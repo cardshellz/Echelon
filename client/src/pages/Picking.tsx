@@ -26,13 +26,14 @@ const activeBatch = {
   assignedTo: "John Doe",
   totalItems: 12,
   completedItems: 7,
+  source: "Shopify", // Added source
   zones: ["A-01", "B-12"],
   priority: "High",
   items: [
-    { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 2, status: "completed", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
-    { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 1, status: "completed", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
-    { id: 3, sku: "NB-990-NVY", name: "New Balance 990v5", location: "B-12-01-C", qty: 3, picked: 0, status: "pending", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
-    { id: 4, sku: "PM-102-GRY", name: "Puma RS-X", location: "B-12-04-D", qty: 1, picked: 0, status: "pending", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
+    { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 2, status: "completed", orderId: "#1024", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
+    { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 1, status: "completed", orderId: "#1025", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
+    { id: 3, sku: "NB-990-NVY", name: "New Balance 990v5", location: "B-12-01-C", qty: 3, picked: 0, status: "pending", orderId: "#1026", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
+    { id: 4, sku: "PM-102-GRY", name: "Puma RS-X", location: "B-12-04-D", qty: 1, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
   ]
 };
 
@@ -55,7 +56,8 @@ export default function Picking() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className="h-8 px-3 bg-primary/10 text-primary border-primary/20">
+            <Badge variant="outline" className="h-8 px-3 bg-primary/10 text-primary border-primary/20 flex items-center gap-2">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain" alt="Shopify" />
               {activeBatch.id}
             </Badge>
           </div>
@@ -89,9 +91,12 @@ export default function Picking() {
                   <Badge variant="secondary" className="text-lg py-1 px-3 font-mono">
                      <MapPin className="w-4 h-4 mr-1" /> {activeBatch.items[2].location}
                   </Badge>
-                  <Badge variant="destructive" className="animate-pulse">
-                    PICK {activeBatch.items[2].qty}
-                  </Badge>
+                  <div className="flex flex-col items-end gap-1">
+                    <Badge variant="destructive" className="animate-pulse">
+                      PICK {activeBatch.items[2].qty}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground font-medium">Order {activeBatch.items[2].orderId}</span>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
