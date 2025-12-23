@@ -15,7 +15,8 @@ import {
   BarChart3,
   ChevronLeft,
   ChevronRight,
-  LucideIcon
+  LucideIcon,
+  Globe
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -51,6 +52,8 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
     { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders" },
     { type: 'link', label: "Picking & Packing", icon: ClipboardList, href: "/picking" },
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping" },
+    { type: "separator", label: "Dropship & Integrations" },
+    { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship" },
     { type: "separator", label: "Management" },
     { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing" },
     { type: 'link', label: "Vendors", icon: Users, href: "/vendors" },
