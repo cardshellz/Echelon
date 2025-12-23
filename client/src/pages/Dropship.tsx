@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { 
   Store, 
   RefreshCw, 
@@ -8,7 +8,8 @@ import {
   CheckCircle2, 
   AlertCircle,
   ArrowRight,
-  Globe
+  Globe,
+  Plus
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +20,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  CardFooter
 } from "@/components/ui/card";
 import {
   Table,
@@ -31,6 +33,16 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Progress } from "@/components/ui/progress";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 
 // Mock Data
 const vendors = [
@@ -46,7 +58,15 @@ const syncCatalog = [
   { sku: "PM-102-GRY", name: "Puma RS-X", stock: 0, vendor: "Vintage Vault", extId: "EBAY-772211", price: "$85.00", status: "Out of Sync (OOS)" },
 ];
 
+const platforms = [
+  { id: "shopify", name: "Shopify", icon: "https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" },
+  { id: "ebay", name: "eBay", icon: "https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" },
+  { id: "amazon", name: "Amazon", icon: "https://upload.wikimedia.org/wikipedia/commons/a/a9/Amazon_logo.svg" },
+];
+
 export default function Dropship() {
+  const [isConnectOpen, setIsConnectOpen] = useState(false);
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -65,9 +85,58 @@ export default function Dropship() {
             <Button variant="outline" className="gap-2">
               <RefreshCw size={16} /> Force Sync
             </Button>
-            <Button className="gap-2">
-              <LinkIcon size={16} /> Connect Vendor
-            </Button>
+            
+            <Dialog open={isConnectOpen} onOpenChange={setIsConnectOpen}>
+              <DialogTrigger asChild>
+                <Button className="gap-2">
+                  <Plus size={16} /> Connect Store
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[425px]">
+                <DialogHeader>
+                  <DialogTitle>Connect New Store</DialogTitle>
+                  <DialogDescription>
+                    Select a platform to integrate. Orders will automatically sync to your WMS.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="grid grid-cols-1 gap-4">
+                     {platforms.map((platform) => (
+                       <Button key={platform.id} variant="outline" className="h-16 justify-start px-4 hover:border-primary hover:bg-primary/5 group relative overflow-hidden">
+                         <div className="absolute inset-0 bg-gradient-to-r from-transparent via-transparent to-primary/5 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
+                         <div className="h-8 w-8 mr-4 flex items-center justify-center">
+                            {/* In a real app we'd use proper SVGs, here using external images for the mock */}
+                            <img src={platform.icon} alt={platform.name} className="max-h-full max-w-full object-contain" />
+                         </div>
+                         <div className="flex flex-col items-start">
+                           <span className="font-semibold text-base">{platform.name}</span>
+                           <span className="text-xs text-muted-foreground">Connect via OAuth 2.0</span>
+                         </div>
+                         <ArrowRight className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-primary" size={16} />
+                       </Button>
+                     ))}
+                  </div>
+                  <div className="relative my-2">
+                    <div className="absolute inset-0 flex items-center">
+                      <span className="w-full border-t" />
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-background px-2 text-muted-foreground">
+                        Or manual API
+                      </span>
+                    </div>
+                  </div>
+                  <div className="grid w-full items-center gap-1.5">
+                    <Label htmlFor="api-key">Custom API Key</Label>
+                    <Input id="api-key" placeholder="sk_live_..." />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsConnectOpen(false)}>Cancel</Button>
+                  <Button type="submit">Verify Connection</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </div>
         </div>
 
@@ -130,8 +199,9 @@ export default function Dropship() {
                   </CardHeader>
                   <CardContent className="pt-4">
                     <div className="flex items-center gap-4 mb-4">
-                      <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center border text-slate-500 font-bold">
-                        {vendor.platform[0]}
+                      <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center border text-slate-500 font-bold overflow-hidden p-2">
+                         {vendor.platform === "Shopify" && <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" alt="Shopify" className="w-full h-full object-contain" />}
+                         {vendor.platform === "eBay" && <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" alt="eBay" className="w-full h-full object-contain" />}
                       </div>
                       <div className="space-y-1">
                         <p className="text-sm font-medium leading-none">Platform: {vendor.platform}</p>
@@ -165,9 +235,12 @@ export default function Dropship() {
                 </Card>
               ))}
               
-              <Card className="border-dashed border-2 flex flex-col items-center justify-center p-6 text-center hover:bg-muted/5 transition-colors cursor-pointer">
+              <Card 
+                className="border-dashed border-2 flex flex-col items-center justify-center p-6 text-center hover:bg-muted/5 transition-colors cursor-pointer"
+                onClick={() => setIsConnectOpen(true)}
+              >
                 <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-4">
-                  <Store className="h-6 w-6 text-muted-foreground" />
+                  <Plus className="h-6 w-6 text-muted-foreground" />
                 </div>
                 <h3 className="font-semibold">Add New Vendor</h3>
                 <p className="text-sm text-muted-foreground mt-1 mb-4">Connect an eBay, Shopify, or Amazon account.</p>
@@ -196,7 +269,11 @@ export default function Dropship() {
                     <TableCell>{item.name}</TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                         <span className="text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 text-slate-600">
+                         <span className="text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 text-slate-600 flex items-center gap-1">
+                           {item.vendor.includes("Shopify") || item.vendor.includes("Luxury") ? 
+                             <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-3 h-3 object-contain" alt="" /> : 
+                             <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-3 h-3 object-contain" alt="" />
+                           }
                            {item.vendor}
                          </span>
                       </div>

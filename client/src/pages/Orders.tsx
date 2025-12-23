@@ -103,6 +103,8 @@ export default function Orders() {
                       <div>
                         <div className="font-semibold flex items-center gap-2">
                           {order.id}
+                          {order.customer.includes("Bob") && <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain ml-1 opacity-70" title="Shopify Order" />}
+                          {order.customer.includes("Alice") && <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-4 h-4 object-contain ml-1 opacity-70" title="eBay Order" />}
                           {order.status === "Pending" && <Badge variant="outline" className="text-xs bg-slate-100">Pending</Badge>}
                           {order.status === "Allocated" && <Badge variant="outline" className="text-xs bg-blue-50 text-blue-700 border-blue-200">Allocated</Badge>}
                           {order.status === "Picking" && <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 animate-pulse">Picking</Badge>}
