@@ -9,6 +9,7 @@ import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
+import Picking from "@/pages/Picking";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -19,9 +20,9 @@ function Router() {
         <Route path="/inventory" component={Inventory} />
         <Route path="/orders" component={Orders} />
         <Route path="/dropship" component={Dropship} />
+        <Route path="/picking" component={Picking} />
         
         {/* Placeholders for routes we haven't built deep yet, re-using Inventory/Orders style for consistency if clicked */}
-        <Route path="/picking" component={Orders} />
         <Route path="/shipping" component={Orders} />
         <Route path="/purchasing" component={Inventory} />
         
