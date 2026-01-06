@@ -10,6 +10,7 @@ import {
   ChevronRight,
   MapPin
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -51,9 +52,26 @@ const singlePickData = {
 
 export default function Picking() {
   const [pickMode, setPickMode] = useState<"batch" | "single">("batch");
+  const [workflowMode, setWorkflowMode] = useState<"solo" | "enterprise">("solo");
   const [scanInput, setScanInput] = useState("");
+  const [step, setStep] = useState<"pick" | "pack_ship">("pick");
   
   const activeData = pickMode === "batch" ? batchPickData : singlePickData;
+
+  const handleAction = () => {
+    if (workflowMode === "solo") {
+       if (step === "pick") {
+         setStep("pack_ship");
+       } else {
+         // Would normally submit and go to next item
+         setStep("pick");
+         setScanInput("");
+       }
+    } else {
+       // Enterprise mode just confirms pick
+       setScanInput("");
+    }
+  };
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
@@ -66,27 +84,52 @@ export default function Picking() {
               Picking
             </h1>
             <p className="text-muted-foreground text-sm hidden md:block">
-              Scan items to move them to packing tote.
+              {workflowMode === "solo" ? "Solo Mode: Pick & Ship in one flow." : "Enterprise Mode: Pick to Tote."}
             </p>
           </div>
           
-          <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg self-start">
-             <Button 
-               size="sm" 
-               variant={pickMode === "batch" ? "default" : "ghost"}
-               onClick={() => setPickMode("batch")}
-               className="text-xs"
-             >
-               Batch Mode
-             </Button>
-             <Button 
-               size="sm" 
-               variant={pickMode === "single" ? "default" : "ghost"}
-               onClick={() => setPickMode("single")}
-               className="text-xs"
-             >
-               Single Order
-             </Button>
+          <div className="flex flex-col gap-2 items-end">
+             <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg">
+                <Button 
+                  size="sm" 
+                  variant={pickMode === "batch" ? "default" : "ghost"}
+                  onClick={() => setPickMode("batch")}
+                  className="text-xs h-7"
+                >
+                  Batch
+                </Button>
+                <Button 
+                  size="sm" 
+                  variant={pickMode === "single" ? "default" : "ghost"}
+                  onClick={() => setPickMode("single")}
+                  className="text-xs h-7"
+                >
+                  Single
+                </Button>
+             </div>
+             <div className="flex items-center gap-2">
+               <span className="text-xs text-muted-foreground uppercase font-semibold">Workflow:</span>
+               <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg">
+                  <Button 
+                    size="icon" 
+                    variant={workflowMode === "solo" ? "default" : "ghost"}
+                    onClick={() => setWorkflowMode("solo")}
+                    className="h-6 w-6"
+                    title="Solo Mode (Pick & Ship)"
+                  >
+                    <Printer size={12} />
+                  </Button>
+                  <Button 
+                    size="icon" 
+                    variant={workflowMode === "enterprise" ? "default" : "ghost"}
+                    onClick={() => setWorkflowMode("enterprise")}
+                    className="h-6 w-6"
+                    title="Enterprise Mode (Pick to Tote)"
+                  >
+                    <Box size={12} />
+                  </Button>
+               </div>
+             </div>
           </div>
         </div>
 
@@ -120,59 +163,101 @@ export default function Picking() {
           {/* "Current Task" - The Scanner Interface */}
           <TabsContent value="current" className="mt-0 flex-1 flex flex-col gap-4">
             {/* The Item to Pick */}
-            <Card className="flex-1 border-primary/50 shadow-md flex flex-col">
-              <CardHeader className="bg-muted/30 pb-2">
-                <div className="flex justify-between items-start">
-                  <Badge variant="secondary" className="text-lg py-1 px-3 font-mono">
-                     <MapPin className="w-4 h-4 mr-1" /> {activeData.items[pickMode === "batch" ? 2 : 0].location}
-                  </Badge>
-                  <div className="flex flex-col items-end gap-1">
-                    <Badge variant="destructive" className="animate-pulse">
-                      PICK {activeData.items[pickMode === "batch" ? 2 : 0].qty}
+            <Card className={cn("flex-1 shadow-md flex flex-col transition-colors duration-500", step === "pack_ship" ? "border-emerald-500/50 bg-emerald-50/10" : "border-primary/50")}>
+              
+              {step === "pick" ? (
+                <>
+                <CardHeader className="bg-muted/30 pb-2">
+                  <div className="flex justify-between items-start">
+                    <Badge variant="secondary" className="text-lg py-1 px-3 font-mono">
+                      <MapPin className="w-4 h-4 mr-1" /> {activeData.items[pickMode === "batch" ? 2 : 0].location}
                     </Badge>
-                    <span className="text-xs text-muted-foreground font-medium">Order {activeData.items[pickMode === "batch" ? 2 : 0].orderId}</span>
+                    <div className="flex flex-col items-end gap-1">
+                      <Badge variant="destructive" className="animate-pulse">
+                        PICK {activeData.items[pickMode === "batch" ? 2 : 0].qty}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground font-medium">Order {activeData.items[pickMode === "batch" ? 2 : 0].orderId}</span>
+                    </div>
                   </div>
-                </div>
-              </CardHeader>
-              <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
-                <div className="relative">
-                  <img 
-                    src={activeData.items[pickMode === "batch" ? 2 : 0].image} 
-                    alt={activeData.items[pickMode === "batch" ? 2 : 0].name}
-                    className="w-48 h-48 object-cover rounded-lg border-2 border-muted shadow-sm"
-                  />
-                  <div className="absolute -bottom-3 -right-3 bg-card border shadow-sm p-2 rounded-full">
-                    <Scan className="w-6 h-6 text-primary" />
-                  </div>
-                </div>
-                
-                <div className="space-y-1">
-                  <h2 className="text-2xl font-bold">{activeData.items[pickMode === "batch" ? 2 : 0].sku}</h2>
-                  <p className="text-muted-foreground text-lg">{activeData.items[pickMode === "batch" ? 2 : 0].name}</p>
-                </div>
-
-                <div className="w-full max-w-sm space-y-3 mt-4">
+                </CardHeader>
+                <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
                   <div className="relative">
-                    <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                    <Input 
-                      placeholder="Scan SKU barcode..." 
-                      className="pl-10 h-12 text-lg border-primary/30 focus-visible:ring-primary"
-                      value={scanInput}
-                      onChange={(e) => setScanInput(e.target.value)}
-                      autoFocus
+                    <img 
+                      src={activeData.items[pickMode === "batch" ? 2 : 0].image} 
+                      alt={activeData.items[pickMode === "batch" ? 2 : 0].name}
+                      className="w-48 h-48 object-cover rounded-lg border-2 border-muted shadow-sm"
                     />
+                    <div className="absolute -bottom-3 -right-3 bg-card border shadow-sm p-2 rounded-full">
+                      <Scan className="w-6 h-6 text-primary" />
+                    </div>
                   </div>
-                  <Button className="w-full h-12 text-lg font-medium shadow-lg shadow-primary/20">
-                    Confirm to Tote
-                  </Button>
-                  <div className="text-xs text-center text-muted-foreground">
-                    Next step: Packing Station
+                  
+                  <div className="space-y-1">
+                    <h2 className="text-2xl font-bold">{activeData.items[pickMode === "batch" ? 2 : 0].sku}</h2>
+                    <p className="text-muted-foreground text-lg">{activeData.items[pickMode === "batch" ? 2 : 0].name}</p>
                   </div>
-                  <Button variant="ghost" className="w-full text-muted-foreground">
-                    Report Issue / Missing Item
-                  </Button>
-                </div>
-              </CardContent>
+
+                  <div className="w-full max-w-sm space-y-3 mt-4">
+                    <div className="relative">
+                      <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                      <Input 
+                        placeholder="Scan SKU barcode..." 
+                        className="pl-10 h-12 text-lg border-primary/30 focus-visible:ring-primary"
+                        value={scanInput}
+                        onChange={(e) => setScanInput(e.target.value)}
+                        autoFocus
+                      />
+                    </div>
+                    <Button 
+                      className="w-full h-12 text-lg font-medium shadow-lg shadow-primary/20"
+                      onClick={handleAction}
+                    >
+                      {workflowMode === "solo" ? "Confirm & Ship" : "Confirm to Tote"}
+                    </Button>
+                    <div className="text-xs text-center text-muted-foreground">
+                      {workflowMode === "solo" ? "Next step: Print Label" : "Next step: Packing Station"}
+                    </div>
+                    <Button variant="ghost" className="w-full text-muted-foreground">
+                      Report Issue / Missing Item
+                    </Button>
+                  </div>
+                </CardContent>
+                </>
+              ) : (
+                /* PACK & SHIP STEP (SOLO MODE) */
+                <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6 animate-in fade-in zoom-in-95 duration-200">
+                   <div className="h-24 w-24 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mb-2">
+                     <Printer className="w-12 h-12" />
+                   </div>
+                   <div className="space-y-1">
+                     <h2 className="text-2xl font-bold text-emerald-700">Ready to Ship</h2>
+                     <p className="text-muted-foreground">Label generated for Order {activeData.items[pickMode === "batch" ? 2 : 0].orderId}</p>
+                   </div>
+                   
+                   <div className="w-full max-w-sm border-2 border-dashed border-emerald-200 bg-emerald-50 rounded-lg p-6 my-2">
+                      <div className="font-mono text-sm mb-2 text-left">TRACKING: 1Z 999 999 99 9999 9999</div>
+                      <div className="h-16 bg-white w-full opacity-80" /> {/* Fake Barcode */}
+                      <div className="mt-4 text-xs text-left text-muted-foreground">
+                        SHIP TO:<br/>
+                        ALICE FREEMAN<br/>
+                        123 MAIN ST, NY
+                      </div>
+                   </div>
+
+                   <div className="w-full max-w-sm space-y-3">
+                     <Button 
+                       className="w-full h-12 text-lg font-medium bg-emerald-600 hover:bg-emerald-700 text-white"
+                       onClick={handleAction}
+                     >
+                       <CheckCircle2 className="mr-2 h-5 w-5" /> Print & Complete
+                     </Button>
+                     <Button variant="ghost" onClick={() => setStep("pick")}>
+                       Cancel / Go Back
+                     </Button>
+                   </div>
+                </CardContent>
+              )}
+
             </Card>
             
             {/* Next Up Preview (Only for Batch) */}
