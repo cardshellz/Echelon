@@ -20,15 +20,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 // Mock "Pick List" Data
-// This module functions independently. It takes a "Batch ID" and allows a worker to process it.
-const activeBatch = {
+const batchPickData = {
   id: "BATCH-4921",
+  type: "Batch Pick",
   assignedTo: "John Doe",
   totalItems: 12,
   completedItems: 7,
-  source: "Shopify", // Added source
+  source: "Shopify",
   zones: ["A-01", "B-12"],
-  priority: "High",
   items: [
     { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 2, status: "completed", orderId: "#1024", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
     { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 1, status: "completed", orderId: "#1025", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
@@ -37,39 +36,75 @@ const activeBatch = {
   ]
 };
 
+const singlePickData = {
+  id: "ORD-1029",
+  type: "Single Order",
+  assignedTo: "John Doe",
+  totalItems: 1,
+  completedItems: 0,
+  source: "Shopify",
+  zones: ["A-01"],
+  items: [
+    { id: 5, sku: "NK-292-RED", name: "Nike Air Max 90 Red", location: "A-01-02-A", qty: 1, picked: 0, status: "pending", orderId: "#1029", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
+  ]
+};
+
 export default function Picking() {
-  const [activeTab, setActiveTab] = useState("current");
+  const [pickMode, setPickMode] = useState<"batch" | "single">("batch");
   const [scanInput, setScanInput] = useState("");
+  
+  const activeData = pickMode === "batch" ? batchPickData : singlePickData;
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
       {/* Header - Mobile Optimized */}
       <div className="bg-card border-b p-4 md:p-6 sticky top-0 z-10">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
           <div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
               <PackageCheck className="h-6 w-6 text-primary" />
               Picking
             </h1>
             <p className="text-muted-foreground text-sm hidden md:block">
-              Batch Picking Mode • Zone A & B
+              Scan items to move them to packing tote.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          
+          <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg self-start">
+             <Button 
+               size="sm" 
+               variant={pickMode === "batch" ? "default" : "ghost"}
+               onClick={() => setPickMode("batch")}
+               className="text-xs"
+             >
+               Batch Mode
+             </Button>
+             <Button 
+               size="sm" 
+               variant={pickMode === "single" ? "default" : "ghost"}
+               onClick={() => setPickMode("single")}
+               className="text-xs"
+             >
+               Single Order
+             </Button>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 mb-2">
             <Badge variant="outline" className="h-8 px-3 bg-primary/10 text-primary border-primary/20 flex items-center gap-2">
               <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain" alt="Shopify" />
-              {activeBatch.id}
+              {activeData.id}
             </Badge>
-          </div>
+            <span className="text-xs font-mono text-muted-foreground uppercase">{activeData.type}</span>
         </div>
 
         {/* Progress Bar */}
         <div className="space-y-2">
           <div className="flex justify-between text-sm font-medium">
-            <span>Progress ({activeBatch.completedItems}/{activeBatch.totalItems})</span>
-            <span>{Math.round((activeBatch.completedItems / activeBatch.totalItems) * 100)}%</span>
+            <span>Progress ({activeData.completedItems}/{activeData.totalItems})</span>
+            <span>{Math.round((activeData.completedItems / activeData.totalItems) * 100)}%</span>
           </div>
-          <Progress value={(activeBatch.completedItems / activeBatch.totalItems) * 100} className="h-3" />
+          <Progress value={(activeData.completedItems / activeData.totalItems) * 100} className="h-3" />
         </div>
       </div>
 
@@ -89,21 +124,21 @@ export default function Picking() {
               <CardHeader className="bg-muted/30 pb-2">
                 <div className="flex justify-between items-start">
                   <Badge variant="secondary" className="text-lg py-1 px-3 font-mono">
-                     <MapPin className="w-4 h-4 mr-1" /> {activeBatch.items[2].location}
+                     <MapPin className="w-4 h-4 mr-1" /> {activeData.items[pickMode === "batch" ? 2 : 0].location}
                   </Badge>
                   <div className="flex flex-col items-end gap-1">
                     <Badge variant="destructive" className="animate-pulse">
-                      PICK {activeBatch.items[2].qty}
+                      PICK {activeData.items[pickMode === "batch" ? 2 : 0].qty}
                     </Badge>
-                    <span className="text-xs text-muted-foreground font-medium">Order {activeBatch.items[2].orderId}</span>
+                    <span className="text-xs text-muted-foreground font-medium">Order {activeData.items[pickMode === "batch" ? 2 : 0].orderId}</span>
                   </div>
                 </div>
               </CardHeader>
               <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
                 <div className="relative">
                   <img 
-                    src={activeBatch.items[2].image} 
-                    alt={activeBatch.items[2].name}
+                    src={activeData.items[pickMode === "batch" ? 2 : 0].image} 
+                    alt={activeData.items[pickMode === "batch" ? 2 : 0].name}
                     className="w-48 h-48 object-cover rounded-lg border-2 border-muted shadow-sm"
                   />
                   <div className="absolute -bottom-3 -right-3 bg-card border shadow-sm p-2 rounded-full">
@@ -112,8 +147,8 @@ export default function Picking() {
                 </div>
                 
                 <div className="space-y-1">
-                  <h2 className="text-2xl font-bold">{activeBatch.items[2].sku}</h2>
-                  <p className="text-muted-foreground text-lg">{activeBatch.items[2].name}</p>
+                  <h2 className="text-2xl font-bold">{activeData.items[pickMode === "batch" ? 2 : 0].sku}</h2>
+                  <p className="text-muted-foreground text-lg">{activeData.items[pickMode === "batch" ? 2 : 0].name}</p>
                 </div>
 
                 <div className="w-full max-w-sm space-y-3 mt-4">
@@ -128,8 +163,11 @@ export default function Picking() {
                     />
                   </div>
                   <Button className="w-full h-12 text-lg font-medium shadow-lg shadow-primary/20">
-                    Confirm Pick
+                    Confirm to Tote
                   </Button>
+                  <div className="text-xs text-center text-muted-foreground">
+                    Next step: Packing Station
+                  </div>
                   <Button variant="ghost" className="w-full text-muted-foreground">
                     Report Issue / Missing Item
                   </Button>
@@ -137,25 +175,27 @@ export default function Picking() {
               </CardContent>
             </Card>
             
-            {/* Next Up Preview */}
-            <div className="h-24 bg-card border rounded-lg p-3 flex items-center gap-4 opacity-60 grayscale hover:grayscale-0 transition-all cursor-pointer">
-              <div className="bg-muted h-16 w-16 rounded-md flex items-center justify-center shrink-0">
-                <Box className="text-muted-foreground" />
+            {/* Next Up Preview (Only for Batch) */}
+            {pickMode === "batch" && (
+              <div className="h-24 bg-card border rounded-lg p-3 flex items-center gap-4 opacity-60 grayscale hover:grayscale-0 transition-all cursor-pointer">
+                <div className="bg-muted h-16 w-16 rounded-md flex items-center justify-center shrink-0">
+                  <Box className="text-muted-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase">Next Item</p>
+                  <p className="font-medium truncate">{activeData.items[3].sku}</p>
+                  <p className="text-sm text-muted-foreground">{activeData.items[3].location}</p>
+                </div>
+                <ChevronRight className="text-muted-foreground" />
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold text-muted-foreground uppercase">Next Item</p>
-                <p className="font-medium truncate">{activeBatch.items[3].sku}</p>
-                <p className="text-sm text-muted-foreground">{activeBatch.items[3].location}</p>
-              </div>
-              <ChevronRight className="text-muted-foreground" />
-            </div>
+            )}
           </TabsContent>
 
           {/* "Full List" View */}
           <TabsContent value="list" className="mt-0 flex-1 overflow-hidden">
             <ScrollArea className="h-full pr-4">
               <div className="space-y-3">
-                {activeBatch.items.map((item) => (
+                {activeData.items.map((item) => (
                   <Card key={item.id} className={item.status === "completed" ? "bg-muted/30 border-muted" : "border-l-4 border-l-primary"}>
                     <CardContent className="p-4 flex items-center gap-4">
                       <div className="h-16 w-16 bg-white rounded-md border p-1 shrink-0">
@@ -166,7 +206,7 @@ export default function Picking() {
                         <div className="flex items-center justify-between mb-1">
                           <span className="font-mono font-bold text-sm">{item.sku}</span>
                           {item.status === "completed" ? (
-                            <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 border-emerald-200">Done</Badge>
+                            <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 border-emerald-200">In Tote</Badge>
                           ) : (
                             <Badge variant="outline">{item.qty} QTY</Badge>
                           )}
@@ -179,12 +219,6 @@ export default function Picking() {
                     </CardContent>
                   </Card>
                 ))}
-                
-                <div className="flex justify-center pt-4">
-                   <Button variant="outline" className="gap-2">
-                     <Printer size={16} /> Print Pick List
-                   </Button>
-                </div>
               </div>
             </ScrollArea>
           </TabsContent>
