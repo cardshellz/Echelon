@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useLocation } from "wouter";
-import { Box, Lock, Scan, ArrowRight } from "lucide-react";
+import { Box, Lock, Scan, ArrowRight, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -9,6 +9,15 @@ export default function Login() {
   const [, setLocation] = useLocation();
   const [pin, setPin] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    // Capture the PWA install prompt
+    window.addEventListener("beforeinstallprompt", (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    });
+  }, []);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -17,6 +26,15 @@ export default function Login() {
     setTimeout(() => {
       setLocation("/");
     }, 800);
+  };
+
+  const handleInstall = () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      setDeferredPrompt(null);
+    } else {
+      alert("To install: Tap 'Share' then 'Add to Home Screen'");
+    }
   };
 
   return (
@@ -71,8 +89,18 @@ export default function Login() {
             </Button>
           </form>
           
-          <div className="mt-8 text-center text-xs text-slate-600">
-            Version 2.4.0 • Enterprise Edition
+          <div className="mt-8 text-center">
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="text-slate-500 hover:text-emerald-400 hover:bg-slate-900 gap-2 text-xs"
+              onClick={handleInstall}
+            >
+              <Download size={14} /> Install App to Device
+            </Button>
+            <div className="text-xs text-slate-600 mt-2">
+              Version 2.4.0 • Enterprise Edition
+            </div>
           </div>
         </CardContent>
       </Card>
