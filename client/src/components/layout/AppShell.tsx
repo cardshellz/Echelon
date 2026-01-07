@@ -16,7 +16,8 @@ import {
   ChevronLeft,
   ChevronRight,
   LucideIcon,
-  Globe
+  Globe,
+  Cable
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -58,6 +59,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping" },
     { type: "separator", label: "Dropship & Integrations" },
     { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship" },
+    { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations" },
     { type: "separator", label: "Management" },
     { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing" },
     { type: 'link', label: "Vendors", icon: Users, href: "/vendors" },
