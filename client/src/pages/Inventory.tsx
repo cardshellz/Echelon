@@ -132,12 +132,66 @@ export default function Inventory() {
             >
               Allocated
             </Button>
+            <Button 
+              variant={activeTab === "bins" ? "default" : "ghost"} 
+              size="sm" 
+              className="h-7 text-xs"
+              onClick={() => setActiveTab("bins")}
+            >
+              Bin Map
+            </Button>
           </div>
         </div>
       </div>
 
       {/* Main Content Area - The Data Grid */}
       <div className="flex-1 p-6 overflow-hidden flex flex-col">
+        {activeTab === "bins" ? (
+          <div className="flex-1 bg-card rounded-md border flex flex-col items-center justify-center text-center p-12 animate-in fade-in zoom-in-95">
+             <div className="bg-primary/10 p-4 rounded-full mb-4">
+               <Package className="h-10 w-10 text-primary" />
+             </div>
+             <h2 className="text-2xl font-bold mb-2">Bin Location Mapping</h2>
+             <p className="text-muted-foreground max-w-md mb-8">
+               This is the foundation of your future WMS. Map your Shopify SKUs to physical bin locations here. 
+               The Picking App uses this to create optimized walking paths.
+             </p>
+             <div className="w-full max-w-2xl border rounded-lg overflow-hidden text-left bg-background">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead>SKU</TableHead>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Current Bin</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {[
+                      { sku: "NK-292-BLK-09", name: "Nike Air Max 90", bin: "A-01-02-B" },
+                      { sku: "AD-550-WHT-08", name: "Adidas Ultraboost", bin: "A-01-04-A" },
+                      { sku: "NB-990-NVY-09", name: "New Balance 990v5", bin: "Unassigned" },
+                    ].map((item, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-mono font-medium">{item.sku}</TableCell>
+                        <TableCell>{item.name}</TableCell>
+                        <TableCell>
+                          {item.bin === "Unassigned" ? (
+                             <Badge variant="outline" className="border-dashed border-amber-400 text-amber-600 bg-amber-50">Unassigned</Badge>
+                          ) : (
+                             <Badge variant="secondary" className="font-mono">{item.bin}</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button variant="ghost" size="sm" className="h-8 text-primary">Edit Bin</Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+             </div>
+          </div>
+        ) : (
         <div className="rounded-md border bg-card flex-1 overflow-auto">
           <Table>
             <TableHeader className="bg-muted/40 sticky top-0 z-10">
@@ -222,6 +276,8 @@ export default function Inventory() {
             </TableBody>
           </Table>
         </div>
+        )}
+        {activeTab !== "bins" && (
         <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
           <div>Showing 1-7 of 1,248 items</div>
           <div className="flex gap-2">
@@ -229,6 +285,7 @@ export default function Inventory() {
             <Button variant="outline" size="sm">Next</Button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

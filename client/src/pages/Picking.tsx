@@ -169,15 +169,29 @@ export default function Picking() {
                 <>
                 <CardHeader className="bg-muted/30 pb-2">
                   <div className="flex justify-between items-start">
-                    <Badge variant="secondary" className="text-lg py-1 px-3 font-mono">
-                      <MapPin className="w-4 h-4 mr-1" /> {activeData.items[pickMode === "batch" ? 2 : 0].location}
-                    </Badge>
+                    <div className="flex flex-col items-start gap-1">
+                      <span className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">Current Stop</span>
+                      <Badge variant="secondary" className="text-xl py-1 px-3 font-mono border-2 border-primary/20 bg-background text-foreground">
+                        <MapPin className="w-5 h-5 mr-2 text-primary" /> {activeData.items[pickMode === "batch" ? 2 : 0].location}
+                      </Badge>
+                    </div>
                     <div className="flex flex-col items-end gap-1">
-                      <Badge variant="destructive" className="animate-pulse">
-                        PICK {activeData.items[pickMode === "batch" ? 2 : 0].qty}
+                      <Badge variant="destructive" className="animate-pulse text-sm px-3 py-1">
+                        PICK {activeData.items[pickMode === "batch" ? 2 : 0].qty} UNITS
                       </Badge>
                       <span className="text-xs text-muted-foreground font-medium">Order {activeData.items[pickMode === "batch" ? 2 : 0].orderId}</span>
                     </div>
+                  </div>
+                  {/* Path Visualization */}
+                  <div className="mt-4 flex items-center gap-1 text-xs text-muted-foreground">
+                    <div className="h-1.5 w-1.5 rounded-full bg-emerald-500"></div>
+                    <div className="h-0.5 w-4 bg-emerald-500"></div>
+                    <div className="h-1.5 w-1.5 rounded-full bg-emerald-500"></div>
+                    <div className="h-0.5 w-4 bg-emerald-500"></div>
+                    <div className="h-2 w-2 rounded-full border-2 border-primary bg-background"></div>
+                    <div className="h-0.5 w-4 bg-border"></div>
+                    <div className="h-1.5 w-1.5 rounded-full bg-border"></div>
+                    <span className="ml-2">Stop 3 of 5</span>
                   </div>
                 </CardHeader>
                 <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
