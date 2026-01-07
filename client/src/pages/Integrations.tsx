@@ -55,7 +55,7 @@ export default function Integrations() {
                     </div>
                     <div>
                       <CardTitle className="text-base">Shopify Connector</CardTitle>
-                      <CardDescription>Direct API Integration</CardDescription>
+                      <CardDescription>Direct API Integration (Source of Truth for SKUs)</CardDescription>
                     </div>
                   </div>
                 </CardHeader>

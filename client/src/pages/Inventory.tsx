@@ -10,7 +10,8 @@ import {
   Printer,
   Edit,
   Move,
-  History
+  History,
+  CheckCircle2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -173,8 +174,18 @@ export default function Inventory() {
                       { sku: "NB-990-NVY-09", name: "New Balance 990v5", bin: "Unassigned" },
                     ].map((item, i) => (
                       <TableRow key={i}>
-                        <TableCell className="font-mono font-medium">{item.sku}</TableCell>
-                        <TableCell>{item.name}</TableCell>
+                        <TableCell className="font-mono font-medium flex items-center gap-2">
+                          <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-3 h-3 object-contain opacity-70" title="Synced from Shopify" />
+                          {item.sku}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            <span>{item.name}</span>
+                            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+                               <CheckCircle2 size={10} className="text-emerald-500" /> Synced with Shopify
+                            </span>
+                          </div>
+                        </TableCell>
                         <TableCell>
                           {item.bin === "Unassigned" ? (
                              <Badge variant="outline" className="border-dashed border-amber-400 text-amber-600 bg-amber-50">Unassigned</Badge>
