@@ -8,7 +8,12 @@ import {
   PackageCheck,
   Printer,
   ChevronRight,
-  MapPin
+  MapPin,
+  XCircle,
+  AlertOctagon,
+  Package,
+  HelpCircle,
+  Camera
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -19,6 +24,20 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  RadioGroup,
+  RadioGroupItem,
+} from "@/components/ui/radio-group";
+import { Label } from "@/components/ui/label";
 
 // Mock "Pick List" Data
 const batchPickData = {
@@ -55,8 +74,25 @@ export default function Picking() {
   const [workflowMode, setWorkflowMode] = useState<"solo" | "enterprise">("solo");
   const [scanInput, setScanInput] = useState("");
   const [step, setStep] = useState<"pick" | "pack_ship">("pick");
+  const [shortPickOpen, setShortPickOpen] = useState(false);
+  const [shortPickReason, setShortPickReason] = useState("");
+  const [shortPickQty, setShortPickQty] = useState("0");
+  const [shortPickNotes, setShortPickNotes] = useState("");
+  const [shortPickSubmitted, setShortPickSubmitted] = useState(false);
   
   const activeData = pickMode === "batch" ? batchPickData : singlePickData;
+  const currentItem = activeData.items[pickMode === "batch" ? 2 : 0];
+
+  const handleShortPickSubmit = () => {
+    setShortPickSubmitted(true);
+    setTimeout(() => {
+      setShortPickOpen(false);
+      setShortPickSubmitted(false);
+      setShortPickReason("");
+      setShortPickQty("0");
+      setShortPickNotes("");
+    }, 1500);
+  };
 
   const handleAction = () => {
     if (workflowMode === "solo") {
@@ -231,8 +267,14 @@ export default function Picking() {
                     <div className="text-xs text-center text-muted-foreground">
                       {workflowMode === "solo" ? "Next step: Print Label" : "Next step: Packing Station"}
                     </div>
-                    <Button variant="ghost" className="w-full text-muted-foreground">
-                      Report Issue / Missing Item
+                    <Button 
+                      variant="ghost" 
+                      className="w-full text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                      onClick={() => setShortPickOpen(true)}
+                      data-testid="button-short-pick"
+                    >
+                      <AlertTriangle className="mr-2 h-4 w-4" />
+                      Can't Find / Short Pick
                     </Button>
                   </div>
                 </CardContent>
@@ -323,6 +365,130 @@ export default function Picking() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Short Pick Dialog */}
+      <Dialog open={shortPickOpen} onOpenChange={setShortPickOpen}>
+        <DialogContent className="sm:max-w-md">
+          {!shortPickSubmitted ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2 text-amber-600">
+                  <AlertOctagon className="h-5 w-5" />
+                  Short Pick Report
+                </DialogTitle>
+                <DialogDescription>
+                  Report an issue with picking {currentItem.sku} from {currentItem.location}
+                </DialogDescription>
+              </DialogHeader>
+              
+              <div className="space-y-4 py-4">
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">What's the issue?</Label>
+                  <RadioGroup value={shortPickReason} onValueChange={setShortPickReason}>
+                    <div className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
+                      <RadioGroupItem value="not_found" id="not_found" />
+                      <Label htmlFor="not_found" className="flex-1 cursor-pointer">
+                        <div className="font-medium flex items-center gap-2">
+                          <XCircle className="h-4 w-4 text-red-500" />
+                          Item Not Found
+                        </div>
+                        <p className="text-xs text-muted-foreground">Bin is empty or item is missing</p>
+                      </Label>
+                    </div>
+                    <div className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
+                      <RadioGroupItem value="partial" id="partial" />
+                      <Label htmlFor="partial" className="flex-1 cursor-pointer">
+                        <div className="font-medium flex items-center gap-2">
+                          <Package className="h-4 w-4 text-amber-500" />
+                          Partial Quantity
+                        </div>
+                        <p className="text-xs text-muted-foreground">Found some but not all requested units</p>
+                      </Label>
+                    </div>
+                    <div className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
+                      <RadioGroupItem value="damaged" id="damaged" />
+                      <Label htmlFor="damaged" className="flex-1 cursor-pointer">
+                        <div className="font-medium flex items-center gap-2">
+                          <AlertTriangle className="h-4 w-4 text-orange-500" />
+                          Item Damaged
+                        </div>
+                        <p className="text-xs text-muted-foreground">Item found but not in sellable condition</p>
+                      </Label>
+                    </div>
+                    <div className="flex items-center space-x-3 p-3 border rounded-lg hover:bg-muted/50 cursor-pointer">
+                      <RadioGroupItem value="wrong_item" id="wrong_item" />
+                      <Label htmlFor="wrong_item" className="flex-1 cursor-pointer">
+                        <div className="font-medium flex items-center gap-2">
+                          <HelpCircle className="h-4 w-4 text-blue-500" />
+                          Wrong Item in Bin
+                        </div>
+                        <p className="text-xs text-muted-foreground">Different SKU found at this location</p>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                </div>
+
+                {shortPickReason === "partial" && (
+                  <div className="space-y-2 animate-in fade-in slide-in-from-top-2">
+                    <Label className="text-sm font-medium">How many units were you able to find?</Label>
+                    <div className="flex items-center gap-2">
+                      <Input 
+                        type="number" 
+                        min="0" 
+                        max={currentItem.qty - 1}
+                        value={shortPickQty}
+                        onChange={(e) => setShortPickQty(e.target.value)}
+                        className="w-24"
+                        data-testid="input-short-pick-qty"
+                      />
+                      <span className="text-sm text-muted-foreground">of {currentItem.qty} requested</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Additional Notes (optional)</Label>
+                  <Textarea 
+                    placeholder="e.g., 'Checked alternate location A-01-03, also empty'"
+                    value={shortPickNotes}
+                    onChange={(e) => setShortPickNotes(e.target.value)}
+                    className="resize-none"
+                    rows={2}
+                    data-testid="textarea-short-pick-notes"
+                  />
+                </div>
+
+                <Button variant="outline" className="w-full" size="sm">
+                  <Camera className="h-4 w-4 mr-2" />
+                  Take Photo of Empty Bin
+                </Button>
+              </div>
+
+              <DialogFooter className="flex-col sm:flex-row gap-2">
+                <Button variant="outline" onClick={() => setShortPickOpen(false)} className="w-full sm:w-auto">
+                  Cancel
+                </Button>
+                <Button 
+                  onClick={handleShortPickSubmit}
+                  disabled={!shortPickReason}
+                  className="w-full sm:w-auto bg-amber-600 hover:bg-amber-700"
+                  data-testid="button-submit-short-pick"
+                >
+                  Submit Short Pick
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <div className="py-12 text-center animate-in fade-in zoom-in-95">
+              <div className="h-16 w-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <CheckCircle2 className="h-8 w-8 text-emerald-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-emerald-700">Short Pick Logged</h3>
+              <p className="text-sm text-muted-foreground mt-1">Moving to next item...</p>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
