@@ -133,7 +133,7 @@ export default function Picking() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-muted/20">
+    <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
       {/* Header - Mobile Optimized */}
       <div className="bg-card border-b p-4 md:p-6 sticky top-0 z-10">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
