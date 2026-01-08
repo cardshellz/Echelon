@@ -13,7 +13,9 @@ import {
   AlertOctagon,
   Package,
   HelpCircle,
-  Camera
+  Camera,
+  ClipboardList,
+  Clock
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -38,6 +40,16 @@ import {
   RadioGroupItem,
 } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+
+// Mock Picking Queue (Backlog)
+const pickingQueue = [
+  { id: "BATCH-4921", orders: 8, items: 24, priority: "high", age: "15m", zones: ["A", "B"], status: "ready", assignee: null },
+  { id: "BATCH-4920", orders: 5, items: 12, priority: "normal", age: "32m", zones: ["A"], status: "in_progress", assignee: "John D." },
+  { id: "BATCH-4919", orders: 12, items: 38, priority: "normal", age: "1h 5m", zones: ["B", "C"], status: "ready", assignee: null },
+  { id: "BATCH-4918", orders: 3, items: 6, priority: "rush", age: "8m", zones: ["A"], status: "ready", assignee: null },
+  { id: "ORD-1030", orders: 1, items: 2, priority: "normal", age: "45m", zones: ["C"], status: "ready", assignee: null },
+  { id: "ORD-1031", orders: 1, items: 1, priority: "high", age: "20m", zones: ["A"], status: "ready", assignee: null },
+];
 
 // Mock "Pick List" Data
 const batchPickData = {
@@ -70,11 +82,23 @@ const singlePickData = {
 };
 
 export default function Picking() {
+  const [view, setView] = useState<"queue" | "picking">("queue");
+  const [selectedBatch, setSelectedBatch] = useState<string | null>(null);
   const [pickMode, setPickMode] = useState<"batch" | "single">("batch");
   const [workflowMode, setWorkflowMode] = useState<"solo" | "enterprise">("solo");
   const [scanInput, setScanInput] = useState("");
   const [step, setStep] = useState<"pick" | "pack_ship">("pick");
   const [shortPickOpen, setShortPickOpen] = useState(false);
+
+  const handleStartPicking = (batchId: string) => {
+    setSelectedBatch(batchId);
+    setView("picking");
+  };
+
+  const handleBackToQueue = () => {
+    setView("queue");
+    setSelectedBatch(null);
+  };
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
   const [shortPickNotes, setShortPickNotes] = useState("");
@@ -134,81 +158,183 @@ export default function Picking() {
 
   return (
     <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
-      {/* Header - Mobile Optimized */}
-      <div className="bg-card border-b p-4 md:p-6 sticky top-0 z-10">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-          <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
-              <PackageCheck className="h-6 w-6 text-primary" />
-              Picking
-            </h1>
-            <p className="text-muted-foreground text-sm hidden md:block">
-              {workflowMode === "solo" ? "Solo Mode: Pick & Ship in one flow." : "Enterprise Mode: Pick to Tote."}
-            </p>
-          </div>
-          
-          <div className="flex flex-col gap-2 items-end">
-             <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg">
+      {/* Queue View */}
+      {view === "queue" ? (
+        <>
+          <div className="bg-card border-b p-4 md:p-6">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+              <div>
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+                  <PackageCheck className="h-6 w-6 text-primary" />
+                  Picking Queue
+                </h1>
+                <p className="text-muted-foreground text-sm">
+                  {pickingQueue.filter(b => b.status === "ready").length} batches ready • {pickingQueue.reduce((acc, b) => acc + b.items, 0)} total items
+                </p>
+              </div>
+              
+              <div className="flex items-center gap-2">
                 <Button 
-                  size="sm" 
-                  variant={pickMode === "batch" ? "default" : "ghost"}
-                  onClick={() => setPickMode("batch")}
-                  className="text-xs h-7"
+                  onClick={() => handleStartPicking(pickingQueue.find(b => b.status === "ready")?.id || "")}
+                  className="bg-emerald-600 hover:bg-emerald-700"
+                  data-testid="button-grab-next"
                 >
-                  Batch
+                  <ArrowRight className="h-4 w-4 mr-2" />
+                  Grab Next Batch
                 </Button>
-                <Button 
-                  size="sm" 
-                  variant={pickMode === "single" ? "default" : "ghost"}
-                  onClick={() => setPickMode("single")}
-                  className="text-xs h-7"
-                >
-                  Single
+              </div>
+            </div>
+
+            {/* Queue Stats */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+              <div className="bg-muted/50 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-primary">{pickingQueue.filter(b => b.status === "ready").length}</div>
+                <div className="text-xs text-muted-foreground">Ready</div>
+              </div>
+              <div className="bg-muted/50 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-amber-600">{pickingQueue.filter(b => b.status === "in_progress").length}</div>
+                <div className="text-xs text-muted-foreground">In Progress</div>
+              </div>
+              <div className="bg-muted/50 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-red-600">{pickingQueue.filter(b => b.priority === "rush").length}</div>
+                <div className="text-xs text-muted-foreground">Rush</div>
+              </div>
+              <div className="bg-muted/50 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold">{pickingQueue.reduce((acc, b) => acc + b.orders, 0)}</div>
+                <div className="text-xs text-muted-foreground">Total Orders</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Queue List */}
+          <div className="p-4 md:p-6 space-y-3">
+            {pickingQueue.map((batch) => (
+              <Card 
+                key={batch.id} 
+                className={cn(
+                  "cursor-pointer hover:border-primary/50 transition-colors",
+                  batch.priority === "rush" && "border-l-4 border-l-red-500",
+                  batch.priority === "high" && "border-l-4 border-l-amber-500",
+                  batch.status === "in_progress" && "bg-amber-50/50"
+                )}
+                onClick={() => handleStartPicking(batch.id)}
+                data-testid={`card-batch-${batch.id}`}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className={cn(
+                        "h-10 w-10 rounded-lg flex items-center justify-center",
+                        batch.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                      )}>
+                        {batch.id.startsWith("BATCH") ? <ClipboardList size={20} /> : <Package size={20} />}
+                      </div>
+                      <div>
+                        <div className="font-semibold flex items-center gap-2">
+                          {batch.id}
+                          {batch.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
+                          {batch.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                          {batch.status === "in_progress" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-100">IN PROGRESS</Badge>}
+                        </div>
+                        <div className="text-sm text-muted-foreground">
+                          {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items} items • Zones: {batch.zones.join(", ")}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1 justify-end">
+                        <Clock size={12} /> {batch.age}
+                      </div>
+                      {batch.assignee && (
+                        <div className="text-xs text-muted-foreground mt-1">{batch.assignee}</div>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* Active Picking View */}
+          <div className="bg-card border-b p-4 md:p-6 sticky top-0 z-10">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+              <div>
+                <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="mb-2 -ml-2 text-muted-foreground">
+                  <ChevronRight className="h-4 w-4 mr-1 rotate-180" /> Back to Queue
                 </Button>
-             </div>
-             <div className="flex items-center gap-2">
-               <span className="text-xs text-muted-foreground uppercase font-semibold">Workflow:</span>
-               <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg">
-                  <Button 
-                    size="icon" 
-                    variant={workflowMode === "solo" ? "default" : "ghost"}
-                    onClick={() => setWorkflowMode("solo")}
-                    className="h-6 w-6"
-                    title="Solo Mode (Pick & Ship)"
-                  >
-                    <Printer size={12} />
-                  </Button>
-                  <Button 
-                    size="icon" 
-                    variant={workflowMode === "enterprise" ? "default" : "ghost"}
-                    onClick={() => setWorkflowMode("enterprise")}
-                    className="h-6 w-6"
-                    title="Enterprise Mode (Pick to Tote)"
-                  >
-                    <Box size={12} />
-                  </Button>
-               </div>
-             </div>
-          </div>
-        </div>
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+                  <PackageCheck className="h-6 w-6 text-primary" />
+                  Picking
+                </h1>
+                <p className="text-muted-foreground text-sm hidden md:block">
+                  {workflowMode === "solo" ? "Solo Mode: Pick & Ship in one flow." : "Enterprise Mode: Pick to Tote."}
+                </p>
+              </div>
+              
+              <div className="flex flex-col gap-2 items-end">
+                 <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg">
+                    <Button 
+                      size="sm" 
+                      variant={pickMode === "batch" ? "default" : "ghost"}
+                      onClick={() => setPickMode("batch")}
+                      className="text-xs h-7"
+                    >
+                      Batch
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      variant={pickMode === "single" ? "default" : "ghost"}
+                      onClick={() => setPickMode("single")}
+                      className="text-xs h-7"
+                    >
+                      Single
+                    </Button>
+                 </div>
+                 <div className="flex items-center gap-2">
+                   <span className="text-xs text-muted-foreground uppercase font-semibold">Workflow:</span>
+                   <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg">
+                      <Button 
+                        size="icon" 
+                        variant={workflowMode === "solo" ? "default" : "ghost"}
+                        onClick={() => setWorkflowMode("solo")}
+                        className="h-6 w-6"
+                        title="Solo Mode (Pick & Ship)"
+                      >
+                        <Printer size={12} />
+                      </Button>
+                      <Button 
+                        size="icon" 
+                        variant={workflowMode === "enterprise" ? "default" : "ghost"}
+                        onClick={() => setWorkflowMode("enterprise")}
+                        className="h-6 w-6"
+                        title="Enterprise Mode (Pick to Tote)"
+                      >
+                        <Box size={12} />
+                      </Button>
+                   </div>
+                 </div>
+              </div>
+            </div>
 
-        <div className="flex items-center justify-between gap-2 mb-2">
-            <Badge variant="outline" className="h-8 px-3 bg-primary/10 text-primary border-primary/20 flex items-center gap-2">
-              <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain" alt="Shopify" />
-              {activeData.id}
-            </Badge>
-            <span className="text-xs font-mono text-muted-foreground uppercase">{activeData.type}</span>
-        </div>
+            <div className="flex items-center justify-between gap-2 mb-2">
+                <Badge variant="outline" className="h-8 px-3 bg-primary/10 text-primary border-primary/20 flex items-center gap-2">
+                  <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain" alt="Shopify" />
+                  {activeData.id}
+                </Badge>
+                <span className="text-xs font-mono text-muted-foreground uppercase">{activeData.type}</span>
+            </div>
 
-        {/* Progress Bar */}
-        <div className="space-y-2">
-          <div className="flex justify-between text-sm font-medium">
-            <span>Progress ({activeData.completedItems}/{activeData.totalItems})</span>
-            <span>{Math.round((activeData.completedItems / activeData.totalItems) * 100)}%</span>
+            {/* Progress Bar */}
+            <div className="space-y-2">
+              <div className="flex justify-between text-sm font-medium">
+                <span>Progress ({activeData.completedItems}/{activeData.totalItems})</span>
+                <span>{Math.round((activeData.completedItems / activeData.totalItems) * 100)}%</span>
+              </div>
+              <Progress value={(activeData.completedItems / activeData.totalItems) * 100} className="h-3" />
+            </div>
           </div>
-          <Progress value={(activeData.completedItems / activeData.totalItems) * 100} className="h-3" />
-        </div>
-      </div>
 
       {/* Main Content */}
       <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col max-w-4xl mx-auto w-full">
@@ -399,6 +525,8 @@ export default function Picking() {
           </TabsContent>
         </Tabs>
       </div>
+        </>
+      )}
 
       {/* Multi-Quantity Confirmation Dialog */}
       <Dialog open={multiQtyConfirmOpen} onOpenChange={setMultiQtyConfirmOpen}>
