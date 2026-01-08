@@ -313,6 +313,39 @@ export default function Picking() {
                   </div>
                 </CardContent>
                 </>
+              ) : (
+                /* PACK & SHIP STEP - Reserved for future use */
+                <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6 animate-in fade-in zoom-in-95 duration-200">
+                   <div className="h-24 w-24 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mb-2">
+                     <Printer className="w-12 h-12" />
+                   </div>
+                   <div className="space-y-1">
+                     <h2 className="text-2xl font-bold text-emerald-700">Ready to Ship</h2>
+                     <p className="text-muted-foreground">Label generated for Order {currentItem.orderId}</p>
+                   </div>
+                   
+                   <div className="w-full max-w-sm border-2 border-dashed border-emerald-200 bg-emerald-50 rounded-lg p-6 my-2">
+                      <div className="font-mono text-sm mb-2 text-left">TRACKING: 1Z 999 999 99 9999 9999</div>
+                      <div className="h-16 bg-white w-full opacity-80" />
+                      <div className="mt-4 text-xs text-left text-muted-foreground">
+                        SHIP TO:<br/>
+                        ALICE FREEMAN<br/>
+                        123 MAIN ST, NY
+                      </div>
+                   </div>
+
+                   <div className="w-full max-w-sm space-y-3">
+                     <Button 
+                       className="w-full h-12 text-lg font-medium bg-emerald-600 hover:bg-emerald-700 text-white"
+                       onClick={() => setStep("pick")}
+                     >
+                       <CheckCircle2 className="mr-2 h-5 w-5" /> Print & Complete
+                     </Button>
+                     <Button variant="ghost" onClick={() => setStep("pick")}>
+                       Cancel / Go Back
+                     </Button>
+                   </div>
+                </CardContent>
               )}
 
             </Card>
