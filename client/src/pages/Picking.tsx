@@ -273,49 +273,9 @@ export default function Picking() {
                 </p>
               </div>
               
-              <div className="flex flex-col gap-2 items-end">
-                 <div className="flex items-center gap-2 bg-muted/50 p-1 rounded-lg">
-                    <Button 
-                      size="sm" 
-                      variant={pickMode === "batch" ? "default" : "ghost"}
-                      onClick={() => setPickMode("batch")}
-                      className="text-xs h-7"
-                    >
-                      Batch
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      variant={pickMode === "single" ? "default" : "ghost"}
-                      onClick={() => setPickMode("single")}
-                      className="text-xs h-7"
-                    >
-                      Single
-                    </Button>
-                 </div>
-                 <div className="flex items-center gap-2">
-                   <span className="text-xs text-muted-foreground uppercase font-semibold">Workflow:</span>
-                   <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg">
-                      <Button 
-                        size="icon" 
-                        variant={workflowMode === "solo" ? "default" : "ghost"}
-                        onClick={() => setWorkflowMode("solo")}
-                        className="h-6 w-6"
-                        title="Solo Mode (Pick & Ship)"
-                      >
-                        <Printer size={12} />
-                      </Button>
-                      <Button 
-                        size="icon" 
-                        variant={workflowMode === "enterprise" ? "default" : "ghost"}
-                        onClick={() => setWorkflowMode("enterprise")}
-                        className="h-6 w-6"
-                        title="Enterprise Mode (Pick to Tote)"
-                      >
-                        <Box size={12} />
-                      </Button>
-                   </div>
-                 </div>
-              </div>
+              <Badge variant="outline" className="text-xs px-3 py-1">
+                {pickMode === "batch" ? "Batch Pick" : "Single Order"}
+              </Badge>
             </div>
 
             <div className="flex items-center justify-between gap-2 mb-2">

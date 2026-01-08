@@ -51,6 +51,7 @@ const orders = [
 export default function Orders() {
   const [autoRelease, setAutoRelease] = useState(true);
   const [releaseDelay, setReleaseDelay] = useState("immediate");
+  const [batchMode, setBatchMode] = useState<"batch" | "single">("batch");
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
@@ -120,6 +121,23 @@ export default function Orders() {
                         </p>
                       </div>
                       
+                      <div className="border-t pt-4 space-y-3">
+                        <Label className="text-sm font-medium">Picking Mode</Label>
+                        <Select value={batchMode} onValueChange={(v: "batch" | "single") => setBatchMode(v)}>
+                          <SelectTrigger data-testid="select-batch-mode">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="batch">Batch Picking (group by location)</SelectItem>
+                            <SelectItem value="single">Single Order Picking</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {batchMode === "batch" && "Orders are grouped by zone/location for efficient picking."}
+                          {batchMode === "single" && "Each order is picked individually, start to finish."}
+                        </p>
+                      </div>
+                      
                       <div className="border-t pt-4 space-y-2">
                         <Label className="text-sm font-medium">Release Conditions</Label>
                         <div className="space-y-2 text-sm">
@@ -129,11 +147,11 @@ export default function Orders() {
                           </div>
                           <div className="flex items-center gap-2">
                             <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            <span>All items in stock</span>
+                            <span className="flex items-center gap-1">All items in stock <span className="text-amber-500 text-[10px]">(warning only)</span></span>
                           </div>
                           <div className="flex items-center gap-2">
                             <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            <span>Valid shipping address</span>
+                            <span className="flex items-center gap-1">Valid shipping address <span className="text-amber-500 text-[10px]">(warning only)</span></span>
                           </div>
                         </div>
                       </div>
