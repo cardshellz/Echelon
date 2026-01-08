@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { 
   ShoppingCart, 
   Search, 
@@ -7,12 +7,17 @@ import {
   Clock,
   AlertCircle,
   CheckCircle2,
-  Truck
+  Truck,
+  Zap,
+  Settings2,
+  ChevronDown
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -20,6 +25,18 @@ import {
   CardTitle,
   CardDescription
 } from "@/components/ui/card";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
@@ -32,6 +49,9 @@ const orders = [
 ];
 
 export default function Orders() {
+  const [autoRelease, setAutoRelease] = useState(true);
+  const [releaseDelay, setReleaseDelay] = useState("immediate");
+
   return (
     <div className="flex flex-col h-full bg-muted/20">
       <div className="p-6 border-b bg-card">
@@ -45,7 +65,85 @@ export default function Orders() {
               Process, allocate, and fulfill customer orders.
             </p>
           </div>
-          <Button>Create Manual Order</Button>
+          <div className="flex items-center gap-3">
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button 
+                  variant={autoRelease ? "default" : "outline"} 
+                  className={autoRelease ? "bg-emerald-600 hover:bg-emerald-700" : ""}
+                  data-testid="button-auto-release-settings"
+                >
+                  <Zap className="h-4 w-4 mr-2" />
+                  Auto-Release {autoRelease ? "ON" : "OFF"}
+                  <ChevronDown className="h-4 w-4 ml-2" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-80" align="end">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="auto-release" className="text-base font-medium">Auto-Release to Pick</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Automatically send orders to picking queue
+                      </p>
+                    </div>
+                    <Switch 
+                      id="auto-release" 
+                      checked={autoRelease} 
+                      onCheckedChange={setAutoRelease}
+                      data-testid="switch-auto-release"
+                    />
+                  </div>
+                  
+                  {autoRelease && (
+                    <>
+                      <div className="border-t pt-4 space-y-3">
+                        <Label className="text-sm font-medium">Release Timing</Label>
+                        <Select value={releaseDelay} onValueChange={setReleaseDelay}>
+                          <SelectTrigger data-testid="select-release-timing">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="immediate">Immediate (as orders arrive)</SelectItem>
+                            <SelectItem value="5min">5 minute batches</SelectItem>
+                            <SelectItem value="15min">15 minute batches</SelectItem>
+                            <SelectItem value="hourly">Hourly batches</SelectItem>
+                            <SelectItem value="cutoff">Daily cutoff (2:00 PM)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {releaseDelay === "immediate" && "Orders are sent to pickers the moment they sync from Shopify."}
+                          {releaseDelay === "5min" && "Orders are grouped every 5 minutes for optimized pick paths."}
+                          {releaseDelay === "15min" && "Orders are grouped every 15 minutes for optimized pick paths."}
+                          {releaseDelay === "hourly" && "Orders are released at the top of each hour."}
+                          {releaseDelay === "cutoff" && "All orders before 2:00 PM ship same-day. Orders after go to next day."}
+                        </p>
+                      </div>
+                      
+                      <div className="border-t pt-4 space-y-2">
+                        <Label className="text-sm font-medium">Release Conditions</Label>
+                        <div className="space-y-2 text-sm">
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                            <span>Payment confirmed</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                            <span>All items in stock</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                            <span>Valid shipping address</span>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
+            <Button variant="outline">Create Manual Order</Button>
+          </div>
         </div>
 
         <Tabs defaultValue="active" className="w-full">
