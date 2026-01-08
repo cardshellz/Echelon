@@ -79,9 +79,40 @@ export default function Picking() {
   const [shortPickQty, setShortPickQty] = useState("0");
   const [shortPickNotes, setShortPickNotes] = useState("");
   const [shortPickSubmitted, setShortPickSubmitted] = useState(false);
+  const [multiQtyConfirmOpen, setMultiQtyConfirmOpen] = useState(false);
+  const [scanConfirmed, setScanConfirmed] = useState(false);
   
   const activeData = pickMode === "batch" ? batchPickData : singlePickData;
   const currentItem = activeData.items[pickMode === "batch" ? 2 : 0];
+
+  const handleScan = (value: string) => {
+    setScanInput(value);
+    if (value.toUpperCase() === currentItem.sku.replace(/-/g, "").toUpperCase() || 
+        value.toUpperCase() === currentItem.sku.toUpperCase()) {
+      // Valid scan - check if multi-quantity
+      if (currentItem.qty > 1) {
+        setMultiQtyConfirmOpen(true);
+      } else {
+        // Single item - auto confirm
+        setScanConfirmed(true);
+        setTimeout(() => {
+          handleAction();
+          setScanConfirmed(false);
+          setScanInput("");
+        }, 600);
+      }
+    }
+  };
+
+  const handleMultiQtyConfirm = (confirmAll: boolean) => {
+    setMultiQtyConfirmOpen(false);
+    setScanConfirmed(true);
+    setTimeout(() => {
+      handleAction();
+      setScanConfirmed(false);
+      setScanInput("");
+    }, 600);
+  };
 
   const handleShortPickSubmit = () => {
     setShortPickSubmitted(true);
@@ -248,25 +279,36 @@ export default function Picking() {
                   </div>
 
                   <div className="w-full max-w-sm space-y-3 mt-4">
-                    <div className="relative">
-                      <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                      <Input 
-                        placeholder="Scan SKU barcode..." 
-                        className="pl-10 h-12 text-lg border-primary/30 focus-visible:ring-primary"
-                        value={scanInput}
-                        onChange={(e) => setScanInput(e.target.value)}
-                        autoFocus
-                      />
+                    {scanConfirmed ? (
+                      <div className="h-12 bg-emerald-100 border-2 border-emerald-500 rounded-md flex items-center justify-center gap-2 text-emerald-700 font-medium animate-in zoom-in-95">
+                        <CheckCircle2 className="h-5 w-5" />
+                        Scan Confirmed!
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input 
+                          placeholder="Scan SKU barcode..." 
+                          className="pl-10 h-12 text-lg border-primary/30 focus-visible:ring-primary"
+                          value={scanInput}
+                          onChange={(e) => handleScan(e.target.value)}
+                          autoFocus
+                          data-testid="input-scan-sku"
+                        />
+                      </div>
+                    )}
+                    <div className="text-xs text-center text-muted-foreground bg-muted/50 rounded-md py-2 px-3">
+                      <span className="font-medium text-foreground">Scan = Auto-Confirm</span>
+                      {currentItem.qty > 1 && <span> • Multi-qty will prompt for count</span>}
                     </div>
                     <Button 
-                      className="w-full h-12 text-lg font-medium shadow-lg shadow-primary/20"
+                      variant="outline"
+                      className="w-full h-10 text-sm"
                       onClick={handleAction}
+                      data-testid="button-manual-confirm"
                     >
-                      {workflowMode === "solo" ? "Confirm & Ship" : "Confirm to Tote"}
+                      Or Manually Confirm Without Scan
                     </Button>
-                    <div className="text-xs text-center text-muted-foreground">
-                      {workflowMode === "solo" ? "Next step: Print Label" : "Next step: Packing Station"}
-                    </div>
                     <Button 
                       variant="ghost" 
                       className="w-full text-amber-600 hover:text-amber-700 hover:bg-amber-50"
@@ -365,6 +407,66 @@ export default function Picking() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* Multi-Quantity Confirmation Dialog */}
+      <Dialog open={multiQtyConfirmOpen} onOpenChange={setMultiQtyConfirmOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-center">Confirm Quantity</DialogTitle>
+            <DialogDescription className="text-center">
+              Picking <span className="font-bold text-foreground">{currentItem.qty} units</span> of {currentItem.sku}
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="py-4 space-y-3">
+            <Button 
+              className="w-full h-14 text-lg bg-emerald-600 hover:bg-emerald-700"
+              onClick={() => handleMultiQtyConfirm(true)}
+              data-testid="button-confirm-all-qty"
+            >
+              <CheckCircle2 className="mr-2 h-5 w-5" />
+              Confirm All {currentItem.qty}
+            </Button>
+            
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">or enter actual count</span>
+              </div>
+            </div>
+            
+            <div className="flex gap-2">
+              <Input 
+                type="number" 
+                placeholder="Qty found" 
+                className="text-center text-lg h-12"
+                min={0}
+                max={currentItem.qty}
+                data-testid="input-partial-qty"
+              />
+              <Button 
+                variant="outline" 
+                className="h-12 px-6"
+                onClick={() => {
+                  setMultiQtyConfirmOpen(false);
+                  setShortPickOpen(true);
+                  setShortPickReason("partial");
+                }}
+              >
+                Partial Pick
+              </Button>
+            </div>
+          </div>
+          
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setMultiQtyConfirmOpen(false)} className="w-full">
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Short Pick Dialog */}
       <Dialog open={shortPickOpen} onOpenChange={setShortPickOpen}>
