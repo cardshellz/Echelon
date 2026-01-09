@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { 
   Scan, 
   CheckCircle2, 
@@ -13,7 +13,11 @@ import {
   Clock,
   RotateCcw,
   Trophy,
-  Zap
+  Zap,
+  Volume2,
+  VolumeX,
+  Maximize,
+  Smartphone
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -23,7 +27,6 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
@@ -120,6 +123,51 @@ const createInitialQueue = (): PickBatch[] => [
   },
 ];
 
+// Sound effects
+const playSound = (type: "success" | "error" | "complete") => {
+  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+  
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  
+  if (type === "success") {
+    oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+    oscillator.frequency.setValueAtTime(1108, audioContext.currentTime + 0.1);
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + 0.2);
+  } else if (type === "error") {
+    oscillator.frequency.setValueAtTime(200, audioContext.currentTime);
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + 0.3);
+  } else if (type === "complete") {
+    oscillator.frequency.setValueAtTime(523, audioContext.currentTime);
+    oscillator.frequency.setValueAtTime(659, audioContext.currentTime + 0.15);
+    oscillator.frequency.setValueAtTime(784, audioContext.currentTime + 0.3);
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + 0.5);
+  }
+};
+
+// Haptic feedback
+const triggerHaptic = (type: "light" | "medium" | "heavy") => {
+  if ("vibrate" in navigator) {
+    const patterns = {
+      light: [30],
+      medium: [50],
+      heavy: [100, 30, 100]
+    };
+    navigator.vibrate(patterns[type]);
+  }
+};
+
 export default function Picking() {
   // Core state
   const [queue, setQueue] = useState<PickBatch[]>(createInitialQueue);
@@ -136,7 +184,12 @@ export default function Picking() {
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
   
-  const inputRef = useRef<HTMLInputElement>(null);
+  // Scanner mode settings
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [scannerMode, setScannerMode] = useState(false);
+  
+  const scanInputRef = useRef<HTMLInputElement>(null);
+  const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Computed values
   const activeBatch = queue.find(b => b.id === activeBatchId);
@@ -145,12 +198,73 @@ export default function Picking() {
   const totalItems = activeBatch?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
   
-  // Focus input when entering pick mode
-  useEffect(() => {
-    if (view === "picking" && inputRef.current) {
-      inputRef.current.focus();
+  // Keep focus on scan input - aggressive refocus for scanner devices
+  const maintainFocus = useCallback(() => {
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && scanInputRef.current) {
+      scanInputRef.current.focus();
     }
-  }, [view, currentItemIndex]);
+  }, [view, shortPickOpen, multiQtyOpen]);
+  
+  // Auto-focus on mount and after any interaction
+  useEffect(() => {
+    if (view === "picking") {
+      maintainFocus();
+      
+      // Set up interval to maintain focus (for scanner devices)
+      const interval = setInterval(maintainFocus, 500);
+      
+      // Also refocus on any click/touch on the document
+      const handleInteraction = () => {
+        if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+        focusTimeoutRef.current = setTimeout(maintainFocus, 100);
+      };
+      
+      document.addEventListener("click", handleInteraction);
+      document.addEventListener("touchend", handleInteraction);
+      
+      return () => {
+        clearInterval(interval);
+        document.removeEventListener("click", handleInteraction);
+        document.removeEventListener("touchend", handleInteraction);
+        if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+      };
+    }
+  }, [view, maintainFocus]);
+  
+  // Refocus after dialogs close
+  useEffect(() => {
+    if (!shortPickOpen && !multiQtyOpen) {
+      setTimeout(maintainFocus, 100);
+    }
+  }, [shortPickOpen, multiQtyOpen, maintainFocus]);
+  
+  // Prevent other inputs from stealing focus in picking mode
+  useEffect(() => {
+    if (view === "picking") {
+      const handleFocusIn = (e: FocusEvent) => {
+        const target = e.target as HTMLElement;
+        if (target !== scanInputRef.current && target.tagName === "INPUT") {
+          e.preventDefault();
+          maintainFocus();
+        }
+      };
+      
+      document.addEventListener("focusin", handleFocusIn);
+      return () => document.removeEventListener("focusin", handleFocusIn);
+    }
+  }, [view, maintainFocus]);
+  
+  // Handle keyboard Enter for scanner (many scanners send Enter after barcode)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && view === "picking" && scanInput.length > 0) {
+        e.preventDefault();
+      }
+    };
+    
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [view, scanInput]);
   
   // Start picking a batch
   const handleStartPicking = (batchId: string) => {
@@ -160,6 +274,7 @@ export default function Picking() {
     setActiveBatchId(batchId);
     setCurrentItemIndex(0);
     setView("picking");
+    triggerHaptic("medium");
   };
   
   // Grab next available batch
@@ -175,25 +290,37 @@ export default function Picking() {
     setScanInput(value);
     if (!currentItem) return;
     
-    const normalizedInput = value.toUpperCase().replace(/-/g, "");
+    const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
     const normalizedSku = currentItem.sku.toUpperCase().replace(/-/g, "");
     
+    // Check for match
     if (normalizedInput === normalizedSku) {
       setScanStatus("success");
+      if (soundEnabled) playSound("success");
+      triggerHaptic("medium");
       
       if (currentItem.qty > 1) {
-        // Multi-quantity item - show confirmation dialog
         setTimeout(() => {
           setMultiQtyOpen(true);
           setScanStatus("idle");
           setScanInput("");
         }, 400);
       } else {
-        // Single quantity - auto-confirm
         setTimeout(() => {
           confirmPick(1);
-        }, 500);
+        }, 400);
       }
+    } else if (normalizedInput.length >= normalizedSku.length && normalizedInput !== normalizedSku) {
+      // Wrong barcode scanned
+      setScanStatus("error");
+      if (soundEnabled) playSound("error");
+      triggerHaptic("heavy");
+      
+      setTimeout(() => {
+        setScanStatus("idle");
+        setScanInput("");
+        maintainFocus();
+      }, 1000);
     }
   };
   
@@ -220,9 +347,12 @@ export default function Picking() {
     setScanStatus("idle");
     setScanInput("");
     setMultiQtyOpen(false);
+    setPickQty(1);
     
-    // Move to next item or complete
-    setTimeout(() => advanceToNext(), 300);
+    setTimeout(() => {
+      advanceToNext();
+      maintainFocus();
+    }, 300);
   };
   
   // Short pick
@@ -246,34 +376,55 @@ export default function Picking() {
       return { ...batch, items: newItems };
     }));
     
+    if (soundEnabled) playSound("error");
+    triggerHaptic("medium");
+    
     setShortPickOpen(false);
     setShortPickReason("");
     setShortPickQty("0");
     
-    setTimeout(() => advanceToNext(), 300);
+    setTimeout(() => {
+      advanceToNext();
+      maintainFocus();
+    }, 300);
   };
   
   // Advance to next item
   const advanceToNext = () => {
     if (!activeBatch) return;
     
+    const updatedBatch = queue.find(b => b.id === activeBatchId);
+    if (!updatedBatch) return;
+    
     // Find next pending item
-    const nextIndex = activeBatch.items.findIndex((item, idx) => 
-      idx > currentItemIndex && (item.status === "pending" || item.status === "in_progress")
-    );
+    let nextIndex = -1;
+    for (let i = currentItemIndex + 1; i < updatedBatch.items.length; i++) {
+      if (updatedBatch.items[i].status === "pending" || updatedBatch.items[i].status === "in_progress") {
+        nextIndex = i;
+        break;
+      }
+    }
     
     if (nextIndex !== -1) {
       setCurrentItemIndex(nextIndex);
     } else {
-      // Check if all items are done
-      const refreshedBatch = queue.find(b => b.id === activeBatchId);
-      const allDone = refreshedBatch?.items.every(i => i.status === "completed" || i.status === "short");
+      // Check from beginning (wrap around)
+      for (let i = 0; i < currentItemIndex; i++) {
+        if (updatedBatch.items[i].status === "pending" || updatedBatch.items[i].status === "in_progress") {
+          nextIndex = i;
+          break;
+        }
+      }
       
-      if (allDone) {
-        // Complete the batch
+      if (nextIndex !== -1) {
+        setCurrentItemIndex(nextIndex);
+      } else {
+        // All items done
         setQueue(prev => prev.map(b => 
           b.id === activeBatchId ? { ...b, status: "completed" as const } : b
         ));
+        if (soundEnabled) playSound("complete");
+        triggerHaptic("heavy");
         setView("complete");
       }
     }
@@ -284,6 +435,7 @@ export default function Picking() {
     setView("queue");
     setActiveBatchId(null);
     setCurrentItemIndex(0);
+    setScanInput("");
   };
   
   // Reset demo
@@ -292,6 +444,16 @@ export default function Picking() {
     setView("queue");
     setActiveBatchId(null);
     setCurrentItemIndex(0);
+    setScanInput("");
+  };
+  
+  // Toggle fullscreen
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+    } else {
+      document.exitFullscreen();
+    }
   };
 
   // ===== RENDER =====
@@ -316,7 +478,24 @@ export default function Picking() {
               </p>
             </div>
             
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => setScannerMode(!scannerMode)}
+                className={cn(scannerMode && "bg-primary text-primary-foreground")}
+                title="Scanner Mode"
+              >
+                <Smartphone className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={toggleFullscreen}
+                title="Fullscreen"
+              >
+                <Maximize className="h-4 w-4" />
+              </Button>
               <Button 
                 variant="outline" 
                 size="sm" 
@@ -324,48 +503,48 @@ export default function Picking() {
                 data-testid="button-reset-demo"
               >
                 <RotateCcw className="h-4 w-4 mr-2" />
-                Reset Demo
+                Reset
               </Button>
               <Button 
                 onClick={handleGrabNext}
-                className="bg-emerald-600 hover:bg-emerald-700"
+                className="bg-emerald-600 hover:bg-emerald-700 h-12 px-6 text-base"
                 disabled={readyBatches.length === 0}
                 data-testid="button-grab-next"
               >
-                <Zap className="h-4 w-4 mr-2" />
-                Grab Next Batch
+                <Zap className="h-5 w-5 mr-2" />
+                Grab Next
               </Button>
             </div>
           </div>
 
           {/* Queue Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-            <div className="bg-muted/50 rounded-lg p-3 text-center">
-              <div className="text-2xl font-bold text-primary">{readyBatches.length}</div>
-              <div className="text-xs text-muted-foreground">Ready</div>
+          <div className="grid grid-cols-4 gap-2 md:gap-3 mt-4">
+            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+              <div className="text-xl md:text-2xl font-bold text-primary">{readyBatches.length}</div>
+              <div className="text-[10px] md:text-xs text-muted-foreground">Ready</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-3 text-center">
-              <div className="text-2xl font-bold text-amber-600">{inProgressBatches.length}</div>
-              <div className="text-xs text-muted-foreground">In Progress</div>
+            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+              <div className="text-xl md:text-2xl font-bold text-amber-600">{inProgressBatches.length}</div>
+              <div className="text-[10px] md:text-xs text-muted-foreground">Active</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-3 text-center">
-              <div className="text-2xl font-bold text-red-600">{queue.filter(b => b.priority === "rush" && b.status === "ready").length}</div>
-              <div className="text-xs text-muted-foreground">Rush</div>
+            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+              <div className="text-xl md:text-2xl font-bold text-red-600">{queue.filter(b => b.priority === "rush" && b.status === "ready").length}</div>
+              <div className="text-[10px] md:text-xs text-muted-foreground">Rush</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-3 text-center">
-              <div className="text-2xl font-bold text-emerald-600">{completedBatches.length}</div>
-              <div className="text-xs text-muted-foreground">Completed</div>
+            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+              <div className="text-xl md:text-2xl font-bold text-emerald-600">{completedBatches.length}</div>
+              <div className="text-[10px] md:text-xs text-muted-foreground">Done</div>
             </div>
           </div>
         </div>
 
         {/* Queue List */}
-        <div className="p-4 md:p-6 space-y-3">
+        <div className="p-3 md:p-6 space-y-2 md:space-y-3">
           {queue.filter(b => b.status !== "completed").map((batch) => (
             <Card 
               key={batch.id} 
               className={cn(
-                "cursor-pointer hover:border-primary/50 transition-colors",
+                "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
                 batch.priority === "rush" && "border-l-4 border-l-red-500",
                 batch.priority === "high" && "border-l-4 border-l-amber-500",
                 batch.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
@@ -373,38 +552,32 @@ export default function Picking() {
               onClick={() => batch.status === "ready" ? handleStartPicking(batch.id) : null}
               data-testid={`card-batch-${batch.id}`}
             >
-              <CardContent className="p-4">
+              <CardContent className="p-3 md:p-4">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-3 md:gap-4">
                     <div className={cn(
-                      "h-10 w-10 rounded-lg flex items-center justify-center",
+                      "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
                       batch.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                     )}>
-                      {batch.id.startsWith("BATCH") ? <ClipboardList size={20} /> : <Package size={20} />}
+                      {batch.id.startsWith("BATCH") ? <ClipboardList size={24} /> : <Package size={24} />}
                     </div>
                     <div>
-                      <div className="font-semibold flex items-center gap-2">
+                      <div className="font-semibold flex items-center gap-2 text-base">
                         {batch.id}
                         {batch.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
                         {batch.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
-                        {batch.status === "in_progress" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-100">IN PROGRESS</Badge>}
                       </div>
                       <div className="text-sm text-muted-foreground">
-                        {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items • Zones: {batch.zones.join(", ")}
+                        {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items
                       </div>
                     </div>
                   </div>
-                  <div className="text-right flex items-center gap-3">
-                    <div>
-                      <div className="text-sm text-muted-foreground flex items-center gap-1 justify-end">
-                        <Clock size={12} /> {batch.age}
-                      </div>
-                      {batch.assignee && (
-                        <div className="text-xs text-muted-foreground mt-1">{batch.assignee}</div>
-                      )}
+                  <div className="text-right flex items-center gap-2">
+                    <div className="text-sm text-muted-foreground flex items-center gap-1">
+                      <Clock size={14} /> {batch.age}
                     </div>
                     {batch.status === "ready" && (
-                      <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                      <ChevronRight className="h-6 w-6 text-muted-foreground" />
                     )}
                   </div>
                 </div>
@@ -412,31 +585,21 @@ export default function Picking() {
             </Card>
           ))}
           
-          {/* Completed section */}
           {completedBatches.length > 0 && (
             <div className="pt-4">
               <h3 className="text-sm font-medium text-muted-foreground mb-3 flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                Completed Today ({completedBatches.length})
+                Completed ({completedBatches.length})
               </h3>
               {completedBatches.map((batch) => (
-                <Card key={batch.id} className="bg-muted/30 border-muted opacity-60">
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-4">
-                        <div className="h-10 w-10 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-700">
-                          <CheckCircle2 size={20} />
-                        </div>
-                        <div>
-                          <div className="font-semibold flex items-center gap-2">
-                            {batch.id}
-                            <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-emerald-100 text-emerald-700">DONE</Badge>
-                          </div>
-                          <div className="text-sm text-muted-foreground">
-                            {batch.items.length} items picked
-                          </div>
-                        </div>
-                      </div>
+                <Card key={batch.id} className="bg-muted/30 border-muted mb-2">
+                  <CardContent className="p-3 flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-700">
+                      <CheckCircle2 size={20} />
+                    </div>
+                    <div className="flex-1">
+                      <span className="font-medium">{batch.id}</span>
+                      <span className="text-sm text-muted-foreground ml-2">• {batch.items.length} items</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -450,46 +613,50 @@ export default function Picking() {
   
   // COMPLETE VIEW
   if (view === "complete") {
+    const readyBatches = queue.filter(b => b.status === "ready");
+    
     return (
       <div className="flex flex-col items-center justify-center min-h-full bg-gradient-to-b from-emerald-50 to-background dark:from-emerald-950/20 p-6">
-        <div className="text-center space-y-6 max-w-md">
-          <div className="h-24 w-24 mx-auto rounded-full bg-emerald-100 dark:bg-emerald-900/50 text-emerald-600 flex items-center justify-center animate-in zoom-in duration-300">
-            <Trophy className="w-12 h-12" />
+        <div className="text-center space-y-6 max-w-md w-full">
+          <div className="h-28 w-28 mx-auto rounded-full bg-emerald-100 dark:bg-emerald-900/50 text-emerald-600 flex items-center justify-center animate-in zoom-in duration-300">
+            <Trophy className="w-14 h-14" />
           </div>
           
           <div className="space-y-2">
             <h1 className="text-3xl font-bold text-emerald-700 dark:text-emerald-400">Batch Complete!</h1>
-            <p className="text-muted-foreground">
-              {activeBatch?.id} has been fully picked and is ready for packing.
+            <p className="text-muted-foreground text-lg">
+              {activeBatch?.id} is ready for packing
             </p>
           </div>
           
-          <div className="bg-card border rounded-lg p-4 text-left space-y-2">
-            <div className="flex justify-between text-sm">
+          <div className="bg-card border rounded-lg p-4 text-left space-y-3">
+            <div className="flex justify-between text-base">
               <span className="text-muted-foreground">Items Picked</span>
-              <span className="font-medium">{activeBatch?.items.filter(i => i.status === "completed").length}</span>
+              <span className="font-bold text-emerald-600">{activeBatch?.items.filter(i => i.status === "completed").length}</span>
             </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Short Picks</span>
-              <span className="font-medium text-amber-600">{activeBatch?.items.filter(i => i.status === "short").length}</span>
-            </div>
-            <div className="flex justify-between text-sm">
+            {(activeBatch?.items.filter(i => i.status === "short").length || 0) > 0 && (
+              <div className="flex justify-between text-base">
+                <span className="text-muted-foreground">Short Picks</span>
+                <span className="font-bold text-amber-600">{activeBatch?.items.filter(i => i.status === "short").length}</span>
+              </div>
+            )}
+            <div className="flex justify-between text-base">
               <span className="text-muted-foreground">Orders</span>
-              <span className="font-medium">{activeBatch?.orders}</span>
+              <span className="font-bold">{activeBatch?.orders}</span>
             </div>
           </div>
           
           <div className="flex flex-col gap-3 pt-4">
             <Button 
               onClick={handleGrabNext}
-              className="bg-emerald-600 hover:bg-emerald-700"
-              disabled={queue.filter(b => b.status === "ready").length === 0}
+              className="bg-emerald-600 hover:bg-emerald-700 h-14 text-lg"
+              disabled={readyBatches.length === 0}
               data-testid="button-next-batch"
             >
-              <ArrowRight className="h-4 w-4 mr-2" />
-              Grab Next Batch
+              <ArrowRight className="h-5 w-5 mr-2" />
+              {readyBatches.length > 0 ? `Grab Next (${readyBatches.length} waiting)` : "No More Batches"}
             </Button>
-            <Button variant="outline" onClick={handleBackToQueue} data-testid="button-back-queue">
+            <Button variant="outline" onClick={handleBackToQueue} className="h-12" data-testid="button-back-queue">
               Back to Queue
             </Button>
           </div>
@@ -498,290 +665,222 @@ export default function Picking() {
     );
   }
   
-  // PICKING VIEW
+  // PICKING VIEW (Scanner Optimized)
   return (
-    <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
-      {/* Header */}
-      <div className="bg-card border-b p-4 md:p-6 sticky top-0 z-10">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-          <div>
-            <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="mb-2 -ml-2 text-muted-foreground">
-              <ChevronRight className="h-4 w-4 mr-1 rotate-180" /> Back to Queue
-            </Button>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
-              <PackageCheck className="h-6 w-6 text-primary" />
-              {activeBatch?.id}
-            </h1>
-          </div>
+    <div className="flex flex-col min-h-full bg-muted/20 overflow-auto select-none">
+      {/* Compact Header */}
+      <div className="bg-card border-b p-3 md:p-4 sticky top-0 z-10">
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="text-muted-foreground h-8 px-2">
+            <ChevronRight className="h-4 w-4 rotate-180" /> Exit
+          </Button>
           
-          <Badge 
-            variant="outline" 
-            className={cn(
-              "text-xs px-3 py-1",
-              activeBatch?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
-              activeBatch?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
-            )}
-          >
-            {activeBatch?.priority === "rush" ? "RUSH ORDER" : activeBatch?.priority === "high" ? "HIGH PRIORITY" : "STANDARD"}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              className="h-8 w-8"
+            >
+              {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+            </Button>
+            <Badge 
+              variant="outline" 
+              className={cn(
+                "text-xs px-2 py-0.5",
+                activeBatch?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
+                activeBatch?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
+              )}
+            >
+              {activeBatch?.id}
+            </Badge>
+          </div>
         </div>
 
         {/* Progress Bar */}
-        <div className="space-y-2">
+        <div className="space-y-1">
           <div className="flex justify-between text-sm font-medium">
-            <span>Progress ({completedItems}/{totalItems} items)</span>
+            <span>{completedItems}/{totalItems} items</span>
             <span>{Math.round(progressPercent)}%</span>
           </div>
-          <Progress value={progressPercent} className="h-3" />
+          <Progress value={progressPercent} className="h-2" />
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col max-w-4xl mx-auto w-full">
-        
-        <Tabs defaultValue="current" className="flex-1 flex flex-col">
-          <TabsList className="grid w-full grid-cols-2 mb-4">
-            <TabsTrigger value="current">Current Task</TabsTrigger>
-            <TabsTrigger value="list">Full Pick List ({completedItems}/{totalItems})</TabsTrigger>
-          </TabsList>
-
-          {/* Current Task */}
-          <TabsContent value="current" className="mt-0 flex-1 flex flex-col gap-4">
-            {currentItem ? (
-              <Card className={cn(
-                "flex-1 shadow-md flex flex-col transition-all duration-300",
-                scanStatus === "success" && "border-emerald-500 bg-emerald-50/30 dark:bg-emerald-950/20"
-              )}>
-                <CardHeader className="bg-muted/30 pb-2">
-                  <div className="flex justify-between items-start">
-                    <div className="flex flex-col items-start gap-1">
-                      <span className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">Pick Location</span>
-                      <Badge variant="secondary" className="text-xl py-1 px-3 font-mono border-2 border-primary/20 bg-background text-foreground">
-                        <MapPin className="w-5 h-5 mr-2 text-primary" /> {currentItem.location}
-                      </Badge>
-                    </div>
-                    <div className="flex flex-col items-end gap-1">
-                      <Badge variant="destructive" className="animate-pulse text-sm px-3 py-1">
-                        PICK {currentItem.qty - currentItem.picked} UNIT{currentItem.qty - currentItem.picked > 1 ? "S" : ""}
-                      </Badge>
-                      <span className="text-xs text-muted-foreground font-medium">Order {currentItem.orderId}</span>
-                    </div>
-                  </div>
-                  
-                  {/* Progress dots */}
-                  <div className="mt-4 flex items-center gap-1 text-xs text-muted-foreground">
-                    {activeBatch?.items.map((item, idx) => (
-                      <React.Fragment key={item.id}>
-                        <div className={cn(
-                          "h-2 w-2 rounded-full transition-colors",
-                          item.status === "completed" && "bg-emerald-500",
-                          item.status === "short" && "bg-amber-500",
-                          idx === currentItemIndex && "bg-primary ring-2 ring-primary/30",
-                          item.status === "pending" && idx !== currentItemIndex && "bg-border"
-                        )} />
-                        {idx < activeBatch.items.length - 1 && (
-                          <div className={cn(
-                            "h-0.5 w-3",
-                            item.status === "completed" || item.status === "short" ? "bg-emerald-500" : "bg-border"
-                          )} />
-                        )}
-                      </React.Fragment>
-                    ))}
-                    <span className="ml-2">Item {currentItemIndex + 1} of {totalItems}</span>
-                  </div>
-                </CardHeader>
-                
-                <CardContent className="flex-1 flex flex-col items-center justify-center text-center p-6 gap-6">
-                  <div className="relative">
-                    <img 
-                      src={currentItem.image} 
-                      alt={currentItem.name}
-                      className={cn(
-                        "w-48 h-48 object-cover rounded-lg border-2 shadow-sm transition-all",
-                        scanStatus === "success" ? "border-emerald-500" : "border-muted"
-                      )}
-                    />
-                    <div className={cn(
-                      "absolute -bottom-3 -right-3 bg-card border shadow-sm p-2 rounded-full transition-colors",
-                      scanStatus === "success" && "bg-emerald-500 border-emerald-500"
-                    )}>
-                      {scanStatus === "success" ? (
-                        <CheckCircle2 className="w-6 h-6 text-white" />
-                      ) : (
-                        <Scan className="w-6 h-6 text-primary" />
-                      )}
-                    </div>
-                  </div>
-                  
-                  <div className="space-y-1">
-                    <h2 className="text-2xl font-bold">{currentItem.sku}</h2>
-                    <p className="text-muted-foreground text-lg">{currentItem.name}</p>
-                  </div>
-
-                  <div className="w-full max-w-sm space-y-3 mt-4">
-                    {scanStatus === "success" ? (
-                      <div className="h-12 bg-emerald-100 border-2 border-emerald-500 rounded-md flex items-center justify-center gap-2 text-emerald-700 font-medium animate-in zoom-in-95">
-                        <CheckCircle2 className="h-5 w-5" />
-                        Scan Confirmed!
-                      </div>
-                    ) : (
-                      <div className="relative">
-                        <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                        <Input 
-                          ref={inputRef}
-                          placeholder="Scan SKU barcode..." 
-                          className="pl-10 h-12 text-lg border-primary/30 focus-visible:ring-primary"
-                          value={scanInput}
-                          onChange={(e) => handleScan(e.target.value)}
-                          data-testid="input-scan-sku"
-                        />
-                      </div>
-                    )}
-                    
-                    <div className="text-xs text-center text-muted-foreground bg-muted/50 rounded-md py-2 px-3">
-                      <span className="font-medium text-foreground">Type SKU: {currentItem.sku.replace(/-/g, "")}</span>
-                      {(currentItem.qty - currentItem.picked) > 1 && <span> • Multi-qty will prompt for count</span>}
-                    </div>
-                    
-                    <Button 
-                      variant="outline"
-                      className="w-full h-10 text-sm"
-                      onClick={() => currentItem.qty > 1 ? setMultiQtyOpen(true) : confirmPick(1)}
-                      data-testid="button-manual-confirm"
-                    >
-                      Skip Scan - Manually Confirm
-                    </Button>
-                    
-                    <Button 
-                      variant="ghost" 
-                      className="w-full text-amber-600 hover:text-amber-700 hover:bg-amber-50"
-                      onClick={() => setShortPickOpen(true)}
-                      data-testid="button-short-pick"
-                    >
-                      <AlertTriangle className="mr-2 h-4 w-4" />
-                      Can't Find / Short Pick
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="flex-1 flex items-center justify-center">
-                <p className="text-muted-foreground">No items remaining</p>
+      {/* Main Pick Interface - Optimized for Scanner */}
+      <div className="flex-1 p-3 md:p-4 flex flex-col max-w-2xl mx-auto w-full">
+        {currentItem ? (
+          <Card className={cn(
+            "flex-1 shadow-lg flex flex-col transition-all duration-200",
+            scanStatus === "success" && "border-emerald-500 border-2 bg-emerald-50/50 dark:bg-emerald-950/30",
+            scanStatus === "error" && "border-red-500 border-2 bg-red-50/50 dark:bg-red-950/30 animate-shake"
+          )}>
+            {/* Location Header - BIG and prominent */}
+            <CardHeader className="bg-muted/50 py-4 px-4 text-center border-b">
+              <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest mb-1">GO TO</div>
+              <div className="text-4xl md:text-5xl font-black font-mono text-primary tracking-wide">
+                {currentItem.location}
               </div>
-            )}
-            
-            {/* Next up preview */}
-            {activeBatch && currentItemIndex < activeBatch.items.length - 1 && (
-              <div className="h-20 bg-card border rounded-lg p-3 flex items-center gap-4 opacity-60 hover:opacity-80 transition-opacity">
-                <div className="bg-muted h-14 w-14 rounded-md flex items-center justify-center shrink-0 overflow-hidden">
-                  <img 
-                    src={activeBatch.items[currentItemIndex + 1].image} 
-                    alt="Next" 
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold text-muted-foreground uppercase">Next Up</p>
-                  <p className="font-medium truncate">{activeBatch.items[currentItemIndex + 1].sku}</p>
-                  <p className="text-sm text-muted-foreground">{activeBatch.items[currentItemIndex + 1].location}</p>
-                </div>
-                <ChevronRight className="text-muted-foreground" />
-              </div>
-            )}
-          </TabsContent>
-
-          {/* Full List */}
-          <TabsContent value="list" className="mt-0 flex-1 overflow-hidden">
-            <ScrollArea className="h-full pr-4">
-              <div className="space-y-3">
+              <div className="flex items-center justify-center gap-2 mt-2">
                 {activeBatch?.items.map((item, idx) => (
-                  <Card 
-                    key={item.id} 
+                  <div 
+                    key={item.id}
                     className={cn(
-                      item.status === "completed" && "bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-200",
-                      item.status === "short" && "bg-amber-50/50 dark:bg-amber-950/20 border-amber-200",
-                      idx === currentItemIndex && item.status === "pending" && "border-l-4 border-l-primary"
-                    )}
-                  >
-                    <CardContent className="p-4 flex items-center gap-4">
-                      <div className="h-14 w-14 bg-white rounded-md border p-1 shrink-0 overflow-hidden">
-                        <img src={item.image} alt={item.name} className="w-full h-full object-cover rounded-sm" />
-                      </div>
-                      
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="font-mono font-bold text-sm">{item.sku}</span>
-                          {item.status === "completed" && (
-                            <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200">
-                              <CheckCircle2 className="h-3 w-3 mr-1" /> Picked
-                            </Badge>
-                          )}
-                          {item.status === "short" && (
-                            <Badge className="bg-amber-100 text-amber-700 border-amber-200">
-                              <AlertTriangle className="h-3 w-3 mr-1" /> Short
-                            </Badge>
-                          )}
-                          {item.status === "pending" && (
-                            <Badge variant="outline">{item.qty} QTY</Badge>
-                          )}
-                        </div>
-                        <p className="text-sm text-muted-foreground truncate">{item.name}</p>
-                        <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-                          <MapPin className="h-3 w-3" /> {item.location}
-                        </p>
-                      </div>
-                    </CardContent>
-                  </Card>
+                      "h-2 w-2 rounded-full transition-all",
+                      item.status === "completed" && "bg-emerald-500",
+                      item.status === "short" && "bg-amber-500",
+                      idx === currentItemIndex && "bg-primary w-4",
+                      item.status === "pending" && idx !== currentItemIndex && "bg-muted-foreground/30"
+                    )} 
+                  />
                 ))}
               </div>
-            </ScrollArea>
-          </TabsContent>
-        </Tabs>
+            </CardHeader>
+            
+            <CardContent className="flex-1 flex flex-col p-4 gap-4">
+              {/* Product Info */}
+              <div className="flex items-center gap-4">
+                <div className="relative shrink-0">
+                  <img 
+                    src={currentItem.image} 
+                    alt={currentItem.name}
+                    className="w-24 h-24 md:w-28 md:h-28 object-cover rounded-lg border-2 border-muted"
+                  />
+                  {scanStatus === "success" && (
+                    <div className="absolute inset-0 bg-emerald-500/20 rounded-lg flex items-center justify-center">
+                      <CheckCircle2 className="w-12 h-12 text-emerald-600" />
+                    </div>
+                  )}
+                </div>
+                
+                <div className="flex-1 min-w-0">
+                  <div className="text-2xl md:text-3xl font-bold font-mono mb-1">{currentItem.sku}</div>
+                  <div className="text-muted-foreground text-sm md:text-base truncate">{currentItem.name}</div>
+                  <div className="text-xs text-muted-foreground mt-1">Order {currentItem.orderId}</div>
+                </div>
+              </div>
+              
+              {/* Quantity Badge - HUGE */}
+              <div className={cn(
+                "py-4 rounded-xl text-center",
+                scanStatus === "success" ? "bg-emerald-100 dark:bg-emerald-900/50" : "bg-red-100 dark:bg-red-900/30"
+              )}>
+                <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-widest">Pick Quantity</div>
+                <div className={cn(
+                  "text-6xl md:text-7xl font-black",
+                  scanStatus === "success" ? "text-emerald-600" : "text-red-600"
+                )}>
+                  {currentItem.qty - currentItem.picked}
+                </div>
+              </div>
+              
+              {/* Scan Input - Always visible and focused */}
+              <div className="mt-auto space-y-3">
+                {scanStatus === "success" ? (
+                  <div className="h-14 bg-emerald-100 border-2 border-emerald-500 rounded-xl flex items-center justify-center gap-3 text-emerald-700 font-bold text-lg animate-in zoom-in-95">
+                    <CheckCircle2 className="h-6 w-6" />
+                    Confirmed!
+                  </div>
+                ) : scanStatus === "error" ? (
+                  <div className="h-14 bg-red-100 border-2 border-red-500 rounded-xl flex items-center justify-center gap-3 text-red-700 font-bold text-lg">
+                    <AlertTriangle className="h-6 w-6" />
+                    Wrong Item!
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <Scan className="absolute left-4 top-1/2 -translate-y-1/2 text-primary h-6 w-6" />
+                    <Input 
+                      ref={scanInputRef}
+                      placeholder="Scan barcode..." 
+                      className="pl-14 h-14 text-xl font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-xl"
+                      value={scanInput}
+                      onChange={(e) => handleScan(e.target.value)}
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      inputMode="none"
+                      data-testid="input-scan-sku"
+                    />
+                  </div>
+                )}
+                
+                {/* Action Buttons - Large touch targets */}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button 
+                    variant="outline"
+                    className="h-12 text-sm font-medium"
+                    onClick={() => currentItem.qty > 1 ? setMultiQtyOpen(true) : confirmPick(1)}
+                    data-testid="button-manual-confirm"
+                  >
+                    <CheckCircle2 className="h-4 w-4 mr-2" />
+                    Manual OK
+                  </Button>
+                  <Button 
+                    variant="outline"
+                    className="h-12 text-sm font-medium text-amber-600 border-amber-300 hover:bg-amber-50"
+                    onClick={() => setShortPickOpen(true)}
+                    data-testid="button-short-pick"
+                  >
+                    <AlertTriangle className="h-4 w-4 mr-2" />
+                    Short Pick
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <p className="text-muted-foreground">No items remaining</p>
+          </div>
+        )}
       </div>
       
       {/* Multi-Qty Confirm Dialog */}
       <Dialog open={multiQtyOpen} onOpenChange={setMultiQtyOpen}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-xs">
           <DialogHeader>
-            <DialogTitle>Confirm Quantity</DialogTitle>
-            <DialogDescription>
-              Pick {currentItem?.qty} units of {currentItem?.sku}?
+            <DialogTitle className="text-center text-xl">Confirm Quantity</DialogTitle>
+            <DialogDescription className="text-center">
+              How many did you pick?
             </DialogDescription>
           </DialogHeader>
           
-          <div className="py-4 space-y-4">
-            <div className="flex items-center justify-center gap-4">
+          <div className="py-6 space-y-4">
+            <div className="flex items-center justify-center gap-6">
               <Button 
                 variant="outline" 
                 size="icon"
+                className="h-14 w-14 text-2xl"
                 onClick={() => setPickQty(Math.max(1, pickQty - 1))}
               >
                 -
               </Button>
-              <span className="text-3xl font-bold w-16 text-center">{pickQty}</span>
+              <span className="text-5xl font-bold w-20 text-center">{pickQty}</span>
               <Button 
                 variant="outline" 
                 size="icon"
+                className="h-14 w-14 text-2xl"
                 onClick={() => setPickQty(Math.min(currentItem?.qty || 1, pickQty + 1))}
               >
                 +
               </Button>
             </div>
-            <p className="text-center text-sm text-muted-foreground">
-              of {currentItem?.qty} requested
+            <p className="text-center text-muted-foreground">
+              of {currentItem?.qty} needed
             </p>
           </div>
           
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button 
-              className="w-full bg-emerald-600 hover:bg-emerald-700"
+              className="w-full h-14 text-lg bg-emerald-600 hover:bg-emerald-700"
               onClick={() => confirmPick(pickQty)}
             >
-              Confirm {pickQty} Unit{pickQty > 1 ? "s" : ""}
+              Confirm {pickQty}
             </Button>
             <Button 
-              variant="outline" 
-              className="w-full"
+              variant="ghost" 
+              className="w-full h-12"
               onClick={() => { setMultiQtyOpen(false); setPickQty(1); }}
             >
               Cancel
@@ -792,46 +891,44 @@ export default function Picking() {
       
       {/* Short Pick Dialog */}
       <Dialog open={shortPickOpen} onOpenChange={setShortPickOpen}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-xs">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-amber-600">
+            <DialogTitle className="flex items-center justify-center gap-2 text-amber-600">
               <AlertTriangle className="h-5 w-5" />
               Short Pick
             </DialogTitle>
-            <DialogDescription>
-              Report issue with {currentItem?.sku}
-            </DialogDescription>
           </DialogHeader>
           
           <div className="py-4 space-y-4">
-            <RadioGroup value={shortPickReason} onValueChange={setShortPickReason}>
-              <div className="flex items-center space-x-2">
+            <RadioGroup value={shortPickReason} onValueChange={setShortPickReason} className="space-y-3">
+              <div className="flex items-center space-x-3 p-3 border rounded-lg">
                 <RadioGroupItem value="not_found" id="not_found" />
-                <Label htmlFor="not_found">Item not at location</Label>
+                <Label htmlFor="not_found" className="flex-1 cursor-pointer">Not at location</Label>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-3 p-3 border rounded-lg">
                 <RadioGroupItem value="damaged" id="damaged" />
-                <Label htmlFor="damaged">Item damaged</Label>
+                <Label htmlFor="damaged" className="flex-1 cursor-pointer">Damaged</Label>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-3 p-3 border rounded-lg">
                 <RadioGroupItem value="wrong_item" id="wrong_item" />
-                <Label htmlFor="wrong_item">Wrong item in bin</Label>
+                <Label htmlFor="wrong_item" className="flex-1 cursor-pointer">Wrong item in bin</Label>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-3 p-3 border rounded-lg">
                 <RadioGroupItem value="partial" id="partial" />
-                <Label htmlFor="partial">Partial quantity available</Label>
+                <Label htmlFor="partial" className="flex-1 cursor-pointer">Partial qty only</Label>
               </div>
             </RadioGroup>
             
             {shortPickReason === "partial" && (
               <div className="space-y-2">
-                <Label>How many can you pick?</Label>
+                <Label>Available quantity:</Label>
                 <Input 
                   type="number" 
                   value={shortPickQty} 
                   onChange={(e) => setShortPickQty(e.target.value)}
                   max={currentItem?.qty}
                   min={0}
+                  className="h-12 text-lg text-center"
                 />
               </div>
             )}
@@ -839,15 +936,15 @@ export default function Picking() {
           
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button 
-              className="w-full bg-amber-600 hover:bg-amber-700"
+              className="w-full h-12 bg-amber-600 hover:bg-amber-700"
               onClick={handleShortPick}
               disabled={!shortPickReason}
             >
               Report Short Pick
             </Button>
             <Button 
-              variant="outline" 
-              className="w-full"
+              variant="ghost" 
+              className="w-full h-10"
               onClick={() => setShortPickOpen(false)}
             >
               Cancel
@@ -855,6 +952,18 @@ export default function Picking() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      
+      {/* CSS for shake animation */}
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
+          20%, 40%, 60%, 80% { transform: translateX(4px); }
+        }
+        .animate-shake {
+          animation: shake 0.5s ease-in-out;
+        }
+      `}</style>
     </div>
   );
 }
