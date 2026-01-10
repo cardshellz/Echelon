@@ -1,8 +1,9 @@
 import crypto from "crypto";
 
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+// Use existing variable names from user's Shopify app setup
+const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET; // shpss_ prefix, used for webhook HMAC verification
 
 export interface ShopifyVariant {
   id: number;
@@ -22,11 +23,13 @@ export interface ShopifyProductsResponse {
 }
 
 function getShopifyConfig() {
-  if (!SHOPIFY_STORE || !SHOPIFY_ACCESS_TOKEN) {
-    throw new Error("SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN environment variables are required");
+  if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ACCESS_TOKEN) {
+    throw new Error("SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required");
   }
+  // Handle both formats: "card-shellz" or "card-shellz.myshopify.com"
+  const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
   return {
-    store: SHOPIFY_STORE,
+    store,
     accessToken: SHOPIFY_ACCESS_TOKEN,
   };
 }
@@ -82,8 +85,8 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
 }
 
 export function verifyShopifyWebhook(rawBody: Buffer, hmacHeader: string): boolean {
-  if (!SHOPIFY_WEBHOOK_SECRET) {
-    throw new Error("SHOPIFY_WEBHOOK_SECRET is required for webhook verification");
+  if (!SHOPIFY_API_SECRET) {
+    throw new Error("SHOPIFY_API_SECRET is required for webhook verification");
   }
   
   if (!hmacHeader) {
@@ -91,7 +94,7 @@ export function verifyShopifyWebhook(rawBody: Buffer, hmacHeader: string): boole
   }
   
   const generatedHash = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+    .createHmac("sha256", SHOPIFY_API_SECRET)
     .update(rawBody)
     .digest("base64");
   

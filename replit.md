@@ -86,7 +86,7 @@ The application includes Progressive Web App configuration with a manifest.json 
   - `POST /api/shopify/webhooks/products/update` - Handles product updates
   - `POST /api/shopify/webhooks/products/delete` - Handles product deletion
 - **Environment Variables Required**:
-  - `SHOPIFY_STORE` - Store name (before .myshopify.com)
+  - `SHOPIFY_SHOP_DOMAIN` - Store domain (either "card-shellz" or "card-shellz.myshopify.com" - both formats work)
   - `SHOPIFY_ACCESS_TOKEN` - Admin API access token with read_products scope
-  - `SHOPIFY_WEBHOOK_SECRET` - Webhook signing secret for HMAC verification
+  - `SHOPIFY_API_SECRET` - API secret (shpss_ prefix) used for webhook HMAC verification
 - New SKUs are created with location "UNASSIGNED" and zone "U" until manually assigned
