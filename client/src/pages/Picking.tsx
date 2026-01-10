@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   Scan, 
   CheckCircle2, 
@@ -20,10 +21,87 @@ import {
   User,
   Focus,
   List,
-  MapPin
+  MapPin,
+  RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
+import type { Order, OrderItem, ItemStatus } from "@shared/schema";
+
+// API response type
+interface OrderWithItems extends Order {
+  items: OrderItem[];
+}
+
+// API functions
+async function fetchPickingQueue(): Promise<OrderWithItems[]> {
+  const res = await fetch("/api/picking/queue");
+  if (!res.ok) throw new Error("Failed to fetch picking queue");
+  return res.json();
+}
+
+async function claimOrder(orderId: number, pickerId: string): Promise<OrderWithItems> {
+  const res = await fetch(`/api/picking/orders/${orderId}/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pickerId }),
+  });
+  if (!res.ok) throw new Error("Failed to claim order");
+  return res.json();
+}
+
+async function releaseOrder(orderId: number): Promise<Order> {
+  const res = await fetch(`/api/picking/orders/${orderId}/release`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to release order");
+  return res.json();
+}
+
+async function updateOrderItem(
+  itemId: number, 
+  status: ItemStatus, 
+  pickedQuantity?: number, 
+  shortReason?: string
+): Promise<OrderItem> {
+  const res = await fetch(`/api/picking/items/${itemId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status, pickedQuantity, shortReason }),
+  });
+  if (!res.ok) throw new Error("Failed to update item");
+  return res.json();
+}
+
+async function markOrderReadyToShip(orderId: number): Promise<Order> {
+  const res = await fetch(`/api/picking/orders/${orderId}/ready-to-ship`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("Failed to mark ready to ship");
+  return res.json();
+}
+
+// Helper to calculate order age from createdAt
+function getOrderAge(createdAt: Date | string): string {
+  const now = new Date();
+  const created = new Date(createdAt);
+  const diffMs = now.getTime() - created.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 60) return `${diffMins}m`;
+  const hours = Math.floor(diffMins / 60);
+  const mins = diffMins % 60;
+  return `${hours}h ${mins}m`;
+}
+
+// Generate a simple picker ID (in production, this would come from auth)
+function getPickerId(): string {
+  let pickerId = localStorage.getItem("pickerId");
+  if (!pickerId) {
+    pickerId = `picker-${Math.random().toString(36).substring(2, 8)}`;
+    localStorage.setItem("pickerId", pickerId);
+  }
+  return pickerId;
+}
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -235,11 +313,90 @@ const triggerHaptic = (type: "light" | "medium" | "heavy") => {
 export default function Picking() {
   // Get picking mode and picker view mode from settings (persisted)
   const { pickingMode, setPickingMode, pickerViewMode, setPickerViewMode } = useSettings();
+  const queryClient = useQueryClient();
+  const pickerId = getPickerId();
   
-  // Core state - Batch mode
+  // Fetch orders from API
+  const { data: apiOrders = [], isLoading, refetch } = useQuery({
+    queryKey: ["picking-queue"],
+    queryFn: fetchPickingQueue,
+    refetchInterval: 30000, // Refresh every 30s
+  });
+  
+  // Transform API orders to SingleOrder format for UI
+  const ordersFromApi: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
+    id: String(order.id),
+    customer: order.customerName,
+    priority: order.priority as "rush" | "high" | "normal",
+    age: getOrderAge(order.createdAt),
+    status: order.status === "in_progress" ? "in_progress" : order.status === "completed" ? "completed" : "ready",
+    assignee: order.assignedPickerId,
+    items: order.items.map((item): PickItem => ({
+      id: item.id,
+      sku: item.sku,
+      name: item.name,
+      location: item.location,
+      qty: item.quantity,
+      picked: item.pickedQuantity,
+      status: item.status as "pending" | "in_progress" | "completed" | "short",
+      orderId: order.orderNumber,
+      image: item.imageUrl || "",
+    })),
+  }));
+  
+  // Use API data if available, otherwise fall back to mock data
+  const hasApiData = ordersFromApi.length > 0 || apiOrders.length === 0;
+  
+  // Core state - Batch mode (mock data for batch mode still)
   const [queue, setQueue] = useState<PickBatch[]>(createInitialQueue);
-  // Core state - Single mode
-  const [singleQueue, setSingleQueue] = useState<SingleOrder[]>(createSingleOrderQueue);
+  // Core state - Single mode (local copy for active picking session)
+  const [localSingleQueue, setLocalSingleQueue] = useState<SingleOrder[]>([]);
+  
+  // Merge API data with local state - local state takes precedence for in-progress orders
+  const singleQueue = pickingMode === "single" && ordersFromApi.length > 0 
+    ? ordersFromApi.map(apiOrder => {
+        const localOrder = localSingleQueue.find(lo => lo.id === apiOrder.id);
+        return localOrder || apiOrder;
+      })
+    : localSingleQueue.length > 0 ? localSingleQueue : createSingleOrderQueue();
+  
+  // Mutation for claiming orders
+  const claimMutation = useMutation({
+    mutationFn: ({ orderId }: { orderId: number }) => claimOrder(orderId, pickerId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+  });
+  
+  // Mutation for updating items
+  const updateItemMutation = useMutation({
+    mutationFn: ({ itemId, status, pickedQuantity, shortReason }: { 
+      itemId: number; 
+      status: ItemStatus; 
+      pickedQuantity?: number; 
+      shortReason?: string;
+    }) => updateOrderItem(itemId, status, pickedQuantity, shortReason),
+  });
+  
+  // Mutation for marking order ready to ship
+  const readyToShipMutation = useMutation({
+    mutationFn: ({ orderId }: { orderId: number }) => markOrderReadyToShip(orderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+  });
+  
+  // Helper to update local single queue (wrapper to maintain compatibility)
+  const setSingleQueue = (updater: SingleOrder[] | ((prev: SingleOrder[]) => SingleOrder[])) => {
+    if (typeof updater === "function") {
+      setLocalSingleQueue(prev => {
+        const base = prev.length > 0 ? prev : singleQueue;
+        return updater(base);
+      });
+    } else {
+      setLocalSingleQueue(updater);
+    }
+  };
   
   const [view, setView] = useState<"queue" | "picking" | "complete">("queue");
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
@@ -339,22 +496,56 @@ export default function Picking() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [view, scanInput]);
   
+  // Claim error state
+  const [claimError, setClaimError] = useState<string | null>(null);
+  
   // Start picking a batch or order
-  const handleStartPicking = (id: string) => {
+  const handleStartPicking = async (id: string) => {
+    setClaimError(null);
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(b => 
         b.id === id ? { ...b, status: "in_progress" as const, assignee: "You" } : b
       ));
       setActiveBatchId(id);
+      setCurrentItemIndex(0);
+      setView("picking");
+      triggerHaptic("medium");
     } else {
-      setSingleQueue(prev => prev.map(o => 
-        o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
-      ));
-      setActiveOrderId(id);
+      // For single mode, claim the order via API if it's a real order (numeric id)
+      const numericId = parseInt(id);
+      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === id);
+      
+      if (isRealOrder) {
+        try {
+          await claimMutation.mutateAsync({ orderId: numericId });
+          // Success - proceed to picking
+          setSingleQueue(prev => prev.map(o => 
+            o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
+          ));
+          setActiveOrderId(id);
+          setCurrentItemIndex(0);
+          setView("picking");
+          triggerHaptic("medium");
+        } catch (error: any) {
+          console.error("Failed to claim order:", error);
+          // Order was claimed by someone else - refresh the queue
+          setClaimError("This order was just claimed by another picker. The queue has been refreshed.");
+          refetch();
+          triggerHaptic("heavy");
+          if (soundEnabled) playSound("error");
+        }
+      } else {
+        // Mock order - proceed without API call
+        setSingleQueue(prev => prev.map(o => 
+          o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
+        ));
+        setActiveOrderId(id);
+        setCurrentItemIndex(0);
+        setView("picking");
+        triggerHaptic("medium");
+      }
     }
-    setCurrentItemIndex(0);
-    setView("picking");
-    triggerHaptic("medium");
   };
   
   // Grab next available batch or order
@@ -415,17 +606,29 @@ export default function Picking() {
   const confirmPick = (qty: number) => {
     if (!activeWork || !currentItem) return;
     
+    const newPicked = currentItem.picked + qty;
+    const newStatus: ItemStatus = newPicked >= currentItem.qty ? "completed" : "in_progress";
+    
+    // Sync with API if this is a real order item
+    const isRealItem = !isNaN(currentItem.id) && ordersFromApi.length > 0;
+    if (isRealItem && pickingMode === "single") {
+      updateItemMutation.mutate({ 
+        itemId: currentItem.id, 
+        status: newStatus, 
+        pickedQuantity: newPicked 
+      });
+    }
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
         
         const newItems = batch.items.map((item, idx) => {
           if (idx !== currentItemIndex) return item;
-          const newPicked = item.picked + qty;
           return {
             ...item,
             picked: newPicked,
-            status: newPicked >= item.qty ? "completed" as const : "in_progress" as const
+            status: newStatus as "pending" | "in_progress" | "completed" | "short"
           };
         });
         
@@ -437,11 +640,10 @@ export default function Picking() {
         
         const newItems = order.items.map((item, idx) => {
           if (idx !== currentItemIndex) return item;
-          const newPicked = item.picked + qty;
           return {
             ...item,
             picked: newPicked,
-            status: newPicked >= item.qty ? "completed" as const : "in_progress" as const
+            status: newStatus as "pending" | "in_progress" | "completed" | "short"
           };
         });
         
@@ -465,6 +667,17 @@ export default function Picking() {
     if (!activeWork || !currentItem) return;
     
     const shortQty = parseInt(shortPickQty) || 0;
+    
+    // Sync with API if this is a real order item
+    const isRealItem = !isNaN(currentItem.id) && ordersFromApi.length > 0;
+    if (isRealItem && pickingMode === "single") {
+      updateItemMutation.mutate({ 
+        itemId: currentItem.id, 
+        status: "short" as ItemStatus, 
+        pickedQuantity: shortQty,
+        shortReason: shortPickReason || undefined
+      });
+    }
     
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
@@ -725,6 +938,10 @@ export default function Picking() {
   
   // Back to queue
   const handleBackToQueue = () => {
+    // Refresh the queue data from API
+    refetch();
+    // Clear local state to use fresh API data
+    setLocalSingleQueue([]);
     setView("queue");
     setActiveBatchId(null);
     setActiveOrderId(null);
@@ -732,10 +949,16 @@ export default function Picking() {
     setScanInput("");
   };
   
-  // Reset demo
+  // Refresh queue data
+  const handleRefreshQueue = () => {
+    refetch();
+    setLocalSingleQueue([]);
+  };
+  
+  // Reset demo (only for mock data mode)
   const handleResetDemo = () => {
     setQueue(createInitialQueue());
-    setSingleQueue(createSingleOrderQueue());
+    setLocalSingleQueue([]);
     setView("queue");
     setActiveBatchId(null);
     setActiveOrderId(null);
@@ -839,12 +1062,24 @@ export default function Picking() {
               <Button 
                 variant="outline" 
                 size="sm" 
-                onClick={handleResetDemo}
-                data-testid="button-reset-demo"
+                onClick={handleRefreshQueue}
+                disabled={isLoading}
+                data-testid="button-refresh-queue"
               >
-                <RotateCcw className="h-4 w-4 mr-2" />
-                Reset
+                <RefreshCw className={cn("h-4 w-4 mr-2", isLoading && "animate-spin")} />
+                Refresh
               </Button>
+              {ordersFromApi.length === 0 && (
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={handleResetDemo}
+                  data-testid="button-reset-demo"
+                >
+                  <RotateCcw className="h-4 w-4 mr-2" />
+                  Demo
+                </Button>
+              )}
               <Button 
                 onClick={handleGrabNext}
                 className="bg-emerald-600 hover:bg-emerald-700 h-12 px-6 text-base"
@@ -856,6 +1091,22 @@ export default function Picking() {
               </Button>
             </div>
           </div>
+
+          {/* Claim Error Alert */}
+          {claimError && (
+            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>{claimError}</span>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={() => setClaimError(null)}
+                className="ml-auto h-6 px-2 text-amber-800 hover:text-amber-900"
+              >
+                Dismiss
+              </Button>
+            </div>
+          )}
 
           {/* Queue Stats */}
           <div className="grid grid-cols-4 gap-2 md:gap-3 mt-4">
