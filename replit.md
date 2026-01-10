@@ -78,3 +78,15 @@ The application includes Progressive Web App configuration with a manifest.json 
 - `@replit/vite-plugin-cartographer` - Development tooling
 - `@replit/vite-plugin-dev-banner` - Development environment indicator
 - Custom `vite-plugin-meta-images` - OpenGraph image handling for Replit deployments
+
+### Shopify Integration
+- **Sync Endpoint**: `POST /api/shopify/sync` - Fetches all products from Shopify, upserts SKUs to product_locations, and deletes orphaned SKUs
+- **Webhook Endpoints**: 
+  - `POST /api/shopify/webhooks/products/create` - Handles new product creation
+  - `POST /api/shopify/webhooks/products/update` - Handles product updates
+  - `POST /api/shopify/webhooks/products/delete` - Handles product deletion
+- **Environment Variables Required**:
+  - `SHOPIFY_STORE` - Store name (before .myshopify.com)
+  - `SHOPIFY_ACCESS_TOKEN` - Admin API access token with read_products scope
+  - `SHOPIFY_WEBHOOK_SECRET` - Webhook signing secret for HMAC verification
+- New SKUs are created with location "UNASSIGNED" and zone "U" until manually assigned
