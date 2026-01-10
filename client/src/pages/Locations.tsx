@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { locationsApi } from "@/lib/api";
 import type { ProductLocation, InsertProductLocation } from "@shared/schema";
@@ -13,7 +13,9 @@ import {
   Upload,
   Download,
   Trash2,
-  Package
+  Package,
+  FileText,
+  Loader2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -51,9 +53,13 @@ export default function Locations() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editLocation, setEditLocation] = useState("");
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importResult, setImportResult] = useState<{ updated: number; notFound: number; errors: string[] } | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const [newSku, setNewSku] = useState("");
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Mutations
   const createMutation = useMutation({
@@ -136,6 +142,50 @@ export default function Locations() {
     }
   };
   
+  // Export CSV
+  const handleExport = () => {
+    window.location.href = "/api/locations/export/csv";
+  };
+  
+  // Import CSV
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+  
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setIsImporting(true);
+    setImportResult(null);
+    setImportDialogOpen(true);
+    
+    try {
+      const csvData = await file.text();
+      const response = await fetch("/api/locations/import/csv", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csvData }),
+      });
+      
+      const result = await response.json();
+      
+      if (response.ok) {
+        setImportResult(result);
+        queryClient.invalidateQueries({ queryKey: ["locations"] });
+      } else {
+        setImportResult({ updated: 0, notFound: 0, errors: [result.error || "Import failed"] });
+      }
+    } catch (error) {
+      setImportResult({ updated: 0, notFound: 0, errors: ["Failed to import CSV file"] });
+    } finally {
+      setIsImporting(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+  
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -160,11 +210,19 @@ export default function Locations() {
           </div>
           
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept=".csv"
+              onChange={handleFileSelect}
+              className="hidden"
+              data-testid="input-csv-file"
+            />
+            <Button variant="outline" size="sm" onClick={handleImportClick} data-testid="button-import-csv">
               <Upload className="h-4 w-4 mr-2" />
               Import CSV
             </Button>
-            <Button variant="outline" size="sm">
+            <Button variant="outline" size="sm" onClick={handleExport} data-testid="button-export-csv">
               <Download className="h-4 w-4 mr-2" />
               Export
             </Button>
@@ -364,6 +422,53 @@ export default function Locations() {
             </Button>
             <Button onClick={handleAdd} disabled={!newSku || !newLocation}>
               Add Location
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Import Result Dialog */}
+      <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileText className="h-5 w-5" />
+              CSV Import
+            </DialogTitle>
+          </DialogHeader>
+          
+          {isImporting ? (
+            <div className="flex flex-col items-center py-8">
+              <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
+              <p className="text-muted-foreground">Processing CSV file...</p>
+            </div>
+          ) : importResult ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-lg text-center">
+                  <div className="text-2xl font-bold text-emerald-600">{importResult.updated}</div>
+                  <div className="text-sm text-muted-foreground">Locations Updated</div>
+                </div>
+                <div className="bg-amber-50 dark:bg-amber-900/20 p-4 rounded-lg text-center">
+                  <div className="text-2xl font-bold text-amber-600">{importResult.notFound}</div>
+                  <div className="text-sm text-muted-foreground">SKUs Not Found</div>
+                </div>
+              </div>
+              
+              {importResult.errors.length > 0 && (
+                <div className="bg-muted/50 p-3 rounded-lg max-h-32 overflow-auto">
+                  <p className="text-xs font-medium mb-1">Issues:</p>
+                  {importResult.errors.map((err, i) => (
+                    <p key={i} className="text-xs text-muted-foreground">{err}</p>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+          
+          <DialogFooter>
+            <Button onClick={() => setImportDialogOpen(false)}>
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

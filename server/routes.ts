@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
 import { fetchAllShopifyProducts, verifyShopifyWebhook, extractSkusFromWebhookPayload } from "./shopify";
+import Papa from "papaparse";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -115,6 +116,109 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting location:", error);
       res.status(500).json({ error: "Failed to delete location" });
+    }
+  });
+
+  // CSV Export - Download all locations as CSV using papaparse
+  app.get("/api/locations/export/csv", async (req, res) => {
+    try {
+      const locations = await storage.getAllProductLocations();
+      
+      // Use papaparse for proper CSV generation with escaping
+      const data = locations.map(loc => ({
+        sku: loc.sku,
+        name: loc.name,
+        location: loc.location,
+        zone: loc.zone,
+        status: loc.status
+      }));
+      
+      const csv = Papa.unparse(data, {
+        header: true,
+        quotes: true
+      });
+      
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=product_locations.csv");
+      res.send(csv);
+    } catch (error) {
+      console.error("Error exporting locations:", error);
+      res.status(500).json({ error: "Failed to export locations" });
+    }
+  });
+
+  // CSV Import - Bulk update locations from CSV using papaparse
+  app.post("/api/locations/import/csv", async (req, res) => {
+    try {
+      const { csvData } = req.body;
+      
+      if (!csvData || typeof csvData !== "string") {
+        return res.status(400).json({ error: "CSV data is required" });
+      }
+      
+      // Use papaparse for robust CSV parsing
+      const parsed = Papa.parse<Record<string, string>>(csvData, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (header: string) => header.toLowerCase().trim()
+      });
+      
+      if (parsed.errors.length > 0) {
+        return res.status(400).json({ 
+          error: "CSV parsing failed", 
+          details: parsed.errors.slice(0, 5).map(e => e.message)
+        });
+      }
+      
+      const rows = parsed.data;
+      
+      if (rows.length === 0) {
+        return res.status(400).json({ error: "CSV must have at least one data row" });
+      }
+      
+      // Check required columns
+      const firstRow = rows[0];
+      if (!('sku' in firstRow) || !('location' in firstRow)) {
+        return res.status(400).json({ error: "CSV must have 'sku' and 'location' columns" });
+      }
+      
+      let updated = 0;
+      let notFound = 0;
+      const errors: string[] = [];
+      
+      // Process each row
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const sku = row.sku?.toUpperCase()?.trim();
+        const location = row.location?.toUpperCase()?.trim();
+        const zone = row.zone?.toUpperCase()?.trim() || location?.split("-")[0] || "U";
+        
+        if (!sku || !location) {
+          errors.push(`Row ${i + 2}: Missing SKU or location`);
+          continue;
+        }
+        
+        // Find and update
+        const existing = await storage.getProductLocationBySku(sku);
+        if (existing) {
+          await storage.updateProductLocation(existing.id, { location, zone });
+          updated++;
+        } else {
+          notFound++;
+          errors.push(`Row ${i + 2}: SKU "${sku}" not found`);
+        }
+      }
+      
+      res.json({
+        success: true,
+        updated,
+        notFound,
+        errors: errors.slice(0, 10),
+        totalErrors: errors.length
+      });
+    } catch (error) {
+      console.error("Error importing locations:", error);
+      res.status(500).json({ error: "Failed to import locations" });
     }
   });
 
