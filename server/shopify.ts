@@ -129,3 +129,88 @@ export function extractSkusFromWebhookPayload(payload: any): { sku: string; name
   
   return skus;
 }
+
+// Order webhook types
+export interface ShopifyOrderLineItem {
+  id: number;
+  sku: string;
+  name: string;
+  title: string;
+  quantity: number;
+  variant_title: string;
+  product_id: number;
+}
+
+export interface ShopifyOrderCustomer {
+  id: number;
+  email: string;
+  first_name: string;
+  last_name: string;
+}
+
+export interface ShopifyOrder {
+  id: number;
+  order_number: number;
+  name: string;
+  email: string;
+  customer: ShopifyOrderCustomer | null;
+  line_items: ShopifyOrderLineItem[];
+  fulfillment_status: string | null;
+  financial_status: string;
+  tags: string;
+  note: string | null;
+  created_at: string;
+  cancelled_at: string | null;
+}
+
+export interface ExtractedOrderItem {
+  shopifyLineItemId: string;
+  sku: string;
+  name: string;
+  quantity: number;
+  imageUrl?: string;
+}
+
+export interface ExtractedOrder {
+  shopifyOrderId: string;
+  orderNumber: string;
+  customerName: string;
+  customerEmail: string | null;
+  priority: "rush" | "high" | "normal";
+  items: ExtractedOrderItem[];
+}
+
+export function extractOrderFromWebhookPayload(payload: ShopifyOrder): ExtractedOrder {
+  const customerName = payload.customer 
+    ? `${payload.customer.first_name} ${payload.customer.last_name}`.trim()
+    : "Guest Customer";
+  
+  const tags = (payload.tags || "").toLowerCase();
+  let priority: "rush" | "high" | "normal" = "normal";
+  if (tags.includes("rush") || tags.includes("express")) {
+    priority = "rush";
+  } else if (tags.includes("priority") || tags.includes("high")) {
+    priority = "high";
+  }
+  
+  const items: ExtractedOrderItem[] = [];
+  for (const lineItem of payload.line_items) {
+    if (lineItem.sku && lineItem.sku.trim()) {
+      items.push({
+        shopifyLineItemId: String(lineItem.id),
+        sku: lineItem.sku.trim().toUpperCase(),
+        name: lineItem.name || lineItem.title,
+        quantity: lineItem.quantity,
+      });
+    }
+  }
+  
+  return {
+    shopifyOrderId: String(payload.id),
+    orderNumber: payload.name || `#${payload.order_number}`,
+    customerName,
+    customerEmail: payload.email || payload.customer?.email || null,
+    priority,
+    items,
+  };
+}

@@ -2,7 +2,8 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
-import { fetchAllShopifyProducts, verifyShopifyWebhook, extractSkusFromWebhookPayload } from "./shopify";
+import { fetchAllShopifyProducts, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import type { InsertOrderItem } from "@shared/schema";
 import Papa from "papaparse";
 
 export async function registerRoutes(
@@ -350,6 +351,140 @@ export async function registerRoutes(
       res.status(200).json({ received: true });
     } catch (error) {
       console.error("Product delete webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // ===== ORDER WEBHOOKS =====
+  
+  // Order created - add to picking queue
+  app.post("/api/shopify/webhooks/orders/create", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body as ShopifyOrder;
+      
+      // Skip if order already exists
+      const existing = await storage.getOrderByShopifyId(String(payload.id));
+      if (existing) {
+        console.log(`Order ${payload.id} already exists, skipping`);
+        return res.status(200).json({ received: true });
+      }
+      
+      // Extract order data
+      const orderData = extractOrderFromWebhookPayload(payload);
+      
+      // Skip if no items with SKUs
+      if (orderData.items.length === 0) {
+        console.log(`Order ${orderData.orderNumber} has no items with SKUs, skipping`);
+        return res.status(200).json({ received: true });
+      }
+      
+      // Enrich items with location data from product_locations
+      const enrichedItems: InsertOrderItem[] = [];
+      for (const item of orderData.items) {
+        const productLocation = await storage.getProductLocationBySku(item.sku);
+        enrichedItems.push({
+          orderId: 0, // Will be set by createOrderWithItems
+          shopifyLineItemId: item.shopifyLineItemId,
+          sku: item.sku,
+          name: item.name,
+          quantity: item.quantity,
+          pickedQuantity: 0,
+          status: "pending",
+          location: productLocation?.location || "UNASSIGNED",
+          zone: productLocation?.zone || "U",
+          imageUrl: item.imageUrl,
+        });
+      }
+      
+      // Create order
+      await storage.createOrderWithItems({
+        shopifyOrderId: orderData.shopifyOrderId,
+        orderNumber: orderData.orderNumber,
+        customerName: orderData.customerName,
+        customerEmail: orderData.customerEmail,
+        priority: orderData.priority,
+        status: "ready",
+      }, enrichedItems);
+      
+      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Order create webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // Order fulfilled - mark as shipped
+  app.post("/api/shopify/webhooks/orders/fulfilled", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body as ShopifyOrder;
+      const order = await storage.getOrderByShopifyId(String(payload.id));
+      
+      if (order) {
+        await storage.updateOrderStatus(order.id, "shipped");
+        console.log(`Webhook: Order ${order.orderNumber} marked as shipped`);
+      }
+      
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Order fulfilled webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // Order cancelled - mark as cancelled
+  app.post("/api/shopify/webhooks/orders/cancelled", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body as ShopifyOrder;
+      const order = await storage.getOrderByShopifyId(String(payload.id));
+      
+      if (order) {
+        await storage.updateOrderStatus(order.id, "cancelled");
+        console.log(`Webhook: Order ${order.orderNumber} marked as cancelled`);
+      }
+      
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Order cancelled webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });
