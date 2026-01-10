@@ -26,7 +26,8 @@ import {
   CloudDownload,
   Search,
   ArrowUpDown,
-  X
+  X,
+  Unlock
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -54,9 +55,11 @@ async function claimOrder(orderId: number, pickerId: string): Promise<OrderWithI
   return res.json();
 }
 
-async function releaseOrder(orderId: number): Promise<Order> {
+async function releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/release`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ resetProgress }),
   });
   if (!res.ok) throw new Error("Failed to release order");
   return res.json();
@@ -387,7 +390,8 @@ export default function Picking() {
   
   // Mutation for releasing orders
   const releaseMutation = useMutation({
-    mutationFn: ({ orderId }: { orderId: number }) => releaseOrder(orderId),
+    mutationFn: ({ orderId, resetProgress = true }: { orderId: number; resetProgress?: boolean }) => 
+      releaseOrder(orderId, resetProgress),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
@@ -441,6 +445,8 @@ export default function Picking() {
   const [shortPickQty, setShortPickQty] = useState("0");
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
+  const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
+  const [releaseOrderId, setReleaseOrderId] = useState<number | null>(null);
   
   // Scanner mode settings
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -1049,6 +1055,40 @@ export default function Picking() {
       document.exitFullscreen();
     }
   };
+  
+  // Release order handler - shows dialog if partially picked
+  const handleReleaseOrder = (orderId: number) => {
+    const order = singleQueue.find(o => o.id === String(orderId));
+    const pickedCount = order?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
+    
+    if (pickedCount === 0) {
+      // No items picked - just release immediately
+      releaseMutation.mutate({ orderId, resetProgress: true });
+      if (view === "picking") {
+        setView("queue");
+        setActiveOrderId(null);
+        setCurrentItemIndex(0);
+      }
+    } else {
+      // Partially picked - show confirmation dialog
+      setReleaseOrderId(orderId);
+      setReleaseDialogOpen(true);
+    }
+  };
+  
+  // Confirm release with chosen option
+  const confirmRelease = async (resetProgress: boolean) => {
+    if (releaseOrderId) {
+      await releaseMutation.mutateAsync({ orderId: releaseOrderId, resetProgress });
+      setReleaseDialogOpen(false);
+      setReleaseOrderId(null);
+      if (view === "picking") {
+        setView("queue");
+        setActiveOrderId(null);
+        setCurrentItemIndex(0);
+      }
+    }
+  };
 
   // ===== RENDER =====
   
@@ -1434,6 +1474,21 @@ export default function Picking() {
                       {order.status === "ready" && (
                         <ChevronRight className="h-6 w-6 text-muted-foreground" />
                       )}
+                      {order.status === "in_progress" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleReleaseOrder(parseInt(order.id));
+                          }}
+                          data-testid={`button-release-${order.id}`}
+                        >
+                          <Unlock className="h-4 w-4 mr-1" />
+                          Release
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -1539,9 +1594,22 @@ export default function Picking() {
       {/* Compact Header */}
       <div className="bg-card border-b p-3 md:p-4 sticky top-0 z-10">
         <div className="flex items-center justify-between gap-2 mb-2">
-          <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="text-muted-foreground h-8 px-2">
-            <ChevronRight className="h-4 w-4 rotate-180" /> Exit
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={handleBackToQueue} className="text-muted-foreground h-8 px-2">
+              <ChevronRight className="h-4 w-4 rotate-180" /> Exit
+            </Button>
+            {pickingMode === "single" && activeOrderId && (
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={() => handleReleaseOrder(parseInt(activeOrderId))} 
+                className="text-amber-600 hover:text-amber-700 hover:bg-amber-50 h-8 px-2"
+                title="Release order back to queue"
+              >
+                <Unlock className="h-4 w-4 mr-1" /> Release
+              </Button>
+            )}
+          </div>
           
           <div className="flex items-center gap-2">
             {/* View Mode Toggle */}
@@ -1942,6 +2010,46 @@ export default function Picking() {
               variant="ghost" 
               className="w-full h-12"
               onClick={() => { setMultiQtyOpen(false); setPickQty(1); }}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Release Order Dialog */}
+      <Dialog open={releaseDialogOpen} onOpenChange={setReleaseDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2">
+              <Unlock className="h-5 w-5" />
+              Release Order
+            </DialogTitle>
+            <DialogDescription className="text-center">
+              This order has items that were partially picked. What would you like to do with the progress?
+            </DialogDescription>
+          </DialogHeader>
+          
+          <DialogFooter className="flex-col gap-2 sm:flex-col pt-4">
+            <Button 
+              className="w-full h-12 bg-emerald-600 hover:bg-emerald-700"
+              onClick={() => confirmRelease(false)}
+            >
+              Keep Progress
+              <span className="text-xs opacity-80 ml-2">(Next picker continues)</span>
+            </Button>
+            <Button 
+              variant="outline"
+              className="w-full h-12"
+              onClick={() => confirmRelease(true)}
+            >
+              Reset Progress
+              <span className="text-xs opacity-80 ml-2">(Start fresh)</span>
+            </Button>
+            <Button 
+              variant="ghost" 
+              className="w-full h-10"
+              onClick={() => setReleaseDialogOpen(false)}
             >
               Cancel
             </Button>
