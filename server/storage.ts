@@ -32,7 +32,7 @@ export interface IStorage {
   deleteProductLocation(id: number): Promise<boolean>;
   
   // Bulk operations for Shopify sync
-  upsertProductLocationBySku(sku: string, name: string, status?: string): Promise<ProductLocation>;
+  upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string): Promise<ProductLocation>;
   deleteProductLocationsBySku(skus: string[]): Promise<number>;
   deleteOrphanedSkus(validSkus: string[]): Promise<number>;
   getAllSkus(): Promise<string[]>;
@@ -114,13 +114,14 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  async upsertProductLocationBySku(sku: string, name: string, status?: string): Promise<ProductLocation> {
+  async upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string): Promise<ProductLocation> {
     const upperSku = sku.toUpperCase();
     const existing = await this.getProductLocationBySku(upperSku);
     
     if (existing) {
       const updates: any = { name, updatedAt: new Date() };
       if (status) updates.status = status;
+      if (imageUrl !== undefined) updates.imageUrl = imageUrl;
       const result = await db
         .update(productLocations)
         .set(updates)
@@ -134,6 +135,7 @@ export class DatabaseStorage implements IStorage {
         location: "UNASSIGNED",
         zone: "U",
         status: status || "active",
+        imageUrl: imageUrl || null,
       }).returning();
       return result[0];
     }

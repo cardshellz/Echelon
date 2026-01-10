@@ -10,6 +10,13 @@ export interface ShopifyVariant {
   sku: string;
   title: string;
   product_id: number;
+  image_id?: number;
+}
+
+export interface ShopifyImage {
+  id: number;
+  src: string;
+  variant_ids?: number[];
 }
 
 export interface ShopifyProduct {
@@ -17,6 +24,8 @@ export interface ShopifyProduct {
   title: string;
   status: "active" | "draft" | "archived";
   variants: ShopifyVariant[];
+  images?: ShopifyImage[];
+  image?: { src: string };
 }
 
 export interface ShopifyProductsResponse {
@@ -35,9 +44,9 @@ function getShopifyConfig() {
   };
 }
 
-export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string }[]> {
+export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string; imageUrl?: string }[]> {
   const config = getShopifyConfig();
-  const allSkus: { sku: string; name: string; status: string }[] = [];
+  const allSkus: { sku: string; name: string; status: string; imageUrl?: string }[] = [];
   let pageInfo: string | null = null;
   
   do {
@@ -60,13 +69,26 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
     const data: ShopifyProductsResponse = await response.json();
     
     for (const product of data.products) {
+      // Build a map of image_id to src for quick lookup
+      const imageMap = new Map<number, string>();
+      if (product.images) {
+        for (const img of product.images) {
+          imageMap.set(img.id, img.src);
+        }
+      }
+      // Get the default product image
+      const defaultImage = product.image?.src || (product.images && product.images[0]?.src);
+      
       for (const variant of product.variants) {
         if (variant.sku && variant.sku.trim()) {
           const variantTitle = variant.title !== "Default Title" ? ` - ${variant.title}` : "";
+          // Try to get variant-specific image, fall back to product image
+          const imageUrl = variant.image_id ? imageMap.get(variant.image_id) : defaultImage;
           allSkus.push({
             sku: variant.sku.trim().toUpperCase(),
             name: `${product.title}${variantTitle}`,
             status: product.status,
+            imageUrl,
           });
         }
       }

@@ -358,7 +358,7 @@ export async function registerRoutes(
       
       for (const product of shopifyProducts) {
         const existing = await storage.getProductLocationBySku(product.sku);
-        await storage.upsertProductLocationBySku(product.sku, product.name, product.status);
+        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl);
         if (existing) {
           updated++;
         } else {
@@ -414,7 +414,7 @@ export async function registerRoutes(
           created++;
         }
         
-        // Enrich items with location data
+        // Enrich items with location and image data from product_locations
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of orderData.items) {
           const productLocation = await storage.getProductLocationBySku(item.sku);
@@ -427,6 +427,7 @@ export async function registerRoutes(
             pickedQuantity: 0,
             status: "pending",
             location: productLocation?.location || "UNASSIGNED",
+            imageUrl: productLocation?.imageUrl || null,
             zone: productLocation?.zone || "U",
           });
         }
