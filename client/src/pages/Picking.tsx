@@ -948,17 +948,26 @@ export default function Picking() {
   // Back to queue
   const handleBackToQueue = async () => {
     // Release the order if we're picking a real order (from API)
+    // BUT only if the picker hasn't started picking anything yet
     if (activeOrderId && pickingMode === "single") {
       const numericId = parseInt(activeOrderId);
       // Compare as numbers - ordersFromApi has numeric IDs
       const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === numericId);
       
       if (isRealOrder) {
-        try {
-          await releaseMutation.mutateAsync({ orderId: numericId });
-        } catch (error) {
-          console.error("Failed to release order:", error);
+        // Check if any items have been picked
+        const activeOrder = singleQueue.find(o => o.id === activeOrderId);
+        const hasPickedItems = activeOrder?.items.some(item => item.picked > 0 || item.status === "completed" || item.status === "short");
+        
+        if (!hasPickedItems) {
+          // No items picked yet - release the order so another picker can grab it
+          try {
+            await releaseMutation.mutateAsync({ orderId: numericId });
+          } catch (error) {
+            console.error("Failed to release order:", error);
+          }
         }
+        // If items have been picked, keep the order claimed (in progress)
       }
     }
     
