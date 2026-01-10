@@ -11,9 +11,13 @@ if (!connectionString) {
   );
 }
 
+// Always use SSL for external/production databases
+// Heroku and most cloud databases require SSL connections
+const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
+
 export const pool = new Pool({
   connectionString,
-  ssl: process.env.EXTERNAL_DATABASE_URL ? { rejectUnauthorized: false } : undefined,
+  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
 });
 
 export const db = drizzle(pool, { schema });
