@@ -1492,11 +1492,17 @@ export default function Picking() {
                 {/* Product Info */}
                 <div className="flex items-center gap-4">
                   <div className="relative shrink-0">
-                    <img 
-                      src={currentItem.image} 
-                      alt={currentItem.name}
-                      className="w-24 h-24 md:w-28 md:h-28 object-cover rounded-lg border-2 border-muted"
-                    />
+                    {currentItem.image ? (
+                      <img 
+                        src={currentItem.image} 
+                        alt={currentItem.name}
+                        className="w-24 h-24 md:w-28 md:h-28 object-cover rounded-lg border-2 border-muted"
+                      />
+                    ) : (
+                      <div className="w-24 h-24 md:w-28 md:h-28 rounded-lg border-2 border-muted bg-muted flex items-center justify-center">
+                        <Package className="w-12 h-12 text-muted-foreground" />
+                      </div>
+                    )}
                     {scanStatus === "success" && (
                       <div className="absolute inset-0 bg-emerald-500/20 rounded-lg flex items-center justify-center">
                         <CheckCircle2 className="w-12 h-12 text-emerald-600" />
@@ -1644,6 +1650,19 @@ export default function Picking() {
                             <span className="text-lg font-bold">{remaining}</span>
                           )}
                         </div>
+                        
+                        {/* Product thumbnail */}
+                        {item.image ? (
+                          <img 
+                            src={item.image} 
+                            alt={item.name}
+                            className="h-10 w-10 rounded object-cover shrink-0 border"
+                          />
+                        ) : (
+                          <div className="h-10 w-10 rounded bg-muted flex items-center justify-center shrink-0 border">
+                            <Package className="h-5 w-5 text-muted-foreground" />
+                          </div>
+                        )}
                         
                         {/* Item info */}
                         <div className="flex-1 min-w-0">
