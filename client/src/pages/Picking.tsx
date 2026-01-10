@@ -233,8 +233,8 @@ const triggerHaptic = (type: "light" | "medium" | "heavy") => {
 };
 
 export default function Picking() {
-  // Get picking mode from settings
-  const { pickingMode } = useSettings();
+  // Get picking mode and picker view mode from settings (persisted)
+  const { pickingMode, setPickingMode, pickerViewMode, setPickerViewMode } = useSettings();
   
   // Core state - Batch mode
   const [queue, setQueue] = useState<PickBatch[]>(createInitialQueue);
@@ -258,9 +258,6 @@ export default function Picking() {
   // Scanner mode settings
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [scannerMode, setScannerMode] = useState(false);
-  
-  // Picker view mode: "focus" (single item) or "list" (all items visible)
-  const [pickerViewMode, setPickerViewMode] = useState<"focus" | "list">("focus");
   
   const scanInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -793,6 +790,35 @@ export default function Picking() {
             </div>
             
             <div className="flex items-center gap-2 flex-wrap">
+              {/* Picking Mode Toggle */}
+              <div className="flex items-center rounded-lg border bg-muted/50 p-1">
+                <Button
+                  variant={pickingMode === "batch" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setPickingMode("batch")}
+                  className={cn(
+                    "gap-1.5",
+                    pickingMode === "batch" && "bg-primary shadow-sm"
+                  )}
+                  data-testid="button-batch-mode"
+                >
+                  <Layers className="h-4 w-4" />
+                  Batch
+                </Button>
+                <Button
+                  variant={pickingMode === "single" ? "default" : "ghost"}
+                  size="sm"
+                  onClick={() => setPickingMode("single")}
+                  className={cn(
+                    "gap-1.5",
+                    pickingMode === "single" && "bg-primary shadow-sm"
+                  )}
+                  data-testid="button-single-mode"
+                >
+                  <Package className="h-4 w-4" />
+                  Single
+                </Button>
+              </div>
               <Button
                 variant="outline"
                 size="icon"
