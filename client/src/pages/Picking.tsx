@@ -1068,6 +1068,9 @@ export default function Picking() {
     
     // Filtered and sorted queue
     const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(item => {
+      // By default, hide completed items unless filtering for "done"
+      if (activeFilter !== "done" && item.status === "completed") return false;
+      
       // Apply status filter
       if (activeFilter === "ready" && item.status !== "ready") return false;
       if (activeFilter === "active" && item.status !== "in_progress") return false;
@@ -1234,31 +1237,110 @@ export default function Picking() {
             </div>
           )}
 
-          {/* Queue Stats */}
+          {/* Queue Stats - Clickable Filters */}
           <div className="grid grid-cols-4 gap-2 md:gap-3 mt-4">
-            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+            <div 
+              className={cn(
+                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-primary/50",
+                activeFilter === "ready" ? "bg-primary/20 ring-2 ring-primary" : "bg-muted/50"
+              )}
+              onClick={() => setActiveFilter(activeFilter === "ready" ? "all" : "ready")}
+              data-testid="filter-ready"
+            >
               <div className="text-xl md:text-2xl font-bold text-primary">{readyItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Ready</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+            <div 
+              className={cn(
+                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-amber-500/50",
+                activeFilter === "active" ? "bg-amber-100 ring-2 ring-amber-500" : "bg-muted/50"
+              )}
+              onClick={() => setActiveFilter(activeFilter === "active" ? "all" : "active")}
+              data-testid="filter-active"
+            >
               <div className="text-xl md:text-2xl font-bold text-amber-600">{inProgressItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Active</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+            <div 
+              className={cn(
+                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-red-500/50",
+                activeFilter === "rush" ? "bg-red-100 ring-2 ring-red-500" : "bg-muted/50"
+              )}
+              onClick={() => setActiveFilter(activeFilter === "rush" ? "all" : "rush")}
+              data-testid="filter-rush"
+            >
               <div className="text-xl md:text-2xl font-bold text-red-600">{readyItems.filter(item => item.priority === "rush").length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Rush</div>
             </div>
-            <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
+            <div 
+              className={cn(
+                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-emerald-500/50",
+                activeFilter === "done" ? "bg-emerald-100 ring-2 ring-emerald-500" : "bg-muted/50"
+              )}
+              onClick={() => setActiveFilter(activeFilter === "done" ? "all" : "done")}
+              data-testid="filter-done"
+            >
               <div className="text-xl md:text-2xl font-bold text-emerald-600">{completedItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Done</div>
             </div>
           </div>
         </div>
 
+        {/* Search and Sort Controls */}
+        <div className="px-3 md:px-6 pt-3 md:pt-4">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search order, customer, or SKU..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 pr-9"
+                data-testid="input-search-queue"
+              />
+              {searchQuery && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+                  onClick={() => setSearchQuery("")}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+            <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+              <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-sort">
+                <ArrowUpDown className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="Sort by..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="priority">Priority</SelectItem>
+                <SelectItem value="items">Item Count</SelectItem>
+                <SelectItem value="order">Order #</SelectItem>
+                <SelectItem value="age">Age</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {(searchQuery || activeFilter !== "all") && (
+            <div className="flex items-center gap-2 mt-2 text-sm text-muted-foreground">
+              <span>Showing {sortedQueue.length} results</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
+              >
+                Clear filters
+              </Button>
+            </div>
+          )}
+        </div>
+
         {/* Queue List */}
         <div className="p-3 md:p-6 space-y-2 md:space-y-3">
           {pickingMode === "batch" ? (
-            queue.filter(b => b.status !== "completed").map((batch) => (
+            (sortedQueue as PickBatch[]).map((batch) => (
               <Card 
                 key={batch.id} 
                 className={cn(
@@ -1303,7 +1385,7 @@ export default function Picking() {
               </Card>
             ))
           ) : (
-            singleQueue.filter(o => o.status !== "completed").map((order) => (
+            (sortedQueue as SingleOrder[]).map((order) => (
               <Card 
                 key={order.id} 
                 className={cn(
