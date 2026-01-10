@@ -234,20 +234,27 @@ export class DatabaseStorage implements IStorage {
   }
 
   async releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order | null> {
+    const orderUpdates: any = {
+      status: "ready" as OrderStatus,
+      assignedPickerId: null,
+      startedAt: null,
+    };
+    
+    if (resetProgress) {
+      orderUpdates.pickedCount = 0;
+      orderUpdates.completedAt = null;
+    }
+    
     const result = await db
       .update(orders)
-      .set({
-        status: "ready" as OrderStatus,
-        assignedPickerId: null,
-        startedAt: null,
-      })
+      .set(orderUpdates)
       .where(eq(orders.id, orderId))
       .returning();
     
     if (resetProgress) {
       await db
         .update(orderItems)
-        .set({ status: "pending" as ItemStatus, pickedQuantity: 0 })
+        .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
         .where(eq(orderItems.orderId, orderId));
     }
     
