@@ -195,7 +195,7 @@ export default function Locations() {
       const result = await response.json();
       if (response.ok) {
         queryClient.invalidateQueries({ queryKey: ["locations"] });
-        alert(`Synced ${result.synced} products from Shopify`);
+        alert(`Synced ${result.total} products from Shopify (${result.created} new, ${result.updated} updated)`);
       } else {
         alert(result.error || "Shopify sync failed");
       }
