@@ -23,7 +23,10 @@ import {
   List,
   MapPin,
   RefreshCw,
-  CloudDownload
+  CloudDownload,
+  Search,
+  ArrowUpDown,
+  X
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -123,6 +126,13 @@ import {
   RadioGroupItem,
 } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 // Types
 interface PickItem {
@@ -417,6 +427,11 @@ export default function Picking() {
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
+  
+  // Search, sort, and filter state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("priority");
+  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done">("all");
   
   // UI state
   const [scanInput, setScanInput] = useState("");
@@ -1050,6 +1065,47 @@ export default function Picking() {
       ? queue.filter(b => b.status === "completed")
       : singleQueue.filter(o => o.status === "completed");
     const totalItemsToPick = readyItems.reduce((acc, item) => acc + item.items.length, 0);
+    
+    // Filtered and sorted queue
+    const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(item => {
+      // Apply status filter
+      if (activeFilter === "ready" && item.status !== "ready") return false;
+      if (activeFilter === "active" && item.status !== "in_progress") return false;
+      if (activeFilter === "done" && item.status !== "completed") return false;
+      if (activeFilter === "rush" && item.priority !== "rush") return false;
+      
+      // Apply search filter
+      if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase();
+        const orderNumber = "orderNumber" in item ? (item as SingleOrder).orderNumber?.toLowerCase() : item.id.toLowerCase();
+        const customer = "customer" in item ? (item as SingleOrder).customer?.toLowerCase() : "";
+        const skus = item.items.map(i => i.sku.toLowerCase()).join(" ");
+        if (!orderNumber?.includes(query) && !customer?.includes(query) && !skus.includes(query)) {
+          return false;
+        }
+      }
+      return true;
+    });
+    
+    // Sort the filtered queue
+    const sortedQueue = [...filteredQueue].sort((a, b) => {
+      switch (sortBy) {
+        case "priority": {
+          const priorityOrder = { rush: 0, high: 1, normal: 2 };
+          return priorityOrder[a.priority] - priorityOrder[b.priority];
+        }
+        case "items":
+          return b.items.length - a.items.length;
+        case "order":
+          const aNum = "orderNumber" in a ? (a as SingleOrder).orderNumber || a.id : a.id;
+          const bNum = "orderNumber" in b ? (b as SingleOrder).orderNumber || b.id : b.id;
+          return aNum.localeCompare(bNum);
+        case "age":
+          return a.age.localeCompare(b.age);
+        default:
+          return 0;
+      }
+    });
     
     return (
       <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
