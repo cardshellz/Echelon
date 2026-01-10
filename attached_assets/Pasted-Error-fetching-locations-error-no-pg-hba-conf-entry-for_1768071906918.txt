@@ -1,0 +1,26 @@
+Error fetching locations: error: no pg_hba.conf entry for host "3.218.244.17", user "u4a9gsbuf4bqhd", database "dc857c6e54s7ur", no encryption
+2026-01-10T19:04:33.247648+00:00 app[web.1]:     at /app/dist/index.cjs:64:13326
+2026-01-10T19:04:33.247650+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-10T19:04:33.247650+00:00 app[web.1]:     at async /app/dist/index.cjs:70:96493
+2026-01-10T19:04:33.247651+00:00 app[web.1]:     at async Hd.getAllProductLocations (/app/dist/index.cjs:70:99813)
+2026-01-10T19:04:33.247652+00:00 app[web.1]:     at async /app/dist/index.cjs:70:103050 {
+2026-01-10T19:04:33.247652+00:00 app[web.1]:   length: 172,
+2026-01-10T19:04:33.247653+00:00 app[web.1]:   severity: 'FATAL',
+2026-01-10T19:04:33.247654+00:00 app[web.1]:   code: '28000',
+2026-01-10T19:04:33.247654+00:00 app[web.1]:   detail: undefined,
+2026-01-10T19:04:33.247654+00:00 app[web.1]:   hint: undefined,
+2026-01-10T19:04:33.247655+00:00 app[web.1]:   position: undefined,
+2026-01-10T19:04:33.247655+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-10T19:04:33.247655+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-10T19:04:33.247656+00:00 app[web.1]:   where: undefined,
+2026-01-10T19:04:33.247656+00:00 app[web.1]:   schema: undefined,
+2026-01-10T19:04:33.247656+00:00 app[web.1]:   table: undefined,
+2026-01-10T19:04:33.247656+00:00 app[web.1]:   column: undefined,
+2026-01-10T19:04:33.247656+00:00 app[web.1]:   dataType: undefined,
+2026-01-10T19:04:33.247657+00:00 app[web.1]:   constraint: undefined,
+2026-01-10T19:04:33.247657+00:00 app[web.1]:   file: 'auth.c',
+2026-01-10T19:04:33.247657+00:00 app[web.1]:   line: '547',
+2026-01-10T19:04:33.247657+00:00 app[web.1]:   routine: 'ClientAuthentication'
+2026-01-10T19:04:33.247657+00:00 app[web.1]: }
+2026-01-10T19:04:33.249372+00:00 app[web.1]: 7:04:33 PM [express] GET /api/locations 500 in 16ms :: {"error":"Failed to fetch locations"}
+2026-01-10T19:04:44.968466+00:00 heroku[web.1]
