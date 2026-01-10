@@ -1,4 +1,8 @@
 import React, { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { locationsApi } from "@/lib/api";
+import type { ProductLocation, InsertProductLocation } from "@shared/schema";
+import { formatDistanceToNow } from "date-fns";
 import { 
   MapPin, 
   Search, 
@@ -35,31 +39,14 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 
-interface ProductLocation {
-  id: number;
-  sku: string;
-  name: string;
-  location: string;
-  zone: string;
-  lastUpdated: string;
-}
-
-const initialLocations: ProductLocation[] = [
-  { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90 Black", location: "A-01-02-B", zone: "A", lastUpdated: "2 days ago" },
-  { id: 2, sku: "NK-292-RED", name: "Nike Air Max 90 Red", location: "A-01-02-A", zone: "A", lastUpdated: "2 days ago" },
-  { id: 3, sku: "NK-AIR-RED", name: "Nike Air Force 1 Red", location: "A-02-01-A", zone: "A", lastUpdated: "1 week ago" },
-  { id: 4, sku: "AD-550-WHT", name: "Adidas Ultraboost White", location: "A-01-04-A", zone: "A", lastUpdated: "3 days ago" },
-  { id: 5, sku: "AD-STN-BLK", name: "Adidas Stan Smith Black", location: "A-02-03-B", zone: "A", lastUpdated: "1 week ago" },
-  { id: 6, sku: "NB-990-NVY", name: "New Balance 990v5 Navy", location: "B-12-01-C", zone: "B", lastUpdated: "5 days ago" },
-  { id: 7, sku: "PM-102-GRY", name: "Puma RS-X Grey", location: "B-12-04-D", zone: "B", lastUpdated: "1 week ago" },
-  { id: 8, sku: "VN-OLD-BLK", name: "Vans Old Skool Black", location: "B-05-02-A", zone: "B", lastUpdated: "3 days ago" },
-  { id: 9, sku: "CV-CHK-WHT", name: "Converse Chuck Taylor White", location: "B-05-04-C", zone: "B", lastUpdated: "4 days ago" },
-  { id: 10, sku: "RB-CL-TAN", name: "Reebok Classic Tan", location: "C-01-01-A", zone: "C", lastUpdated: "1 week ago" },
-  { id: 11, sku: "SK-BLZ-BLU", name: "Skechers Blazer Blue", location: "C-03-02-B", zone: "C", lastUpdated: "2 weeks ago" },
-];
-
 export default function Locations() {
-  const [locations, setLocations] = useState<ProductLocation[]>(initialLocations);
+  const queryClient = useQueryClient();
+  
+  // Fetch locations
+  const { data: locations = [], isLoading } = useQuery({
+    queryKey: ["locations"],
+    queryFn: locationsApi.getAll,
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editLocation, setEditLocation] = useState("");
@@ -67,6 +54,35 @@ export default function Locations() {
   const [newSku, setNewSku] = useState("");
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  
+  // Mutations
+  const createMutation = useMutation({
+    mutationFn: locationsApi.create,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["locations"] });
+      setAddDialogOpen(false);
+      setNewSku("");
+      setNewName("");
+      setNewLocation("");
+    },
+  });
+  
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: { location: string; zone: string } }) => 
+      locationsApi.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["locations"] });
+      setEditingId(null);
+      setEditLocation("");
+    },
+  });
+  
+  const deleteMutation = useMutation({
+    mutationFn: locationsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["locations"] });
+    },
+  });
   
   // Filter locations
   const filteredLocations = locations.filter(loc => 
@@ -86,14 +102,11 @@ export default function Locations() {
   
   // Save edit
   const handleSaveEdit = (id: number) => {
-    const zone = editLocation.split("-")[0] || "A";
-    setLocations(prev => prev.map(loc => 
-      loc.id === id 
-        ? { ...loc, location: editLocation.toUpperCase(), zone, lastUpdated: "Just now" }
-        : loc
-    ));
-    setEditingId(null);
-    setEditLocation("");
+    const zone = editLocation.split("-")[0]?.toUpperCase() || "A";
+    updateMutation.mutate({ 
+      id, 
+      data: { location: editLocation.toUpperCase(), zone } 
+    });
   };
   
   // Cancel edit
@@ -106,28 +119,30 @@ export default function Locations() {
   const handleAdd = () => {
     if (!newSku || !newLocation) return;
     
-    const zone = newLocation.split("-")[0] || "A";
-    const newId = Math.max(...locations.map(l => l.id)) + 1;
+    const zone = newLocation.split("-")[0]?.toUpperCase() || "A";
     
-    setLocations(prev => [...prev, {
-      id: newId,
+    createMutation.mutate({
       sku: newSku.toUpperCase(),
       name: newName || newSku.toUpperCase(),
       location: newLocation.toUpperCase(),
       zone,
-      lastUpdated: "Just now"
-    }]);
-    
-    setAddDialogOpen(false);
-    setNewSku("");
-    setNewName("");
-    setNewLocation("");
+    });
   };
   
   // Delete
   const handleDelete = (id: number) => {
-    setLocations(prev => prev.filter(loc => loc.id !== id));
+    if (confirm("Are you sure you want to delete this location?")) {
+      deleteMutation.mutate(id);
+    }
   };
+  
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-muted-foreground">Loading locations...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
@@ -228,7 +243,9 @@ export default function Locations() {
                     <TableCell>
                       <Badge variant="secondary">{loc.zone}</Badge>
                     </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">{loc.lastUpdated}</TableCell>
+                    <TableCell className="text-muted-foreground text-sm">
+                      {formatDistanceToNow(new Date(loc.updatedAt), { addSuffix: true })}
+                    </TableCell>
                     <TableCell className="text-right">
                       {editingId === loc.id ? (
                         <div className="flex items-center justify-end gap-1">
