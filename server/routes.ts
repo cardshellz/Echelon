@@ -160,13 +160,18 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Webhooks - need raw body for HMAC verification
+  // Shopify Webhooks - raw body captured by express.json verify callback
   app.post("/api/shopify/webhooks/products/create", async (req: Request, res: Response) => {
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
       
-      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
         console.error("Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
@@ -189,9 +194,14 @@ export async function registerRoutes(
   app.post("/api/shopify/webhooks/products/update", async (req: Request, res: Response) => {
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
       
-      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
         console.error("Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
@@ -214,9 +224,14 @@ export async function registerRoutes(
   app.post("/api/shopify/webhooks/products/delete", async (req: Request, res: Response) => {
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
       
-      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
         console.error("Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
