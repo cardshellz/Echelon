@@ -369,6 +369,14 @@ export default function Picking() {
     },
   });
   
+  // Mutation for releasing orders
+  const releaseMutation = useMutation({
+    mutationFn: ({ orderId }: { orderId: number }) => releaseOrder(orderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+  });
+  
   // Mutation for updating items
   const updateItemMutation = useMutation({
     mutationFn: ({ itemId, status, pickedQuantity, shortReason }: { 
@@ -938,7 +946,21 @@ export default function Picking() {
   };
   
   // Back to queue
-  const handleBackToQueue = () => {
+  const handleBackToQueue = async () => {
+    // Release the order if we're picking a real order (from API)
+    if (activeOrderId && pickingMode === "single") {
+      const numericId = parseInt(activeOrderId);
+      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === activeOrderId);
+      
+      if (isRealOrder) {
+        try {
+          await releaseMutation.mutateAsync({ orderId: numericId });
+        } catch (error) {
+          console.error("Failed to release order:", error);
+        }
+      }
+    }
+    
     // Refresh the queue data from API
     refetch();
     // Clear local state to use fresh API data

@@ -139,6 +139,10 @@ export interface ShopifyOrderLineItem {
   quantity: number;
   variant_title: string;
   product_id: number;
+  requires_shipping: boolean;
+  image?: {
+    src: string;
+  };
 }
 
 export interface ShopifyOrderCustomer {
@@ -254,19 +258,26 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
   
   const items: ExtractedOrderItem[] = [];
   for (const lineItem of payload.line_items) {
-    if (lineItem.sku && lineItem.sku.trim()) {
+    // Only import items that require shipping and have a SKU
+    if (lineItem.requires_shipping !== false && lineItem.sku && lineItem.sku.trim()) {
       items.push({
         shopifyLineItemId: String(lineItem.id),
         sku: lineItem.sku.trim().toUpperCase(),
         name: lineItem.name || lineItem.title,
         quantity: lineItem.quantity,
+        imageUrl: lineItem.image?.src || undefined,
       });
     }
   }
   
+  // Use payload.name (e.g., "#1234") if available, otherwise format order_number
+  const orderNumber = payload.name 
+    ? payload.name 
+    : `#${payload.order_number}`;
+  
   return {
     shopifyOrderId: String(payload.id),
-    orderNumber: payload.name || `#${payload.order_number}`,
+    orderNumber,
     customerName,
     customerEmail: payload.email || payload.customer?.email || null,
     priority,
