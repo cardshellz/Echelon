@@ -1,16 +1,15 @@
-import React, { useState } from "react";
+import React from "react";
 import { 
   ShoppingCart, 
   Search, 
   Filter, 
-  MoreHorizontal, 
   Clock,
   AlertCircle,
   CheckCircle2,
-  Truck,
   Zap,
-  Settings2,
-  ChevronDown
+  ChevronDown,
+  Layers,
+  Package
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,7 +22,6 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-  CardDescription
 } from "@/components/ui/card";
 import {
   Popover,
@@ -37,8 +35,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useSettings, PickingMode } from "@/lib/settings";
+import { cn } from "@/lib/utils";
 
 const orders = [
   { id: "ORD-2024-001", customer: "Alice Freeman", items: 4, total: "$450.00", status: "Allocated", sla: "2h 15m", progress: 30, date: "Today, 10:23 AM" },
@@ -49,9 +49,14 @@ const orders = [
 ];
 
 export default function Orders() {
-  const [autoRelease, setAutoRelease] = useState(true);
-  const [releaseDelay, setReleaseDelay] = useState("immediate");
-  const [batchMode, setBatchMode] = useState<"batch" | "single">("batch");
+  const { 
+    pickingMode, 
+    setPickingMode, 
+    autoRelease, 
+    setAutoRelease, 
+    releaseDelay, 
+    setReleaseDelay 
+  } = useSettings();
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
@@ -67,6 +72,36 @@ export default function Orders() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {/* Picking Mode Toggle - Separate prominent control */}
+            <div className="flex items-center rounded-lg border bg-muted/50 p-1" data-testid="picking-mode-toggle">
+              <Button
+                variant={pickingMode === "batch" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => setPickingMode("batch")}
+                className={cn(
+                  "gap-2",
+                  pickingMode === "batch" && "bg-primary shadow-sm"
+                )}
+                data-testid="button-batch-mode"
+              >
+                <Layers className="h-4 w-4" />
+                Batch
+              </Button>
+              <Button
+                variant={pickingMode === "single" ? "default" : "ghost"}
+                size="sm"
+                onClick={() => setPickingMode("single")}
+                className={cn(
+                  "gap-2",
+                  pickingMode === "single" && "bg-primary shadow-sm"
+                )}
+                data-testid="button-single-mode"
+              >
+                <Package className="h-4 w-4" />
+                Single
+              </Button>
+            </div>
+
             <Popover>
               <PopoverTrigger asChild>
                 <Button 
@@ -118,23 +153,6 @@ export default function Orders() {
                           {releaseDelay === "15min" && "Orders are grouped every 15 minutes for optimized pick paths."}
                           {releaseDelay === "hourly" && "Orders are released at the top of each hour."}
                           {releaseDelay === "cutoff" && "All orders before 2:00 PM ship same-day. Orders after go to next day."}
-                        </p>
-                      </div>
-                      
-                      <div className="border-t pt-4 space-y-3">
-                        <Label className="text-sm font-medium">Picking Mode</Label>
-                        <Select value={batchMode} onValueChange={(v: "batch" | "single") => setBatchMode(v)}>
-                          <SelectTrigger data-testid="select-batch-mode">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="batch">Batch Picking (group by location)</SelectItem>
-                            <SelectItem value="single">Single Order Picking</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p className="text-xs text-muted-foreground">
-                          {batchMode === "batch" && "Orders are grouped by zone/location for efficient picking."}
-                          {batchMode === "single" && "Each order is picked individually, start to finish."}
                         </p>
                       </div>
                       
