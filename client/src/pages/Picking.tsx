@@ -2,12 +2,10 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { 
   Scan, 
   CheckCircle2, 
-  Box, 
   ArrowRight, 
   AlertTriangle,
   PackageCheck,
   ChevronRight,
-  MapPin,
   Package,
   ClipboardList,
   Clock,
@@ -17,9 +15,12 @@ import {
   Volume2,
   VolumeX,
   Maximize,
-  Smartphone
+  Smartphone,
+  Layers,
+  User
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useSettings } from "@/lib/settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -65,7 +66,67 @@ interface PickBatch {
   assignee: string | null;
 }
 
-// Initial mock data
+// Single order data for single picking mode
+interface SingleOrder {
+  id: string;
+  customer: string;
+  items: PickItem[];
+  priority: "rush" | "high" | "normal";
+  age: string;
+  status: "ready" | "in_progress" | "completed";
+  assignee: string | null;
+}
+
+const createSingleOrderQueue = (): SingleOrder[] => [
+  {
+    id: "ORD-1024",
+    customer: "Alice Freeman",
+    priority: "high",
+    age: "15m",
+    status: "ready",
+    assignee: null,
+    items: [
+      { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
+      { id: 4, sku: "PM-102-GRY", name: "Puma RS-X", location: "B-12-04-D", qty: 1, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
+    ]
+  },
+  {
+    id: "ORD-1025",
+    customer: "Bob Smith",
+    priority: "rush",
+    age: "8m",
+    status: "ready",
+    assignee: null,
+    items: [
+      { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 0, status: "pending", orderId: "#1025", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
+    ]
+  },
+  {
+    id: "ORD-1026",
+    customer: "Charlie Davis",
+    priority: "normal",
+    age: "1h 5m",
+    status: "ready",
+    assignee: null,
+    items: [
+      { id: 3, sku: "NB-990-NVY", name: "New Balance 990v5", location: "B-12-01-C", qty: 3, picked: 0, status: "pending", orderId: "#1026", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
+    ]
+  },
+  {
+    id: "ORD-1030",
+    customer: "Diana Prince",
+    priority: "normal",
+    age: "45m",
+    status: "ready",
+    assignee: null,
+    items: [
+      { id: 5, sku: "NK-AIR-RED", name: "Nike Air Force 1 Red", location: "A-02-01-A", qty: 1, picked: 0, status: "pending", orderId: "#1030", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
+      { id: 6, sku: "AD-STN-BLK", name: "Adidas Stan Smith", location: "A-02-03-B", qty: 2, picked: 0, status: "pending", orderId: "#1030", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
+    ]
+  },
+];
+
+// Initial mock data for batch picking mode
 const createInitialQueue = (): PickBatch[] => [
   { 
     id: "BATCH-4921", 
@@ -169,10 +230,17 @@ const triggerHaptic = (type: "light" | "medium" | "heavy") => {
 };
 
 export default function Picking() {
-  // Core state
+  // Get picking mode from settings
+  const { pickingMode } = useSettings();
+  
+  // Core state - Batch mode
   const [queue, setQueue] = useState<PickBatch[]>(createInitialQueue);
+  // Core state - Single mode
+  const [singleQueue, setSingleQueue] = useState<SingleOrder[]>(createSingleOrderQueue);
+  
   const [view, setView] = useState<"queue" | "picking" | "complete">("queue");
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
   
   // UI state
@@ -191,11 +259,13 @@ export default function Picking() {
   const scanInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Computed values
+  // Computed values - work for both modes
   const activeBatch = queue.find(b => b.id === activeBatchId);
-  const currentItem = activeBatch?.items[currentItemIndex];
-  const completedItems = activeBatch?.items.filter(i => i.status === "completed" || i.status === "short").length || 0;
-  const totalItems = activeBatch?.items.length || 0;
+  const activeOrder = singleQueue.find(o => o.id === activeOrderId);
+  const activeWork = pickingMode === "batch" ? activeBatch : activeOrder;
+  const currentItem = activeWork?.items[currentItemIndex];
+  const completedItems = activeWork?.items.filter(i => i.status === "completed" || i.status === "short").length || 0;
+  const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
   
   // Keep focus on scan input - aggressive refocus for scanner devices
@@ -266,22 +336,36 @@ export default function Picking() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [view, scanInput]);
   
-  // Start picking a batch
-  const handleStartPicking = (batchId: string) => {
-    setQueue(prev => prev.map(b => 
-      b.id === batchId ? { ...b, status: "in_progress" as const, assignee: "You" } : b
-    ));
-    setActiveBatchId(batchId);
+  // Start picking a batch or order
+  const handleStartPicking = (id: string) => {
+    if (pickingMode === "batch") {
+      setQueue(prev => prev.map(b => 
+        b.id === id ? { ...b, status: "in_progress" as const, assignee: "You" } : b
+      ));
+      setActiveBatchId(id);
+    } else {
+      setSingleQueue(prev => prev.map(o => 
+        o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
+      ));
+      setActiveOrderId(id);
+    }
     setCurrentItemIndex(0);
     setView("picking");
     triggerHaptic("medium");
   };
   
-  // Grab next available batch
+  // Grab next available batch or order
   const handleGrabNext = () => {
-    const nextBatch = queue.find(b => b.status === "ready");
-    if (nextBatch) {
-      handleStartPicking(nextBatch.id);
+    if (pickingMode === "batch") {
+      const nextBatch = queue.find(b => b.status === "ready");
+      if (nextBatch) {
+        handleStartPicking(nextBatch.id);
+      }
+    } else {
+      const nextOrder = singleQueue.find(o => o.status === "ready");
+      if (nextOrder) {
+        handleStartPicking(nextOrder.id);
+      }
     }
   };
   
@@ -326,23 +410,41 @@ export default function Picking() {
   
   // Confirm pick
   const confirmPick = (qty: number) => {
-    if (!activeBatch || !currentItem) return;
+    if (!activeWork || !currentItem) return;
     
-    setQueue(prev => prev.map(batch => {
-      if (batch.id !== activeBatchId) return batch;
-      
-      const newItems = batch.items.map((item, idx) => {
-        if (idx !== currentItemIndex) return item;
-        const newPicked = item.picked + qty;
-        return {
-          ...item,
-          picked: newPicked,
-          status: newPicked >= item.qty ? "completed" as const : "in_progress" as const
-        };
-      });
-      
-      return { ...batch, items: newItems };
-    }));
+    if (pickingMode === "batch") {
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        
+        const newItems = batch.items.map((item, idx) => {
+          if (idx !== currentItemIndex) return item;
+          const newPicked = item.picked + qty;
+          return {
+            ...item,
+            picked: newPicked,
+            status: newPicked >= item.qty ? "completed" as const : "in_progress" as const
+          };
+        });
+        
+        return { ...batch, items: newItems };
+      }));
+    } else {
+      setSingleQueue(prev => prev.map(order => {
+        if (order.id !== activeOrderId) return order;
+        
+        const newItems = order.items.map((item, idx) => {
+          if (idx !== currentItemIndex) return item;
+          const newPicked = item.picked + qty;
+          return {
+            ...item,
+            picked: newPicked,
+            status: newPicked >= item.qty ? "completed" as const : "in_progress" as const
+          };
+        });
+        
+        return { ...order, items: newItems };
+      }));
+    }
     
     setScanStatus("idle");
     setScanInput("");
@@ -357,24 +459,41 @@ export default function Picking() {
   
   // Short pick
   const handleShortPick = () => {
-    if (!activeBatch || !currentItem) return;
+    if (!activeWork || !currentItem) return;
     
     const shortQty = parseInt(shortPickQty) || 0;
     
-    setQueue(prev => prev.map(batch => {
-      if (batch.id !== activeBatchId) return batch;
-      
-      const newItems = batch.items.map((item, idx) => {
-        if (idx !== currentItemIndex) return item;
-        return {
-          ...item,
-          picked: shortQty,
-          status: "short" as const
-        };
-      });
-      
-      return { ...batch, items: newItems };
-    }));
+    if (pickingMode === "batch") {
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        
+        const newItems = batch.items.map((item, idx) => {
+          if (idx !== currentItemIndex) return item;
+          return {
+            ...item,
+            picked: shortQty,
+            status: "short" as const
+          };
+        });
+        
+        return { ...batch, items: newItems };
+      }));
+    } else {
+      setSingleQueue(prev => prev.map(order => {
+        if (order.id !== activeOrderId) return order;
+        
+        const newItems = order.items.map((item, idx) => {
+          if (idx !== currentItemIndex) return item;
+          return {
+            ...item,
+            picked: shortQty,
+            status: "short" as const
+          };
+        });
+        
+        return { ...order, items: newItems };
+      }));
+    }
     
     if (soundEnabled) playSound("error");
     triggerHaptic("medium");
@@ -391,15 +510,16 @@ export default function Picking() {
   
   // Advance to next item
   const advanceToNext = () => {
-    if (!activeBatch) return;
+    const updatedWork = pickingMode === "batch" 
+      ? queue.find(b => b.id === activeBatchId)
+      : singleQueue.find(o => o.id === activeOrderId);
     
-    const updatedBatch = queue.find(b => b.id === activeBatchId);
-    if (!updatedBatch) return;
+    if (!updatedWork) return;
     
     // Find next pending item
     let nextIndex = -1;
-    for (let i = currentItemIndex + 1; i < updatedBatch.items.length; i++) {
-      if (updatedBatch.items[i].status === "pending" || updatedBatch.items[i].status === "in_progress") {
+    for (let i = currentItemIndex + 1; i < updatedWork.items.length; i++) {
+      if (updatedWork.items[i].status === "pending" || updatedWork.items[i].status === "in_progress") {
         nextIndex = i;
         break;
       }
@@ -410,7 +530,7 @@ export default function Picking() {
     } else {
       // Check from beginning (wrap around)
       for (let i = 0; i < currentItemIndex; i++) {
-        if (updatedBatch.items[i].status === "pending" || updatedBatch.items[i].status === "in_progress") {
+        if (updatedWork.items[i].status === "pending" || updatedWork.items[i].status === "in_progress") {
           nextIndex = i;
           break;
         }
@@ -420,9 +540,15 @@ export default function Picking() {
         setCurrentItemIndex(nextIndex);
       } else {
         // All items done
-        setQueue(prev => prev.map(b => 
-          b.id === activeBatchId ? { ...b, status: "completed" as const } : b
-        ));
+        if (pickingMode === "batch") {
+          setQueue(prev => prev.map(b => 
+            b.id === activeBatchId ? { ...b, status: "completed" as const } : b
+          ));
+        } else {
+          setSingleQueue(prev => prev.map(o => 
+            o.id === activeOrderId ? { ...o, status: "completed" as const } : o
+          ));
+        }
         if (soundEnabled) playSound("complete");
         triggerHaptic("heavy");
         setView("complete");
@@ -434,6 +560,7 @@ export default function Picking() {
   const handleBackToQueue = () => {
     setView("queue");
     setActiveBatchId(null);
+    setActiveOrderId(null);
     setCurrentItemIndex(0);
     setScanInput("");
   };
@@ -441,8 +568,10 @@ export default function Picking() {
   // Reset demo
   const handleResetDemo = () => {
     setQueue(createInitialQueue());
+    setSingleQueue(createSingleOrderQueue());
     setView("queue");
     setActiveBatchId(null);
+    setActiveOrderId(null);
     setCurrentItemIndex(0);
     setScanInput("");
   };
@@ -460,9 +589,17 @@ export default function Picking() {
   
   // QUEUE VIEW
   if (view === "queue") {
-    const readyBatches = queue.filter(b => b.status === "ready");
-    const inProgressBatches = queue.filter(b => b.status === "in_progress");
-    const completedBatches = queue.filter(b => b.status === "completed");
+    // Use different data based on picking mode
+    const readyItems = pickingMode === "batch" 
+      ? queue.filter(b => b.status === "ready")
+      : singleQueue.filter(o => o.status === "ready");
+    const inProgressItems = pickingMode === "batch"
+      ? queue.filter(b => b.status === "in_progress")
+      : singleQueue.filter(o => o.status === "in_progress");
+    const completedItems = pickingMode === "batch"
+      ? queue.filter(b => b.status === "completed")
+      : singleQueue.filter(o => o.status === "completed");
+    const totalItemsToPick = readyItems.reduce((acc, item) => acc + item.items.length, 0);
     
     return (
       <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
@@ -472,9 +609,16 @@ export default function Picking() {
               <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
                 <PackageCheck className="h-6 w-6 text-primary" />
                 Picking Queue
+                <Badge variant="outline" className={cn(
+                  "text-xs ml-2",
+                  pickingMode === "batch" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-purple-50 text-purple-700 border-purple-200"
+                )}>
+                  {pickingMode === "batch" ? <Layers className="h-3 w-3 mr-1" /> : <Package className="h-3 w-3 mr-1" />}
+                  {pickingMode === "batch" ? "Batch Mode" : "Single Order"}
+                </Badge>
               </h1>
               <p className="text-muted-foreground text-sm">
-                {readyBatches.length} batches ready • {readyBatches.reduce((acc, b) => acc + b.items.length, 0)} items to pick
+                {readyItems.length} {pickingMode === "batch" ? "batches" : "orders"} ready • {totalItemsToPick} items to pick
               </p>
             </div>
             
@@ -508,7 +652,7 @@ export default function Picking() {
               <Button 
                 onClick={handleGrabNext}
                 className="bg-emerald-600 hover:bg-emerald-700 h-12 px-6 text-base"
-                disabled={readyBatches.length === 0}
+                disabled={readyItems.length === 0}
                 data-testid="button-grab-next"
               >
                 <Zap className="h-5 w-5 mr-2" />
@@ -520,19 +664,19 @@ export default function Picking() {
           {/* Queue Stats */}
           <div className="grid grid-cols-4 gap-2 md:gap-3 mt-4">
             <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
-              <div className="text-xl md:text-2xl font-bold text-primary">{readyBatches.length}</div>
+              <div className="text-xl md:text-2xl font-bold text-primary">{readyItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Ready</div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
-              <div className="text-xl md:text-2xl font-bold text-amber-600">{inProgressBatches.length}</div>
+              <div className="text-xl md:text-2xl font-bold text-amber-600">{inProgressItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Active</div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
-              <div className="text-xl md:text-2xl font-bold text-red-600">{queue.filter(b => b.priority === "rush" && b.status === "ready").length}</div>
+              <div className="text-xl md:text-2xl font-bold text-red-600">{readyItems.filter(item => item.priority === "rush").length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Rush</div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2 md:p-3 text-center">
-              <div className="text-xl md:text-2xl font-bold text-emerald-600">{completedBatches.length}</div>
+              <div className="text-xl md:text-2xl font-bold text-emerald-600">{completedItems.length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Done</div>
             </div>
           </div>
@@ -540,66 +684,113 @@ export default function Picking() {
 
         {/* Queue List */}
         <div className="p-3 md:p-6 space-y-2 md:space-y-3">
-          {queue.filter(b => b.status !== "completed").map((batch) => (
-            <Card 
-              key={batch.id} 
-              className={cn(
-                "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
-                batch.priority === "rush" && "border-l-4 border-l-red-500",
-                batch.priority === "high" && "border-l-4 border-l-amber-500",
-                batch.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
-              )}
-              onClick={() => batch.status === "ready" ? handleStartPicking(batch.id) : null}
-              data-testid={`card-batch-${batch.id}`}
-            >
-              <CardContent className="p-3 md:p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3 md:gap-4">
-                    <div className={cn(
-                      "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
-                      batch.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
-                    )}>
-                      {batch.id.startsWith("BATCH") ? <ClipboardList size={24} /> : <Package size={24} />}
+          {pickingMode === "batch" ? (
+            queue.filter(b => b.status !== "completed").map((batch) => (
+              <Card 
+                key={batch.id} 
+                className={cn(
+                  "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
+                  batch.priority === "rush" && "border-l-4 border-l-red-500",
+                  batch.priority === "high" && "border-l-4 border-l-amber-500",
+                  batch.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
+                )}
+                onClick={() => batch.status === "ready" ? handleStartPicking(batch.id) : null}
+                data-testid={`card-batch-${batch.id}`}
+              >
+                <CardContent className="p-3 md:p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3 md:gap-4">
+                      <div className={cn(
+                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
+                        batch.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                      )}>
+                        <ClipboardList size={24} />
+                      </div>
+                      <div>
+                        <div className="font-semibold flex items-center gap-2 text-base">
+                          {batch.id}
+                          {batch.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
+                          {batch.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                        </div>
+                        <div className="text-sm text-muted-foreground">
+                          {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <div className="font-semibold flex items-center gap-2 text-base">
-                        {batch.id}
-                        {batch.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
-                        {batch.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                    <div className="text-right flex items-center gap-2">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1">
+                        <Clock size={14} /> {batch.age}
                       </div>
-                      <div className="text-sm text-muted-foreground">
-                        {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items
-                      </div>
+                      {batch.status === "ready" && (
+                        <ChevronRight className="h-6 w-6 text-muted-foreground" />
+                      )}
                     </div>
                   </div>
-                  <div className="text-right flex items-center gap-2">
-                    <div className="text-sm text-muted-foreground flex items-center gap-1">
-                      <Clock size={14} /> {batch.age}
+                </CardContent>
+              </Card>
+            ))
+          ) : (
+            singleQueue.filter(o => o.status !== "completed").map((order) => (
+              <Card 
+                key={order.id} 
+                className={cn(
+                  "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
+                  order.priority === "rush" && "border-l-4 border-l-red-500",
+                  order.priority === "high" && "border-l-4 border-l-amber-500",
+                  order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
+                )}
+                onClick={() => order.status === "ready" ? handleStartPicking(order.id) : null}
+                data-testid={`card-order-${order.id}`}
+              >
+                <CardContent className="p-3 md:p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3 md:gap-4">
+                      <div className={cn(
+                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
+                        order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                      )}>
+                        <Package size={24} />
+                      </div>
+                      <div>
+                        <div className="font-semibold flex items-center gap-2 text-base">
+                          {order.id}
+                          {order.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
+                          {order.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                        </div>
+                        <div className="text-sm text-muted-foreground flex items-center gap-1">
+                          <User size={12} /> {order.customer} • {order.items.length} items
+                        </div>
+                      </div>
                     </div>
-                    {batch.status === "ready" && (
-                      <ChevronRight className="h-6 w-6 text-muted-foreground" />
-                    )}
+                    <div className="text-right flex items-center gap-2">
+                      <div className="text-sm text-muted-foreground flex items-center gap-1">
+                        <Clock size={14} /> {order.age}
+                      </div>
+                      {order.status === "ready" && (
+                        <ChevronRight className="h-6 w-6 text-muted-foreground" />
+                      )}
+                    </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            ))
+          )}
           
-          {completedBatches.length > 0 && (
+          {completedItems.length > 0 && (
             <div className="pt-4">
               <h3 className="text-sm font-medium text-muted-foreground mb-3 flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                Completed ({completedBatches.length})
+                Completed ({completedItems.length})
               </h3>
-              {completedBatches.map((batch) => (
-                <Card key={batch.id} className="bg-muted/30 border-muted mb-2">
+              {completedItems.map((item) => (
+                <Card key={item.id} className="bg-muted/30 border-muted mb-2">
                   <CardContent className="p-3 flex items-center gap-3">
                     <div className="h-10 w-10 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-700">
                       <CheckCircle2 size={20} />
                     </div>
                     <div className="flex-1">
-                      <span className="font-medium">{batch.id}</span>
-                      <span className="text-sm text-muted-foreground ml-2">• {batch.items.length} items</span>
+                      <span className="font-medium">{item.id}</span>
+                      <span className="text-sm text-muted-foreground ml-2">• {item.items.length} items</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -613,7 +804,9 @@ export default function Picking() {
   
   // COMPLETE VIEW
   if (view === "complete") {
-    const readyBatches = queue.filter(b => b.status === "ready");
+    const readyCount = pickingMode === "batch" 
+      ? queue.filter(b => b.status === "ready").length
+      : singleQueue.filter(o => o.status === "ready").length;
     
     return (
       <div className="flex flex-col items-center justify-center min-h-full bg-gradient-to-b from-emerald-50 to-background dark:from-emerald-950/20 p-6">
@@ -623,38 +816,48 @@ export default function Picking() {
           </div>
           
           <div className="space-y-2">
-            <h1 className="text-3xl font-bold text-emerald-700 dark:text-emerald-400">Batch Complete!</h1>
+            <h1 className="text-3xl font-bold text-emerald-700 dark:text-emerald-400">
+              {pickingMode === "batch" ? "Batch" : "Order"} Complete!
+            </h1>
             <p className="text-muted-foreground text-lg">
-              {activeBatch?.id} is ready for packing
+              {activeWork?.id} is ready for packing
             </p>
           </div>
           
           <div className="bg-card border rounded-lg p-4 text-left space-y-3">
             <div className="flex justify-between text-base">
               <span className="text-muted-foreground">Items Picked</span>
-              <span className="font-bold text-emerald-600">{activeBatch?.items.filter(i => i.status === "completed").length}</span>
+              <span className="font-bold text-emerald-600">{activeWork?.items.filter(i => i.status === "completed").length}</span>
             </div>
-            {(activeBatch?.items.filter(i => i.status === "short").length || 0) > 0 && (
+            {(activeWork?.items.filter(i => i.status === "short").length || 0) > 0 && (
               <div className="flex justify-between text-base">
                 <span className="text-muted-foreground">Short Picks</span>
-                <span className="font-bold text-amber-600">{activeBatch?.items.filter(i => i.status === "short").length}</span>
+                <span className="font-bold text-amber-600">{activeWork?.items.filter(i => i.status === "short").length}</span>
               </div>
             )}
-            <div className="flex justify-between text-base">
-              <span className="text-muted-foreground">Orders</span>
-              <span className="font-bold">{activeBatch?.orders}</span>
-            </div>
+            {pickingMode === "batch" && activeBatch && (
+              <div className="flex justify-between text-base">
+                <span className="text-muted-foreground">Orders</span>
+                <span className="font-bold">{activeBatch.orders}</span>
+              </div>
+            )}
+            {pickingMode === "single" && activeOrder && (
+              <div className="flex justify-between text-base">
+                <span className="text-muted-foreground">Customer</span>
+                <span className="font-bold">{activeOrder.customer}</span>
+              </div>
+            )}
           </div>
           
           <div className="flex flex-col gap-3 pt-4">
             <Button 
               onClick={handleGrabNext}
               className="bg-emerald-600 hover:bg-emerald-700 h-14 text-lg"
-              disabled={readyBatches.length === 0}
+              disabled={readyCount === 0}
               data-testid="button-next-batch"
             >
               <ArrowRight className="h-5 w-5 mr-2" />
-              {readyBatches.length > 0 ? `Grab Next (${readyBatches.length} waiting)` : "No More Batches"}
+              {readyCount > 0 ? `Grab Next (${readyCount} waiting)` : `No More ${pickingMode === "batch" ? "Batches" : "Orders"}`}
             </Button>
             <Button variant="outline" onClick={handleBackToQueue} className="h-12" data-testid="button-back-queue">
               Back to Queue
@@ -688,11 +891,11 @@ export default function Picking() {
               variant="outline" 
               className={cn(
                 "text-xs px-2 py-0.5",
-                activeBatch?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
-                activeBatch?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
+                activeWork?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
+                activeWork?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
               )}
             >
-              {activeBatch?.id}
+              {activeWork?.id}
             </Badge>
           </div>
         </div>
