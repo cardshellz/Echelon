@@ -22,7 +22,8 @@ import {
   Focus,
   List,
   MapPin,
-  RefreshCw
+  RefreshCw,
+  Download
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -955,6 +956,27 @@ export default function Picking() {
     setLocalSingleQueue([]);
   };
   
+  // Sync orders from Shopify state
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{created: number, updated: number, total: number} | null>(null);
+  
+  const handleSyncOrders = async () => {
+    setIsSyncing(true);
+    setSyncResult(null);
+    try {
+      const response = await fetch("/api/shopify/sync-orders", { method: "POST" });
+      const data = await response.json();
+      if (data.success) {
+        setSyncResult({ created: data.created, updated: data.updated, total: data.total });
+        refetch();
+      }
+    } catch (error) {
+      console.error("Failed to sync orders:", error);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+  
   // Reset demo (only for mock data mode)
   const handleResetDemo = () => {
     setQueue(createInitialQueue());
@@ -1068,6 +1090,16 @@ export default function Picking() {
               >
                 <RefreshCw className={cn("h-4 w-4 mr-2", isLoading && "animate-spin")} />
                 Refresh
+              </Button>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={handleSyncOrders}
+                disabled={isSyncing}
+                data-testid="button-sync-orders"
+              >
+                <Download className={cn("h-4 w-4 mr-2", isSyncing && "animate-bounce")} />
+                {isSyncing ? "Syncing..." : "Sync Shopify"}
               </Button>
               {ordersFromApi.length === 0 && (
                 <Button 

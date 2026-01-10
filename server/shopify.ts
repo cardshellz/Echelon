@@ -180,6 +180,65 @@ export interface ExtractedOrder {
   items: ExtractedOrderItem[];
 }
 
+export interface ShopifyOrdersResponse {
+  orders: ShopifyOrder[];
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
+  const config = getShopifyConfig();
+  const allOrders: ExtractedOrder[] = [];
+  let pageInfo: string | null = null;
+  
+  do {
+    const url: string = pageInfo
+      ? `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`
+      : `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=open&fulfillment_status=unfulfilled,partial`;
+    
+    const response: Response = await fetch(url, {
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!response.ok) {
+      if (response.status === 429) {
+        await delay(2000);
+        continue;
+      }
+      const error = await response.text();
+      throw new Error(`Shopify API error: ${response.status} - ${error}`);
+    }
+    
+    const data: ShopifyOrdersResponse = await response.json();
+    
+    for (const order of data.orders) {
+      if (!order.cancelled_at) {
+        allOrders.push(extractOrderFromWebhookPayload(order));
+      }
+    }
+    
+    const linkHeader: string | null = response.headers.get("Link");
+    pageInfo = null;
+    if (linkHeader) {
+      const nextMatch: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+      if (nextMatch) {
+        pageInfo = nextMatch[1];
+      }
+    }
+    
+    if (pageInfo) {
+      await delay(600);
+    }
+  } while (pageInfo);
+  
+  return allOrders;
+}
+
 export function extractOrderFromWebhookPayload(payload: ShopifyOrder): ExtractedOrder {
   const customerName = payload.customer 
     ? `${payload.customer.first_name} ${payload.customer.last_name}`.trim()

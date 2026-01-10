@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
-import { fetchAllShopifyProducts, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import { fetchAllShopifyProducts, fetchUnfulfilledOrders, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import type { InsertOrderItem } from "@shared/schema";
 import Papa from "papaparse";
 
@@ -382,6 +382,79 @@ export async function registerRoutes(
       console.error("Shopify sync error:", error);
       res.status(500).json({ 
         error: "Failed to sync with Shopify",
+        message: error.message 
+      });
+    }
+  });
+
+  // Shopify Orders Sync - fetch all unfulfilled orders
+  app.post("/api/shopify/sync-orders", async (req, res) => {
+    try {
+      console.log("Starting Shopify orders sync...");
+      
+      const shopifyOrders = await fetchUnfulfilledOrders();
+      console.log(`Fetched ${shopifyOrders.length} unfulfilled orders from Shopify`);
+      
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+      
+      for (const orderData of shopifyOrders) {
+        // Check if order already exists
+        const existingOrder = await storage.getOrderByShopifyId(orderData.shopifyOrderId);
+        
+        if (existingOrder) {
+          // Skip orders that are already being processed or completed
+          if (existingOrder.status !== "ready") {
+            skipped++;
+            continue;
+          }
+          updated++;
+        } else {
+          created++;
+        }
+        
+        // Enrich items with location data
+        const enrichedItems: InsertOrderItem[] = [];
+        for (const item of orderData.items) {
+          const productLocation = await storage.getProductLocationBySku(item.sku);
+          enrichedItems.push({
+            orderId: 0, // Will be set by createOrder
+            shopifyLineItemId: item.shopifyLineItemId,
+            sku: item.sku,
+            name: item.name,
+            quantity: item.quantity,
+            pickedQuantity: 0,
+            status: "pending",
+            location: productLocation?.location || "UNASSIGNED",
+            zone: productLocation?.zone || "U",
+          });
+        }
+        
+        // Create or update order
+        await storage.createOrderWithItems({
+          shopifyOrderId: orderData.shopifyOrderId,
+          orderNumber: orderData.orderNumber,
+          customerName: orderData.customerName,
+          customerEmail: orderData.customerEmail,
+          priority: orderData.priority,
+          status: "ready",
+        }, enrichedItems);
+      }
+      
+      console.log(`Orders sync complete: ${created} created, ${updated} updated, ${skipped} skipped (in progress)`);
+      
+      res.json({
+        success: true,
+        created,
+        updated,
+        skipped,
+        total: shopifyOrders.length,
+      });
+    } catch (error: any) {
+      console.error("Shopify orders sync error:", error);
+      res.status(500).json({ 
+        error: "Failed to sync orders from Shopify",
         message: error.message 
       });
     }
