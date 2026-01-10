@@ -1090,6 +1090,16 @@ export default function Picking() {
       return true;
     });
     
+    // Helper to parse age string like "45m" or "1h 5m" into total minutes
+    const parseAgeToMinutes = (age: string): number => {
+      let total = 0;
+      const hoursMatch = age.match(/(\d+)h/);
+      const minsMatch = age.match(/(\d+)m/);
+      if (hoursMatch) total += parseInt(hoursMatch[1], 10) * 60;
+      if (minsMatch) total += parseInt(minsMatch[1], 10);
+      return total;
+    };
+    
     // Sort the filtered queue
     const sortedQueue = [...filteredQueue].sort((a, b) => {
       switch (sortBy) {
@@ -1104,7 +1114,7 @@ export default function Picking() {
           const bNum = "orderNumber" in b ? (b as SingleOrder).orderNumber || b.id : b.id;
           return aNum.localeCompare(bNum);
         case "age":
-          return a.age.localeCompare(b.age);
+          return parseAgeToMinutes(a.age) - parseAgeToMinutes(b.age);
         default:
           return 0;
       }
