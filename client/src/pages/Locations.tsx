@@ -15,7 +15,8 @@ import {
   Trash2,
   Package,
   FileText,
-  Loader2
+  Loader2,
+  RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -56,6 +57,7 @@ export default function Locations() {
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [importResult, setImportResult] = useState<{ updated: number; notFound: number; errors: string[] } | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [newSku, setNewSku] = useState("");
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
@@ -186,6 +188,24 @@ export default function Locations() {
     }
   };
   
+  const handleShopifySync = async () => {
+    setIsSyncing(true);
+    try {
+      const response = await fetch("/api/shopify/sync", { method: "POST" });
+      const result = await response.json();
+      if (response.ok) {
+        queryClient.invalidateQueries({ queryKey: ["locations"] });
+        alert(`Synced ${result.synced} products from Shopify`);
+      } else {
+        alert(result.error || "Shopify sync failed");
+      }
+    } catch (error) {
+      alert("Failed to sync with Shopify");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+  
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -218,6 +238,16 @@ export default function Locations() {
               className="hidden"
               data-testid="input-csv-file"
             />
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleShopifySync}
+              disabled={isSyncing}
+              data-testid="button-shopify-sync"
+            >
+              <RefreshCw className={cn("h-4 w-4 mr-2", isSyncing && "animate-spin")} />
+              {isSyncing ? "Syncing..." : "Sync Shopify"}
+            </Button>
             <Button variant="outline" size="sm" onClick={handleImportClick} data-testid="button-import-csv">
               <Upload className="h-4 w-4 mr-2" />
               Import CSV
