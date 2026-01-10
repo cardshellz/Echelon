@@ -223,6 +223,128 @@ export async function registerRoutes(
     }
   });
 
+  // ===== PICKING QUEUE API =====
+  
+  // Get orders for picking queue (ready or in_progress)
+  app.get("/api/picking/queue", async (req, res) => {
+    try {
+      const orders = await storage.getOrdersWithItems(["ready", "in_progress"]);
+      res.json(orders);
+    } catch (error) {
+      console.error("Error fetching picking queue:", error);
+      res.status(500).json({ error: "Failed to fetch picking queue" });
+    }
+  });
+
+  // Get a specific order with items
+  app.get("/api/picking/orders/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.getOrderById(id);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      const items = await storage.getOrderItems(id);
+      res.json({ ...order, items });
+    } catch (error) {
+      console.error("Error fetching order:", error);
+      res.status(500).json({ error: "Failed to fetch order" });
+    }
+  });
+
+  // Claim an order for picking
+  app.post("/api/picking/orders/:id/claim", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { pickerId } = req.body;
+      
+      if (!pickerId) {
+        return res.status(400).json({ error: "pickerId is required" });
+      }
+      
+      const order = await storage.claimOrder(id, pickerId);
+      
+      if (!order) {
+        return res.status(409).json({ error: "Order is no longer available" });
+      }
+      
+      const items = await storage.getOrderItems(id);
+      res.json({ ...order, items });
+    } catch (error) {
+      console.error("Error claiming order:", error);
+      res.status(500).json({ error: "Failed to claim order" });
+    }
+  });
+
+  // Release an order (unclaim)
+  app.post("/api/picking/orders/:id/release", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.releaseOrder(id);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error releasing order:", error);
+      res.status(500).json({ error: "Failed to release order" });
+    }
+  });
+
+  // Update item picked status
+  app.patch("/api/picking/items/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { status, pickedQuantity, shortReason } = req.body;
+      
+      const item = await storage.updateOrderItemStatus(id, status, pickedQuantity, shortReason);
+      
+      if (!item) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+      
+      // Update order progress
+      await storage.updateOrderProgress(item.orderId);
+      
+      res.json(item);
+    } catch (error) {
+      console.error("Error updating item:", error);
+      res.status(500).json({ error: "Failed to update item" });
+    }
+  });
+
+  // Mark order as ready to ship
+  app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.updateOrderStatus(id, "ready_to_ship");
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error updating order:", error);
+      res.status(500).json({ error: "Failed to update order" });
+    }
+  });
+
+  // Get all orders (for orders management page)
+  app.get("/api/orders", async (req, res) => {
+    try {
+      const orders = await storage.getOrdersWithItems();
+      res.json(orders);
+    } catch (error) {
+      console.error("Error fetching orders:", error);
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
+  });
+
   // Shopify Sync API
   app.post("/api/shopify/sync", async (req, res) => {
     try {
