@@ -280,11 +280,14 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
   
   const items: ExtractedOrderItem[] = [];
   for (const lineItem of payload.line_items) {
-    // Only import items that require shipping and have a SKU
-    if (lineItem.requires_shipping === true && lineItem.sku && lineItem.sku.trim()) {
+    // Import all items that require shipping, even without SKU
+    if (lineItem.requires_shipping === true) {
+      const sku = lineItem.sku && lineItem.sku.trim() 
+        ? lineItem.sku.trim().toUpperCase() 
+        : `NO-SKU-${lineItem.id}`;
       items.push({
         shopifyLineItemId: String(lineItem.id),
-        sku: lineItem.sku.trim().toUpperCase(),
+        sku,
         name: lineItem.name || lineItem.title,
         quantity: lineItem.quantity,
         imageUrl: lineItem.image?.src || undefined,
