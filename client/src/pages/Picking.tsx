@@ -151,6 +151,7 @@ interface PickBatch {
 // Single order data for single picking mode
 interface SingleOrder {
   id: string;
+  orderNumber: string;
   customer: string;
   items: PickItem[];
   priority: "rush" | "high" | "normal";
@@ -162,6 +163,7 @@ interface SingleOrder {
 const createSingleOrderQueue = (): SingleOrder[] => [
   {
     id: "ORD-1024",
+    orderNumber: "#1024",
     customer: "Alice Freeman",
     priority: "high",
     age: "15m",
@@ -174,6 +176,7 @@ const createSingleOrderQueue = (): SingleOrder[] => [
   },
   {
     id: "ORD-1025",
+    orderNumber: "#1025",
     customer: "Bob Smith",
     priority: "rush",
     age: "8m",
@@ -185,6 +188,7 @@ const createSingleOrderQueue = (): SingleOrder[] => [
   },
   {
     id: "ORD-1026",
+    orderNumber: "#1026",
     customer: "Charlie Davis",
     priority: "normal",
     age: "1h 5m",
@@ -196,6 +200,7 @@ const createSingleOrderQueue = (): SingleOrder[] => [
   },
   {
     id: "ORD-1030",
+    orderNumber: "#1030",
     customer: "Diana Prince",
     priority: "normal",
     age: "45m",
@@ -327,6 +332,7 @@ export default function Picking() {
   // Transform API orders to SingleOrder format for UI
   const ordersFromApi: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
     id: String(order.id),
+    orderNumber: order.orderNumber,
     customer: order.customerName,
     priority: order.priority as "rush" | "high" | "normal",
     age: getOrderAge(order.createdAt),
@@ -952,7 +958,7 @@ export default function Picking() {
     if (activeOrderId && pickingMode === "single") {
       const numericId = parseInt(activeOrderId);
       // Compare as numbers - ordersFromApi has numeric IDs
-      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === numericId);
+      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === String(numericId));
       
       if (isRealOrder) {
         // Check if any items have been picked
@@ -1264,7 +1270,7 @@ export default function Picking() {
                       </div>
                       <div>
                         <div className="font-semibold flex items-center gap-2 text-base">
-                          {order.id}
+                          {order.orderNumber}
                           {order.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
                           {order.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         </div>
