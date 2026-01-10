@@ -259,7 +259,7 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
   const items: ExtractedOrderItem[] = [];
   for (const lineItem of payload.line_items) {
     // Only import items that require shipping and have a SKU
-    if (lineItem.requires_shipping !== false && lineItem.sku && lineItem.sku.trim()) {
+    if (lineItem.requires_shipping === true && lineItem.sku && lineItem.sku.trim()) {
       items.push({
         shopifyLineItemId: String(lineItem.id),
         sku: lineItem.sku.trim().toUpperCase(),
