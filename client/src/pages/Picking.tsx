@@ -23,7 +23,7 @@ import {
   List,
   MapPin,
   RefreshCw,
-  Download
+  CloudDownload
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -950,7 +950,8 @@ export default function Picking() {
     // Release the order if we're picking a real order (from API)
     if (activeOrderId && pickingMode === "single") {
       const numericId = parseInt(activeOrderId);
-      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === activeOrderId);
+      // Compare as numbers - ordersFromApi has numeric IDs
+      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === numericId);
       
       if (isRealOrder) {
         try {
@@ -1120,7 +1121,7 @@ export default function Picking() {
                 disabled={isSyncing}
                 data-testid="button-sync-orders"
               >
-                <Download className={cn("h-4 w-4 mr-2", isSyncing && "animate-bounce")} />
+                <CloudDownload className={cn("h-4 w-4 mr-2", isSyncing && "animate-bounce")} />
                 {isSyncing ? "Syncing..." : "Sync Shopify"}
               </Button>
               {ordersFromApi.length === 0 && (
