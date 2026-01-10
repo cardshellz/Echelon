@@ -1,7 +1,8 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
+import { fetchAllShopifyProducts, verifyShopifyWebhook, extractSkusFromWebhookPayload } from "./shopify";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -114,6 +115,123 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting location:", error);
       res.status(500).json({ error: "Failed to delete location" });
+    }
+  });
+
+  // Shopify Sync API
+  app.post("/api/shopify/sync", async (req, res) => {
+    try {
+      console.log("Starting Shopify SKU sync...");
+      
+      const shopifyProducts = await fetchAllShopifyProducts();
+      console.log(`Fetched ${shopifyProducts.length} SKUs from Shopify`);
+      
+      let created = 0;
+      let updated = 0;
+      
+      for (const product of shopifyProducts) {
+        const existing = await storage.getProductLocationBySku(product.sku);
+        await storage.upsertProductLocationBySku(product.sku, product.name);
+        if (existing) {
+          updated++;
+        } else {
+          created++;
+        }
+      }
+      
+      const validSkus = shopifyProducts.map(p => p.sku);
+      const deleted = await storage.deleteOrphanedSkus(validSkus);
+      
+      console.log(`Sync complete: ${created} created, ${updated} updated, ${deleted} deleted`);
+      
+      res.json({
+        success: true,
+        created,
+        updated,
+        deleted,
+        total: shopifyProducts.length,
+      });
+    } catch (error: any) {
+      console.error("Shopify sync error:", error);
+      res.status(500).json({ 
+        error: "Failed to sync with Shopify",
+        message: error.message 
+      });
+    }
+  });
+
+  // Shopify Webhooks - need raw body for HMAC verification
+  app.post("/api/shopify/webhooks/products/create", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody;
+      
+      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body;
+      const skus = extractSkusFromWebhookPayload(payload);
+      
+      for (const { sku, name } of skus) {
+        await storage.upsertProductLocationBySku(sku, name);
+      }
+      
+      console.log(`Webhook: Created/updated ${skus.length} SKUs from product create`);
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Product create webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  app.post("/api/shopify/webhooks/products/update", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody;
+      
+      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body;
+      const skus = extractSkusFromWebhookPayload(payload);
+      
+      for (const { sku, name } of skus) {
+        await storage.upsertProductLocationBySku(sku, name);
+      }
+      
+      console.log(`Webhook: Updated ${skus.length} SKUs from product update`);
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Product update webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  app.post("/api/shopify/webhooks/products/delete", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody;
+      
+      if (rawBody && !verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body;
+      const skus = extractSkusFromWebhookPayload(payload);
+      const skuList = skus.map(s => s.sku);
+      
+      const deleted = await storage.deleteProductLocationsBySku(skuList);
+      console.log(`Webhook: Deleted ${deleted} SKUs from product delete`);
+      
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Product delete webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
     }
   });
 
