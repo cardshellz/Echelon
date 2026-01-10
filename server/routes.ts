@@ -282,7 +282,8 @@ export async function registerRoutes(
   app.post("/api/picking/orders/:id/release", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const order = await storage.releaseOrder(id);
+      const { resetProgress = true } = req.body || {};
+      const order = await storage.releaseOrder(id, resetProgress);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });

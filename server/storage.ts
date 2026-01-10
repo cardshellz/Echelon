@@ -43,7 +43,7 @@ export interface IStorage {
   getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
   createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
-  releaseOrder(orderId: number): Promise<Order | null>;
+  releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
   
   // Order Items
@@ -233,7 +233,7 @@ export class DatabaseStorage implements IStorage {
     return result[0] || null;
   }
 
-  async releaseOrder(orderId: number): Promise<Order | null> {
+  async releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order | null> {
     const result = await db
       .update(orders)
       .set({
@@ -244,10 +244,12 @@ export class DatabaseStorage implements IStorage {
       .where(eq(orders.id, orderId))
       .returning();
     
-    await db
-      .update(orderItems)
-      .set({ status: "pending" as ItemStatus, pickedQuantity: 0 })
-      .where(eq(orderItems.orderId, orderId));
+    if (resetProgress) {
+      await db
+        .update(orderItems)
+        .set({ status: "pending" as ItemStatus, pickedQuantity: 0 })
+        .where(eq(orderItems.orderId, orderId));
+    }
     
     return result[0] || null;
   }
