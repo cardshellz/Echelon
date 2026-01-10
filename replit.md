@@ -61,6 +61,15 @@ The application includes Progressive Web App configuration with a manifest.json 
 - **PostgreSQL** - Primary database, connection via `DATABASE_URL` or `EXTERNAL_DATABASE_URL` environment variable
 - Drizzle Kit for schema migrations (`npm run db:push`)
 
+**IMPORTANT: External Database Migrations**
+- The app uses `EXTERNAL_DATABASE_URL` (Heroku) in production, not the built-in Replit database
+- Schema changes must be applied to the external database manually:
+  ```bash
+  psql "$EXTERNAL_DATABASE_URL" -c "ALTER TABLE table_name ADD COLUMN column_name TYPE;"
+  ```
+- The `npm run db:push` command only updates the local development database
+- Always verify schema changes against the external database before testing
+
 ### Third-Party Libraries
 - **@tanstack/react-query** - Server state management
 - **drizzle-orm** / **drizzle-zod** - Database ORM with Zod schema generation
