@@ -15,6 +15,7 @@ export interface ShopifyVariant {
 export interface ShopifyProduct {
   id: number;
   title: string;
+  status: "active" | "draft" | "archived";
   variants: ShopifyVariant[];
 }
 
@@ -34,9 +35,9 @@ function getShopifyConfig() {
   };
 }
 
-export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string }[]> {
+export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string }[]> {
   const config = getShopifyConfig();
-  const allSkus: { sku: string; name: string }[] = [];
+  const allSkus: { sku: string; name: string; status: string }[] = [];
   let pageInfo: string | null = null;
   
   do {
@@ -65,6 +66,7 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
           allSkus.push({
             sku: variant.sku.trim().toUpperCase(),
             name: `${product.title}${variantTitle}`,
+            status: product.status,
           });
         }
       }
@@ -108,8 +110,9 @@ export function verifyShopifyWebhook(rawBody: Buffer, hmacHeader: string): boole
   }
 }
 
-export function extractSkusFromWebhookPayload(payload: any): { sku: string; name: string }[] {
-  const skus: { sku: string; name: string }[] = [];
+export function extractSkusFromWebhookPayload(payload: any): { sku: string; name: string; status: string }[] {
+  const skus: { sku: string; name: string; status: string }[] = [];
+  const productStatus = payload.status || "active";
   
   if (payload.variants) {
     for (const variant of payload.variants) {
@@ -118,6 +121,7 @@ export function extractSkusFromWebhookPayload(payload: any): { sku: string; name
         skus.push({
           sku: variant.sku.trim().toUpperCase(),
           name: `${payload.title}${variantTitle}`,
+          status: productStatus,
         });
       }
     }

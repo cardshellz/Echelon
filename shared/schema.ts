@@ -23,6 +23,7 @@ export const productLocations = pgTable("product_locations", {
   name: text("name").notNull(),
   location: varchar("location", { length: 50 }).notNull(),
   zone: varchar("zone", { length: 10 }).notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

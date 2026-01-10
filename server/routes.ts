@@ -131,7 +131,7 @@ export async function registerRoutes(
       
       for (const product of shopifyProducts) {
         const existing = await storage.getProductLocationBySku(product.sku);
-        await storage.upsertProductLocationBySku(product.sku, product.name);
+        await storage.upsertProductLocationBySku(product.sku, product.name, product.status);
         if (existing) {
           updated++;
         } else {
@@ -179,8 +179,8 @@ export async function registerRoutes(
       const payload = req.body;
       const skus = extractSkusFromWebhookPayload(payload);
       
-      for (const { sku, name } of skus) {
-        await storage.upsertProductLocationBySku(sku, name);
+      for (const { sku, name, status } of skus) {
+        await storage.upsertProductLocationBySku(sku, name, status);
       }
       
       console.log(`Webhook: Created/updated ${skus.length} SKUs from product create`);
@@ -209,8 +209,8 @@ export async function registerRoutes(
       const payload = req.body;
       const skus = extractSkusFromWebhookPayload(payload);
       
-      for (const { sku, name } of skus) {
-        await storage.upsertProductLocationBySku(sku, name);
+      for (const { sku, name, status } of skus) {
+        await storage.upsertProductLocationBySku(sku, name, status);
       }
       
       console.log(`Webhook: Updated ${skus.length} SKUs from product update`);
