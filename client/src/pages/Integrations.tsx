@@ -78,7 +78,7 @@ export default function Integrations() {
                     </div>
                     <div>
                       <CardTitle className="text-base">Custom OMS</CardTitle>
-                      <CardDescription>Nexus Internal Order System</CardDescription>
+                      <CardDescription>Echelon Internal Order System</CardDescription>
                     </div>
                   </div>
                 </CardHeader>
@@ -112,7 +112,7 @@ export default function Integrations() {
                        <Settings2 size={24} />
                     </div>
                     <div>
-                      <CardTitle className="text-lg">Nexus WMS Core</CardTitle>
+                      <CardTitle className="text-lg">Echelon Core</CardTitle>
                       <CardDescription>Inventory Ledger & Logic Engine</CardDescription>
                     </div>
                   </div>
@@ -191,7 +191,7 @@ export default function Integrations() {
                        <Power size={20} className="text-slate-500" />
                     </div>
                     <div>
-                      <CardTitle className="text-base">Nexus Shipping</CardTitle>
+                      <CardTitle className="text-base">Echelon Shipping</CardTitle>
                       <CardDescription>Direct Carrier Integration</CardDescription>
                     </div>
                   </div>

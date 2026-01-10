@@ -1,7 +1,7 @@
 {
-  "name": "Nexus WMS",
-  "short_name": "Nexus",
-  "description": "Warehouse Management System for picking, packing, and inventory",
+  "name": "Echelon",
+  "short_name": "Echelon",
+  "description": "End-to-end operations from purchase to fulfillment",
   "start_url": "/picking",
   "display": "standalone",
   "orientation": "portrait",

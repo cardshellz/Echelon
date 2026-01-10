@@ -44,7 +44,7 @@ export default function Login() {
           <div className="h-16 w-16 bg-primary/20 rounded-2xl flex items-center justify-center mb-4">
              <Box className="h-10 w-10 text-primary" />
           </div>
-          <CardTitle className="text-3xl font-bold tracking-tight">Nexus WMS</CardTitle>
+          <CardTitle className="text-3xl font-bold tracking-tight">Echelon</CardTitle>
           <CardDescription className="text-slate-400">
             Enter your Picker ID or scan badge
           </CardDescription>

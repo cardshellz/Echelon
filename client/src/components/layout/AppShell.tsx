@@ -75,7 +75,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
           <div className="bg-primary/20 p-1.5 rounded-md text-primary">
             <Box size={20} />
           </div>
-          <span>Nexus<span className="text-sidebar-foreground/60">WMS</span></span>
+          <span>Echelon</span>
         </div>
         {collapsed && !mobile && (
           <div className="mx-auto bg-primary/20 p-1.5 rounded-md text-primary">
@@ -201,7 +201,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-9" 
               />
             </div>
-            {isMobile && <span className="font-semibold text-lg">NexusWMS</span>}
+            {isMobile && <span className="font-semibold text-lg">Echelon</span>}
           </div>
           
           <div className="flex items-center gap-2">

@@ -1,8 +1,8 @@
-# Nexus WMS - Warehouse Management System
+# Echelon - Operations Management System
 
 ## Overview
 
-Nexus WMS is a full-stack warehouse management system designed for inventory tracking, order processing, and warehouse operations. The application follows a standard warehouse lifecycle: order ingestion, wave/batch planning, picking, packing, and shipping. It's built as a modern web application with a React frontend and Express backend, using PostgreSQL for data persistence.
+Echelon is a full-stack operations management system designed for end-to-end control from product purchase to fulfillment, including inventory tracking, order processing, and warehouse operations. The application follows a standard warehouse lifecycle: order ingestion, wave/batch planning, picking, packing, and shipping. It's built as a modern web application with a React frontend and Express backend, using PostgreSQL for data persistence.
 
 ## User Preferences
 
