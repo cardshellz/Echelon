@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -40,3 +40,64 @@ export const updateProductLocationSchema = createInsertSchema(productLocations).
 export type InsertProductLocation = z.infer<typeof insertProductLocationSchema>;
 export type UpdateProductLocation = z.infer<typeof updateProductLocationSchema>;
 export type ProductLocation = typeof productLocations.$inferSelect;
+
+// Order status workflow: ready → in_progress → completed → ready_to_ship → shipped
+export const orderStatusEnum = ["ready", "in_progress", "completed", "ready_to_ship", "shipped", "cancelled"] as const;
+export type OrderStatus = typeof orderStatusEnum[number];
+
+// Order priority levels
+export const orderPriorityEnum = ["rush", "high", "normal"] as const;
+export type OrderPriority = typeof orderPriorityEnum[number];
+
+// Item status during picking
+export const itemStatusEnum = ["pending", "in_progress", "completed", "short"] as const;
+export type ItemStatus = typeof itemStatusEnum[number];
+
+export const orders = pgTable("orders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  shopifyOrderId: varchar("shopify_order_id", { length: 50 }).notNull().unique(),
+  orderNumber: varchar("order_number", { length: 50 }).notNull(),
+  customerName: text("customer_name").notNull(),
+  customerEmail: text("customer_email"),
+  priority: varchar("priority", { length: 20 }).notNull().default("normal"),
+  status: varchar("status", { length: 20 }).notNull().default("ready"),
+  assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
+  batchId: varchar("batch_id", { length: 50 }),
+  itemCount: integer("item_count").notNull().default(0),
+  pickedCount: integer("picked_count").notNull().default(0),
+  shortReason: text("short_reason"),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+});
+
+export const insertOrderSchema = createInsertSchema(orders).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOrder = z.infer<typeof insertOrderSchema>;
+export type Order = typeof orders.$inferSelect;
+
+export const orderItems = pgTable("order_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }),
+  sku: varchar("sku", { length: 100 }).notNull(),
+  name: text("name").notNull(),
+  quantity: integer("quantity").notNull(),
+  pickedQuantity: integer("picked_quantity").notNull().default(0),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
+  zone: varchar("zone", { length: 10 }).notNull().default("U"),
+  imageUrl: text("image_url"),
+  shortReason: text("short_reason"),
+});
+
+export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
+  id: true,
+});
+
+export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
+export type OrderItem = typeof orderItems.$inferSelect;
