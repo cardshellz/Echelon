@@ -385,8 +385,15 @@ export default function Picking() {
   const releaseMutation = useMutation({
     mutationFn: ({ orderId, resetProgress = true }: { orderId: number; resetProgress?: boolean }) => 
       releaseOrder(orderId, resetProgress),
-    onSuccess: () => {
+    onSuccess: (_, { orderId }) => {
+      // Clear local state for this order so it refreshes from API
+      setLocalSingleQueue(prev => prev.filter(o => o.id !== String(orderId)));
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
+    onError: (error) => {
+      console.error("Failed to release order:", error);
+      // Show error feedback
+      playSound("error");
     },
   });
   
@@ -1053,17 +1060,21 @@ export default function Picking() {
   };
   
   // Release order handler - shows dialog if partially picked
-  const handleReleaseOrder = (orderId: number) => {
+  const handleReleaseOrder = async (orderId: number) => {
     const order = singleQueue.find(o => o.id === String(orderId));
     const pickedCount = order?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
     
     if (pickedCount === 0) {
       // No items picked - just release immediately
-      releaseMutation.mutate({ orderId, resetProgress: true });
-      if (view === "picking") {
-        setView("queue");
-        setActiveOrderId(null);
-        setCurrentItemIndex(0);
+      try {
+        await releaseMutation.mutateAsync({ orderId, resetProgress: true });
+        if (view === "picking") {
+          setView("queue");
+          setActiveOrderId(null);
+          setCurrentItemIndex(0);
+        }
+      } catch (error) {
+        console.error("Failed to release:", error);
       }
     } else {
       // Partially picked - show confirmation dialog
