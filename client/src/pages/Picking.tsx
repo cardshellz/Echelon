@@ -332,11 +332,58 @@ export default function Picking() {
   const { data: apiOrders = [], isLoading, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["picking-queue"],
     queryFn: fetchPickingQueue,
-    refetchInterval: 15000, // Refresh every 15s for near real-time updates
+    refetchInterval: 15000, // Refresh every 15s as fallback
     refetchOnWindowFocus: true, // Refresh when picker returns to app
     refetchOnMount: true, // Always fetch fresh data on mount
     staleTime: 5000, // Consider data stale after 5s
   });
+  
+  // WebSocket for real-time order updates
+  useEffect(() => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout | null = null;
+    
+    const connect = () => {
+      ws = new WebSocket(wsUrl);
+      
+      ws.onopen = () => {
+        console.log("WebSocket connected for real-time order updates");
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "orders:updated") {
+            console.log("New order received via WebSocket, refreshing queue");
+            refetch();
+            if (soundTheme !== "silent") {
+              playSoundLib("success", soundTheme);
+            }
+          }
+        } catch (e) {
+          console.error("WebSocket message parse error:", e);
+        }
+      };
+      
+      ws.onclose = () => {
+        console.log("WebSocket disconnected, reconnecting in 5s...");
+        reconnectTimeout = setTimeout(connect, 5000);
+      };
+      
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+      };
+    };
+    
+    connect();
+    
+    return () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (ws) ws.close();
+    };
+  }, [refetch, soundTheme]);
   
   // Transform API orders to SingleOrder format for UI
   const ordersFromApi: SingleOrder[] = apiOrders.map((order): SingleOrder => ({

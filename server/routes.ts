@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
@@ -738,6 +739,9 @@ export async function registerRoutes(
       }, enrichedItems);
       
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);
+      
+      broadcastOrdersUpdated();
+      
       res.status(200).json({ received: true });
     } catch (error) {
       console.error("Order create webhook error:", error);

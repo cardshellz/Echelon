@@ -3,6 +3,7 @@ import session from "express-session";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
+import { setupWebSocket } from "./websocket";
 import type { SafeUser } from "@shared/schema";
 
 declare module "express-session" {
@@ -13,6 +14,8 @@ declare module "express-session" {
 
 const app = express();
 const httpServer = createServer(app);
+
+setupWebSocket(httpServer);
 
 declare module "http" {
   interface IncomingMessage {
