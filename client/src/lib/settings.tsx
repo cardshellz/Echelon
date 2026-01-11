@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import type { SoundTheme } from "./sounds";
 
 export type PickingMode = "batch" | "single";
 export type PickerViewMode = "focus" | "list";
@@ -12,6 +13,10 @@ interface SettingsContextType {
   setAutoRelease: (enabled: boolean) => void;
   releaseDelay: string;
   setReleaseDelay: (delay: string) => void;
+  soundTheme: SoundTheme;
+  setSoundTheme: (theme: SoundTheme) => void;
+  hapticEnabled: boolean;
+  setHapticEnabled: (enabled: boolean) => void;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(undefined);
@@ -35,6 +40,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [releaseDelay, setReleaseDelayState] = useState(() => {
     return localStorage.getItem("releaseDelay") || "immediate";
   });
+  
+  const [soundTheme, setSoundThemeState] = useState<SoundTheme>(() => {
+    const saved = localStorage.getItem("soundTheme");
+    return (saved as SoundTheme) || "classic";
+  });
+  
+  const [hapticEnabled, setHapticEnabledState] = useState(() => {
+    const saved = localStorage.getItem("hapticEnabled");
+    return saved !== null ? saved === "true" : true;
+  });
 
   const setPickingMode = (mode: PickingMode) => {
     setPickingModeState(mode);
@@ -55,6 +70,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setReleaseDelayState(delay);
     localStorage.setItem("releaseDelay", delay);
   };
+  
+  const setSoundTheme = (theme: SoundTheme) => {
+    setSoundThemeState(theme);
+    localStorage.setItem("soundTheme", theme);
+  };
+  
+  const setHapticEnabled = (enabled: boolean) => {
+    setHapticEnabledState(enabled);
+    localStorage.setItem("hapticEnabled", String(enabled));
+  };
 
   return (
     <SettingsContext.Provider value={{
@@ -66,6 +91,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       setAutoRelease,
       releaseDelay,
       setReleaseDelay,
+      soundTheme,
+      setSoundTheme,
+      hapticEnabled,
+      setHapticEnabled,
     }}>
       {children}
     </SettingsContext.Provider>

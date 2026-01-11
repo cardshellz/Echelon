@@ -129,6 +129,7 @@ import {
   RadioGroupItem,
 } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -284,54 +285,46 @@ const createInitialQueue = (): PickBatch[] => [
   },
 ];
 
-// Sound effects
-const playSound = (type: "success" | "error" | "complete") => {
-  const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const oscillator = audioContext.createOscillator();
-  const gainNode = audioContext.createGain();
-  
-  oscillator.connect(gainNode);
-  gainNode.connect(audioContext.destination);
-  
-  if (type === "success") {
-    oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
-    oscillator.frequency.setValueAtTime(1108, audioContext.currentTime + 0.1);
-    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-    oscillator.start(audioContext.currentTime);
-    oscillator.stop(audioContext.currentTime + 0.2);
-  } else if (type === "error") {
-    oscillator.frequency.setValueAtTime(200, audioContext.currentTime);
-    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
-    oscillator.start(audioContext.currentTime);
-    oscillator.stop(audioContext.currentTime + 0.3);
-  } else if (type === "complete") {
-    oscillator.frequency.setValueAtTime(523, audioContext.currentTime);
-    oscillator.frequency.setValueAtTime(659, audioContext.currentTime + 0.15);
-    oscillator.frequency.setValueAtTime(784, audioContext.currentTime + 0.3);
-    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-    oscillator.start(audioContext.currentTime);
-    oscillator.stop(audioContext.currentTime + 0.5);
-  }
-};
-
-// Haptic feedback
-const triggerHaptic = (type: "light" | "medium" | "heavy") => {
-  if ("vibrate" in navigator) {
-    const patterns = {
-      light: [30],
-      medium: [50],
-      heavy: [100, 30, 100]
-    };
-    navigator.vibrate(patterns[type]);
-  }
-};
+// Sound and haptic imports from shared library
+import { 
+  playSound as playSoundLib, 
+  triggerHaptic as triggerHapticLib,
+  themeNames,
+  themeDescriptions,
+  previewTheme,
+  type SoundTheme,
+  type SoundType
+} from "@/lib/sounds";
 
 export default function Picking() {
-  // Get picking mode and picker view mode from settings (persisted)
-  const { pickingMode, setPickingMode, pickerViewMode, setPickerViewMode } = useSettings();
+  // Get picking mode, view mode, and sound/haptic settings from context
+  const { 
+    pickingMode, setPickingMode, 
+    pickerViewMode, setPickerViewMode,
+    soundTheme, setSoundTheme,
+    hapticEnabled, setHapticEnabled
+  } = useSettings();
+  
+  // Wrapper functions that use settings
+  const playSound = (type: SoundType) => {
+    if (soundTheme !== "silent") {
+      playSoundLib(type, soundTheme);
+    }
+    if (hapticEnabled) {
+      const hapticMap: Record<SoundType, "success" | "error" | "complete"> = {
+        success: "success",
+        error: "error", 
+        complete: "complete"
+      };
+      triggerHapticLib(hapticMap[type]);
+    }
+  };
+  
+  const triggerHaptic = (type: "light" | "medium" | "heavy") => {
+    if (hapticEnabled) {
+      triggerHapticLib(type);
+    }
+  };
   const queryClient = useQueryClient();
   const pickerId = getPickerId();
   
@@ -449,8 +442,11 @@ export default function Picking() {
   const [releaseOrderId, setReleaseOrderId] = useState<number | null>(null);
   
   // Scanner mode settings
-  const [soundEnabled, setSoundEnabled] = useState(true);
   const [scannerMode, setScannerMode] = useState(false);
+  const [soundSettingsOpen, setSoundSettingsOpen] = useState(false);
+  
+  // Computed sound enabled state for icon display
+  const soundEnabled = soundTheme !== "silent";
   
   const scanInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -569,7 +565,7 @@ export default function Picking() {
           setClaimError("This order was just claimed by another picker. The queue has been refreshed.");
           refetch();
           triggerHaptic("heavy");
-          if (soundEnabled) playSound("error");
+          playSound("error");
         }
       } else {
         // Mock order - proceed without API call
@@ -610,7 +606,7 @@ export default function Picking() {
     // Check for match
     if (normalizedInput === normalizedSku) {
       setScanStatus("success");
-      if (soundEnabled) playSound("success");
+      playSound("success");
       triggerHaptic("medium");
       
       if (currentItem.qty > 1) {
@@ -627,7 +623,7 @@ export default function Picking() {
     } else if (normalizedInput.length >= normalizedSku.length && normalizedInput !== normalizedSku) {
       // Wrong barcode scanned
       setScanStatus("error");
-      if (soundEnabled) playSound("error");
+      playSound("error");
       triggerHaptic("heavy");
       
       setTimeout(() => {
@@ -747,7 +743,7 @@ export default function Picking() {
       }));
     }
     
-    if (soundEnabled) playSound("error");
+    playSound("error");
     triggerHaptic("medium");
     
     setShortPickOpen(false);
@@ -777,7 +773,7 @@ export default function Picking() {
     if (matchingIndex !== -1) {
       const item = activeWork.items[matchingIndex];
       setScanStatus("success");
-      if (soundEnabled) playSound("success");
+      playSound("success");
       triggerHaptic("medium");
       
       // Pick the item
@@ -795,7 +791,7 @@ export default function Picking() {
       
       if (!anyMatch) {
         setScanStatus("error");
-        if (soundEnabled) playSound("error");
+        playSound("error");
         triggerHaptic("heavy");
         
         setTimeout(() => {
@@ -850,7 +846,7 @@ export default function Picking() {
     const item = activeWork.items[idx];
     if (!item || item.status === "completed" || item.status === "short") return;
     
-    if (soundEnabled) playSound("success");
+    playSound("success");
     triggerHaptic("medium");
     handleListItemPickDirect(idx, item.qty);
   };
@@ -861,7 +857,7 @@ export default function Picking() {
     const item = activeWork.items[idx];
     if (!item || item.status === "completed" || item.status === "short") return;
     
-    if (soundEnabled) playSound("error");
+    playSound("error");
     triggerHaptic("medium");
     
     if (pickingMode === "batch") {
@@ -918,7 +914,7 @@ export default function Picking() {
           o.id === activeOrderId ? { ...o, status: "completed" as const } : o
         ));
       }
-      if (soundEnabled) playSound("complete");
+      playSound("complete");
       triggerHaptic("heavy");
       setView("complete");
     }
@@ -965,7 +961,7 @@ export default function Picking() {
             o.id === activeOrderId ? { ...o, status: "completed" as const } : o
           ));
         }
-        if (soundEnabled) playSound("complete");
+        playSound("complete");
         triggerHaptic("heavy");
         setView("complete");
       }
@@ -1644,8 +1640,9 @@ export default function Picking() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setSoundEnabled(!soundEnabled)}
+              onClick={() => setSoundSettingsOpen(true)}
               className="h-8 w-8"
+              title="Sound & Haptic Settings"
             >
               {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
             </Button>
@@ -1950,7 +1947,7 @@ export default function Picking() {
                       o.id === activeOrderId ? { ...o, status: "completed" as const } : o
                     ));
                   }
-                  if (soundEnabled) playSound("complete");
+                  playSound("complete");
                   triggerHaptic("heavy");
                   setView("complete");
                 }}
@@ -2012,6 +2009,93 @@ export default function Picking() {
               onClick={() => { setMultiQtyOpen(false); setPickQty(1); }}
             >
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Sound & Haptic Settings Dialog */}
+      <Dialog open={soundSettingsOpen} onOpenChange={setSoundSettingsOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2">
+              <Volume2 className="h-5 w-5" />
+              Sound & Haptic Settings
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="py-4 space-y-6">
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Sound Theme</Label>
+              <RadioGroup 
+                value={soundTheme} 
+                onValueChange={(value) => {
+                  setSoundTheme(value as SoundTheme);
+                  if (value !== "silent") {
+                    setTimeout(() => previewTheme(value as SoundTheme), 100);
+                  }
+                }} 
+                className="space-y-2"
+              >
+                {(Object.keys(themeNames) as SoundTheme[]).map((theme) => (
+                  <div 
+                    key={theme}
+                    className={cn(
+                      "flex items-center justify-between p-3 border rounded-lg cursor-pointer transition-colors",
+                      soundTheme === theme && "border-primary bg-primary/5"
+                    )}
+                    onClick={() => {
+                      setSoundTheme(theme);
+                      if (theme !== "silent") {
+                        setTimeout(() => previewTheme(theme), 100);
+                      }
+                    }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <RadioGroupItem value={theme} id={`theme-${theme}`} />
+                      <div>
+                        <Label htmlFor={`theme-${theme}`} className="cursor-pointer font-medium">
+                          {themeNames[theme]}
+                        </Label>
+                        <p className="text-xs text-muted-foreground">{themeDescriptions[theme]}</p>
+                      </div>
+                    </div>
+                    {theme !== "silent" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 px-2"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          previewTheme(theme);
+                        }}
+                      >
+                        <Volume2 className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </RadioGroup>
+            </div>
+            
+            <div className="flex items-center justify-between p-3 border rounded-lg">
+              <div>
+                <Label className="font-medium">Haptic Feedback</Label>
+                <p className="text-xs text-muted-foreground">Vibration on scan & pick</p>
+              </div>
+              <Switch 
+                checked={hapticEnabled} 
+                onCheckedChange={setHapticEnabled}
+              />
+            </div>
+          </div>
+          
+          <DialogFooter>
+            <Button 
+              className="w-full"
+              onClick={() => setSoundSettingsOpen(false)}
+            >
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>
