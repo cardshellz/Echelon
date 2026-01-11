@@ -14,6 +14,7 @@ import Dropship from "@/pages/Dropship";
 import Picking from "@/pages/Picking";
 import Locations from "@/pages/Locations";
 import Integrations from "@/pages/Integrations";
+import Users from "@/pages/Users";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/not-found";
 
@@ -88,6 +89,9 @@ function Router() {
         </Route>
         <Route path="/integrations">
           <ProtectedRoute component={Integrations} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/users">
+          <ProtectedRoute component={Users} allowedRoles={["admin"]} />
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />

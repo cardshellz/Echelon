@@ -70,6 +70,67 @@ export async function registerRoutes(
     }
   });
   
+  // User Management API (admin only)
+  app.get("/api/users", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const users = await storage.getAllUsers();
+      res.json(users);
+    } catch (error) {
+      console.error("Error fetching users:", error);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+  
+  app.post("/api/users", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const { username, password, role, displayName } = req.body;
+      
+      if (!username || !password) {
+        return res.status(400).json({ error: "Username and password required" });
+      }
+      
+      // Check if username already exists
+      const existing = await storage.getUserByUsername(username);
+      if (existing) {
+        return res.status(400).json({ error: "Username already exists" });
+      }
+      
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      const user = await storage.createUser({
+        username,
+        password: hashedPassword,
+        role: role || "picker",
+        displayName: displayName || username,
+      });
+      
+      // Return safe user (without password)
+      const safeUser: SafeUser = {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        displayName: user.displayName,
+        active: user.active,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+      };
+      
+      res.status(201).json(safeUser);
+    } catch (error) {
+      console.error("Error creating user:", error);
+      res.status(500).json({ error: "Failed to create user" });
+    }
+  });
+  
   // Product Locations API
   
   // Get all locations
