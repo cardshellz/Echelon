@@ -18,7 +18,8 @@ import {
   LucideIcon,
   Globe,
   Cable,
-  MapPin
+  MapPin,
+  LogOut
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
+import { useAuth } from "@/lib/auth";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -45,28 +47,39 @@ interface SidebarProps {
 }
 
 type NavItem = 
-  | { type: 'link'; label: string; icon: LucideIcon; href: string }
-  | { type: 'separator'; label: string };
+  | { type: 'link'; label: string; icon: LucideIcon; href: string; roles?: string[] }
+  | { type: 'separator'; label: string; roles?: string[] };
 
 const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mobile?: boolean, onClose?: () => void }) => {
   const [location] = useLocation();
+  const { user, logout } = useAuth();
 
-  const navItems: NavItem[] = [
-    { type: 'link', label: "Dashboard", icon: LayoutDashboard, href: "/" },
-    { type: "separator", label: "Operations" },
-    { type: 'link', label: "Inventory (WMS)", icon: Package, href: "/inventory" },
-    { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders" },
+  const allNavItems: NavItem[] = [
+    { type: 'link', label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
+    { type: "separator", label: "Operations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Inventory (WMS)", icon: Package, href: "/inventory", roles: ["admin", "lead"] },
+    { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Picking & Packing", icon: ClipboardList, href: "/picking" },
-    { type: 'link', label: "Product Locations", icon: MapPin, href: "/locations" },
-    { type: 'link', label: "Shipping", icon: Truck, href: "/shipping" },
-    { type: "separator", label: "Dropship & Integrations" },
-    { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship" },
-    { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations" },
-    { type: "separator", label: "Management" },
-    { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing" },
-    { type: 'link', label: "Vendors", icon: Users, href: "/vendors" },
-    { type: 'link', label: "Analytics", icon: BarChart3, href: "/analytics" },
+    { type: 'link', label: "Product Locations", icon: MapPin, href: "/locations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
+    { type: "separator", label: "Dropship & Integrations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship", roles: ["admin", "lead"] },
+    { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations", roles: ["admin"] },
+    { type: "separator", label: "Management", roles: ["admin", "lead"] },
+    { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing", roles: ["admin", "lead"] },
+    { type: 'link', label: "Vendors", icon: Users, href: "/vendors", roles: ["admin", "lead"] },
+    { type: 'link', label: "Analytics", icon: BarChart3, href: "/analytics", roles: ["admin", "lead"] },
   ];
+  
+  const navItems = allNavItems.filter(item => {
+    if (!item.roles) return true;
+    return user && item.roles.includes(user.role);
+  });
+  
+  const handleLogout = async () => {
+    await logout();
+    window.location.href = "/login";
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -121,18 +134,29 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
       </ScrollArea>
 
       <div className="p-4 border-t border-sidebar-border/50">
-        {(!collapsed || mobile) && (
+        {(!collapsed || mobile) && user && (
           <div className="flex items-center gap-3 mb-4 px-2">
             <Avatar className="h-8 w-8 border border-sidebar-border">
-              <AvatarImage src="https://github.com/shadcn.png" />
-              <AvatarFallback>JD</AvatarFallback>
+              <AvatarFallback>{(user.displayName || user.username).slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
             <div className="flex flex-col overflow-hidden">
-              <span className="text-sm font-medium truncate">John Doe</span>
-              <span className="text-xs text-sidebar-foreground/50 truncate">Warehouse Mgr</span>
+              <span className="text-sm font-medium truncate">{user.displayName || user.username}</span>
+              <span className="text-xs text-sidebar-foreground/50 truncate capitalize">{user.role}</span>
             </div>
           </div>
         )}
+        <Button 
+          variant="ghost" 
+          size="sm"
+          onClick={handleLogout}
+          className={cn(
+            "w-full text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+            collapsed && !mobile ? "justify-center px-2" : "justify-start gap-2"
+          )}
+        >
+          <LogOut size={16} />
+          {(!collapsed || mobile) && <span>Log out</span>}
+        </Button>
       </div>
     </div>
   );
@@ -230,7 +254,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuItem>Settings</DropdownMenuItem>
                 <DropdownMenuItem>Billing</DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem>Log out</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { 
+                  fetch("/api/auth/logout", { method: "POST" }).then(() => {
+                    window.location.href = "/login";
+                  });
+                }}>Log out</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>

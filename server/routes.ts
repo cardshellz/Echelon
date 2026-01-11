@@ -3,13 +3,73 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
-import type { InsertOrderItem } from "@shared/schema";
+import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
+import bcrypt from "bcrypt";
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  
+  // Auth API
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      
+      if (!username || !password) {
+        return res.status(400).json({ error: "Username and password required" });
+      }
+      
+      const user = await storage.getUserByUsername(username);
+      
+      if (!user || !user.active) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      
+      const validPassword = await bcrypt.compare(password, user.password);
+      
+      if (!validPassword) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
+      
+      await storage.updateUserLastLogin(user.id);
+      
+      const safeUser: SafeUser = {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        displayName: user.displayName,
+        active: user.active,
+        createdAt: user.createdAt,
+        lastLoginAt: new Date(),
+      };
+      
+      req.session.user = safeUser;
+      res.json({ user: safeUser });
+    } catch (error) {
+      console.error("Login error:", error);
+      res.status(500).json({ error: "Login failed" });
+    }
+  });
+  
+  app.post("/api/auth/logout", (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: "Logout failed" });
+      }
+      res.json({ success: true });
+    });
+  });
+  
+  app.get("/api/auth/me", (req, res) => {
+    if (req.session.user) {
+      res.json({ user: req.session.user });
+    } else {
+      res.status(401).json({ error: "Not authenticated" });
+    }
+  });
+  
   // Product Locations API
   
   // Get all locations

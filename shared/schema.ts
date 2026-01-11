@@ -3,19 +3,32 @@ import { pgTable, text, varchar, integer, timestamp, jsonb } from "drizzle-orm/p
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// User roles
+export const userRoleEnum = ["admin", "lead", "picker"] as const;
+export type UserRole = typeof userRoleEnum[number];
+
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
+  role: varchar("role", { length: 20 }).notNull().default("picker"),
+  displayName: text("display_name"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastLoginAt: timestamp("last_login_at"),
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
   password: true,
+  role: true,
+  displayName: true,
 });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+export type SafeUser = Omit<User, "password">;
 
 export const productLocations = pgTable("product_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

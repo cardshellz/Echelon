@@ -1,10 +1,11 @@
 import React from "react";
-import { Switch, Route, useLocation } from "wouter";
+import { Switch, Route, useLocation, Redirect } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
+import { AuthProvider, useAuth } from "@/lib/auth";
 import Layout from "@/components/layout/AppShell";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
@@ -16,29 +17,84 @@ import Integrations from "@/pages/Integrations";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/not-found";
 
+function ProtectedRoute({ 
+  component: Component, 
+  allowedRoles 
+}: { 
+  component: React.ComponentType; 
+  allowedRoles?: string[];
+}) {
+  const { user, isLoading } = useAuth();
+  
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+  
+  if (!user) {
+    return <Redirect to="/login" />;
+  }
+  
+  if (allowedRoles && !allowedRoles.includes(user.role)) {
+    return <Redirect to="/picking" />;
+  }
+  
+  return <Component />;
+}
+
 function Router() {
   const [location] = useLocation();
+  const { user, isLoading } = useAuth();
 
   if (location === "/login") {
     return <Login />;
   }
+  
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+  
+  if (!user) {
+    return <Redirect to="/login" />;
+  }
+
+  const isPickerOnly = user.role === "picker";
 
   return (
     <Layout>
       <Switch>
-        <Route path="/" component={Dashboard} />
-        <Route path="/inventory" component={Inventory} />
-        <Route path="/orders" component={Orders} />
-        <Route path="/dropship" component={Dropship} />
+        <Route path="/">
+          {isPickerOnly ? <Redirect to="/picking" /> : <Dashboard />}
+        </Route>
+        <Route path="/inventory">
+          <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/orders">
+          <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/dropship">
+          <ProtectedRoute component={Dropship} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/picking" component={Picking} />
-        <Route path="/locations" component={Locations} />
-        <Route path="/integrations" component={Integrations} />
-        
-        {/* Placeholders for routes we haven't built deep yet, re-using Inventory/Orders style for consistency if clicked */}
-        <Route path="/shipping" component={Orders} />
-        <Route path="/purchasing" component={Inventory} />
-        
-        {/* Fallback to 404 */}
+        <Route path="/locations">
+          <ProtectedRoute component={Locations} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/integrations">
+          <ProtectedRoute component={Integrations} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/shipping">
+          <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/purchasing">
+          <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route component={NotFound} />
       </Switch>
     </Layout>
@@ -48,12 +104,14 @@ function Router() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <SettingsProvider>
-        <TooltipProvider>
-          <Toaster />
-          <Router />
-        </TooltipProvider>
-      </SettingsProvider>
+      <AuthProvider>
+        <SettingsProvider>
+          <TooltipProvider>
+            <Toaster />
+            <Router />
+          </TooltipProvider>
+        </SettingsProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

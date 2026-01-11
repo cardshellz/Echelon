@@ -1,6 +1,7 @@
 import { 
   type User, 
   type InsertUser, 
+  type SafeUser,
   type ProductLocation, 
   type InsertProductLocation,
   type UpdateProductLocation,
@@ -22,6 +23,8 @@ export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  updateUserLastLogin(id: string): Promise<void>;
+  getAllUsers(): Promise<SafeUser[]>;
   
   // Product Locations
   getAllProductLocations(): Promise<ProductLocation[]>;
@@ -67,6 +70,23 @@ export class DatabaseStorage implements IStorage {
   async createUser(insertUser: InsertUser): Promise<User> {
     const result = await db.insert(users).values(insertUser).returning();
     return result[0];
+  }
+
+  async updateUserLastLogin(id: string): Promise<void> {
+    await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, id));
+  }
+
+  async getAllUsers(): Promise<SafeUser[]> {
+    const result = await db.select({
+      id: users.id,
+      username: users.username,
+      role: users.role,
+      displayName: users.displayName,
+      active: users.active,
+      createdAt: users.createdAt,
+      lastLoginAt: users.lastLoginAt,
+    }).from(users);
+    return result as SafeUser[];
   }
 
   // Product Location methods
