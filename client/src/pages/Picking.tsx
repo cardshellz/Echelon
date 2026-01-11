@@ -1963,26 +1963,21 @@ export default function Picking() {
                         )}
                         
                         {/* Item info */}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-base">{item.sku}</span>
+                        <div className="flex-1 min-w-0 overflow-hidden">
+                          <div className="flex items-center gap-1">
+                            <span className="font-mono font-bold text-sm truncate">{item.sku}</span>
                             {item.status === "completed" && (
-                              <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">Done</Badge>
+                              <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 shrink-0">Done</Badge>
                             )}
                             {item.status === "short" && (
-                              <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">Short</Badge>
+                              <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">Short</Badge>
                             )}
                           </div>
                           <div className="text-xs text-muted-foreground truncate">{item.name}</div>
-                        </div>
-                        
-                        {/* Location */}
-                        <div className="text-right shrink-0">
-                          <div className="flex items-center gap-1 text-primary font-mono font-bold text-sm">
+                          <div className="flex items-center gap-1 text-primary font-mono text-xs mt-0.5">
                             <MapPin className="h-3 w-3" />
                             {item.location}
                           </div>
-                          <div className="text-xs text-muted-foreground">Qty: {item.qty}</div>
                         </div>
                         
                         {/* Quick action buttons */}
@@ -1991,7 +1986,7 @@ export default function Picking() {
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-10 w-10 text-emerald-600 hover:bg-emerald-50"
+                              className="h-9 w-9 text-emerald-600 hover:bg-emerald-50"
                               onClick={() => handleListItemPick(idx)}
                               data-testid={`button-pick-${item.id}`}
                             >
@@ -2000,7 +1995,7 @@ export default function Picking() {
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-10 w-10 text-amber-600 hover:bg-amber-50"
+                              className="h-9 w-9 text-amber-600 hover:bg-amber-50"
                               onClick={() => handleListItemShort(idx)}
                               data-testid={`button-short-${item.id}`}
                             >
