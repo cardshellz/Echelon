@@ -26,6 +26,8 @@ import {
   CloudDownload,
   Search,
   ArrowUpDown,
+  ArrowDown,
+  ArrowUp,
   X,
   Unlock
 } from "lucide-react";
@@ -484,7 +486,8 @@ export default function Picking() {
   
   // Search, sort, and filter state
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("priority");
+  const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("age");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done">("all");
   
   // UI state
@@ -1199,22 +1202,28 @@ export default function Picking() {
     
     // Sort the filtered queue
     const sortedQueue = [...filteredQueue].sort((a, b) => {
+      let result = 0;
       switch (sortBy) {
         case "priority": {
           const priorityOrder = { rush: 0, high: 1, normal: 2 };
-          return priorityOrder[a.priority] - priorityOrder[b.priority];
+          result = priorityOrder[a.priority] - priorityOrder[b.priority];
+          break;
         }
         case "items":
-          return b.items.length - a.items.length;
+          result = a.items.length - b.items.length;
+          break;
         case "order":
           const aNum = "orderNumber" in a ? (a as SingleOrder).orderNumber || a.id : a.id;
           const bNum = "orderNumber" in b ? (b as SingleOrder).orderNumber || b.id : b.id;
-          return aNum.localeCompare(bNum);
+          result = aNum.localeCompare(bNum);
+          break;
         case "age":
-          return parseAgeToMinutes(a.age) - parseAgeToMinutes(b.age);
+          result = parseAgeToMinutes(a.age) - parseAgeToMinutes(b.age);
+          break;
         default:
-          return 0;
+          result = 0;
       }
+      return sortDirection === "desc" ? -result : result;
     });
     
     return (
@@ -1416,18 +1425,33 @@ export default function Picking() {
                 </Button>
               )}
             </div>
-            <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-              <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-sort">
-                <ArrowUpDown className="h-4 w-4 mr-2" />
-                <SelectValue placeholder="Sort by..." />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="priority">Priority</SelectItem>
-                <SelectItem value="items">Item Count</SelectItem>
-                <SelectItem value="order">Order #</SelectItem>
-                <SelectItem value="age">Age</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="flex items-center gap-1">
+              <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                <SelectTrigger className="w-full sm:w-[140px]" data-testid="select-sort">
+                  <SelectValue placeholder="Sort by..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="priority">Priority</SelectItem>
+                  <SelectItem value="items">Item Count</SelectItem>
+                  <SelectItem value="order">Order #</SelectItem>
+                  <SelectItem value="age">Order Age</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => setSortDirection(sortDirection === "asc" ? "desc" : "asc")}
+                className="h-10 w-10"
+                title={sortDirection === "desc" ? "Sorted high to low (click to reverse)" : "Sorted low to high (click to reverse)"}
+                data-testid="button-sort-direction"
+              >
+                {sortDirection === "desc" ? (
+                  <ArrowDown className="h-4 w-4" />
+                ) : (
+                  <ArrowUp className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
           </div>
           {(searchQuery || activeFilter !== "all") && (
             <div className="flex items-center gap-2 mt-2 text-sm text-muted-foreground">
