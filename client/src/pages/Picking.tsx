@@ -328,11 +328,14 @@ export default function Picking() {
   const queryClient = useQueryClient();
   const pickerId = getPickerId();
   
-  // Fetch orders from API
-  const { data: apiOrders = [], isLoading, refetch } = useQuery({
+  // Fetch orders from API - auto-refresh every 15s and when window regains focus
+  const { data: apiOrders = [], isLoading, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["picking-queue"],
     queryFn: fetchPickingQueue,
-    refetchInterval: 30000, // Refresh every 30s
+    refetchInterval: 15000, // Refresh every 15s for near real-time updates
+    refetchOnWindowFocus: true, // Refresh when picker returns to app
+    refetchOnMount: true, // Always fetch fresh data on mount
+    staleTime: 5000, // Consider data stale after 5s
   });
   
   // Transform API orders to SingleOrder format for UI
