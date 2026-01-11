@@ -41,11 +41,21 @@ The backend follows a clean separation:
 - `/shared/schema.ts` - Drizzle schema definitions and Zod validation schemas shared between frontend and backend
 
 ### Database Schema
-Two main tables:
-1. **users** - Authentication (id, username, password)
+Main tables:
+1. **users** - Authentication with role-based access (id, username, password, role, displayName, active, createdAt, lastLoginAt)
 2. **product_locations** - SKU to warehouse location mapping (id, sku, name, location, zone, updatedAt)
+3. **orders** - Order tracking with picking workflow status
+4. **order_items** - Line items for each order with picking progress
 
 Location format follows warehouse convention: Zone-Aisle-Rack-Bin (e.g., "A-01-02-B")
+
+### Authentication & Authorization
+- **Session-based auth** using express-session with cookie storage
+- **Roles**: admin, lead, picker
+- **Route protection**: Pickers only see Picking page; admins/leads see full navigation
+- **Default users**:
+  - admin / admin123 (full access)
+  - picker1 / picker123 (picking only)
 
 ### Build System
 - Development: Vite dev server with HMR for frontend, tsx for backend

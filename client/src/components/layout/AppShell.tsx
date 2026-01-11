@@ -113,20 +113,20 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
             const Icon = item.icon;
             
             return (
-              <Link key={index} href={item.href}>
-                <a 
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2 rounded-md transition-colors text-sm font-medium",
-                    isActive 
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground" 
-                      : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                    collapsed && !mobile && "justify-center px-2"
-                  )}
-                  onClick={mobile ? onClose : undefined}
-                >
-                  <Icon size={20} className={cn(collapsed && !mobile && "mx-auto")} />
-                  {(!collapsed || mobile) && <span>{item.label}</span>}
-                </a>
+              <Link 
+                key={index} 
+                href={item.href}
+                className={cn(
+                  "flex items-center gap-3 px-3 py-2 rounded-md transition-colors text-sm font-medium",
+                  isActive 
+                    ? "bg-sidebar-primary text-sidebar-primary-foreground" 
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                  collapsed && !mobile && "justify-center px-2"
+                )}
+                onClick={mobile ? onClose : undefined}
+              >
+                <Icon size={20} className={cn(collapsed && !mobile && "mx-auto")} />
+                {(!collapsed || mobile) && <span>{item.label}</span>}
               </Link>
             );
           })}
