@@ -927,11 +927,15 @@ export default function Picking() {
       
       if (matchingIndex !== -1) {
         const item = activeWork.items[matchingIndex];
-        addDebug(`MATCH! ${item.sku}`);
+        const newPicked = item.picked + 1;
+        const isItemComplete = newPicked >= item.qty;
+        addDebug(`MATCH! ${item.sku} (${newPicked}/${item.qty})`);
         setScanStatus("success");
         playSound("success");
         triggerHaptic("medium");
-        handleListItemPickDirect(matchingIndex, item.qty);
+        
+        // Pick one unit at a time
+        handleListItemPickOne(matchingIndex);
         
         setTimeout(() => {
           setScanStatus("idle");
@@ -959,14 +963,97 @@ export default function Picking() {
     addDebug(`Input: "${value}"`);
   };
   
-  // Handle picking an item directly from list view by index
+  // Handle picking ONE unit of an item (for scanning - increments by 1)
+  const handleListItemPickOne = (idx: number) => {
+    if (!activeWork) return;
+    
+    const item = activeWork.items[idx];
+    if (!item) return;
+    
+    const newPicked = item.picked + 1;
+    const isItemComplete = newPicked >= item.qty;
+    
+    console.log("[PICK] Picking 1 unit of:", item.sku, `(${newPicked}/${item.qty})`);
+    
+    // Visual feedback
+    setLastScannedItemId(item.id);
+    setTimeout(() => setLastScannedItemId(null), 2000);
+    
+    // Sync with API for single mode
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem && pickingMode === "single") {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
+        pickedQuantity: newPicked 
+      });
+    }
+    
+    // Helper to check completion and handle it
+    const checkAndHandleCompletion = (items: typeof activeWork.items) => {
+      const allDone = items.every(it => it.status === "completed" || it.status === "short");
+      if (allDone) {
+        setTimeout(() => {
+          playSound("complete");
+          triggerHaptic("heavy");
+          setActiveOrderId(null);
+          setActiveBatchId(null);
+          setView("queue");
+        }, 500);
+      }
+      return allDone;
+    };
+    
+    if (pickingMode === "batch") {
+      // Update batch queue
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        
+        const newItems = batch.items.map((it, i) => {
+          if (i !== idx) return it;
+          return {
+            ...it,
+            picked: newPicked,
+            status: isItemComplete ? "completed" as const : "in_progress" as const
+          };
+        });
+        
+        checkAndHandleCompletion(newItems);
+        return { ...batch, items: newItems };
+      }));
+    } else {
+      // Update single order queue
+      setLocalSingleQueue(prev => {
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
+        
+        return base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          
+          const newItems = order.items.map((it, i) => {
+            if (i !== idx) return it;
+            return {
+              ...it,
+              picked: newPicked,
+              status: isItemComplete ? "completed" as const : "in_progress" as const
+            };
+          });
+          
+          const allDone = checkAndHandleCompletion(newItems);
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
+        });
+      });
+    }
+  };
+  
+  // Handle picking an item directly from list view by index (picks full qty - for button clicks)
   const handleListItemPickDirect = (idx: number, qty: number) => {
     if (!activeWork) return;
     
     const item = activeWork.items[idx];
     if (!item) return;
     
-    console.log("[PICK] Picking item:", item.sku, "idx:", idx, "qty:", qty);
+    console.log("[PICK] Picking full qty:", item.sku, "idx:", idx, "qty:", qty);
     
     // Visual feedback - highlight the scanned item
     setLastScannedItemId(item.id);
@@ -1018,8 +1105,19 @@ export default function Picking() {
             };
           });
           
+          // Check if order is now complete
+          const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+          if (allDone) {
+            setTimeout(() => {
+              playSound("complete");
+              triggerHaptic("heavy");
+              setActiveOrderId(null);
+              setView("queue");
+            }, 500);
+          }
+          
           console.log("[PICK] Updated items:", newItems.map(i => ({ sku: i.sku, status: i.status })));
-          return { ...order, items: newItems };
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
       });
     }
