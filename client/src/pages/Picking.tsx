@@ -559,6 +559,7 @@ export default function Picking() {
   // Scanner mode settings
   const [scannerMode, setScannerMode] = useState(false);
   const [soundSettingsOpen, setSoundSettingsOpen] = useState(false);
+  const [lastScannedItemId, setLastScannedItemId] = useState<number | null>(null);
   
   // Computed sound enabled state for icon display
   const soundEnabled = soundTheme !== "silent";
@@ -926,6 +927,10 @@ export default function Picking() {
     
     const item = activeWork.items[idx];
     if (!item) return;
+    
+    // Visual feedback - highlight the scanned item
+    setLastScannedItemId(item.id);
+    setTimeout(() => setLastScannedItemId(null), 2000);
     
     // Sync with API if this is a real order item
     const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
@@ -2037,114 +2042,99 @@ export default function Picking() {
             </div>
           </div>
           
-          {/* Scrollable item list */}
+          {/* Scrollable item list - COMPACT ROWS */}
           <ScrollArea className="flex-1">
-            <div className="space-y-2 pb-4">
+            <div className="space-y-1 pb-4">
               {activeWork?.items.map((item, idx) => {
                 const remaining = item.qty - item.picked;
                 const isCompleted = item.status === "completed" || item.status === "short";
+                const justScanned = item.id === lastScannedItemId;
                 
                 return (
-                  <Card 
+                  <div 
                     key={item.id} 
                     className={cn(
-                      "transition-all duration-200",
-                      isCompleted && "opacity-60 bg-muted/30",
-                      idx === currentItemIndex && !isCompleted && "border-primary border-2 shadow-md"
+                      "flex items-center gap-2 p-2 rounded-lg border transition-all duration-300",
+                      // Completed states
+                      item.status === "completed" && "bg-emerald-50 border-emerald-200",
+                      item.status === "short" && "bg-amber-50 border-amber-200",
+                      // Pending state
+                      !isCompleted && "bg-white border-slate-200",
+                      // Just scanned - flash effect
+                      justScanned && "ring-2 ring-emerald-500 bg-emerald-100 animate-pulse"
                     )}
                     data-testid={`list-item-${item.id}`}
                   >
-                    <CardContent className="p-2">
-                      {/* BIN LOCATION - TOP, VERY PROMINENT */}
-                      <div className="rounded-lg py-2 px-3 mb-2 text-center bg-primary/15 border-2 border-primary/30">
-                        <div className={cn(
-                          "text-3xl font-black font-mono tracking-wide",
-                          isCompleted ? "text-muted-foreground" : "text-primary"
+                    {/* Status/Qty indicator */}
+                    <div className={cn(
+                      "h-10 w-10 rounded flex items-center justify-center shrink-0 text-lg font-bold",
+                      item.status === "completed" && "bg-emerald-500 text-white",
+                      item.status === "short" && "bg-amber-500 text-white",
+                      !isCompleted && "bg-slate-100 text-slate-700"
+                    )}>
+                      {item.status === "completed" ? (
+                        <CheckCircle2 className="h-5 w-5" />
+                      ) : item.status === "short" ? (
+                        <AlertTriangle className="h-5 w-5" />
+                      ) : (
+                        <span>{remaining}</span>
+                      )}
+                    </div>
+                    
+                    {/* Product image */}
+                    {item.image ? (
+                      <img 
+                        src={item.image} 
+                        alt=""
+                        className="h-10 w-10 rounded object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="h-10 w-10 rounded bg-slate-100 flex items-center justify-center shrink-0">
+                        <Package className="h-4 w-4 text-slate-400" />
+                      </div>
+                    )}
+                    
+                    {/* Info - SKU and Location */}
+                    <div className="flex-1 min-w-0">
+                      <div className="font-mono text-sm font-medium truncate">{item.sku}</div>
+                      <div className="flex items-center gap-2">
+                        <span className={cn(
+                          "text-lg font-black font-mono",
+                          isCompleted ? "text-slate-400" : "text-primary"
                         )}>
                           {item.location}
-                        </div>
+                        </span>
                         {isCompleted && (
-                          <div className="text-xs text-muted-foreground mt-0.5">
-                            {item.status === "completed" ? "Picked" : "Short"}
-                          </div>
+                          <span className="text-xs font-medium text-emerald-600">
+                            {item.status === "completed" ? "✓ Picked" : "⚠ Short"}
+                          </span>
                         )}
                       </div>
-                      
-                      <div className="flex items-center gap-2">
-                        {/* Quantity badge */}
-                        <div className={cn(
-                          "h-12 w-12 rounded-lg flex items-center justify-center shrink-0 text-xl font-bold",
-                          item.status === "completed" && "bg-emerald-100 text-emerald-600",
-                          item.status === "short" && "bg-amber-100 text-amber-600",
-                          item.status === "pending" && "bg-slate-100 text-slate-700",
-                          item.status === "in_progress" && "bg-primary/10 text-primary"
-                        )}>
-                          {item.status === "completed" ? (
-                            <CheckCircle2 className="h-6 w-6" />
-                          ) : item.status === "short" ? (
-                            <AlertTriangle className="h-6 w-6" />
-                          ) : (
-                            <span>{remaining}</span>
-                          )}
-                        </div>
-                        
-                        {/* Product thumbnail */}
-                        {item.image ? (
-                          <img 
-                            src={item.image} 
-                            alt={item.name}
-                            className="h-12 w-12 rounded object-cover shrink-0 border"
-                          />
-                        ) : (
-                          <div className="h-12 w-12 rounded bg-muted flex items-center justify-center shrink-0 border">
-                            <Package className="h-6 w-6 text-muted-foreground" />
-                          </div>
-                        )}
-                        
-                        {/* Item info */}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-mono font-semibold text-sm truncate">{item.sku}</span>
-                            {item.status === "completed" && (
-                              <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 shrink-0">Done</Badge>
-                            )}
-                            {item.status === "short" && (
-                              <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">Short</Badge>
-                            )}
-                          </div>
-                          <div className="text-xs text-muted-foreground truncate">{item.name}</div>
-                          {/* Barcode - small and subtle */}
-                          {item.barcode && (
-                            <div className="text-[10px] text-muted-foreground/70 font-mono truncate">{item.barcode}</div>
-                          )}
-                        </div>
-                        
-                        {/* Quick action buttons */}
-                        {!isCompleted && (
-                          <div className="flex gap-1 shrink-0">
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-10 w-10 text-emerald-600 hover:bg-emerald-50"
-                              onClick={() => handleListItemPick(idx)}
-                              data-testid={`button-pick-${item.id}`}
-                            >
-                              <CheckCircle2 className="h-6 w-6" />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-10 w-10 text-amber-600 hover:bg-amber-50"
-                              onClick={() => handleListItemShort(idx)}
-                              data-testid={`button-short-${item.id}`}
-                            >
-                              <AlertTriangle className="h-6 w-6" />
-                            </Button>
-                          </div>
-                        )}
+                    </div>
+                    
+                    {/* Action buttons */}
+                    {!isCompleted && (
+                      <div className="flex gap-1 shrink-0">
+                        <Button
+                          size="icon"
+                          className="h-10 w-10 bg-emerald-500 hover:bg-emerald-600 text-white"
+                          onClick={() => handleListItemPick(idx)}
+                          data-testid={`button-pick-${item.id}`}
+                        >
+                          <CheckCircle2 className="h-5 w-5" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          className="h-10 w-10 text-amber-600 border-amber-300 hover:bg-amber-50"
+                          onClick={() => handleListItemShort(idx)}
+                          data-testid={`button-short-${item.id}`}
+                        >
+                          <AlertTriangle className="h-5 w-5" />
+                        </Button>
                       </div>
-                    </CardContent>
-                  </Card>
+                    )}
+                  </div>
                 );
               })}
             </div>
