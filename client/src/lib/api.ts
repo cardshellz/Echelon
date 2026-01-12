@@ -55,3 +55,26 @@ export const locationsApi = {
     if (!response.ok) throw new Error("Failed to delete location");
   },
 };
+
+// Order hold/release API
+export async function holdOrder(orderId: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/orders/${orderId}/hold`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Failed to hold order" }));
+    throw new Error(error.error || "Failed to hold order");
+  }
+}
+
+export async function releaseHoldOrder(orderId: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/orders/${orderId}/release-hold`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Failed to release hold" }));
+    throw new Error(error.error || "Failed to release hold");
+  }
+}

@@ -29,10 +29,13 @@ import {
   ArrowDown,
   ArrowUp,
   X,
-  Unlock
+  Unlock,
+  Pause,
+  Play
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
+import { useAuth } from "@/lib/auth";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
 // API response type
@@ -64,6 +67,24 @@ async function releaseOrder(orderId: number, resetProgress: boolean = true): Pro
     body: JSON.stringify({ resetProgress }),
   });
   if (!res.ok) throw new Error("Failed to release order");
+  return res.json();
+}
+
+async function holdOrder(orderId: number): Promise<Order> {
+  const res = await fetch(`/api/orders/${orderId}/hold`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error("Failed to hold order");
+  return res.json();
+}
+
+async function releaseHoldOrder(orderId: number): Promise<Order> {
+  const res = await fetch(`/api/orders/${orderId}/release-hold`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error("Failed to release hold");
   return res.json();
 }
 
@@ -151,6 +172,7 @@ interface PickItem {
   status: "pending" | "in_progress" | "completed" | "short";
   orderId: string;
   image: string;
+  barcode?: string;
 }
 
 interface PickBatch {
@@ -174,6 +196,7 @@ interface SingleOrder {
   age: string;
   status: "ready" | "in_progress" | "completed";
   assignee: string | null;
+  onHold?: boolean;
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -299,6 +322,10 @@ import {
 } from "@/lib/sounds";
 
 export default function Picking() {
+  // Get current user for role-based UI
+  const { user } = useAuth();
+  const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
+  
   // Get picking mode, view mode, and sound/haptic settings from context
   const { 
     pickingMode, setPickingMode, 
@@ -396,6 +423,7 @@ export default function Picking() {
     age: getOrderAge(order.createdAt),
     status: order.status === "in_progress" ? "in_progress" : order.status === "completed" ? "completed" : "ready",
     assignee: order.assignedPickerId,
+    onHold: order.onHold === 1,
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -406,6 +434,7 @@ export default function Picking() {
       status: item.status as "pending" | "in_progress" | "completed" | "short",
       orderId: order.orderNumber,
       image: item.imageUrl || "",
+      barcode: item.barcode || undefined,
     })),
   }));
   
@@ -445,6 +474,32 @@ export default function Picking() {
     onError: (error) => {
       console.error("Failed to release order:", error);
       // Show error feedback
+      playSound("error");
+    },
+  });
+  
+  // Mutation for putting orders on hold (admin/lead only)
+  const holdMutation = useMutation({
+    mutationFn: (orderId: number) => holdOrder(orderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      playSound("success");
+    },
+    onError: (error) => {
+      console.error("Failed to hold order:", error);
+      playSound("error");
+    },
+  });
+  
+  // Mutation for releasing hold on orders (admin/lead only)
+  const releaseHoldMutation = useMutation({
+    mutationFn: (orderId: number) => releaseHoldOrder(orderId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      playSound("success");
+    },
+    onError: (error) => {
+      console.error("Failed to release hold:", error);
       playSound("error");
     },
   });
@@ -655,16 +710,17 @@ export default function Picking() {
     }
   };
   
-  // Handle scan input
+  // Handle scan input (matches SKU or barcode)
   const handleScan = (value: string) => {
     setScanInput(value);
     if (!currentItem) return;
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
     const normalizedSku = currentItem.sku.toUpperCase().replace(/-/g, "");
+    const normalizedBarcode = currentItem.barcode?.toUpperCase().replace(/-/g, "") || "";
     
-    // Check for match
-    if (normalizedInput === normalizedSku) {
+    // Check for match (SKU or barcode)
+    if (normalizedInput === normalizedSku || normalizedInput === normalizedBarcode) {
       setScanStatus("success");
       playSound("success");
       triggerHaptic("medium");
@@ -816,18 +872,19 @@ export default function Picking() {
     }, 300);
   };
   
-  // Handle list view scan - finds matching item and picks it
+  // Handle list view scan - finds matching item and picks it (matches SKU or barcode)
   const handleListScan = (value: string) => {
     setScanInput(value);
     if (!activeWork) return;
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
     
-    // Find matching unpicked item
+    // Find matching unpicked item by SKU or barcode
     const matchingIndex = activeWork.items.findIndex(item => {
       if (item.status === "completed" || item.status === "short") return false;
       const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
-      return normalizedInput === normalizedSku;
+      const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
+      return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
     });
     
     if (matchingIndex !== -1) {
@@ -1523,9 +1580,10 @@ export default function Picking() {
                   "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
                   order.priority === "rush" && "border-l-4 border-l-red-500",
                   order.priority === "high" && "border-l-4 border-l-amber-500",
-                  order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
+                  order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
+                  order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40"
                 )}
-                onClick={() => order.status === "ready" ? handleStartPicking(order.id) : null}
+                onClick={() => order.status === "ready" && !order.onHold ? handleStartPicking(order.id) : null}
                 data-testid={`card-order-${order.id}`}
               >
                 <CardContent className="p-3 md:p-4">
@@ -1533,15 +1591,17 @@ export default function Picking() {
                     <div className="flex items-center gap-3 md:gap-4">
                       <div className={cn(
                         "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
+                        order.onHold ? "bg-slate-200 text-slate-500" : 
                         order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                       )}>
-                        <Package size={24} />
+                        {order.onHold ? <Pause size={24} /> : <Package size={24} />}
                       </div>
                       <div>
                         <div className="font-semibold flex items-center gap-2 text-base">
                           {order.orderNumber}
-                          {order.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
-                          {order.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                          {order.onHold && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-slate-400 text-slate-600 bg-slate-100">ON HOLD</Badge>}
+                          {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
+                          {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         </div>
                         <div className="text-sm text-muted-foreground flex items-center gap-1">
                           <User size={12} /> {order.customer} • {order.items.length} items
@@ -1552,7 +1612,38 @@ export default function Picking() {
                       <div className="text-sm text-muted-foreground flex items-center gap-1">
                         <Clock size={14} /> {order.age}
                       </div>
-                      {order.status === "ready" && (
+                      {/* Admin/Lead: Hold/Release buttons */}
+                      {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            holdMutation.mutate(parseInt(order.id));
+                          }}
+                          data-testid={`button-hold-${order.id}`}
+                        >
+                          <Pause className="h-4 w-4 mr-1" />
+                          Hold
+                        </Button>
+                      )}
+                      {isAdminOrLead && order.onHold && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            releaseHoldMutation.mutate(parseInt(order.id));
+                          }}
+                          data-testid={`button-release-hold-${order.id}`}
+                        >
+                          <Play className="h-4 w-4 mr-1" />
+                          Release
+                        </Button>
+                      )}
+                      {order.status === "ready" && !order.onHold && (
                         <ChevronRight className="h-6 w-6 text-muted-foreground" />
                       )}
                       {order.status === "in_progress" && (

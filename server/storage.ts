@@ -249,7 +249,8 @@ export class DatabaseStorage implements IStorage {
         and(
           eq(orders.id, orderId),
           eq(orders.status, "ready"),
-          isNull(orders.assignedPickerId)
+          isNull(orders.assignedPickerId),
+          eq(orders.onHold, 0) // Cannot claim held orders
         )
       )
       .returning();

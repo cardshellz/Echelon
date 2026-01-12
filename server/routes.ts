@@ -347,11 +347,17 @@ export async function registerRoutes(
 
   // ===== PICKING QUEUE API =====
   
-  // Get orders for picking queue (ready or in_progress)
+  // Get orders for picking queue (ready or in_progress, excluding held orders for pickers)
   app.get("/api/picking/queue", async (req, res) => {
     try {
       const orders = await storage.getOrdersWithItems(["ready", "in_progress"]);
-      res.json(orders);
+      // Filter out held orders unless user is admin/lead
+      const user = req.session.user;
+      const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
+      const filteredOrders = isAdminOrLead 
+        ? orders 
+        : orders.filter(order => order.onHold === 0);
+      res.json(filteredOrders);
     } catch (error) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });
@@ -594,6 +600,7 @@ export async function registerRoutes(
             location: productLocation?.location || "UNASSIGNED",
             imageUrl: productLocation?.imageUrl || null,
             zone: productLocation?.zone || "U",
+            barcode: productLocation?.barcode || null,
           });
         }
         
@@ -767,6 +774,7 @@ export async function registerRoutes(
           location: productLocation?.location || "UNASSIGNED",
           zone: productLocation?.zone || "U",
           imageUrl: item.imageUrl,
+          barcode: productLocation?.barcode || null,
         });
       }
       
