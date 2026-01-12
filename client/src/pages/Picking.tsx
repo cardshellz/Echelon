@@ -2115,30 +2115,30 @@ export default function Picking() {
                       </div>
                     )}
                     
-                    {/* Info - SKU and Location */}
-                    <div className="flex-1 min-w-0">
-                      <div className="font-mono text-sm font-medium truncate">{item.sku}</div>
+                    {/* Info - SKU and Location - flex-1 with min-w-0 for proper truncation */}
+                    <div className="flex-1 min-w-0 overflow-hidden">
+                      <div className="font-mono text-xs font-medium truncate">{item.sku}</div>
                       <div className="flex items-center gap-2">
                         <span className={cn(
-                          "text-lg font-black font-mono",
+                          "text-base font-black font-mono",
                           isCompleted ? "text-slate-400" : "text-primary"
                         )}>
                           {item.location}
                         </span>
                         {isCompleted && (
-                          <span className="text-xs font-medium text-emerald-600">
-                            {item.status === "completed" ? "✓ Picked" : "⚠ Short"}
+                          <span className="text-xs font-medium text-emerald-600 whitespace-nowrap">
+                            {item.status === "completed" ? "✓" : "⚠"}
                           </span>
                         )}
                       </div>
                     </div>
                     
-                    {/* Action buttons */}
+                    {/* Action buttons - flex-none prevents Android Chrome from collapsing */}
                     {!isCompleted && (
-                      <div className="flex gap-1 shrink-0">
+                      <div className="flex gap-1 flex-none ml-auto">
                         <Button
                           size="icon"
-                          className="h-10 w-10 bg-emerald-500 hover:bg-emerald-600 text-white"
+                          className="h-10 w-10 flex-none bg-emerald-500 hover:bg-emerald-600 text-white"
                           onClick={() => handleListItemPick(idx)}
                           data-testid={`button-pick-${item.id}`}
                         >
@@ -2147,7 +2147,7 @@ export default function Picking() {
                         <Button
                           size="icon"
                           variant="outline"
-                          className="h-10 w-10 text-amber-600 border-amber-300 hover:bg-amber-50"
+                          className="h-10 w-10 flex-none text-amber-600 border-amber-300 hover:bg-amber-50"
                           onClick={() => handleListItemShort(idx)}
                           data-testid={`button-short-${item.id}`}
                         >
