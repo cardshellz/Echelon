@@ -2141,45 +2141,48 @@ export default function Picking() {
                   <div 
                     key={item.id} 
                     className={cn(
-                      "flex items-center gap-2 p-2 rounded-lg border transition-all duration-300 overflow-hidden",
+                      "flex items-center gap-2 p-2 rounded-lg border w-full max-w-full",
                       item.status === "completed" && "bg-emerald-50 border-emerald-200",
                       item.status === "short" && "bg-amber-50 border-amber-200",
                       !isCompleted && "bg-white border-slate-200",
-                      justScanned && "ring-2 ring-emerald-500 bg-emerald-100 animate-pulse"
+                      justScanned && "ring-2 ring-emerald-500 bg-emerald-100"
                     )}
+                    style={{ overflow: 'hidden' }}
                     data-testid={`list-item-${item.id}`}
                   >
-                    {/* Left: Image */}
-                    {item.image ? (
-                      <img src={item.image} alt="" className="h-12 w-12 rounded object-cover flex-none" />
-                    ) : (
-                      <div className="h-12 w-12 rounded bg-slate-100 flex items-center justify-center flex-none">
-                        <Package className="h-5 w-5 text-slate-400" />
-                      </div>
-                    )}
+                    {/* Image - fixed size */}
+                    <div className="w-12 h-12 flex-shrink-0">
+                      {item.image ? (
+                        <img src={item.image} alt="" className="w-12 h-12 rounded object-cover" />
+                      ) : (
+                        <div className="w-12 h-12 rounded bg-slate-100 flex items-center justify-center">
+                          <Package className="h-5 w-5 text-slate-400" />
+                        </div>
+                      )}
+                    </div>
                     
-                    {/* Middle: Info (truncates, never pushes buttons) */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className={cn("text-lg font-black font-mono", isCompleted ? "text-slate-400" : "text-primary")}>
+                    {/* Info - takes remaining space, text wraps/truncates */}
+                    <div className="flex-1 min-w-0 overflow-hidden">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={cn("text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                           {item.location}
                         </span>
-                        <span className={cn("text-xs px-1.5 py-0.5 rounded", isCompleted ? "bg-emerald-100 text-emerald-700" : "bg-slate-100")}>
+                        <span className={cn("text-xs px-1.5 py-0.5 rounded flex-shrink-0", isCompleted ? "bg-emerald-100 text-emerald-700" : "bg-slate-100")}>
                           {item.picked}/{item.qty}
                         </span>
                       </div>
-                      <div className="text-xs text-slate-600 truncate">{item.name}</div>
+                      <div className="text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
                       <div className="text-[10px] font-mono text-slate-400 truncate">{item.sku}</div>
                     </div>
                     
-                    {/* Right: Buttons (fixed width, never get pushed off) */}
-                    <div className="flex-none flex gap-1">
+                    {/* Buttons - fixed width, always visible */}
+                    <div className="flex-shrink-0 w-[88px] flex gap-1 justify-end">
                       {!isCompleted ? (
                         <>
-                          <Button size="icon" className="h-10 w-10 bg-emerald-500 text-white" onClick={() => handleListItemPick(idx)} data-testid={`button-pick-${item.id}`}>
+                          <Button size="icon" className="h-10 w-10 bg-emerald-500 text-white flex-shrink-0" onClick={() => handleListItemPick(idx)} data-testid={`button-pick-${item.id}`}>
                             <CheckCircle2 className="h-5 w-5" />
                           </Button>
-                          <Button size="icon" variant="outline" className="h-10 w-10 border-amber-400 text-amber-600" onClick={() => handleListItemShort(idx)} data-testid={`button-short-${item.id}`}>
+                          <Button size="icon" variant="outline" className="h-10 w-10 border-amber-400 text-amber-600 flex-shrink-0" onClick={() => handleListItemShort(idx)} data-testid={`button-short-${item.id}`}>
                             <AlertTriangle className="h-5 w-5" />
                           </Button>
                         </>
