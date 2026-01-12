@@ -100,12 +100,19 @@ The application includes Progressive Web App configuration with a manifest.json 
 
 ### Shopify Integration
 - **Sync Endpoint**: `POST /api/shopify/sync` - Fetches all products from Shopify, upserts SKUs to product_locations, and deletes orphaned SKUs
+- **Order Sync**: `POST /api/shopify/sync-orders` - Fetches unfulfilled orders and also runs fulfillment status sync
+- **Fulfillment Sync**: `POST /api/shopify/sync-fulfillments` - Checks all active orders against Shopify and marks fulfilled/cancelled orders
 - **Webhook Endpoints**: 
   - `POST /api/shopify/webhooks/products/create` - Handles new product creation
   - `POST /api/shopify/webhooks/products/update` - Handles product updates
   - `POST /api/shopify/webhooks/products/delete` - Handles product deletion
+  - `POST /api/shopify/webhooks/orders/create` - Handles new order creation
+  - `POST /api/shopify/webhooks/orders/cancelled` - Handles order cancellation
+  - `POST /api/shopify/webhooks/fulfillments/create` - **Auto-ships orders when fulfilled in Shopify (via Shipstation)**
+  - `POST /api/shopify/webhooks/fulfillments/update` - Handles fulfillment status updates
 - **Environment Variables Required**:
   - `SHOPIFY_SHOP_DOMAIN` - Store domain (either "card-shellz" or "card-shellz.myshopify.com" - both formats work)
   - `SHOPIFY_ACCESS_TOKEN` - Admin API access token with read_products scope
   - `SHOPIFY_API_SECRET` - API secret (shpss_ prefix) used for webhook HMAC verification
 - New SKUs are created with location "UNASSIGNED" and zone "U" until manually assigned
+- **Fulfillment Flow**: When Shipstation ships an order, it updates Shopify's fulfillment_status. Shopify then sends a fulfillments/create webhook to Echelon, which automatically marks the order as shipped

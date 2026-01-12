@@ -812,6 +812,98 @@ export async function registerRoutes(
     }
   });
 
+  // ===== FULFILLMENT WEBHOOKS =====
+  
+  // Helper to check order fulfillment and update status
+  async function checkAndUpdateOrderFulfillment(shopifyOrderId: string, source: string): Promise<void> {
+    const order = await storage.getOrderByShopifyId(shopifyOrderId);
+    if (!order || order.status === "shipped" || order.status === "cancelled") {
+      return;
+    }
+    
+    // Fetch the order's overall fulfillment status from Shopify
+    const fulfillmentStatuses = await fetchOrdersFulfillmentStatus([shopifyOrderId]);
+    const orderStatus = fulfillmentStatuses.find(s => s.shopifyOrderId === shopifyOrderId);
+    
+    if (orderStatus?.fulfillmentStatus === "fulfilled") {
+      await storage.updateOrderStatus(order.id, "shipped");
+      console.log(`Order ${order.orderNumber} marked as shipped via ${source} (fully fulfilled in Shopify)`);
+      broadcastOrdersUpdated();
+    } else if (orderStatus?.cancelledAt) {
+      await storage.updateOrderStatus(order.id, "cancelled");
+      console.log(`Order ${order.orderNumber} marked as cancelled via ${source}`);
+      broadcastOrdersUpdated();
+    }
+  }
+
+  // Fulfillment created - check if order is fully fulfilled before marking shipped
+  app.post("/api/shopify/webhooks/fulfillments/create", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body;
+      const shopifyOrderId = String(payload.order_id);
+      const fulfillmentStatus = payload.status; // pending, open, success, cancelled, error, failure
+      
+      console.log(`Fulfillment webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus}`);
+      
+      // Only check fulfillment if this specific fulfillment was successful
+      if (fulfillmentStatus === "success") {
+        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment create webhook");
+      }
+      
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Fulfillment create webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // Fulfillment update - handle status changes
+  app.post("/api/shopify/webhooks/fulfillments/update", async (req: Request, res: Response) => {
+    try {
+      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+      const rawBody = (req as any).rawBody as Buffer | undefined;
+      
+      if (!rawBody) {
+        console.error("Missing raw body for webhook verification");
+        return res.status(400).json({ error: "Missing request body" });
+      }
+      
+      if (!verifyShopifyWebhook(rawBody, hmac)) {
+        console.error("Invalid Shopify webhook signature");
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+      
+      const payload = req.body;
+      const shopifyOrderId = String(payload.order_id);
+      const fulfillmentStatus = payload.status;
+      
+      console.log(`Fulfillment update webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus}`);
+      
+      // Check overall order fulfillment status
+      if (fulfillmentStatus === "success") {
+        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment update webhook");
+      }
+      
+      res.status(200).json({ received: true });
+    } catch (error) {
+      console.error("Fulfillment update webhook error:", error);
+      res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
   // ===== ORDER WEBHOOKS =====
   
   // Order created - add to picking queue
