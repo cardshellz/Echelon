@@ -902,97 +902,61 @@ export default function Picking() {
     console.log("[SCAN]", msg);
   };
   
-  // Buffer for keyboard scan - accumulates keystrokes
-  const scanBufferRef = useRef<string>("");
-  const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
-  // Process a complete scan (called after scanner finishes sending characters)
-  const processScan = (value: string) => {
-    if (!activeWork || !value.trim()) {
-      addDebug(`Empty scan ignored`);
-      return;
-    }
-    
-    const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-    addDebug(`Processing: "${normalizedInput}"`);
-    
-    // Find matching unpicked item by SKU or barcode
-    const matchingIndex = activeWork.items.findIndex(item => {
-      if (item.status === "completed" || item.status === "short") return false;
-      const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
-      const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
-      return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
-    });
-    
-    if (matchingIndex !== -1) {
-      const item = activeWork.items[matchingIndex];
-      addDebug(`MATCH! ${item.sku} at idx ${matchingIndex}`);
-      setScanStatus("success");
-      playSound("success");
-      triggerHaptic("medium");
-      
-      // Pick immediately, then clear input
-      handleListItemPickDirect(matchingIndex, item.qty);
-      setTimeout(() => {
-        setScanStatus("idle");
-        setScanInput("");
-        scanBufferRef.current = "";
-        maintainFocus();
-      }, 300);
-    } else {
-      addDebug(`NO MATCH for "${normalizedInput}"`);
-      setScanStatus("error");
-      playSound("error");
-      triggerHaptic("heavy");
-      
-      setTimeout(() => {
-        setScanStatus("idle");
-        setScanInput("");
-        scanBufferRef.current = "";
-        maintainFocus();
-      }, 1000);
-    }
-  };
-  
-  // Handle keydown - capture each keystroke directly from scanner
+  // Simple scan handler - process when Enter is pressed
   const handleScanKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // Enter/Tab = end of scan, process the buffer
-    if (e.key === "Enter" || e.key === "Tab") {
+    if (e.key === "Enter") {
       e.preventDefault();
-      if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
+      const value = e.currentTarget.value;
+      addDebug(`Enter: "${value}"`);
       
-      const scannedValue = scanBufferRef.current;
-      addDebug(`Enter: buffer="${scannedValue}"`);
-      
-      if (scannedValue.length >= 3) {
-        processScan(scannedValue);
-      }
-      scanBufferRef.current = "";
-      setScanInput("");
-      return;
-    }
-    
-    // Printable character - add to buffer
-    if (e.key.length === 1) {
-      scanBufferRef.current += e.key;
-      addDebug(`Key: "${e.key}" buf="${scanBufferRef.current}"`);
-      
-      // Reset timeout - process after 200ms of no input (fallback if no Enter)
-      if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
-      scanTimeoutRef.current = setTimeout(() => {
-        if (scanBufferRef.current.length >= 3) {
-          addDebug(`Timeout: processing buffer`);
-          processScan(scanBufferRef.current);
-        }
-        scanBufferRef.current = "";
+      if (!activeWork || !value.trim()) {
+        addDebug(`No value or no order`);
         setScanInput("");
-      }, 200);
+        return;
+      }
+      
+      const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
+      
+      // Find matching unpicked item
+      const matchingIndex = activeWork.items.findIndex(item => {
+        if (item.status === "completed" || item.status === "short") return false;
+        const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
+        const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
+        return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
+      });
+      
+      if (matchingIndex !== -1) {
+        const item = activeWork.items[matchingIndex];
+        addDebug(`MATCH! ${item.sku}`);
+        setScanStatus("success");
+        playSound("success");
+        triggerHaptic("medium");
+        handleListItemPickDirect(matchingIndex, item.qty);
+        
+        setTimeout(() => {
+          setScanStatus("idle");
+          setScanInput("");
+          maintainFocus();
+        }, 300);
+      } else {
+        addDebug(`NO MATCH: "${normalizedInput}"`);
+        setScanStatus("error");
+        playSound("error");
+        triggerHaptic("heavy");
+        
+        setTimeout(() => {
+          setScanStatus("idle");
+          setScanInput("");
+          maintainFocus();
+        }, 1000);
+      }
     }
   };
   
-  // Handle input change - sync display only (actual processing via keydown)
+  // Simple onChange - just update display
   const handleListScan = (value: string) => {
     setScanInput(value);
+    addDebug(`Input: "${value}"`);
   };
   
   // Handle picking an item directly from list view by index
@@ -2129,7 +2093,6 @@ export default function Picking() {
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
