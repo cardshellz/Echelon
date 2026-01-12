@@ -897,20 +897,39 @@ export default function Picking() {
   // Handle list view scan - finds matching item and picks it (matches SKU or barcode)
   const handleListScan = (value: string) => {
     setScanInput(value);
-    if (!activeWork) return;
+    
+    console.log("[SCAN] Input received:", value, "activeWork:", !!activeWork, "activeOrderId:", activeOrderId);
+    
+    if (!activeWork) {
+      console.log("[SCAN] No activeWork, returning");
+      return;
+    }
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
+    console.log("[SCAN] Normalized input:", normalizedInput);
+    console.log("[SCAN] Items to search:", activeWork.items.map(i => ({ 
+      sku: i.sku, 
+      barcode: i.barcode, 
+      status: i.status,
+      normalizedSku: i.sku.toUpperCase().replace(/-/g, ""),
+      normalizedBarcode: i.barcode?.toUpperCase().replace(/-/g, "") || ""
+    })));
     
     // Find matching unpicked item by SKU or barcode
     const matchingIndex = activeWork.items.findIndex(item => {
       if (item.status === "completed" || item.status === "short") return false;
       const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
       const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
-      return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
+      const matches = normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
+      if (matches) console.log("[SCAN] Found match:", item.sku);
+      return matches;
     });
+    
+    console.log("[SCAN] Matching index:", matchingIndex);
     
     if (matchingIndex !== -1) {
       const item = activeWork.items[matchingIndex];
+      console.log("[SCAN] SUCCESS - picking item:", item.sku, "qty:", item.qty);
       setScanStatus("success");
       playSound("success");
       triggerHaptic("medium");
@@ -922,6 +941,7 @@ export default function Picking() {
         setScanInput("");
       }, 400);
     } else if (normalizedInput.length >= 5) {
+      console.log("[SCAN] No match found, input length:", normalizedInput.length);
       // Check if it's a wrong barcode (not matching any pending item)
       const anyMatch = activeWork.items.some(item => {
         const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
@@ -929,6 +949,7 @@ export default function Picking() {
       });
       
       if (!anyMatch) {
+        console.log("[SCAN] ERROR - no match at all");
         setScanStatus("error");
         playSound("error");
         triggerHaptic("heavy");
