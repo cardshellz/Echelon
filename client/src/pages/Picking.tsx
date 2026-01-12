@@ -572,6 +572,7 @@ export default function Picking() {
   const [scannerMode, setScannerMode] = useState(false);
   const [soundSettingsOpen, setSoundSettingsOpen] = useState(false);
   const [lastScannedItemId, setLastScannedItemId] = useState<number | null>(null);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
   
   // Computed sound enabled state for icon display
   const soundEnabled = soundTheme !== "silent";
@@ -894,42 +895,40 @@ export default function Picking() {
     }, 300);
   };
   
+  // Helper to add debug log entry
+  const addDebug = (msg: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setDebugLog(prev => [`${timestamp}: ${msg}`, ...prev.slice(0, 9)]);
+    console.log("[SCAN]", msg);
+  };
+  
   // Handle list view scan - finds matching item and picks it (matches SKU or barcode)
   const handleListScan = (value: string) => {
     setScanInput(value);
     
-    console.log("[SCAN] Input received:", value, "activeWork:", !!activeWork, "activeOrderId:", activeOrderId);
+    addDebug(`Input: "${value}" (len=${value.length})`);
     
     if (!activeWork) {
-      console.log("[SCAN] No activeWork, returning");
+      addDebug("No activeWork!");
       return;
     }
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-    console.log("[SCAN] Normalized input:", normalizedInput);
-    console.log("[SCAN] Items to search:", activeWork.items.map(i => ({ 
-      sku: i.sku, 
-      barcode: i.barcode, 
-      status: i.status,
-      normalizedSku: i.sku.toUpperCase().replace(/-/g, ""),
-      normalizedBarcode: i.barcode?.toUpperCase().replace(/-/g, "") || ""
-    })));
+    addDebug(`Normalized: "${normalizedInput}"`);
     
     // Find matching unpicked item by SKU or barcode
     const matchingIndex = activeWork.items.findIndex(item => {
       if (item.status === "completed" || item.status === "short") return false;
       const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
       const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
-      const matches = normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
-      if (matches) console.log("[SCAN] Found match:", item.sku);
-      return matches;
+      return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
     });
     
-    console.log("[SCAN] Matching index:", matchingIndex);
+    addDebug(`Match index: ${matchingIndex}`);
     
     if (matchingIndex !== -1) {
       const item = activeWork.items[matchingIndex];
-      console.log("[SCAN] SUCCESS - picking item:", item.sku, "qty:", item.qty);
+      addDebug(`SUCCESS! Picking: ${item.sku}`);
       setScanStatus("success");
       playSound("success");
       triggerHaptic("medium");
@@ -941,7 +940,7 @@ export default function Picking() {
         setScanInput("");
       }, 400);
     } else if (normalizedInput.length >= 5) {
-      console.log("[SCAN] No match found, input length:", normalizedInput.length);
+      addDebug(`No match for "${normalizedInput}"`);
       // Check if it's a wrong barcode (not matching any pending item)
       const anyMatch = activeWork.items.some(item => {
         const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
@@ -949,7 +948,7 @@ export default function Picking() {
       });
       
       if (!anyMatch) {
-        console.log("[SCAN] ERROR - no match at all");
+        addDebug("ERROR - barcode not found");
         setScanStatus("error");
         playSound("error");
         triggerHaptic("heavy");
@@ -2083,7 +2082,7 @@ export default function Picking() {
         /* LIST VIEW - All items visible, can pick in any order */
         <div className="flex-1 p-3 md:p-4 flex flex-col max-w-2xl mx-auto w-full">
           {/* Scan input at top for list view */}
-          <div className="mb-3">
+          <div className="mb-2">
             <div className="relative">
               <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-primary h-5 w-5" />
               <Input 
@@ -2100,6 +2099,14 @@ export default function Picking() {
                 data-testid="input-scan-sku-list"
               />
             </div>
+            {/* Debug log panel - shows scan activity */}
+            {debugLog.length > 0 && (
+              <div className="mt-1 p-2 bg-slate-900 text-green-400 rounded text-[10px] font-mono max-h-20 overflow-auto">
+                {debugLog.map((log, i) => (
+                  <div key={i} className={i === 0 ? "font-bold" : "text-green-600"}>{log}</div>
+                ))}
+              </div>
+            )}
           </div>
           
           {/* Scrollable item list - COMPACT ROWS */}
