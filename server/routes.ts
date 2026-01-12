@@ -571,6 +571,12 @@ export async function registerRoutes(
       let skipped = 0;
       
       for (const orderData of shopifyOrders) {
+        // Skip orders with no shippable items (e.g., digital memberships)
+        if (orderData.items.length === 0) {
+          skipped++;
+          continue;
+        }
+        
         // Check if order already exists
         const existingOrder = await storage.getOrderByShopifyId(orderData.shopifyOrderId);
         
