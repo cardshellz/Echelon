@@ -2121,7 +2121,7 @@ export default function Picking() {
                   <div 
                     key={item.id} 
                     className={cn(
-                      "p-2 rounded-lg border transition-all duration-300",
+                      "flex items-center gap-2 p-2 rounded-lg border transition-all duration-300 overflow-hidden",
                       item.status === "completed" && "bg-emerald-50 border-emerald-200",
                       item.status === "short" && "bg-amber-50 border-amber-200",
                       !isCompleted && "bg-white border-slate-200",
@@ -2129,82 +2129,45 @@ export default function Picking() {
                     )}
                     data-testid={`list-item-${item.id}`}
                   >
-                    {/* Row 1: Location + Counter + Actions */}
-                    <div className="flex items-center gap-2 mb-1">
-                      {/* Location - most prominent */}
-                      <div className={cn(
-                        "text-xl font-black font-mono",
-                        isCompleted ? "text-slate-400" : "text-primary"
-                      )}>
-                        {item.location}
+                    {/* Left: Image */}
+                    {item.image ? (
+                      <img src={item.image} alt="" className="h-12 w-12 rounded object-cover flex-none" />
+                    ) : (
+                      <div className="h-12 w-12 rounded bg-slate-100 flex items-center justify-center flex-none">
+                        <Package className="h-5 w-5 text-slate-400" />
                       </div>
-                      
-                      {/* Counter: picked of total */}
-                      <div className={cn(
-                        "text-sm font-medium px-2 py-0.5 rounded",
-                        isCompleted ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-600"
-                      )}>
-                        {item.picked} of {item.qty}
+                    )}
+                    
+                    {/* Middle: Info (truncates, never pushes buttons) */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={cn("text-lg font-black font-mono", isCompleted ? "text-slate-400" : "text-primary")}>
+                          {item.location}
+                        </span>
+                        <span className={cn("text-xs px-1.5 py-0.5 rounded", isCompleted ? "bg-emerald-100 text-emerald-700" : "bg-slate-100")}>
+                          {item.picked}/{item.qty}
+                        </span>
                       </div>
-                      
-                      {/* Spacer */}
-                      <div className="flex-1" />
-                      
-                      {/* Action buttons */}
-                      {!isCompleted ? (
-                        <div className="flex gap-1 flex-none">
-                          <Button
-                            size="icon"
-                            className="h-8 w-8 flex-none bg-emerald-500 hover:bg-emerald-600 text-white"
-                            onClick={() => handleListItemPick(idx)}
-                            data-testid={`button-pick-${item.id}`}
-                          >
-                            <CheckCircle2 className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            className="h-8 w-8 flex-none text-amber-600 border-amber-300"
-                            onClick={() => handleListItemShort(idx)}
-                            data-testid={`button-short-${item.id}`}
-                          >
-                            <AlertTriangle className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="flex-none">
-                          {item.status === "completed" ? (
-                            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                          ) : (
-                            <AlertTriangle className="h-5 w-5 text-amber-500" />
-                          )}
-                        </div>
-                      )}
+                      <div className="text-xs text-slate-600 truncate">{item.name}</div>
+                      <div className="text-[10px] font-mono text-slate-400 truncate">{item.sku}</div>
                     </div>
                     
-                    {/* Row 2: Image + Product Details */}
-                    <div className="flex items-start gap-2">
-                      {/* Product image */}
-                      {item.image ? (
-                        <img 
-                          src={item.image} 
-                          alt=""
-                          className="h-12 w-12 rounded object-cover shrink-0"
-                        />
+                    {/* Right: Buttons (fixed width, never get pushed off) */}
+                    <div className="flex-none flex gap-1">
+                      {!isCompleted ? (
+                        <>
+                          <Button size="icon" className="h-10 w-10 bg-emerald-500 text-white" onClick={() => handleListItemPick(idx)} data-testid={`button-pick-${item.id}`}>
+                            <CheckCircle2 className="h-5 w-5" />
+                          </Button>
+                          <Button size="icon" variant="outline" className="h-10 w-10 border-amber-400 text-amber-600" onClick={() => handleListItemShort(idx)} data-testid={`button-short-${item.id}`}>
+                            <AlertTriangle className="h-5 w-5" />
+                          </Button>
+                        </>
                       ) : (
-                        <div className="h-12 w-12 rounded bg-slate-100 flex items-center justify-center shrink-0">
-                          <Package className="h-5 w-5 text-slate-400" />
+                        <div className="h-10 w-10 flex items-center justify-center">
+                          {item.status === "completed" ? <CheckCircle2 className="h-6 w-6 text-emerald-500" /> : <AlertTriangle className="h-6 w-6 text-amber-500" />}
                         </div>
                       )}
-                      
-                      {/* Product details */}
-                      <div className="flex-1 min-w-0 text-xs">
-                        <div className="font-medium text-slate-700 truncate">{item.name}</div>
-                        <div className="font-mono text-muted-foreground truncate">{item.sku}</div>
-                        {item.barcode && (
-                          <div className="font-mono text-muted-foreground/70 truncate">{item.barcode}</div>
-                        )}
-                      </div>
                     </div>
                   </div>
                 );
