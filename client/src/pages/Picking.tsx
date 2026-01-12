@@ -2022,21 +2022,21 @@ export default function Picking() {
                     data-testid={`list-item-${item.id}`}
                   >
                     <CardContent className="p-3">
-                      <div className="flex items-center gap-3">
-                        {/* Status indicator */}
+                      <div className="flex items-center gap-2">
+                        {/* Quantity badge - prominent on left */}
                         <div className={cn(
-                          "h-10 w-10 rounded-lg flex items-center justify-center shrink-0",
+                          "h-12 w-12 rounded-lg flex items-center justify-center shrink-0 text-xl font-bold",
                           item.status === "completed" && "bg-emerald-100 text-emerald-600",
                           item.status === "short" && "bg-amber-100 text-amber-600",
-                          item.status === "pending" && "bg-muted text-muted-foreground",
+                          item.status === "pending" && "bg-slate-100 text-slate-700",
                           item.status === "in_progress" && "bg-primary/10 text-primary"
                         )}>
                           {item.status === "completed" ? (
-                            <CheckCircle2 className="h-5 w-5" />
+                            <CheckCircle2 className="h-6 w-6" />
                           ) : item.status === "short" ? (
-                            <AlertTriangle className="h-5 w-5" />
+                            <AlertTriangle className="h-6 w-6" />
                           ) : (
-                            <span className="text-lg font-bold">{remaining}</span>
+                            <span>{remaining}</span>
                           )}
                         </div>
                         
@@ -2045,17 +2045,17 @@ export default function Picking() {
                           <img 
                             src={item.image} 
                             alt={item.name}
-                            className="h-10 w-10 rounded object-cover shrink-0 border"
+                            className="h-12 w-12 rounded object-cover shrink-0 border"
                           />
                         ) : (
-                          <div className="h-10 w-10 rounded bg-muted flex items-center justify-center shrink-0 border">
-                            <Package className="h-5 w-5 text-muted-foreground" />
+                          <div className="h-12 w-12 rounded bg-muted flex items-center justify-center shrink-0 border">
+                            <Package className="h-6 w-6 text-muted-foreground" />
                           </div>
                         )}
                         
-                        {/* Item info */}
-                        <div className="flex-1 min-w-0 overflow-hidden">
-                          <div className="flex items-center gap-1">
+                        {/* Item info - centered */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
                             <span className="font-mono font-bold text-sm truncate">{item.sku}</span>
                             {item.status === "completed" && (
                               <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 shrink-0">Done</Badge>
@@ -2064,20 +2064,22 @@ export default function Picking() {
                               <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">Short</Badge>
                             )}
                           </div>
-                          <div className="text-xs text-muted-foreground truncate">{item.name}</div>
-                          <div className="flex items-center gap-1 text-primary font-mono text-xs mt-0.5">
-                            <MapPin className="h-3 w-3" />
-                            {item.location}
-                          </div>
+                          <div className="text-xs text-muted-foreground truncate max-w-[180px]">{item.name}</div>
+                        </div>
+                        
+                        {/* BIN LOCATION - LARGE and prominent on right */}
+                        <div className="shrink-0 bg-primary/10 rounded-lg px-3 py-2 text-center min-w-[60px]">
+                          <div className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Bin</div>
+                          <div className="text-xl font-bold text-primary font-mono">{item.location}</div>
                         </div>
                         
                         {/* Quick action buttons */}
                         {!isCompleted && (
-                          <div className="flex gap-1 shrink-0">
+                          <div className="flex flex-col gap-1 shrink-0">
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-9 w-9 text-emerald-600 hover:bg-emerald-50"
+                              className="h-8 w-8 text-emerald-600 hover:bg-emerald-50"
                               onClick={() => handleListItemPick(idx)}
                               data-testid={`button-pick-${item.id}`}
                             >
@@ -2086,7 +2088,7 @@ export default function Picking() {
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-9 w-9 text-amber-600 hover:bg-amber-50"
+                              className="h-8 w-8 text-amber-600 hover:bg-amber-50"
                               onClick={() => handleListItemShort(idx)}
                               data-testid={`button-short-${item.id}`}
                             >
