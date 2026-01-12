@@ -1822,19 +1822,29 @@ export default function Picking() {
             >
               {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
             </Button>
-            <Badge 
-              variant="outline" 
-              className={cn(
-                "text-xs px-2 py-0.5",
-                activeWork?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
-                activeWork?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
-              )}
-            >
-              {activeWork?.id}
-            </Badge>
+{/* Priority badge only - order # shown below */}
+            {(activeWork?.priority === "rush" || activeWork?.priority === "high") && (
+              <Badge 
+                variant="outline" 
+                className={cn(
+                  "text-xs px-2 py-0.5",
+                  activeWork?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
+                  activeWork?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
+                )}
+              >
+                {activeWork?.priority === "rush" ? "RUSH" : "HIGH"}
+              </Badge>
+            )}
           </div>
         </div>
 
+        {/* Order Number - Prominent */}
+        <div className="text-center py-1">
+          <span className="text-2xl font-bold text-primary">
+            {pickingMode === "single" && activeOrder ? activeOrder.orderNumber : activeWork?.id}
+          </span>
+        </div>
+        
         {/* Progress Bar */}
         <div className="space-y-1">
           <div className="flex justify-between text-sm font-medium">
@@ -2021,9 +2031,24 @@ export default function Picking() {
                     )}
                     data-testid={`list-item-${item.id}`}
                   >
-                    <CardContent className="p-3">
+                    <CardContent className="p-2">
+                      {/* BIN LOCATION - TOP, VERY PROMINENT */}
+                      <div className="rounded-lg py-2 px-3 mb-2 text-center bg-primary/15 border-2 border-primary/30">
+                        <div className={cn(
+                          "text-3xl font-black font-mono tracking-wide",
+                          isCompleted ? "text-muted-foreground" : "text-primary"
+                        )}>
+                          {item.location}
+                        </div>
+                        {isCompleted && (
+                          <div className="text-xs text-muted-foreground mt-0.5">
+                            {item.status === "completed" ? "Picked" : "Short"}
+                          </div>
+                        )}
+                      </div>
+                      
                       <div className="flex items-center gap-2">
-                        {/* Quantity badge - prominent on left */}
+                        {/* Quantity badge */}
                         <div className={cn(
                           "h-12 w-12 rounded-lg flex items-center justify-center shrink-0 text-xl font-bold",
                           item.status === "completed" && "bg-emerald-100 text-emerald-600",
@@ -2053,10 +2078,10 @@ export default function Picking() {
                           </div>
                         )}
                         
-                        {/* Item info - centered */}
+                        {/* Item info */}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-1.5">
-                            <span className="font-mono font-bold text-sm truncate">{item.sku}</span>
+                            <span className="font-mono font-semibold text-sm truncate">{item.sku}</span>
                             {item.status === "completed" && (
                               <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 shrink-0">Done</Badge>
                             )}
@@ -2064,35 +2089,33 @@ export default function Picking() {
                               <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200 shrink-0">Short</Badge>
                             )}
                           </div>
-                          <div className="text-xs text-muted-foreground truncate max-w-[180px]">{item.name}</div>
-                        </div>
-                        
-                        {/* BIN LOCATION - LARGE and prominent on right */}
-                        <div className="shrink-0 bg-primary/10 rounded-lg px-3 py-2 text-center min-w-[60px]">
-                          <div className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Bin</div>
-                          <div className="text-xl font-bold text-primary font-mono">{item.location}</div>
+                          <div className="text-xs text-muted-foreground truncate">{item.name}</div>
+                          {/* Barcode - small and subtle */}
+                          {item.barcode && (
+                            <div className="text-[10px] text-muted-foreground/70 font-mono truncate">{item.barcode}</div>
+                          )}
                         </div>
                         
                         {/* Quick action buttons */}
                         {!isCompleted && (
-                          <div className="flex flex-col gap-1 shrink-0">
+                          <div className="flex gap-1 shrink-0">
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-8 w-8 text-emerald-600 hover:bg-emerald-50"
+                              className="h-10 w-10 text-emerald-600 hover:bg-emerald-50"
                               onClick={() => handleListItemPick(idx)}
                               data-testid={`button-pick-${item.id}`}
                             >
-                              <CheckCircle2 className="h-5 w-5" />
+                              <CheckCircle2 className="h-6 w-6" />
                             </Button>
                             <Button
                               size="icon"
                               variant="ghost"
-                              className="h-8 w-8 text-amber-600 hover:bg-amber-50"
+                              className="h-10 w-10 text-amber-600 hover:bg-amber-50"
                               onClick={() => handleListItemShort(idx)}
                               data-testid={`button-short-${item.id}`}
                             >
-                              <AlertTriangle className="h-5 w-5" />
+                              <AlertTriangle className="h-6 w-6" />
                             </Button>
                           </div>
                         )}
