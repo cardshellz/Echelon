@@ -663,6 +663,7 @@ export default function Picking() {
   // Start picking a batch or order
   const handleStartPicking = async (id: string) => {
     setClaimError(null);
+    setDebugLog([]); // Clear debug log for new order
     
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(b => 
@@ -2191,6 +2192,8 @@ export default function Picking() {
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
+                readOnly={false}
+                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
