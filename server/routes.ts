@@ -649,12 +649,16 @@ export async function registerRoutes(
     // This covers ready, in_progress, completed, ready_to_ship, and any on-hold orders
     const allOrders = await storage.getOrdersWithItems();
     
+    console.log(`Fulfillment sync: Found ${allOrders.length} total orders in database`);
+    
     // Filter to non-terminal orders that have Shopify IDs
     const activeOrders = allOrders.filter(o => 
       o.status !== "shipped" && 
       o.status !== "cancelled" && 
       o.shopifyOrderId
     );
+    
+    console.log(`Fulfillment sync: ${activeOrders.length} active orders to check (not shipped/cancelled, have Shopify ID)`);
     
     if (activeOrders.length === 0) {
       return { shipped: 0, cancelled: 0, checked: 0 };
@@ -670,14 +674,21 @@ export async function registerRoutes(
     }
     
     // Fetch fulfillment status from Shopify
+    console.log(`Fulfillment sync: Fetching status from Shopify for ${shopifyOrderIds.length} orders...`);
     const fulfillmentStatuses = await fetchOrdersFulfillmentStatus(shopifyOrderIds);
+    console.log(`Fulfillment sync: Shopify returned ${fulfillmentStatuses.length} order statuses`);
     
     let shipped = 0;
     let cancelled = 0;
     
     for (const status of fulfillmentStatuses) {
       const order = activeOrders.find(o => o.shopifyOrderId === status.shopifyOrderId);
-      if (!order) continue;
+      if (!order) {
+        console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
+        continue;
+      }
+      
+      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.shopifyOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
       
       // If fulfilled in Shopify, mark as shipped in our system
       if (status.fulfillmentStatus === "fulfilled") {
