@@ -512,6 +512,18 @@ export default function Picking() {
       pickedQuantity?: number; 
       shortReason?: string;
     }) => updateOrderItem(itemId, status, pickedQuantity, shortReason),
+    onSuccess: (updatedItem) => {
+      // Update the query cache with the new item status
+      queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
+        if (!oldData) return oldData;
+        return oldData.map(order => ({
+          ...order,
+          items: order.items.map(item => 
+            item.id === updatedItem.id ? { ...item, ...updatedItem } : item
+          )
+        }));
+      });
+    },
   });
   
   // Mutation for marking order ready to ship
@@ -667,10 +679,19 @@ export default function Picking() {
       if (isRealOrder) {
         try {
           await claimMutation.mutateAsync({ orderId: numericId });
-          // Success - proceed to picking
-          setSingleQueue(prev => prev.map(o => 
-            o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
-          ));
+          // Success - copy the order to local state for picking session
+          const orderToPick = ordersFromApi.find(o => o.id === id);
+          if (orderToPick) {
+            setLocalSingleQueue(prev => {
+              // Add or update this order in local state
+              const existing = prev.find(o => o.id === id);
+              if (existing) {
+                return prev.map(o => o.id === id ? { ...orderToPick, status: "in_progress" as const, assignee: "You" } : o);
+              } else {
+                return [...prev, { ...orderToPick, status: "in_progress" as const, assignee: "You" }];
+              }
+            });
+          }
           setActiveOrderId(id);
           setCurrentItemIndex(0);
           setView("picking");
