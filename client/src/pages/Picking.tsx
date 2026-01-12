@@ -924,14 +924,27 @@ export default function Picking() {
   const handleListItemPickDirect = (idx: number, qty: number) => {
     if (!activeWork) return;
     
+    const item = activeWork.items[idx];
+    if (!item) return;
+    
+    // Sync with API if this is a real order item
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem && pickingMode === "single") {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: "completed" as ItemStatus, 
+        pickedQuantity: qty 
+      });
+    }
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
         
-        const newItems = batch.items.map((item, i) => {
-          if (i !== idx) return item;
+        const newItems = batch.items.map((it, i) => {
+          if (i !== idx) return it;
           return {
-            ...item,
+            ...it,
             picked: qty,
             status: "completed" as const
           };
@@ -943,10 +956,10 @@ export default function Picking() {
       setSingleQueue(prev => prev.map(order => {
         if (order.id !== activeOrderId) return order;
         
-        const newItems = order.items.map((item, i) => {
-          if (i !== idx) return item;
+        const newItems = order.items.map((it, i) => {
+          if (i !== idx) return it;
           return {
-            ...item,
+            ...it,
             picked: qty,
             status: "completed" as const
           };
@@ -976,6 +989,16 @@ export default function Picking() {
     
     playSound("error");
     triggerHaptic("medium");
+    
+    // Sync with API if this is a real order item
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem && pickingMode === "single") {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: "short" as ItemStatus, 
+        pickedQuantity: 0 
+      });
+    }
     
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
