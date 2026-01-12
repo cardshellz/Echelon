@@ -949,6 +949,8 @@ export default function Picking() {
     const item = activeWork.items[idx];
     if (!item) return;
     
+    console.log("[PICK] Picking item:", item.sku, "idx:", idx, "qty:", qty);
+    
     // Visual feedback - highlight the scanned item
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 2000);
@@ -956,6 +958,7 @@ export default function Picking() {
     // Sync with API if this is a real order item
     const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
     if (isRealItem && pickingMode === "single") {
+      console.log("[PICK] Sending API update for item:", item.id);
       updateItemMutation.mutate({ 
         itemId: item.id, 
         status: "completed" as ItemStatus, 
@@ -979,20 +982,29 @@ export default function Picking() {
         return { ...batch, items: newItems };
       }));
     } else {
-      setSingleQueue(prev => prev.map(order => {
-        if (order.id !== activeOrderId) return order;
+      // Update localSingleQueue directly - this is the source of truth during picking
+      console.log("[PICK] Updating localSingleQueue for order:", activeOrderId);
+      setLocalSingleQueue(prev => {
+        // If the order isn't in local state yet, add it from singleQueue
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
         
-        const newItems = order.items.map((it, i) => {
-          if (i !== idx) return it;
-          return {
-            ...it,
-            picked: qty,
-            status: "completed" as const
-          };
+        return base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          
+          const newItems = order.items.map((it, i) => {
+            if (i !== idx) return it;
+            return {
+              ...it,
+              picked: qty,
+              status: "completed" as const
+            };
+          });
+          
+          console.log("[PICK] Updated items:", newItems.map(i => ({ sku: i.sku, status: i.status })));
+          return { ...order, items: newItems };
         });
-        
-        return { ...order, items: newItems };
-      }));
+      });
     }
   };
   
@@ -1042,20 +1054,26 @@ export default function Picking() {
         return { ...batch, items: newItems };
       }));
     } else {
-      setSingleQueue(prev => prev.map(order => {
-        if (order.id !== activeOrderId) return order;
+      // Update localSingleQueue directly
+      setLocalSingleQueue(prev => {
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
         
-        const newItems = order.items.map((it, i) => {
-          if (i !== idx) return it;
-          return {
-            ...it,
-            picked: 0,
-            status: "short" as const
-          };
+        return base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          
+          const newItems = order.items.map((it, i) => {
+            if (i !== idx) return it;
+            return {
+              ...it,
+              picked: 0,
+              status: "short" as const
+            };
+          });
+          
+          return { ...order, items: newItems };
         });
-        
-        return { ...order, items: newItems };
-      }));
+      });
     }
   };
   
