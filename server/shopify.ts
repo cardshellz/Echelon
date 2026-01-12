@@ -11,6 +11,7 @@ export interface ShopifyVariant {
   title: string;
   product_id: number;
   image_id?: number;
+  barcode?: string;
 }
 
 export interface ShopifyImage {
@@ -44,9 +45,9 @@ function getShopifyConfig() {
   };
 }
 
-export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string; imageUrl?: string }[]> {
+export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string; imageUrl?: string; barcode?: string }[]> {
   const config = getShopifyConfig();
-  const allSkus: { sku: string; name: string; status: string; imageUrl?: string }[] = [];
+  const allSkus: { sku: string; name: string; status: string; imageUrl?: string; barcode?: string }[] = [];
   let pageInfo: string | null = null;
   
   do {
@@ -89,6 +90,7 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
             name: `${product.title}${variantTitle}`,
             status: product.status,
             imageUrl,
+            barcode: variant.barcode?.trim() || undefined,
           });
         }
       }

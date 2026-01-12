@@ -38,6 +38,7 @@ export const productLocations = pgTable("product_locations", {
   zone: varchar("zone", { length: 10 }).notNull(),
   status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   imageUrl: text("image_url"),
+  barcode: varchar("barcode", { length: 100 }), // Product barcode from Shopify for scanner matching
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
@@ -75,6 +76,8 @@ export const orders = pgTable("orders", {
   customerEmail: text("customer_email"),
   priority: varchar("priority", { length: 20 }).notNull().default("normal"),
   status: varchar("status", { length: 20 }).notNull().default("ready"),
+  onHold: integer("on_hold").notNull().default(0), // 1 = on hold (hidden from pickers), 0 = available
+  heldAt: timestamp("held_at"), // When the order was put on hold
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
   batchId: varchar("batch_id", { length: 50 }),
   itemCount: integer("item_count").notNull().default(0),
@@ -106,6 +109,7 @@ export const orderItems = pgTable("order_items", {
   location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
   zone: varchar("zone", { length: 10 }).notNull().default("U"),
   imageUrl: text("image_url"),
+  barcode: varchar("barcode", { length: 100 }), // Product barcode for scanner matching
   shortReason: text("short_reason"),
 });
 

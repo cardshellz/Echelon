@@ -468,6 +468,48 @@ export async function registerRoutes(
     }
   });
 
+  // Hold an order (admin/lead only)
+  app.post("/api/orders/:id/hold", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const id = parseInt(req.params.id);
+      const order = await storage.holdOrder(id);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error holding order:", error);
+      res.status(500).json({ error: "Failed to hold order" });
+    }
+  });
+
+  // Release hold on an order (admin/lead only)
+  app.post("/api/orders/:id/release-hold", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const id = parseInt(req.params.id);
+      const order = await storage.releaseHoldOrder(id);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error releasing hold:", error);
+      res.status(500).json({ error: "Failed to release hold" });
+    }
+  });
+
   // Shopify Sync API
   app.post("/api/shopify/sync", async (req, res) => {
     try {
@@ -481,7 +523,7 @@ export async function registerRoutes(
       
       for (const product of shopifyProducts) {
         const existing = await storage.getProductLocationBySku(product.sku);
-        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl);
+        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl, product.barcode);
         if (existing) {
           updated++;
         } else {

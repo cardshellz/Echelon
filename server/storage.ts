@@ -35,7 +35,7 @@ export interface IStorage {
   deleteProductLocation(id: number): Promise<boolean>;
   
   // Bulk operations for Shopify sync
-  upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string): Promise<ProductLocation>;
+  upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string, barcode?: string): Promise<ProductLocation>;
   deleteProductLocationsBySku(skus: string[]): Promise<number>;
   deleteOrphanedSkus(validSkus: string[]): Promise<number>;
   getAllSkus(): Promise<string[]>;
@@ -48,6 +48,8 @@ export interface IStorage {
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
   releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
+  holdOrder(orderId: number): Promise<Order | null>;
+  releaseHoldOrder(orderId: number): Promise<Order | null>;
   
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
@@ -134,7 +136,7 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  async upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string): Promise<ProductLocation> {
+  async upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string, barcode?: string): Promise<ProductLocation> {
     const upperSku = sku.toUpperCase();
     const existing = await this.getProductLocationBySku(upperSku);
     
@@ -142,6 +144,7 @@ export class DatabaseStorage implements IStorage {
       const updates: any = { name, updatedAt: new Date() };
       if (status) updates.status = status;
       if (imageUrl !== undefined) updates.imageUrl = imageUrl;
+      if (barcode !== undefined) updates.barcode = barcode || null;
       const result = await db
         .update(productLocations)
         .set(updates)
@@ -156,6 +159,7 @@ export class DatabaseStorage implements IStorage {
         zone: "U",
         status: status || "active",
         imageUrl: imageUrl || null,
+        barcode: barcode || null,
       }).returning();
       return result[0];
     }
@@ -338,6 +342,24 @@ export class DatabaseStorage implements IStorage {
       .where(eq(orders.id, orderId))
       .returning();
     
+    return result[0] || null;
+  }
+
+  async holdOrder(orderId: number): Promise<Order | null> {
+    const result = await db
+      .update(orders)
+      .set({ onHold: 1, heldAt: new Date() })
+      .where(eq(orders.id, orderId))
+      .returning();
+    return result[0] || null;
+  }
+
+  async releaseHoldOrder(orderId: number): Promise<Order | null> {
+    const result = await db
+      .update(orders)
+      .set({ onHold: 0, heldAt: null })
+      .where(eq(orders.id, orderId))
+      .returning();
     return result[0] || null;
   }
 }
