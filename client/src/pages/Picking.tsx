@@ -2150,6 +2150,7 @@ export default function Picking() {
                       </div>
                       <div className="text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
                       <div className="text-[10px] font-mono text-slate-400 truncate">{item.sku}</div>
+                      {item.barcode && <div className="text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
                     </div>
                     
                     {/* Buttons - fixed width, always visible */}
