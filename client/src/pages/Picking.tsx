@@ -902,19 +902,15 @@ export default function Picking() {
     console.log("[SCAN]", msg);
   };
   
-  // Handle list view scan - finds matching item and picks it (matches SKU or barcode)
-  const handleListScan = (value: string) => {
-    setScanInput(value);
-    
-    addDebug(`Input: "${value}" (len=${value.length})`);
-    
-    if (!activeWork) {
-      addDebug("No activeWork!");
-      return;
-    }
+  // Ref for scan timeout - scanners send characters rapidly, wait for pause
+  const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Process a complete scan (called after scanner finishes sending characters)
+  const processScan = (value: string) => {
+    if (!activeWork || !value.trim()) return;
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
-    addDebug(`Normalized: "${normalizedInput}"`);
+    addDebug(`Processing: "${normalizedInput}"`);
     
     // Find matching unpicked item by SKU or barcode
     const matchingIndex = activeWork.items.findIndex(item => {
@@ -924,40 +920,63 @@ export default function Picking() {
       return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
     });
     
-    addDebug(`Match index: ${matchingIndex}`);
-    
     if (matchingIndex !== -1) {
       const item = activeWork.items[matchingIndex];
-      addDebug(`SUCCESS! Picking: ${item.sku}`);
+      addDebug(`MATCH! ${item.sku} at idx ${matchingIndex}`);
       setScanStatus("success");
       playSound("success");
       triggerHaptic("medium");
       
-      // Pick the item
+      // Pick immediately, then clear input
+      handleListItemPickDirect(matchingIndex, item.qty);
       setTimeout(() => {
-        handleListItemPickDirect(matchingIndex, item.qty);
         setScanStatus("idle");
         setScanInput("");
-      }, 400);
-    } else if (normalizedInput.length >= 5) {
-      addDebug(`No match for "${normalizedInput}"`);
-      // Check if it's a wrong barcode (not matching any pending item)
-      const anyMatch = activeWork.items.some(item => {
-        const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
-        return normalizedInput === normalizedSku;
-      });
+        maintainFocus();
+      }, 300);
+    } else {
+      addDebug(`NO MATCH for "${normalizedInput}"`);
+      setScanStatus("error");
+      playSound("error");
+      triggerHaptic("heavy");
       
-      if (!anyMatch) {
-        addDebug("ERROR - barcode not found");
-        setScanStatus("error");
-        playSound("error");
-        triggerHaptic("heavy");
-        
-        setTimeout(() => {
-          setScanStatus("idle");
-          setScanInput("");
-          maintainFocus();
-        }, 1000);
+      setTimeout(() => {
+        setScanStatus("idle");
+        setScanInput("");
+        maintainFocus();
+      }, 1000);
+    }
+  };
+  
+  // Handle input change - buffer keystrokes and wait for scanner to finish
+  const handleListScan = (value: string) => {
+    setScanInput(value);
+    addDebug(`Buffering: "${value}" (${value.length})`);
+    
+    // Clear any pending timeout
+    if (scanTimeoutRef.current) {
+      clearTimeout(scanTimeoutRef.current);
+    }
+    
+    // Wait 150ms after last keystroke - scanners send chars rapidly, humans don't
+    scanTimeoutRef.current = setTimeout(() => {
+      if (value.trim().length >= 3) {
+        processScan(value);
+      }
+    }, 150);
+  };
+  
+  // Handle Enter key from scanner (most scanners send Enter after barcode)
+  const handleScanKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      // Clear pending timeout and process immediately
+      if (scanTimeoutRef.current) {
+        clearTimeout(scanTimeoutRef.current);
+      }
+      addDebug(`Enter pressed, value: "${scanInput}"`);
+      if (scanInput.trim().length >= 3) {
+        processScan(scanInput);
       }
     }
   };
@@ -2091,6 +2110,7 @@ export default function Picking() {
                 className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
                 value={scanInput}
                 onChange={(e) => handleListScan(e.target.value)}
+                onKeyDown={handleScanKeyDown}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
