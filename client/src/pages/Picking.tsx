@@ -2093,7 +2093,7 @@ export default function Picking() {
                   <div 
                     key={item.id} 
                     className={cn(
-                      "flex items-center gap-2 p-2 rounded-lg border transition-all duration-300",
+                      "flex items-center gap-1.5 p-1.5 rounded-lg border transition-all duration-300",
                       // Completed states
                       item.status === "completed" && "bg-emerald-50 border-emerald-200",
                       item.status === "short" && "bg-amber-50 border-amber-200",
@@ -2104,73 +2104,61 @@ export default function Picking() {
                     )}
                     data-testid={`list-item-${item.id}`}
                   >
-                    {/* Status/Qty indicator */}
+                    {/* Status/Qty indicator - compact */}
                     <div className={cn(
-                      "h-10 w-10 rounded flex items-center justify-center shrink-0 text-lg font-bold",
+                      "h-8 w-8 rounded flex items-center justify-center shrink-0 text-sm font-bold",
                       item.status === "completed" && "bg-emerald-500 text-white",
                       item.status === "short" && "bg-amber-500 text-white",
                       !isCompleted && "bg-slate-100 text-slate-700"
                     )}>
                       {item.status === "completed" ? (
-                        <CheckCircle2 className="h-5 w-5" />
+                        <CheckCircle2 className="h-4 w-4" />
                       ) : item.status === "short" ? (
-                        <AlertTriangle className="h-5 w-5" />
+                        <AlertTriangle className="h-4 w-4" />
                       ) : (
                         <span>{remaining}</span>
                       )}
                     </div>
                     
-                    {/* Product image */}
-                    {item.image ? (
-                      <img 
-                        src={item.image} 
-                        alt=""
-                        className="h-10 w-10 rounded object-cover shrink-0"
-                      />
-                    ) : (
-                      <div className="h-10 w-10 rounded bg-slate-100 flex items-center justify-center shrink-0">
-                        <Package className="h-4 w-4 text-slate-400" />
-                      </div>
-                    )}
-                    
-                    {/* Info - SKU and Location - flex-1 with min-w-0 for proper truncation */}
+                    {/* Info - Location prominent, SKU secondary */}
                     <div className="flex-1 min-w-0 overflow-hidden">
-                      <div className="font-mono text-xs font-medium truncate">{item.sku}</div>
-                      <div className="flex items-center gap-2">
-                        <span className={cn(
-                          "text-base font-black font-mono",
-                          isCompleted ? "text-slate-400" : "text-primary"
-                        )}>
-                          {item.location}
-                        </span>
-                        {isCompleted && (
-                          <span className="text-xs font-medium text-emerald-600 whitespace-nowrap">
-                            {item.status === "completed" ? "✓" : "⚠"}
-                          </span>
-                        )}
+                      <div className={cn(
+                        "text-base font-black font-mono leading-tight",
+                        isCompleted ? "text-slate-400" : "text-primary"
+                      )}>
+                        {item.location}
                       </div>
+                      <div className="font-mono text-[10px] text-muted-foreground truncate">{item.sku}</div>
                     </div>
                     
-                    {/* Action buttons - flex-none prevents Android Chrome from collapsing */}
-                    {!isCompleted && (
-                      <div className="flex gap-1 flex-none ml-auto">
+                    {/* Action buttons - compact, fixed width */}
+                    {!isCompleted ? (
+                      <div className="flex gap-1 flex-none" style={{ minWidth: '68px' }}>
                         <Button
                           size="icon"
-                          className="h-10 w-10 flex-none bg-emerald-500 hover:bg-emerald-600 text-white"
+                          className="h-8 w-8 flex-none bg-emerald-500 hover:bg-emerald-600 text-white"
                           onClick={() => handleListItemPick(idx)}
                           data-testid={`button-pick-${item.id}`}
                         >
-                          <CheckCircle2 className="h-5 w-5" />
+                          <CheckCircle2 className="h-4 w-4" />
                         </Button>
                         <Button
                           size="icon"
                           variant="outline"
-                          className="h-10 w-10 flex-none text-amber-600 border-amber-300 hover:bg-amber-50"
+                          className="h-8 w-8 flex-none text-amber-600 border-amber-300"
                           onClick={() => handleListItemShort(idx)}
                           data-testid={`button-short-${item.id}`}
                         >
-                          <AlertTriangle className="h-5 w-5" />
+                          <AlertTriangle className="h-4 w-4" />
                         </Button>
+                      </div>
+                    ) : (
+                      <div className="flex-none w-8 flex justify-center">
+                        {item.status === "completed" ? (
+                          <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                        ) : (
+                          <AlertTriangle className="h-5 w-5 text-amber-500" />
+                        )}
                       </div>
                     )}
                   </div>
