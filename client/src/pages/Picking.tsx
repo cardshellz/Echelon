@@ -1661,6 +1661,7 @@ export default function Picking() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9 pr-9"
+                inputMode="none"
                 data-testid="input-search-queue"
               />
               {searchQuery && (
