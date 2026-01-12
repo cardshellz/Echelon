@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchUnfulfilledOrders, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
@@ -623,17 +623,100 @@ export async function registerRoutes(
       
       console.log(`Orders sync complete: ${created} created, ${updated} updated, ${skipped} skipped (in progress)`);
       
+      // Now sync fulfillment status for all non-shipped orders in our system
+      const fulfillmentResult = await syncFulfillmentStatus();
+      
       res.json({
         success: true,
         created,
         updated,
         skipped,
         total: shopifyOrders.length,
+        fulfillmentSync: fulfillmentResult,
       });
     } catch (error: any) {
       console.error("Shopify orders sync error:", error);
       res.status(500).json({ 
         error: "Failed to sync orders from Shopify",
+        message: error.message 
+      });
+    }
+  });
+
+  // Helper function to sync fulfillment status for all non-terminal orders
+  async function syncFulfillmentStatus(): Promise<{ shipped: number; cancelled: number; checked: number }> {
+    // Get ALL orders that might need status updates - include everything except already shipped/cancelled
+    // This covers ready, in_progress, completed, ready_to_ship, and any on-hold orders
+    const allOrders = await storage.getOrdersWithItems();
+    
+    // Filter to non-terminal orders that have Shopify IDs
+    const activeOrders = allOrders.filter(o => 
+      o.status !== "shipped" && 
+      o.status !== "cancelled" && 
+      o.shopifyOrderId
+    );
+    
+    if (activeOrders.length === 0) {
+      return { shipped: 0, cancelled: 0, checked: 0 };
+    }
+    
+    // Get their Shopify IDs
+    const shopifyOrderIds = activeOrders
+      .filter(o => o.shopifyOrderId)
+      .map(o => o.shopifyOrderId!);
+    
+    if (shopifyOrderIds.length === 0) {
+      return { shipped: 0, cancelled: 0, checked: 0 };
+    }
+    
+    // Fetch fulfillment status from Shopify
+    const fulfillmentStatuses = await fetchOrdersFulfillmentStatus(shopifyOrderIds);
+    
+    let shipped = 0;
+    let cancelled = 0;
+    
+    for (const status of fulfillmentStatuses) {
+      const order = activeOrders.find(o => o.shopifyOrderId === status.shopifyOrderId);
+      if (!order) continue;
+      
+      // If fulfilled in Shopify, mark as shipped in our system
+      if (status.fulfillmentStatus === "fulfilled") {
+        await storage.updateOrderStatus(order.id, "shipped");
+        shipped++;
+        console.log(`Order ${order.orderNumber} marked as shipped (fulfilled in Shopify)`);
+      }
+      // If cancelled in Shopify, mark as cancelled
+      else if (status.cancelledAt) {
+        await storage.updateOrderStatus(order.id, "cancelled");
+        cancelled++;
+        console.log(`Order ${order.orderNumber} marked as cancelled`);
+      }
+    }
+    
+    if (shipped > 0 || cancelled > 0) {
+      broadcastOrdersUpdated();
+    }
+    
+    return { shipped, cancelled, checked: shopifyOrderIds.length };
+  }
+
+  // Dedicated fulfillment sync endpoint
+  app.post("/api/shopify/sync-fulfillments", async (req, res) => {
+    try {
+      console.log("Starting fulfillment status sync...");
+      
+      const result = await syncFulfillmentStatus();
+      
+      console.log(`Fulfillment sync complete: ${result.shipped} shipped, ${result.cancelled} cancelled out of ${result.checked} checked`);
+      
+      res.json({
+        success: true,
+        ...result,
+      });
+    } catch (error: any) {
+      console.error("Fulfillment sync error:", error);
+      res.status(500).json({ 
+        error: "Failed to sync fulfillment status",
         message: error.message 
       });
     }

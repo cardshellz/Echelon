@@ -311,3 +311,58 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
     items,
   };
 }
+
+// Fetch fulfillment status for specific order IDs from Shopify
+export interface OrderFulfillmentStatus {
+  shopifyOrderId: string;
+  fulfillmentStatus: string | null;
+  cancelledAt: string | null;
+}
+
+export async function fetchOrdersFulfillmentStatus(shopifyOrderIds: string[]): Promise<OrderFulfillmentStatus[]> {
+  const config = getShopifyConfig();
+  const results: OrderFulfillmentStatus[] = [];
+  
+  // Shopify API allows fetching by IDs in batches
+  const batchSize = 50;
+  for (let i = 0; i < shopifyOrderIds.length; i += batchSize) {
+    const batch = shopifyOrderIds.slice(i, i + batchSize);
+    const idsParam = batch.join(",");
+    
+    const url = `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?ids=${idsParam}&status=any&fields=id,fulfillment_status,cancelled_at`;
+    
+    const response = await fetch(url, {
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!response.ok) {
+      if (response.status === 429) {
+        await delay(2000);
+        i -= batchSize; // Retry this batch
+        continue;
+      }
+      const error = await response.text();
+      throw new Error(`Shopify API error: ${response.status} - ${error}`);
+    }
+    
+    const data: { orders: Array<{ id: number; fulfillment_status: string | null; cancelled_at: string | null }> } = await response.json();
+    
+    for (const order of data.orders) {
+      results.push({
+        shopifyOrderId: String(order.id),
+        fulfillmentStatus: order.fulfillment_status,
+        cancelledAt: order.cancelled_at,
+      });
+    }
+    
+    // Rate limiting
+    if (i + batchSize < shopifyOrderIds.length) {
+      await delay(500);
+    }
+  }
+  
+  return results;
+}
