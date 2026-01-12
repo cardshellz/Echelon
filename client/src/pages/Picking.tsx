@@ -902,12 +902,16 @@ export default function Picking() {
     console.log("[SCAN]", msg);
   };
   
-  // Ref for scan timeout - scanners send characters rapidly, wait for pause
+  // Buffer for keyboard scan - accumulates keystrokes
+  const scanBufferRef = useRef<string>("");
   const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Process a complete scan (called after scanner finishes sending characters)
   const processScan = (value: string) => {
-    if (!activeWork || !value.trim()) return;
+    if (!activeWork || !value.trim()) {
+      addDebug(`Empty scan ignored`);
+      return;
+    }
     
     const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
     addDebug(`Processing: "${normalizedInput}"`);
@@ -932,6 +936,7 @@ export default function Picking() {
       setTimeout(() => {
         setScanStatus("idle");
         setScanInput("");
+        scanBufferRef.current = "";
         maintainFocus();
       }, 300);
     } else {
@@ -943,42 +948,51 @@ export default function Picking() {
       setTimeout(() => {
         setScanStatus("idle");
         setScanInput("");
+        scanBufferRef.current = "";
         maintainFocus();
       }, 1000);
     }
   };
   
-  // Handle input change - buffer keystrokes and wait for scanner to finish
-  const handleListScan = (value: string) => {
-    setScanInput(value);
-    addDebug(`Buffering: "${value}" (${value.length})`);
-    
-    // Clear any pending timeout
-    if (scanTimeoutRef.current) {
-      clearTimeout(scanTimeoutRef.current);
-    }
-    
-    // Wait 150ms after last keystroke - scanners send chars rapidly, humans don't
-    scanTimeoutRef.current = setTimeout(() => {
-      if (value.trim().length >= 3) {
-        processScan(value);
-      }
-    }, 150);
-  };
-  
-  // Handle Enter key from scanner (most scanners send Enter after barcode)
+  // Handle keydown - capture each keystroke directly from scanner
   const handleScanKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Enter/Tab = end of scan, process the buffer
     if (e.key === "Enter" || e.key === "Tab") {
       e.preventDefault();
-      // Clear pending timeout and process immediately
-      if (scanTimeoutRef.current) {
-        clearTimeout(scanTimeoutRef.current);
+      if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
+      
+      const scannedValue = scanBufferRef.current;
+      addDebug(`Enter: buffer="${scannedValue}"`);
+      
+      if (scannedValue.length >= 3) {
+        processScan(scannedValue);
       }
-      addDebug(`Enter pressed, value: "${scanInput}"`);
-      if (scanInput.trim().length >= 3) {
-        processScan(scanInput);
-      }
+      scanBufferRef.current = "";
+      setScanInput("");
+      return;
     }
+    
+    // Printable character - add to buffer
+    if (e.key.length === 1) {
+      scanBufferRef.current += e.key;
+      addDebug(`Key: "${e.key}" buf="${scanBufferRef.current}"`);
+      
+      // Reset timeout - process after 200ms of no input (fallback if no Enter)
+      if (scanTimeoutRef.current) clearTimeout(scanTimeoutRef.current);
+      scanTimeoutRef.current = setTimeout(() => {
+        if (scanBufferRef.current.length >= 3) {
+          addDebug(`Timeout: processing buffer`);
+          processScan(scanBufferRef.current);
+        }
+        scanBufferRef.current = "";
+        setScanInput("");
+      }, 200);
+    }
+  };
+  
+  // Handle input change - sync display only (actual processing via keydown)
+  const handleListScan = (value: string) => {
+    setScanInput(value);
   };
   
   // Handle picking an item directly from list view by index
