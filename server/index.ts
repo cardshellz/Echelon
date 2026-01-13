@@ -42,9 +42,11 @@ if (process.env.NODE_ENV === "production") {
 
 // Set up PostgreSQL session store for persistent sessions
 const PgSession = connectPgSimple(session);
+const dbConnectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
+const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
 const sessionPool = new Pool({
-  connectionString: process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL,
-  ssl: process.env.EXTERNAL_DATABASE_URL ? { rejectUnauthorized: false } : undefined,
+  connectionString: dbConnectionString,
+  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
 });
 
 app.use(
