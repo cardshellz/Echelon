@@ -347,10 +347,10 @@ export async function registerRoutes(
 
   // ===== PICKING QUEUE API =====
   
-  // Get orders for picking queue (ready or in_progress, excluding held orders for pickers)
+  // Get orders for picking queue (including completed for Done count)
   app.get("/api/picking/queue", async (req, res) => {
     try {
-      const orders = await storage.getOrdersWithItems(["ready", "in_progress"]);
+      const orders = await storage.getOrdersWithItems(["ready", "in_progress", "completed"]);
       // Filter out held orders unless user is admin/lead
       const user = req.session.user;
       const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
