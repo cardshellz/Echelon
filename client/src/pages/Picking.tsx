@@ -609,6 +609,9 @@ export default function Picking() {
   const [lastScannedItemId, setLastScannedItemId] = useState<number | null>(null);
   const [debugLog, setDebugLog] = useState<string[]>([]);
   
+  // Hold/release flash animation state
+  const [flashingOrderId, setFlashingOrderId] = useState<string | null>(null);
+  
   // Computed sound enabled state for icon display
   const soundEnabled = soundTheme !== "silent";
   
@@ -1928,11 +1931,12 @@ export default function Picking() {
               <Card 
                 key={order.id} 
                 className={cn(
-                  "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
+                  "cursor-pointer hover:border-primary/50 transition-all active:scale-[0.99]",
                   order.priority === "rush" && "border-l-4 border-l-red-500",
                   order.priority === "high" && "border-l-4 border-l-amber-500",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
-                  order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40"
+                  order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
+                  flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
                 onClick={() => order.status === "ready" && !order.onHold ? handleStartPicking(order.id) : null}
                 data-testid={`card-order-${order.id}`}
@@ -1971,7 +1975,9 @@ export default function Picking() {
                           className="h-8 px-2 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
                           onClick={(e) => {
                             e.stopPropagation();
+                            setFlashingOrderId(order.id);
                             holdMutation.mutate(parseInt(order.id));
+                            setTimeout(() => setFlashingOrderId(null), 600);
                           }}
                           data-testid={`button-hold-${order.id}`}
                         >
@@ -1986,7 +1992,9 @@ export default function Picking() {
                           className="h-8 px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
                           onClick={(e) => {
                             e.stopPropagation();
+                            setFlashingOrderId(order.id);
                             releaseHoldMutation.mutate(parseInt(order.id));
+                            setTimeout(() => setFlashingOrderId(null), 600);
                           }}
                           data-testid={`button-release-hold-${order.id}`}
                         >
