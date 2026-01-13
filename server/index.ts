@@ -1,5 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { Pool } from "pg";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -33,15 +35,27 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Set up PostgreSQL session store for persistent sessions
+const PgSession = connectPgSimple(session);
+const sessionPool = new Pool({
+  connectionString: process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL,
+  ssl: process.env.EXTERNAL_DATABASE_URL ? { rejectUnauthorized: false } : undefined,
+});
+
 app.use(
   session({
+    store: new PgSession({
+      pool: sessionPool,
+      tableName: "session",
+      createTableIfMissing: true,
+    }),
     secret: process.env.SESSION_SECRET || "echelon-dev-secret-change-me",
     resave: false,
     saveUninitialized: false,
     cookie: {
       secure: process.env.NODE_ENV === "production",
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     },
   })
 );
