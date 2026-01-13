@@ -609,56 +609,62 @@ export default function Picking() {
   const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
   
-  // Hide keyboard by blurring the active element
-  const hideKeyboard = useCallback(() => {
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
-    }
-    // Also try VirtualKeyboard API
-    if ('virtualKeyboard' in navigator) {
-      (navigator as any).virtualKeyboard.hide();
-    }
-  }, []);
-  
-  // Keep focus on scan input - but don't auto-focus (let scanner work without keyboard)
+  // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
-    // Don't auto-focus - this prevents keyboard from appearing
-    // The global keydown listener captures scanner input anyway
-  }, []);
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && manualInputRef.current) {
+      manualInputRef.current.focus();
+    }
+  }, [view, shortPickOpen, multiQtyOpen]);
   
-  // Hide keyboard when entering picking view
+  // Auto-focus on mount and after any interaction
   useEffect(() => {
     if (view === "picking") {
-      // Immediately hide keyboard when picking starts
-      hideKeyboard();
+      maintainFocus();
+      
+      // Set up interval to maintain focus (for scanner devices)
+      const interval = setInterval(maintainFocus, 500);
+      
+      // Also refocus on any click/touch on the document
+      const handleInteraction = () => {
+        if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+        focusTimeoutRef.current = setTimeout(maintainFocus, 100);
+      };
+      
+      document.addEventListener("click", handleInteraction);
+      document.addEventListener("touchend", handleInteraction);
+      
+      return () => {
+        clearInterval(interval);
+        document.removeEventListener("click", handleInteraction);
+        document.removeEventListener("touchend", handleInteraction);
+        if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+      };
     }
-  }, [view, hideKeyboard]);
+  }, [view, maintainFocus]);
   
-  // Hide keyboard after dialogs close
+  // Refocus after dialogs close
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen && view === "picking") {
-      setTimeout(hideKeyboard, 100);
+    if (!shortPickOpen && !multiQtyOpen) {
+      setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, view, hideKeyboard]);
+  }, [shortPickOpen, multiQtyOpen, maintainFocus]);
   
-  // Auto-hide keyboard when any input gets focused in picking mode
+  // Prevent other inputs from stealing focus in picking mode
   useEffect(() => {
     if (view === "picking") {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
-        // When an input gets focus, immediately blur it to hide keyboard
-        // Scanner will still work via global keydown listener
-        if (target.tagName === "INPUT") {
-          setTimeout(() => {
-            hideKeyboard();
-          }, 50);
+        // Allow focus on scan input
+        if (target !== manualInputRef.current && target.tagName === "INPUT") {
+          e.preventDefault();
+          maintainFocus();
         }
       };
       
       document.addEventListener("focusin", handleFocusIn);
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
-  }, [view, hideKeyboard]);
+  }, [view, maintainFocus]);
   
   // Ref for processScan callback - updated when dependencies change
   const processScanRef = useRef<(value: string) => void>(() => {});
