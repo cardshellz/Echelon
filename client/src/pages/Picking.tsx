@@ -588,11 +588,15 @@ export default function Picking() {
   const [soundSettingsOpen, setSoundSettingsOpen] = useState(false);
   const [lastScannedItemId, setLastScannedItemId] = useState<number | null>(null);
   const [debugLog, setDebugLog] = useState<string[]>([]);
+  const [manualEntryMode, setManualEntryMode] = useState(false); // Toggle for manual keyboard entry
   
   // Computed sound enabled state for icon display
   const soundEnabled = soundTheme !== "silent";
   
-  const scanInputRef = useRef<HTMLInputElement>(null);
+  // Scanner trap ref (div) for hardware scanner - doesn't trigger keyboard
+  const scannerTrapRef = useRef<HTMLDivElement>(null);
+  // Manual entry input ref - only used when manual entry is active
+  const manualInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   // Global scanner buffer - captures keystrokes even with readOnly input
@@ -608,12 +612,16 @@ export default function Picking() {
   const totalItems = activeWork?.items.length || 0;
   const progressPercent = totalItems > 0 ? (completedItems / totalItems) * 100 : 0;
   
-  // Keep focus on scan input - aggressive refocus for scanner devices
+  // Keep focus on scanner trap (or manual input) - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && scanInputRef.current) {
-      scanInputRef.current.focus();
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen) {
+      if (manualEntryMode && manualInputRef.current) {
+        manualInputRef.current.focus();
+      } else if (scannerTrapRef.current) {
+        scannerTrapRef.current.focus();
+      }
     }
-  }, [view, shortPickOpen, multiQtyOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, manualEntryMode]);
   
   // Auto-focus on mount and after any interaction
   useEffect(() => {
@@ -648,12 +656,13 @@ export default function Picking() {
     }
   }, [shortPickOpen, multiQtyOpen, maintainFocus]);
   
-  // Prevent other inputs from stealing focus in picking mode
+  // Prevent other inputs from stealing focus in picking mode (except manual entry input)
   useEffect(() => {
     if (view === "picking") {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
-        if (target !== scanInputRef.current && target.tagName === "INPUT") {
+        // Allow focus on scanner trap or manual input
+        if (target !== scannerTrapRef.current && target !== manualInputRef.current && target.tagName === "INPUT") {
           e.preventDefault();
           maintainFocus();
         }
@@ -2271,20 +2280,19 @@ export default function Picking() {
                       <AlertTriangle className="h-6 w-6" />
                       Wrong Item!
                     </div>
-                  ) : (
+                  ) : manualEntryMode ? (
                     <div className="relative">
                       <Scan className="absolute left-4 top-1/2 -translate-y-1/2 text-primary h-6 w-6" />
                       <Input 
-                        ref={scanInputRef}
-                        placeholder="Scan barcode..." 
-                        className="pl-14 h-14 text-xl font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-xl"
-                        style={{ caretColor: 'transparent' }}
+                        ref={manualInputRef}
+                        placeholder="Type barcode..." 
+                        className="pl-14 pr-12 h-14 text-xl font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-xl"
                         value={scanInput}
-                        onChange={(e) => handleScan(e.target.value)}
-                        onFocus={() => {
-                          // Try to hide virtual keyboard using VirtualKeyboard API
-                          if ('virtualKeyboard' in navigator) {
-                            (navigator as any).virtualKeyboard.hide();
+                        onChange={(e) => setScanInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && scanInput.trim()) {
+                            handleScan(scanInput.trim());
+                            setScanInput("");
                           }
                         }}
                         autoComplete="off"
@@ -2292,8 +2300,45 @@ export default function Picking() {
                         autoCapitalize="off"
                         spellCheck={false}
                         enterKeyHint="done"
-                        data-testid="input-scan-sku"
+                        data-testid="input-scan-sku-manual"
                       />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 p-0"
+                        onClick={() => { setManualEntryMode(false); setScanInput(""); }}
+                        data-testid="button-exit-manual"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Scan className="absolute left-4 top-1/2 -translate-y-1/2 text-primary h-6 w-6 z-10" />
+                      <div
+                        ref={scannerTrapRef}
+                        tabIndex={0}
+                        role="textbox"
+                        aria-label="Scan barcode"
+                        className="pl-14 pr-20 h-14 text-xl font-mono border-2 border-primary/50 focus:ring-2 focus:ring-primary focus:ring-offset-2 rounded-xl bg-background flex items-center cursor-text outline-none"
+                        onClick={() => scannerTrapRef.current?.focus()}
+                        data-testid="scanner-trap"
+                      >
+                        {scanInput ? (
+                          <span className="text-foreground">{scanInput}</span>
+                        ) : (
+                          <span className="text-muted-foreground">Scan barcode...</span>
+                        )}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 h-8 px-2 text-xs text-muted-foreground"
+                        onClick={() => { setManualEntryMode(true); setScanInput(""); }}
+                        data-testid="button-manual-entry"
+                      >
+                        Type
+                      </Button>
                     </div>
                   )}
                   
@@ -2332,30 +2377,62 @@ export default function Picking() {
         <div className="flex-1 p-3 md:p-4 flex flex-col max-w-2xl mx-auto w-full">
           {/* Scan input at top for list view */}
           <div className="mb-2">
-            <div className="relative">
-              <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-primary h-5 w-5" />
-              <Input 
-                ref={scanInputRef}
-                placeholder="Scan any item barcode..." 
-                className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
-                style={{ caretColor: 'transparent' }}
-                value={scanInput}
-                onChange={(e) => setScanInput(e.target.value)}
-                onKeyDown={handleScanKeyDown}
-                onFocus={() => {
-                  // Try to hide virtual keyboard using VirtualKeyboard API
-                  if ('virtualKeyboard' in navigator) {
-                    (navigator as any).virtualKeyboard.hide();
-                  }
-                }}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                enterKeyHint="done"
-                data-testid="input-scan-sku-list"
-              />
-            </div>
+            {manualEntryMode ? (
+              <div className="relative">
+                <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-primary h-5 w-5" />
+                <Input 
+                  ref={manualInputRef}
+                  placeholder="Type barcode..." 
+                  className="pl-12 pr-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
+                  value={scanInput}
+                  onChange={(e) => setScanInput(e.target.value)}
+                  onKeyDown={handleScanKeyDown}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  enterKeyHint="done"
+                  data-testid="input-scan-sku-list-manual"
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 p-0"
+                  onClick={() => { setManualEntryMode(false); setScanInput(""); }}
+                  data-testid="button-exit-manual-list"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="relative">
+                <Scan className="absolute left-3 top-1/2 -translate-y-1/2 text-primary h-5 w-5 z-10" />
+                <div
+                  ref={scannerTrapRef}
+                  tabIndex={0}
+                  role="textbox"
+                  aria-label="Scan barcode"
+                  className="pl-12 pr-16 h-12 text-lg font-mono border-2 border-primary/50 focus:ring-2 focus:ring-primary focus:ring-offset-2 rounded-lg bg-background flex items-center cursor-text outline-none"
+                  onClick={() => scannerTrapRef.current?.focus()}
+                  data-testid="scanner-trap-list"
+                >
+                  {scanInput ? (
+                    <span className="text-foreground">{scanInput}</span>
+                  ) : (
+                    <span className="text-muted-foreground">Scan any item barcode...</span>
+                  )}
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 px-2 text-xs text-muted-foreground"
+                  onClick={() => { setManualEntryMode(true); setScanInput(""); }}
+                  data-testid="button-manual-entry-list"
+                >
+                  Type
+                </Button>
+              </div>
+            )}
             {/* Debug log panel - shows scan activity */}
             {debugLog.length > 0 && (
               <div className="mt-1 p-2 bg-slate-900 text-green-400 rounded text-[10px] font-mono max-h-20 overflow-auto">
