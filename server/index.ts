@@ -35,6 +35,11 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// Trust proxy for Heroku (needed for secure cookies behind load balancer)
+if (process.env.NODE_ENV === "production") {
+  app.set("trust proxy", 1);
+}
+
 // Set up PostgreSQL session store for persistent sessions
 const PgSession = connectPgSimple(session);
 const sessionPool = new Pool({
