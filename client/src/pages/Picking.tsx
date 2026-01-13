@@ -36,6 +36,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
 import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 
 // API response type
@@ -327,6 +328,7 @@ export default function Picking() {
   // Get current user for role-based UI
   const { user } = useAuth();
   const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
+  const { toast } = useToast();
   
   // Get picking mode, view mode, and sound/haptic settings from context
   const { 
@@ -499,23 +501,41 @@ export default function Picking() {
       console.log("[HOLD] Success:", data);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
+      toast({
+        title: "Order on hold",
+        description: `Order ${data.orderNumber} has been placed on hold`,
+      });
     },
     onError: (error) => {
       console.error("[HOLD] Failed to hold order:", error);
       playSound("error");
+      toast({
+        title: "Failed to hold order",
+        description: "Please try again",
+        variant: "destructive",
+      });
     },
   });
   
   // Mutation for releasing hold on orders (admin/lead only)
   const releaseHoldMutation = useMutation({
     mutationFn: (orderId: number) => releaseHoldOrder(orderId),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
+      toast({
+        title: "Order released",
+        description: `Order ${data.orderNumber} is back in the queue`,
+      });
     },
     onError: (error) => {
       console.error("Failed to release hold:", error);
       playSound("error");
+      toast({
+        title: "Failed to release order",
+        description: "Please try again",
+        variant: "destructive",
+      });
     },
   });
   
