@@ -589,6 +589,10 @@ export default function Picking() {
   const scanInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
+  // Global scanner buffer - captures keystrokes even with readOnly input
+  const scanBufferRef = useRef<string>("");
+  const scanBufferTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
   // Computed values - work for both modes
   const activeBatch = queue.find(b => b.id === activeBatchId);
   const activeOrder = singleQueue.find(o => o.id === activeOrderId);
@@ -654,17 +658,67 @@ export default function Picking() {
     }
   }, [view, maintainFocus]);
   
-  // Handle keyboard Enter for scanner (many scanners send Enter after barcode)
+  // Global scanner capture - works with readOnly input to suppress keyboard
+  // Captures all keystrokes and builds buffer, processes on Enter
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && view === "picking" && scanInput.length > 0) {
+    if (view !== "picking" || shortPickOpen || multiQtyOpen) {
+      return;
+    }
+    
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Ignore modifier keys and special keys
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      
+      // Clear timeout on each keystroke
+      if (scanBufferTimeoutRef.current) {
+        clearTimeout(scanBufferTimeoutRef.current);
+      }
+      
+      if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
+        const scannedValue = scanBufferRef.current.trim();
+        if (scannedValue.length > 0) {
+          addDebugLog(`GLOBAL: Enter with buffer "${scannedValue}"`);
+          setScanInput(scannedValue);
+          // Process the scan
+          setTimeout(() => {
+            processScan(scannedValue);
+            scanBufferRef.current = "";
+            setScanInput("");
+          }, 10);
+        }
+        return;
+      }
+      
+      // Only capture printable characters
+      if (e.key.length === 1) {
+        scanBufferRef.current += e.key;
+        setScanInput(scanBufferRef.current);
+        addDebugLog(`GLOBAL: Key "${e.key}" buffer="${scanBufferRef.current}"`);
+        
+        // Auto-clear buffer after 300ms of no input (in case Enter doesn't come)
+        scanBufferTimeoutRef.current = setTimeout(() => {
+          if (scanBufferRef.current.length > 0) {
+            addDebugLog(`GLOBAL: Timeout, processing buffer "${scanBufferRef.current}"`);
+            const scannedValue = scanBufferRef.current.trim();
+            if (scannedValue.length >= 3) {
+              processScan(scannedValue);
+            }
+            scanBufferRef.current = "";
+            setScanInput("");
+          }
+        }, 300);
       }
     };
     
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [view, scanInput]);
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeyDown);
+      if (scanBufferTimeoutRef.current) {
+        clearTimeout(scanBufferTimeoutRef.current);
+      }
+    };
+  }, [view, shortPickOpen, multiQtyOpen]);
   
   // Claim error state
   const [claimError, setClaimError] = useState<string | null>(null);
@@ -2195,8 +2249,7 @@ export default function Picking() {
                 placeholder="Scan any item barcode..." 
                 className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
                 value={scanInput}
-                onChange={(e) => handleListScan(e.target.value)}
-                onKeyDown={handleScanKeyDown}
+                readOnly
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
