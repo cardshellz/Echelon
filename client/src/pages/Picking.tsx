@@ -74,6 +74,7 @@ async function holdOrder(orderId: number): Promise<Order> {
   const res = await fetch(`/api/orders/${orderId}/hold`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
   });
   if (!res.ok) throw new Error("Failed to hold order");
   return res.json();
@@ -83,6 +84,7 @@ async function releaseHoldOrder(orderId: number): Promise<Order> {
   const res = await fetch(`/api/orders/${orderId}/release-hold`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
   });
   if (!res.ok) throw new Error("Failed to release hold");
   return res.json();
