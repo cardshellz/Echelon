@@ -2276,13 +2276,20 @@ export default function Picking() {
                         ref={scanInputRef}
                         placeholder="Scan barcode..." 
                         className="pl-14 h-14 text-xl font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-xl"
+                        style={{ caretColor: 'transparent' }}
                         value={scanInput}
                         onChange={(e) => handleScan(e.target.value)}
+                        onFocus={() => {
+                          // Try to hide virtual keyboard using VirtualKeyboard API
+                          if ('virtualKeyboard' in navigator) {
+                            (navigator as any).virtualKeyboard.hide();
+                          }
+                        }}
                         autoComplete="off"
                         autoCorrect="off"
                         autoCapitalize="off"
                         spellCheck={false}
-                        inputMode="none"
+                        enterKeyHint="done"
                         data-testid="input-scan-sku"
                       />
                     </div>
@@ -2329,14 +2336,21 @@ export default function Picking() {
                 ref={scanInputRef}
                 placeholder="Scan any item barcode..." 
                 className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
+                style={{ caretColor: 'transparent' }}
                 value={scanInput}
                 onChange={(e) => setScanInput(e.target.value)}
                 onKeyDown={handleScanKeyDown}
+                onFocus={() => {
+                  // Try to hide virtual keyboard using VirtualKeyboard API
+                  if ('virtualKeyboard' in navigator) {
+                    (navigator as any).virtualKeyboard.hide();
+                  }
+                }}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                inputMode="none"
+                enterKeyHint="done"
                 data-testid="input-scan-sku-list"
               />
             </div>
