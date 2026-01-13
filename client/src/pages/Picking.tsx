@@ -658,12 +658,21 @@ export default function Picking() {
     }
   }, [view, maintainFocus]);
   
+  // Ref for processScan callback - updated when dependencies change
+  const processScanRef = useRef<(value: string) => void>(() => {});
+  
   // Global scanner capture - works with readOnly input to suppress keyboard
   // Captures all keystrokes and builds buffer, processes on Enter
   useEffect(() => {
     if (view !== "picking" || shortPickOpen || multiQtyOpen) {
       return;
     }
+    
+    const logDebug = (msg: string) => {
+      const ts = new Date().toLocaleTimeString();
+      setDebugLog(prev => [`${ts}: ${msg}`, ...prev.slice(0, 9)]);
+      console.log("[SCAN]", msg);
+    };
     
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Ignore modifier keys and special keys
@@ -678,11 +687,11 @@ export default function Picking() {
         e.preventDefault();
         const scannedValue = scanBufferRef.current.trim();
         if (scannedValue.length > 0) {
-          addDebugLog(`GLOBAL: Enter with buffer "${scannedValue}"`);
+          logDebug(`GLOBAL: Enter with buffer "${scannedValue}"`);
           setScanInput(scannedValue);
-          // Process the scan
+          // Process via ref (updated with current activeWork)
           setTimeout(() => {
-            processScan(scannedValue);
+            processScanRef.current(scannedValue);
             scanBufferRef.current = "";
             setScanInput("");
           }, 10);
@@ -694,15 +703,14 @@ export default function Picking() {
       if (e.key.length === 1) {
         scanBufferRef.current += e.key;
         setScanInput(scanBufferRef.current);
-        addDebugLog(`GLOBAL: Key "${e.key}" buffer="${scanBufferRef.current}"`);
         
         // Auto-clear buffer after 300ms of no input (in case Enter doesn't come)
         scanBufferTimeoutRef.current = setTimeout(() => {
           if (scanBufferRef.current.length > 0) {
-            addDebugLog(`GLOBAL: Timeout, processing buffer "${scanBufferRef.current}"`);
+            logDebug(`GLOBAL: Timeout, processing buffer "${scanBufferRef.current}"`);
             const scannedValue = scanBufferRef.current.trim();
             if (scannedValue.length >= 3) {
-              processScan(scannedValue);
+              processScanRef.current(scannedValue);
             }
             scanBufferRef.current = "";
             setScanInput("");
@@ -1026,6 +1034,53 @@ export default function Picking() {
     setScanInput(value);
     addDebug(`Input: "${value}"`);
   };
+  
+  // Update processScanRef with current scan logic (for global keyboard capture)
+  useEffect(() => {
+    processScanRef.current = (value: string) => {
+      if (!activeWork || !value.trim()) {
+        addDebug(`Global scan: no value or no order`);
+        return;
+      }
+      
+      const normalizedInput = value.toUpperCase().replace(/-/g, "").trim();
+      
+      // Find matching unpicked item
+      const matchingIndex = activeWork.items.findIndex(item => {
+        if (item.status === "completed" || item.status === "short") return false;
+        const normalizedSku = item.sku.toUpperCase().replace(/-/g, "");
+        const normalizedBarcode = item.barcode?.toUpperCase().replace(/-/g, "") || "";
+        return normalizedInput === normalizedSku || normalizedInput === normalizedBarcode;
+      });
+      
+      if (matchingIndex !== -1) {
+        const item = activeWork.items[matchingIndex];
+        const newPicked = item.picked + 1;
+        addDebug(`GLOBAL MATCH! ${item.sku} (${newPicked}/${item.qty})`);
+        setScanStatus("success");
+        playSound("success");
+        triggerHaptic("medium");
+        
+        // Pick one unit at a time
+        handleListItemPickOne(matchingIndex);
+        
+        setTimeout(() => {
+          setScanStatus("idle");
+          maintainFocus();
+        }, 300);
+      } else {
+        addDebug(`GLOBAL NO MATCH: "${normalizedInput}"`);
+        setScanStatus("error");
+        playSound("error");
+        triggerHaptic("heavy");
+        
+        setTimeout(() => {
+          setScanStatus("idle");
+          maintainFocus();
+        }, 1000);
+      }
+    };
+  }, [activeWork, playSound, triggerHaptic, maintainFocus]);
   
   // Handle picking ONE unit of an item (for scanning - increments by 1)
   const handleListItemPickOne = (idx: number) => {
