@@ -489,13 +489,17 @@ export default function Picking() {
   
   // Mutation for putting orders on hold (admin/lead only)
   const holdMutation = useMutation({
-    mutationFn: (orderId: number) => holdOrder(orderId),
-    onSuccess: () => {
+    mutationFn: (orderId: number) => {
+      console.log("[HOLD] Attempting to hold order:", orderId);
+      return holdOrder(orderId);
+    },
+    onSuccess: (data) => {
+      console.log("[HOLD] Success:", data);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
     },
     onError: (error) => {
-      console.error("Failed to hold order:", error);
+      console.error("[HOLD] Failed to hold order:", error);
       playSound("error");
     },
   });
@@ -564,7 +568,7 @@ export default function Picking() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("age");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done">("all");
+  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold">("all");
   
   // UI state
   const [scanInput, setScanInput] = useState("");
@@ -1515,13 +1519,16 @@ export default function Picking() {
     // Use different data based on picking mode
     const readyItems = pickingMode === "batch" 
       ? queue.filter(b => b.status === "ready")
-      : singleQueue.filter(o => o.status === "ready");
+      : singleQueue.filter(o => o.status === "ready" && !o.onHold);
     const inProgressItems = pickingMode === "batch"
       ? queue.filter(b => b.status === "in_progress")
       : singleQueue.filter(o => o.status === "in_progress");
     const completedItems = pickingMode === "batch"
       ? queue.filter(b => b.status === "completed")
       : singleQueue.filter(o => o.status === "completed");
+    const holdItems = pickingMode === "single"
+      ? singleQueue.filter(o => o.onHold)
+      : [];
     const totalItemsToPick = readyItems.reduce((acc, item) => acc + item.items.length, 0);
     
     // Filtered and sorted queue
@@ -1529,11 +1536,16 @@ export default function Picking() {
       // By default, hide completed items unless filtering for "done"
       if (activeFilter !== "done" && item.status === "completed") return false;
       
+      // By default, hide held items unless filtering for "hold" (admin only)
+      const itemOnHold = "onHold" in item && item.onHold;
+      if (activeFilter !== "hold" && itemOnHold) return false;
+      
       // Apply status filter
-      if (activeFilter === "ready" && item.status !== "ready") return false;
+      if (activeFilter === "ready" && (item.status !== "ready" || itemOnHold)) return false;
       if (activeFilter === "active" && item.status !== "in_progress") return false;
       if (activeFilter === "done" && item.status !== "completed") return false;
       if (activeFilter === "rush" && item.priority !== "rush") return false;
+      if (activeFilter === "hold" && !itemOnHold) return false;
       
       // Apply search filter
       if (searchQuery.trim()) {
@@ -1712,7 +1724,7 @@ export default function Picking() {
           )}
 
           {/* Queue Stats - Clickable Filters */}
-          <div className="grid grid-cols-4 gap-2 md:gap-3 mt-4">
+          <div className={cn("grid gap-2 md:gap-3 mt-4", isAdminOrLead && holdItems.length > 0 ? "grid-cols-5" : "grid-cols-4")}>
             <div 
               className={cn(
                 "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-primary/50",
@@ -1746,6 +1758,20 @@ export default function Picking() {
               <div className="text-xl md:text-2xl font-bold text-red-600">{readyItems.filter(item => item.priority === "rush").length}</div>
               <div className="text-[10px] md:text-xs text-muted-foreground">Rush</div>
             </div>
+            {/* Hold filter - only visible to admins when there are held orders */}
+            {isAdminOrLead && holdItems.length > 0 && (
+              <div 
+                className={cn(
+                  "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-slate-500/50",
+                  activeFilter === "hold" ? "bg-slate-200 ring-2 ring-slate-500" : "bg-muted/50"
+                )}
+                onClick={() => setActiveFilter(activeFilter === "hold" ? "all" : "hold")}
+                data-testid="filter-hold"
+              >
+                <div className="text-xl md:text-2xl font-bold text-slate-600">{holdItems.length}</div>
+                <div className="text-[10px] md:text-xs text-muted-foreground">On Hold</div>
+              </div>
+            )}
             <div 
               className={cn(
                 "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-emerald-500/50",
