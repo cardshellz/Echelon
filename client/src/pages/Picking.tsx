@@ -2304,11 +2304,13 @@ export default function Picking() {
                 placeholder="Scan any item barcode..." 
                 className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
                 value={scanInput}
-                readOnly
+                onChange={(e) => setScanInput(e.target.value)}
+                onKeyDown={handleScanKeyDown}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
+                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
