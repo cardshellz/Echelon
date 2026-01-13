@@ -1661,7 +1661,6 @@ export default function Picking() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-9 pr-9"
-                inputMode="none"
                 data-testid="input-search-queue"
               />
               {searchQuery && (
@@ -2202,8 +2201,6 @@ export default function Picking() {
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                readOnly={false}
-                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
