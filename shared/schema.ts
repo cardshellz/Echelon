@@ -106,6 +106,7 @@ export const orderItems = pgTable("order_items", {
   name: text("name").notNull(),
   quantity: integer("quantity").notNull(),
   pickedQuantity: integer("picked_quantity").notNull().default(0),
+  fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0), // Quantity fulfilled in Shopify (shipped by Shipstation)
   status: varchar("status", { length: 20 }).notNull().default("pending"),
   location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
   zone: varchar("zone", { length: 10 }).notNull().default("U"),
