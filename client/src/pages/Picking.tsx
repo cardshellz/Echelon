@@ -1950,7 +1950,13 @@ export default function Picking() {
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
-                onClick={() => order.status === "ready" && !order.onHold ? handleStartPicking(order.id) : null}
+                onClick={() => {
+                  if (order.status === "ready" && !order.onHold) {
+                    handleStartPicking(order.id);
+                  } else if (order.status === "completed") {
+                    setSelectedCompletedOrder(order);
+                  }
+                }}
                 data-testid={`card-order-${order.id}`}
               >
                 <CardContent className="p-3 md:p-4">
@@ -1959,9 +1965,10 @@ export default function Picking() {
                       <div className={cn(
                         "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
                         order.onHold ? "bg-slate-200 text-slate-500" : 
+                        order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
                         order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                       )}>
-                        {order.onHold ? <Pause size={24} /> : <Package size={24} />}
+                        {order.onHold ? <Pause size={24} /> : order.status === "completed" ? <CheckCircle2 size={24} /> : <Package size={24} />}
                       </div>
                       <div>
                         <div className="font-semibold flex items-center gap-2 text-base">
@@ -1973,6 +1980,11 @@ export default function Picking() {
                         <div className="text-sm text-muted-foreground flex items-center gap-1">
                           <User size={12} /> {order.customer} • {order.items.length} items
                         </div>
+                        {order.status === "completed" && order.pickerName && (
+                          <div className="text-xs text-muted-foreground mt-0.5">
+                            Picked by {order.pickerName}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="text-right flex items-center gap-2">
@@ -2031,6 +2043,9 @@ export default function Picking() {
                           <Unlock className="h-4 w-4 mr-1" />
                           Release
                         </Button>
+                      )}
+                      {order.status === "completed" && (
+                        <ChevronRight className="h-6 w-6 text-emerald-600" />
                       )}
                     </div>
                   </div>
