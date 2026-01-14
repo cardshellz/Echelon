@@ -632,6 +632,7 @@ export async function registerRoutes(
           customerEmail: orderData.customerEmail,
           priority: orderData.priority,
           status: "ready",
+          shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
         }, enrichedItems);
         
         created++;
@@ -1000,6 +1001,7 @@ export async function registerRoutes(
         customerEmail: orderData.customerEmail,
         priority: orderData.priority,
         status: "ready",
+        shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
       }, enrichedItems);
       
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);

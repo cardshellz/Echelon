@@ -427,7 +427,7 @@ export default function Picking() {
     orderNumber: order.orderNumber,
     customer: order.customerName,
     priority: order.priority as "rush" | "high" | "normal",
-    age: getOrderAge(order.createdAt),
+    age: getOrderAge(order.shopifyCreatedAt || order.createdAt),
     status: order.status === "in_progress" ? "in_progress" : order.status === "completed" ? "completed" : "ready",
     assignee: order.assignedPickerId,
     onHold: order.onHold === 1,

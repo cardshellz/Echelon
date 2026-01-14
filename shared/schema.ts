@@ -84,6 +84,7 @@ export const orders = pgTable("orders", {
   pickedCount: integer("picked_count").notNull().default(0),
   shortReason: text("short_reason"),
   metadata: jsonb("metadata"),
+  shopifyCreatedAt: timestamp("shopify_created_at"), // When the order was placed in Shopify
   createdAt: timestamp("created_at").defaultNow().notNull(),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),

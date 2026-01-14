@@ -205,6 +205,7 @@ export interface ExtractedOrder {
   customerName: string;
   customerEmail: string | null;
   priority: "rush" | "high" | "normal";
+  shopifyCreatedAt: string; // ISO date string from Shopify
   items: ExtractedOrderItem[];
 }
 
@@ -319,6 +320,7 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
     customerName,
     customerEmail: payload.email || payload.customer?.email || null,
     priority,
+    shopifyCreatedAt: payload.created_at,
     items,
   };
 }
