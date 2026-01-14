@@ -56,9 +56,14 @@ export type InsertProductLocation = z.infer<typeof insertProductLocationSchema>;
 export type UpdateProductLocation = z.infer<typeof updateProductLocationSchema>;
 export type ProductLocation = typeof productLocations.$inferSelect;
 
-// Order status workflow: ready → in_progress → completed → ready_to_ship → shipped
-export const orderStatusEnum = ["ready", "in_progress", "completed", "ready_to_ship", "shipped", "cancelled"] as const;
+// Order status workflow: ready → in_progress → completed/exception → ready_to_ship → shipped
+// Exception status is for orders with short items that need lead review
+export const orderStatusEnum = ["ready", "in_progress", "completed", "exception", "ready_to_ship", "shipped", "cancelled"] as const;
 export type OrderStatus = typeof orderStatusEnum[number];
+
+// Exception resolution types
+export const exceptionResolutionEnum = ["ship_partial", "hold", "resolved", "cancelled"] as const;
+export type ExceptionResolution = typeof exceptionResolutionEnum[number];
 
 // Order priority levels
 export const orderPriorityEnum = ["rush", "high", "normal"] as const;
@@ -88,6 +93,12 @@ export const orders = pgTable("orders", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),
+  // Exception tracking fields
+  exceptionAt: timestamp("exception_at"), // When the order entered exception status
+  exceptionResolution: varchar("exception_resolution", { length: 20 }), // ship_partial, hold, resolved, cancelled
+  exceptionResolvedAt: timestamp("exception_resolved_at"),
+  exceptionResolvedBy: varchar("exception_resolved_by", { length: 100 }), // User ID who resolved
+  exceptionNotes: text("exception_notes"), // Lead notes on resolution
 });
 
 export const insertOrderSchema = createInsertSchema(orders).omit({
