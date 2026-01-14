@@ -1,0 +1,33 @@
+ at=error code=H15 desc="Idle connection" method=GET path="/ws" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=383fecb1-dbdd-0387-d2b8-aec4f2fb2e67 fwd="67.20.233.54" dyno=web.1 connect=0ms service=55001ms status=101 bytes=0 protocol=http1.1 tls=true tls_version=unknown
+2026-01-14T13:46:49.618782+00:00 app[web.1]: WebSocket client disconnected
+2026-01-14T13:46:50.190943+00:00 app[web.1]: Starting Shopify orders sync...
+2026-01-14T13:46:50.191021+00:00 app[web.1]: [SHOPIFY SYNC] Starting to fetch unfulfilled orders...
+2026-01-14T13:46:50.191034+00:00 app[web.1]: [SHOPIFY SYNC] Fetching page 1...
+2026-01-14T13:46:50.532200+00:00 heroku[router]: at=info method=POST path="/api/shopify/sync-orders" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=9450b192-449c-3616-87b9-38f8d474a3f0 fwd="67.20.233.54" dyno=web.1 connect=0ms service=343ms status=500 bytes=137 protocol=http1.1 tls=true tls_version=unknown
+2026-01-14T13:46:50.523789+00:00 app[web.1]: [SHOPIFY SYNC] Page 1: Got 80 orders
+2026-01-14T13:46:50.524041+00:00 app[web.1]: [SHOPIFY SYNC] Complete: Fetched 80 total orders across 1 pages
+2026-01-14T13:46:50.524053+00:00 app[web.1]: Fetched 80 unfulfilled orders from Shopify
+2026-01-14T13:46:50.529355+00:00 app[web.1]: Shopify orders sync error: error: duplicate key value violates unique constraint "orders_shopify_order_id_key"
+2026-01-14T13:46:50.529357+00:00 app[web.1]:     at /app/dist/index.cjs:70:13326
+2026-01-14T13:46:50.529359+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-14T13:46:50.529360+00:00 app[web.1]:     at async /app/dist/index.cjs:84:98189
+2026-01-14T13:46:50.529361+00:00 app[web.1]:     at async $m.createOrderWithItems (/app/dist/index.cjs:84:103895)
+2026-01-14T13:46:50.529361+00:00 app[web.1]:     at async /app/dist/index.cjs:84:120886 {
+2026-01-14T13:46:50.529361+00:00 app[web.1]:   length: 242,
+2026-01-14T13:46:50.529362+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-14T13:46:50.529362+00:00 app[web.1]:   code: '23505',
+2026-01-14T13:46:50.529363+00:00 app[web.1]:   detail: 'Key (shopify_order_id)=(11898389266591) already exists.',
+2026-01-14T13:46:50.529363+00:00 app[web.1]:   hint: undefined,
+2026-01-14T13:46:50.529363+00:00 app[web.1]:   position: undefined,
+2026-01-14T13:46:50.529364+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-14T13:46:50.529364+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   where: undefined,
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   schema: 'public',
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   table: 'orders',
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   column: undefined,
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   dataType: undefined,
+2026-01-14T13:46:50.529365+00:00 app[web.1]:   constraint: 'orders_shopify_order_id_key',
+2026-01-14T13:46:50.529366+00:00 app[web.1]:   file: 'nbtinsert.c',
+2026-01-14T13:46:50.529366+00:00 app[web.1]:   line: '671',
+2026-01-14T13:46:50.529366+00:00 app[web.1]:   routine: '_bt_check_unique'
+2026-01-14T13:46:50.529366+00:00 app[web.1]: }

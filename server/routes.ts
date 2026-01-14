@@ -599,16 +599,12 @@ export async function registerRoutes(
         const existingOrder = await storage.getOrderByShopifyId(orderData.shopifyOrderId);
         
         if (existingOrder) {
-          // Skip orders that are already being processed or completed
-          if (existingOrder.status !== "ready") {
-            skipped++;
-            continue;
-          }
-          updated++;
-        } else {
-          created++;
+          // Skip orders that already exist - we don't want to overwrite in-progress picking
+          skipped++;
+          continue;
         }
         
+        // Only create NEW orders
         // Enrich items with location and image data from product_locations
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of orderData.items) {
@@ -628,7 +624,7 @@ export async function registerRoutes(
           });
         }
         
-        // Create or update order
+        // Create new order
         await storage.createOrderWithItems({
           shopifyOrderId: orderData.shopifyOrderId,
           orderNumber: orderData.orderNumber,
@@ -637,6 +633,8 @@ export async function registerRoutes(
           priority: orderData.priority,
           status: "ready",
         }, enrichedItems);
+        
+        created++;
       }
       
       console.log(`Orders sync complete: ${created} created, ${updated} updated, ${skipped} skipped (in progress)`);
