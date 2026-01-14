@@ -711,11 +711,12 @@ export async function registerRoutes(
       
       console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.shopifyOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
       
-      // If fulfilled in Shopify, mark as shipped in our system
-      if (status.fulfillmentStatus === "fulfilled") {
+      // If fulfilled OR partially fulfilled in Shopify, mark as shipped in our system
+      // We only import physical items, so partial fulfillment means all our tracked items are shipped
+      if (status.fulfillmentStatus === "fulfilled" || status.fulfillmentStatus === "partial") {
         await storage.updateOrderStatus(order.id, "shipped");
         shipped++;
-        console.log(`Order ${order.orderNumber} marked as shipped (fulfilled in Shopify)`);
+        console.log(`Order ${order.orderNumber} marked as shipped (Shopify status: ${status.fulfillmentStatus})`);
       }
       // If cancelled in Shopify, mark as cancelled
       else if (status.cancelledAt) {
@@ -901,9 +902,19 @@ export async function registerRoutes(
   // ===== FULFILLMENT WEBHOOKS =====
   
   // Helper to check order fulfillment and update status
-  async function checkAndUpdateOrderFulfillment(shopifyOrderId: string, source: string): Promise<void> {
+  async function checkAndUpdateOrderFulfillment(shopifyOrderId: string, source: string, forceShip: boolean = false): Promise<void> {
     const order = await storage.getOrderByShopifyId(shopifyOrderId);
     if (!order || order.status === "shipped" || order.status === "cancelled") {
+      return;
+    }
+    
+    // If forceShip is true (e.g., from a successful fulfillment webhook), 
+    // mark as shipped immediately without checking Shopify's overall status.
+    // This handles partial fulfillments where digital items remain unfulfilled.
+    if (forceShip) {
+      await storage.updateOrderStatus(order.id, "shipped");
+      console.log(`Order ${order.orderNumber} marked as shipped via ${source} (physical items fulfilled)`);
+      broadcastOrdersUpdated();
       return;
     }
     
@@ -911,9 +922,10 @@ export async function registerRoutes(
     const fulfillmentStatuses = await fetchOrdersFulfillmentStatus([shopifyOrderId]);
     const orderStatus = fulfillmentStatuses.find(s => s.shopifyOrderId === shopifyOrderId);
     
-    if (orderStatus?.fulfillmentStatus === "fulfilled") {
+    // Mark shipped if fully fulfilled OR partially fulfilled (since we only track physical items)
+    if (orderStatus?.fulfillmentStatus === "fulfilled" || orderStatus?.fulfillmentStatus === "partial") {
       await storage.updateOrderStatus(order.id, "shipped");
-      console.log(`Order ${order.orderNumber} marked as shipped via ${source} (fully fulfilled in Shopify)`);
+      console.log(`Order ${order.orderNumber} marked as shipped via ${source} (Shopify status: ${orderStatus.fulfillmentStatus})`);
       broadcastOrdersUpdated();
     } else if (orderStatus?.cancelledAt) {
       await storage.updateOrderStatus(order.id, "cancelled");
@@ -944,9 +956,10 @@ export async function registerRoutes(
       
       console.log(`Fulfillment webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus}`);
       
-      // Only check fulfillment if this specific fulfillment was successful
+      // If this fulfillment was successful, mark order as shipped immediately
+      // Since we only import physical items, a successful fulfillment means all tracked items are shipped
       if (fulfillmentStatus === "success") {
-        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment create webhook");
+        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment create webhook", true);
       }
       
       res.status(200).json({ received: true });
@@ -978,9 +991,9 @@ export async function registerRoutes(
       
       console.log(`Fulfillment update webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus}`);
       
-      // Check overall order fulfillment status
+      // If this fulfillment was successful, mark order as shipped immediately
       if (fulfillmentStatus === "success") {
-        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment update webhook");
+        await checkAndUpdateOrderFulfillment(shopifyOrderId, "fulfillment update webhook", true);
       }
       
       res.status(200).json({ received: true });
