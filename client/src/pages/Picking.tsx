@@ -428,7 +428,8 @@ export default function Picking() {
     customer: order.customerName,
     priority: order.priority as "rush" | "high" | "normal",
     age: getOrderAge(order.shopifyCreatedAt || order.createdAt),
-    status: order.status === "in_progress" ? "in_progress" : order.status === "completed" ? "completed" : "ready",
+    status: order.status === "in_progress" ? "in_progress" : 
+            (order.status === "completed" || order.status === "ready_to_ship" || order.status === "shipped") ? "completed" : "ready",
     assignee: order.assignedPickerId,
     onHold: order.onHold === 1,
     pickerName: order.pickerName || null,
@@ -1973,9 +1974,11 @@ export default function Picking() {
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
                 onClick={() => {
+                  console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold);
                   if (order.status === "ready" && !order.onHold) {
                     handleStartPicking(order.id);
                   } else if (order.status === "completed") {
+                    console.log("Opening completed order dialog:", order.orderNumber);
                     setSelectedCompletedOrder(order);
                   }
                 }}
