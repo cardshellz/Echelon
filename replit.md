@@ -115,4 +115,10 @@ The application includes Progressive Web App configuration with a manifest.json 
   - `SHOPIFY_ACCESS_TOKEN` - Admin API access token with read_products scope
   - `SHOPIFY_API_SECRET` - API secret (shpss_ prefix) used for webhook HMAC verification
 - New SKUs are created with location "UNASSIGNED" and zone "U" until manually assigned
-- **Fulfillment Flow**: When Shipstation ships an order, it updates Shopify's fulfillment_status. Shopify then sends a fulfillments/create webhook to Echelon, which automatically marks the order as shipped
+- **Fulfillment Flow**: 
+  - When Shipstation ships items, it updates Shopify's fulfillment_status
+  - Shopify sends a `fulfillments/create` webhook to Echelon with line-item details
+  - Echelon tracks `fulfilledQuantity` for each order_item (how many units have been shipped)
+  - An order is marked "shipped" only when ALL tracked physical items are fully fulfilled
+  - This supports **split shipments** - if an order has 3 items but only 2 ship, it stays in the queue until the 3rd ships
+  - Digital items (memberships, etc.) are excluded during import, so partial fulfillments with only digital items remaining are handled correctly

@@ -56,6 +56,11 @@ export interface IStorage {
   updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string): Promise<OrderItem | null>;
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number): Promise<Order | null>;
+  
+  // Fulfillment tracking
+  updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null>;
+  getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined>;
+  areAllItemsFulfilled(orderId: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -386,6 +391,43 @@ export class DatabaseStorage implements IStorage {
       .where(eq(orders.id, orderId))
       .returning();
     return result[0] || null;
+  }
+
+  // Fulfillment tracking methods
+  async getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined> {
+    const result = await db
+      .select()
+      .from(orderItems)
+      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId));
+    return result[0];
+  }
+
+  async updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null> {
+    // First get the current item to add to its fulfilled quantity
+    const item = await this.getOrderItemByShopifyLineId(shopifyLineItemId);
+    if (!item) return null;
+    
+    // Clamp to not exceed the ordered quantity (prevents over-counting from webhook retries)
+    const newFulfilledQty = Math.min(
+      item.quantity, 
+      (item.fulfilledQuantity || 0) + additionalQty
+    );
+    
+    const result = await db
+      .update(orderItems)
+      .set({ fulfilledQuantity: newFulfilledQty })
+      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId))
+      .returning();
+    
+    return result[0] || null;
+  }
+
+  async areAllItemsFulfilled(orderId: number): Promise<boolean> {
+    const items = await this.getOrderItems(orderId);
+    if (items.length === 0) return false;
+    
+    // All items must have fulfilledQuantity >= quantity
+    return items.every(item => (item.fulfilledQuantity || 0) >= item.quantity);
   }
 }
 
