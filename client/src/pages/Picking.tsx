@@ -631,6 +631,9 @@ export default function Picking() {
   const manualInputRef = useRef<HTMLInputElement>(null);
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
+  // Refs for item elements to enable auto-scroll
+  const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  
   // Global scanner buffer - captures keystrokes even with readOnly input
   const scanBufferRef = useRef<string>("");
   const scanBufferTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -700,6 +703,25 @@ export default function Picking() {
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
   }, [view, maintainFocus]);
+  
+  // Auto-scroll to keep first pending item visible after each pick
+  useEffect(() => {
+    if (view !== "picking" || !activeWork) return;
+    
+    // Find the first pending/in_progress item
+    const firstPendingIndex = activeWork.items.findIndex(
+      item => item.status === "pending" || item.status === "in_progress"
+    );
+    
+    if (firstPendingIndex !== -1) {
+      const item = activeWork.items[firstPendingIndex];
+      const element = itemRefs.current.get(item.id);
+      if (element) {
+        // Scroll the item into view with some padding at top
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }
+  }, [view, activeWork?.items.map(i => `${i.id}:${i.status}`).join(",")]);
   
   // Ref for processScan callback - updated when dependencies change
   const processScanRef = useRef<(value: string) => void>(() => {});
@@ -2432,7 +2454,11 @@ export default function Picking() {
                 
                 return (
                   <div 
-                    key={item.id} 
+                    key={item.id}
+                    ref={(el) => {
+                      if (el) itemRefs.current.set(item.id, el);
+                      else itemRefs.current.delete(item.id);
+                    }}
                     className={cn(
                       "flex items-center gap-2 p-2 rounded-lg border w-full max-w-full",
                       item.status === "completed" && "bg-emerald-50 border-emerald-200",
