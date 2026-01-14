@@ -315,6 +315,13 @@ export class DatabaseStorage implements IStorage {
     const updates: any = { status };
     if (pickedQty !== undefined) updates.pickedQuantity = pickedQty;
     if (shortReason !== undefined) updates.shortReason = shortReason;
+    // Set pickedAt timestamp when item is marked as completed
+    if (status === "completed") {
+      updates.pickedAt = new Date();
+    } else if (status === "pending") {
+      // Clear pickedAt if item is reset
+      updates.pickedAt = null;
+    }
     
     const result = await db
       .update(orderItems)

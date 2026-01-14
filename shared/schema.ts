@@ -111,6 +111,7 @@ export const orderItems = pgTable("order_items", {
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // Product barcode for scanner matching
   shortReason: text("short_reason"),
+  pickedAt: timestamp("picked_at"), // When this item was picked
 });
 
 export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
