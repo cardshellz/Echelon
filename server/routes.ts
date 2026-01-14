@@ -640,6 +640,9 @@ export async function registerRoutes(
       
       console.log(`Orders sync complete: ${created} created, ${updated} updated, ${skipped} skipped (in progress)`);
       
+      // Reconcile locations for pending items (update from product_locations if changed)
+      const reconcileResult = await reconcileOrderItemLocations();
+      
       // Now sync fulfillment status for all non-shipped orders in our system
       const fulfillmentResult = await syncFulfillmentStatus();
       
@@ -650,6 +653,7 @@ export async function registerRoutes(
         skipped,
         total: shopifyOrders.length,
         fulfillmentSync: fulfillmentResult,
+        locationReconcile: reconcileResult,
       });
     } catch (error: any) {
       console.error("Shopify orders sync error:", error);
@@ -726,6 +730,60 @@ export async function registerRoutes(
     }
     
     return { shipped, cancelled, checked: shopifyOrderIds.length };
+  }
+
+  // Reconcile order item locations with product_locations table
+  // Updates pending/unassigned items if product_locations has been updated
+  async function reconcileOrderItemLocations(): Promise<{ updated: number; checked: number }> {
+    // Get all active orders (not shipped/cancelled) with their items
+    const allOrders = await storage.getOrdersWithItems();
+    const activeOrders = allOrders.filter(o => 
+      o.status !== "shipped" && 
+      o.status !== "cancelled"
+    );
+    
+    let updated = 0;
+    let checked = 0;
+    
+    for (const order of activeOrders) {
+      for (const item of order.items) {
+        checked++;
+        
+        // Only update items that haven't been picked yet
+        if (item.status !== "pending") continue;
+        
+        // Look up current location from product_locations by SKU
+        const productLocation = await storage.getProductLocationBySku(item.sku);
+        
+        if (!productLocation) continue;
+        
+        // Check if location/zone needs updating
+        const needsUpdate = 
+          item.location !== productLocation.location ||
+          item.zone !== productLocation.zone ||
+          item.barcode !== productLocation.barcode ||
+          item.imageUrl !== productLocation.imageUrl;
+        
+        if (needsUpdate) {
+          await storage.updateOrderItemLocation(
+            item.id, 
+            productLocation.location, 
+            productLocation.zone,
+            productLocation.barcode || null,
+            productLocation.imageUrl || null
+          );
+          updated++;
+          console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${productLocation.location}`);
+        }
+      }
+    }
+    
+    if (updated > 0) {
+      broadcastOrdersUpdated();
+      console.log(`Location reconcile: Updated ${updated} items out of ${checked} checked`);
+    }
+    
+    return { updated, checked };
   }
 
   // Dedicated fulfillment sync endpoint

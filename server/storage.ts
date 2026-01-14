@@ -54,6 +54,7 @@ export interface IStorage {
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string): Promise<OrderItem | null>;
+  updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number): Promise<Order | null>;
 }
 
@@ -326,6 +327,22 @@ export class DatabaseStorage implements IStorage {
     const result = await db
       .update(orderItems)
       .set(updates)
+      .where(eq(orderItems.id, itemId))
+      .returning();
+    
+    return result[0] || null;
+  }
+
+  async updateOrderItemLocation(
+    itemId: number,
+    location: string,
+    zone: string,
+    barcode: string | null,
+    imageUrl: string | null
+  ): Promise<OrderItem | null> {
+    const result = await db
+      .update(orderItems)
+      .set({ location, zone, barcode, imageUrl })
       .where(eq(orderItems.id, itemId))
       .returning();
     
