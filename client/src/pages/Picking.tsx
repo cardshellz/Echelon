@@ -456,15 +456,19 @@ export default function Picking() {
   const [localSingleQueue, setLocalSingleQueue] = useState<SingleOrder[]>([]);
   
   // Merge API data with local state - local state takes precedence for in-progress orders
-  // Also include completed orders from localSingleQueue that may no longer be in API
+  // For completed orders, use API data which has picker metadata
   const singleQueue = pickingMode === "single" && ordersFromApi.length > 0 
     ? (() => {
-        // Start with API orders, preferring local state if exists
+        // Start with API orders, preferring local state for in-progress orders only
         const merged = ordersFromApi.map(apiOrder => {
           const localOrder = localSingleQueue.find(lo => lo.id === apiOrder.id);
+          // For completed orders, prefer API data which has picker metadata
+          if (apiOrder.status === "completed") {
+            return apiOrder;
+          }
           return localOrder || apiOrder;
         });
-        // Add completed orders from local state that aren't in API anymore
+        // Add completed orders from local state that aren't in API anymore (recently completed)
         const completedLocalOrders = localSingleQueue.filter(
           lo => lo.status === "completed" && !ordersFromApi.some(ao => ao.id === lo.id)
         );
