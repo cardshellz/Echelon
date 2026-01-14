@@ -357,7 +357,25 @@ export async function registerRoutes(
       const filteredOrders = isAdminOrLead 
         ? orders 
         : orders.filter(order => order.onHold === 0);
-      res.json(filteredOrders);
+      
+      // Get all unique picker IDs and lookup their display names
+      const pickerIds = [...new Set(filteredOrders.map(o => o.assignedPickerId).filter(Boolean))] as string[];
+      const pickerMap = new Map<string, string>();
+      
+      for (const pickerId of pickerIds) {
+        const picker = await storage.getUser(pickerId);
+        if (picker) {
+          pickerMap.set(pickerId, picker.displayName || picker.username);
+        }
+      }
+      
+      // Add picker display name to orders
+      const ordersWithPickerNames = filteredOrders.map(order => ({
+        ...order,
+        pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
+      }));
+      
+      res.json(ordersWithPickerNames);
     } catch (error) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });
