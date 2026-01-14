@@ -42,6 +42,7 @@ import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 // API response type
 interface OrderWithItems extends Order {
   items: OrderItem[];
+  pickerName?: string | null;
 }
 
 // API functions
@@ -200,6 +201,8 @@ interface SingleOrder {
   status: "ready" | "in_progress" | "completed";
   assignee: string | null;
   onHold?: boolean;
+  pickerName?: string | null;
+  completedAt?: string | null;
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -428,6 +431,8 @@ export default function Picking() {
     status: order.status === "in_progress" ? "in_progress" : order.status === "completed" ? "completed" : "ready",
     assignee: order.assignedPickerId,
     onHold: order.onHold === 1,
+    pickerName: order.pickerName || null,
+    completedAt: order.completedAt ? String(order.completedAt) : null,
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -611,6 +616,9 @@ export default function Picking() {
   
   // Hold/release flash animation state
   const [flashingOrderId, setFlashingOrderId] = useState<string | null>(null);
+  
+  // Completed order detail modal state
+  const [selectedCompletedOrder, setSelectedCompletedOrder] = useState<SingleOrder | null>(null);
   
   // Computed sound enabled state for icon display
   const soundEnabled = soundTheme !== "silent";
@@ -2034,15 +2042,28 @@ export default function Picking() {
                 Completed ({completedItems.length})
               </h3>
               {completedItems.map((item) => (
-                <Card key={item.id} className="bg-muted/30 border-muted mb-2">
+                <Card 
+                  key={item.id} 
+                  className="bg-muted/30 border-muted mb-2 cursor-pointer hover:border-emerald-300 transition-colors"
+                  onClick={() => setSelectedCompletedOrder(item as SingleOrder)}
+                  data-testid={`card-completed-${item.id}`}
+                >
                   <CardContent className="p-3 flex items-center gap-3">
                     <div className="h-10 w-10 rounded-lg flex items-center justify-center bg-emerald-100 text-emerald-700">
                       <CheckCircle2 size={20} />
                     </div>
                     <div className="flex-1">
-                      <span className="font-medium">{item.id}</span>
-                      <span className="text-sm text-muted-foreground ml-2">• {item.items.length} items</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{(item as SingleOrder).orderNumber || item.id}</span>
+                        <span className="text-sm text-muted-foreground">• {item.items.length} items</span>
+                      </div>
+                      {(item as SingleOrder).pickerName && (
+                        <div className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                          <User size={10} /> Picked by {(item as SingleOrder).pickerName}
+                        </div>
+                      )}
                     </div>
+                    <ChevronRight className="h-5 w-5 text-muted-foreground" />
                   </CardContent>
                 </Card>
               ))}
@@ -2721,6 +2742,103 @@ export default function Picking() {
               onClick={() => setShortPickOpen(false)}
             >
               Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Completed Order Detail Dialog */}
+      <Dialog open={!!selectedCompletedOrder} onOpenChange={(open) => !open && setSelectedCompletedOrder(null)}>
+        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              Order {selectedCompletedOrder?.orderNumber}
+            </DialogTitle>
+            <DialogDescription>
+              Completed order details
+            </DialogDescription>
+          </DialogHeader>
+          
+          {selectedCompletedOrder && (
+            <div className="space-y-4">
+              {/* Order Summary */}
+              <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Customer</span>
+                  <span className="font-medium">{selectedCompletedOrder.customer}</span>
+                </div>
+                {selectedCompletedOrder.pickerName && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Picked by</span>
+                    <span className="font-medium">{selectedCompletedOrder.pickerName}</span>
+                  </div>
+                )}
+                {selectedCompletedOrder.completedAt && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Completed</span>
+                    <span className="font-medium">
+                      {new Date(selectedCompletedOrder.completedAt).toLocaleString()}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Items</span>
+                  <span className="font-medium">{selectedCompletedOrder.items.length} items</span>
+                </div>
+              </div>
+              
+              {/* Items List */}
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Picked Items</h4>
+                {selectedCompletedOrder.items.map((item) => (
+                  <div 
+                    key={item.id} 
+                    className="flex items-center gap-3 p-2 border rounded-lg bg-background"
+                  >
+                    {item.image ? (
+                      <img 
+                        src={item.image} 
+                        alt={item.name}
+                        className="h-10 w-10 rounded object-cover"
+                      />
+                    ) : (
+                      <div className="h-10 w-10 rounded bg-muted flex items-center justify-center">
+                        <Package size={16} className="text-muted-foreground" />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{item.name}</div>
+                      <div className="text-xs text-muted-foreground flex items-center gap-2">
+                        <span>{item.sku}</span>
+                        <span>•</span>
+                        <span>{item.location}</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={cn(
+                        "text-sm font-medium",
+                        item.status === "completed" ? "text-emerald-600" : "text-amber-600"
+                      )}>
+                        {item.picked}/{item.qty}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {item.status === "short" ? "Short" : "Picked"}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              className="w-full"
+              onClick={() => setSelectedCompletedOrder(null)}
+            >
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>
