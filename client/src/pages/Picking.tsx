@@ -1659,6 +1659,7 @@ export default function Picking() {
     });
     
     return (
+      <>
       <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
         <div className="bg-card border-b p-4 md:p-6">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
@@ -2115,6 +2116,102 @@ export default function Picking() {
           )}
         </div>
       </div>
+      
+      {/* Completed Order Detail Dialog */}
+      <Dialog open={!!selectedCompletedOrder} onOpenChange={(open) => !open && setSelectedCompletedOrder(null)}>
+        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              Order {selectedCompletedOrder?.orderNumber}
+            </DialogTitle>
+            <DialogDescription>
+              Completed order details
+            </DialogDescription>
+          </DialogHeader>
+          
+          {selectedCompletedOrder && (
+            <div className="space-y-4">
+              <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Customer</span>
+                  <span className="font-medium">{selectedCompletedOrder.customer}</span>
+                </div>
+                {selectedCompletedOrder.pickerName && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Picked by</span>
+                    <span className="font-medium">{selectedCompletedOrder.pickerName}</span>
+                  </div>
+                )}
+                {selectedCompletedOrder.completedAt && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Completed</span>
+                    <span className="font-medium">
+                      {new Date(selectedCompletedOrder.completedAt).toLocaleString()}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Items</span>
+                  <span className="font-medium">{selectedCompletedOrder.items.length} items</span>
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-muted-foreground">Picked Items</h4>
+                {selectedCompletedOrder.items.map((item) => (
+                  <div 
+                    key={item.id} 
+                    className="flex items-center gap-3 p-2 border rounded-lg bg-background"
+                  >
+                    {item.image ? (
+                      <img 
+                        src={item.image} 
+                        alt={item.name}
+                        className="h-10 w-10 rounded object-cover"
+                      />
+                    ) : (
+                      <div className="h-10 w-10 rounded bg-muted flex items-center justify-center">
+                        <Package size={16} className="text-muted-foreground" />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">{item.name}</div>
+                      <div className="text-xs text-muted-foreground flex items-center gap-2">
+                        <span>{item.sku}</span>
+                        <span>•</span>
+                        <span>{item.location}</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className={cn(
+                        "text-sm font-medium",
+                        item.status === "completed" ? "text-emerald-600" : "text-amber-600"
+                      )}>
+                        {item.picked}/{item.qty}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {item.status === "short" ? "Short" : "Picked"}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              className="w-full"
+              onClick={() => setSelectedCompletedOrder(null)}
+            >
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      </>
     );
   }
   
