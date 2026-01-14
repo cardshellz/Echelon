@@ -1,0 +1,27 @@
+ at=info method=GET path="/api/picking/queue" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=f2aa887d-3113-da7c-1dcf-585987720aaf fwd="24.144.188.208" dyno=web.1 connect=0ms service=38ms status=500 bytes=41 protocol=http1.1 tls=true tls_version=unknown
+2026-01-14T13:35:48.198795+00:00 app[web.1]: Error fetching picking queue: error: column "picked_at" does not exist
+2026-01-14T13:35:48.198808+00:00 app[web.1]:     at /app/dist/index.cjs:70:13326
+2026-01-14T13:35:48.198809+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-14T13:35:48.198809+00:00 app[web.1]:     at async /app/dist/index.cjs:84:98189
+2026-01-14T13:35:48.198809+00:00 app[web.1]:     at async $m.getOrdersWithItems (/app/dist/index.cjs:84:103771)
+2026-01-14T13:35:48.198809+00:00 app[web.1]:     at async /app/dist/index.cjs:84:116250 {
+2026-01-14T13:35:48.198810+00:00 app[web.1]:   length: 110,
+2026-01-14T13:35:48.198818+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-14T13:35:48.198818+00:00 app[web.1]:   code: '42703',
+2026-01-14T13:35:48.198819+00:00 app[web.1]:   detail: undefined,
+2026-01-14T13:35:48.198819+00:00 app[web.1]:   hint: undefined,
+2026-01-14T13:35:48.198819+00:00 app[web.1]:   position: '166',
+2026-01-14T13:35:48.198820+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-14T13:35:48.198820+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-14T13:35:48.198820+00:00 app[web.1]:   where: undefined,
+2026-01-14T13:35:48.198820+00:00 app[web.1]:   schema: undefined,
+2026-01-14T13:35:48.198820+00:00 app[web.1]:   table: undefined,
+2026-01-14T13:35:48.198821+00:00 app[web.1]:   column: undefined,
+2026-01-14T13:35:48.198821+00:00 app[web.1]:   dataType: undefined,
+2026-01-14T13:35:48.198821+00:00 app[web.1]:   constraint: undefined,
+2026-01-14T13:35:48.198821+00:00 app[web.1]:   file: 'parse_relation.c',
+2026-01-14T13:35:48.198821+00:00 app[web.1]:   line: '3773',
+2026-01-14T13:35:48.198822+00:00 app[web.1]:   routine: 'errorMissingColumn'
+2026-01-14T13:35:48.198822+00:00 app[web.1]: }
+2026-01-14T13:35:48.199338+00:00 app[web.1]: 1:35:48 PM [express] GET /api/picking/queue 500 in 38ms :: {"error":"Failed to fetch picking queue"}
+2026-01-14T13:35:48.697495+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/fulfillments/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=d57c943b-ad30-b3cb-53ce-0d82e9c79b2c fwd="34.136.242.247" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=tru
