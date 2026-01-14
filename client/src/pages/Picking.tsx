@@ -4,6 +4,7 @@ import {
   Scan, 
   CheckCircle2, 
   ArrowRight, 
+  ArrowLeft,
   AlertTriangle,
   PackageCheck,
   ChevronRight,
@@ -29,9 +30,11 @@ import {
   ArrowDown,
   ArrowUp,
   X,
+  XCircle,
   Unlock,
   Pause,
-  Play
+  Play,
+  Truck
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -115,6 +118,23 @@ async function markOrderReadyToShip(orderId: number): Promise<Order> {
   return res.json();
 }
 
+async function fetchExceptions(): Promise<OrderWithItems[]> {
+  const res = await fetch("/api/orders/exceptions", { credentials: "include" });
+  if (!res.ok) throw new Error("Failed to fetch exceptions");
+  return res.json();
+}
+
+async function resolveException(orderId: number, resolution: string, notes?: string): Promise<Order> {
+  const res = await fetch(`/api/orders/${orderId}/resolve-exception`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ resolution, notes }),
+  });
+  if (!res.ok) throw new Error("Failed to resolve exception");
+  return res.json();
+}
+
 // Helper to calculate order age from createdAt
 function getOrderAge(createdAt: Date | string): string {
   const now = new Date();
@@ -140,7 +160,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -374,6 +394,28 @@ export default function Picking() {
     staleTime: 5000, // Consider data stale after 5s
   });
   
+  // Fetch exceptions for admins/leads only
+  const { data: exceptionOrders = [], refetch: refetchExceptions } = useQuery({
+    queryKey: ["exception-orders"],
+    queryFn: fetchExceptions,
+    enabled: !!isAdminOrLead, // Only fetch for admin/lead users
+    refetchOnWindowFocus: true,
+  });
+  
+  // Mutation for resolving exceptions
+  const resolveExceptionMutation = useMutation({
+    mutationFn: ({ orderId, resolution, notes }: { orderId: number; resolution: string; notes?: string }) => 
+      resolveException(orderId, resolution, notes),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["exception-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      toast({ title: "Exception resolved", description: "Order has been updated." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to resolve exception", description: error.message, variant: "destructive" });
+    }
+  });
+  
   // WebSocket for real-time order updates
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -591,7 +633,7 @@ export default function Picking() {
     }
   };
   
-  const [view, setView] = useState<"queue" | "picking" | "complete">("queue");
+  const [view, setView] = useState<"queue" | "picking" | "complete" | "exceptions">("queue");
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
@@ -600,7 +642,7 @@ export default function Picking() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("age");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold">("all");
+  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions">("all");
   
   // UI state
   const [scanInput, setScanInput] = useState("");
@@ -1767,6 +1809,27 @@ export default function Picking() {
                 <Zap className="h-5 w-5 mr-2" />
                 Grab Next
               </Button>
+              {/* Exceptions Button - Admin/Lead Only */}
+              {isAdminOrLead && (
+                <Button
+                  variant={view === "exceptions" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setView(view === "exceptions" ? "queue" : "exceptions")}
+                  className={cn(
+                    "gap-1.5 relative",
+                    view === "exceptions" && "bg-orange-600 hover:bg-orange-700"
+                  )}
+                  data-testid="button-exceptions"
+                >
+                  <AlertTriangle className="h-4 w-4" />
+                  Exceptions
+                  {exceptionOrders.length > 0 && (
+                    <Badge variant="destructive" className="absolute -top-2 -right-2 h-5 w-5 p-0 flex items-center justify-center text-xs">
+                      {exceptionOrders.length}
+                    </Badge>
+                  )}
+                </Button>
+              )}
             </div>
           </div>
 
@@ -2212,6 +2275,208 @@ export default function Picking() {
         </DialogContent>
       </Dialog>
       </>
+    );
+  }
+  
+  // EXCEPTIONS VIEW - Admin/Lead only
+  if (view === "exceptions" && isAdminOrLead) {
+    // Transform API orders to display format
+    const exceptionItems = exceptionOrders.map((order): SingleOrder => ({
+      id: String(order.id),
+      orderNumber: order.orderNumber,
+      customer: order.customerName,
+      priority: order.priority as "rush" | "high" | "normal",
+      age: getOrderAge(order.shopifyCreatedAt || order.createdAt),
+      status: "ready" as const,
+      assignee: order.assignedPickerId,
+      onHold: false,
+      pickerName: order.pickerName || null,
+      completedAt: order.completedAt ? String(order.completedAt) : null,
+      items: order.items.map((item): PickItem => {
+        // Safely map item status to known values
+        const validStatuses = ["pending", "in_progress", "completed", "short"];
+        const status = validStatuses.includes(item.status) 
+          ? item.status as "pending" | "in_progress" | "completed" | "short"
+          : "pending"; // Default unknown statuses to pending
+        return {
+          id: item.id,
+          sku: item.sku,
+          name: item.name,
+          location: item.location,
+          qty: item.quantity,
+          picked: item.pickedQuantity,
+          status,
+          orderId: order.orderNumber,
+          barcode: item.barcode || undefined,
+        };
+      }),
+    }));
+    
+    return (
+      <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
+        <div className="bg-card border-b p-4 md:p-6">
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <div>
+              <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+                <AlertTriangle className="h-6 w-6 text-orange-500" />
+                Exception Queue
+                <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200 ml-2">
+                  {exceptionOrders.length} orders
+                </Badge>
+              </h1>
+              <p className="text-muted-foreground text-sm">
+                Orders with short picks or issues requiring lead review
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              onClick={() => setView("queue")}
+              data-testid="button-back-to-queue"
+            >
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Queue
+            </Button>
+          </div>
+        </div>
+        
+        <div className="flex-1 p-4 md:p-6">
+          {exceptionItems.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <CheckCircle2 className="h-16 w-16 text-emerald-500 mb-4" />
+              <h2 className="text-xl font-semibold mb-2">No Exceptions</h2>
+              <p className="text-muted-foreground">All orders are processing normally</p>
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              {exceptionItems.map((order) => {
+                const shortItems = order.items.filter(i => i.status === "short");
+                const originalOrder = exceptionOrders.find(o => o.id === Number(order.id));
+                
+                return (
+                  <Card key={order.id} className="border-orange-200 bg-orange-50/50" data-testid={`exception-order-${order.id}`}>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <CardTitle className="text-lg flex items-center gap-2">
+                            {order.orderNumber}
+                            <Badge variant="outline" className="bg-orange-100 text-orange-700 border-orange-300">
+                              {shortItems.length} short {shortItems.length === 1 ? "item" : "items"}
+                            </Badge>
+                          </CardTitle>
+                          <p className="text-sm text-muted-foreground">{order.customer}</p>
+                        </div>
+                        <div className="text-right text-sm text-muted-foreground">
+                          <div>Age: {order.age}</div>
+                          {order.pickerName && <div>Picker: {order.pickerName}</div>}
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="pb-4">
+                      {/* Short Items */}
+                      <div className="mb-4">
+                        <h4 className="text-sm font-medium mb-2 text-orange-700">Short Picks:</h4>
+                        <div className="space-y-2">
+                          {shortItems.map((item) => (
+                            <div key={item.id} className="flex items-center justify-between bg-white rounded-lg p-2 border">
+                              <div>
+                                <div className="font-medium text-sm">{item.sku}</div>
+                                <div className="text-xs text-muted-foreground">{item.name}</div>
+                                <div className="text-xs text-muted-foreground">Location: {item.location}</div>
+                              </div>
+                              <div className="text-right">
+                                <div className="font-bold text-orange-600">{item.picked}/{item.qty}</div>
+                                <div className="text-xs text-muted-foreground">picked</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      
+                      {/* Resolution Buttons */}
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="bg-blue-600 hover:bg-blue-700"
+                          onClick={() => {
+                            if (confirm("Ship this order with available quantities? Short items will be marked as backordered.")) {
+                              resolveExceptionMutation.mutate({
+                                orderId: Number(order.id),
+                                resolution: "ship_partial",
+                                notes: "Shipped partial - remaining items backordered"
+                              });
+                            }
+                          }}
+                          disabled={resolveExceptionMutation.isPending}
+                          data-testid={`button-ship-partial-${order.id}`}
+                        >
+                          <Truck className="h-4 w-4 mr-1" />
+                          Ship Partial
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            if (confirm("Put this order on hold until all items are available?")) {
+                              resolveExceptionMutation.mutate({
+                                orderId: Number(order.id),
+                                resolution: "hold",
+                                notes: "Waiting for inventory"
+                              });
+                            }
+                          }}
+                          disabled={resolveExceptionMutation.isPending}
+                          data-testid={`button-hold-${order.id}`}
+                        >
+                          <Pause className="h-4 w-4 mr-1" />
+                          Hold Order
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-emerald-600 hover:text-emerald-700"
+                          onClick={() => {
+                            if (confirm("Mark this exception as resolved and send back to queue?")) {
+                              resolveExceptionMutation.mutate({
+                                orderId: Number(order.id),
+                                resolution: "resolved",
+                                notes: "Issue resolved - back to picking"
+                              });
+                            }
+                          }}
+                          disabled={resolveExceptionMutation.isPending}
+                          data-testid={`button-resolve-${order.id}`}
+                        >
+                          <CheckCircle2 className="h-4 w-4 mr-1" />
+                          Resolved
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700"
+                          onClick={() => {
+                            if (confirm("Cancel this order? This action cannot be undone.")) {
+                              resolveExceptionMutation.mutate({
+                                orderId: Number(order.id),
+                                resolution: "cancelled"
+                              });
+                            }
+                          }}
+                          disabled={resolveExceptionMutation.isPending}
+                          data-testid={`button-cancel-${order.id}`}
+                        >
+                          <XCircle className="h-4 w-4 mr-1" />
+                          Cancel
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     );
   }
   

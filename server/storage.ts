@@ -61,6 +61,10 @@ export interface IStorage {
   updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null>;
   getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined>;
   areAllItemsFulfilled(orderId: number): Promise<boolean>;
+  
+  // Exception handling
+  getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]>;
+  resolveException(orderId: number, resolution: string, resolvedBy: string, notes?: string): Promise<Order | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -359,11 +363,20 @@ export class DatabaseStorage implements IStorage {
     const pickedCount = items.reduce((sum, item) => sum + item.pickedQuantity, 0);
     const totalCount = items.reduce((sum, item) => sum + item.quantity, 0);
     const allDone = items.every(item => item.status === "completed" || item.status === "short");
+    const hasShortItems = items.some(item => item.status === "short");
     
     const updates: any = { pickedCount };
     if (allDone) {
-      updates.status = "completed" as OrderStatus;
-      updates.completedAt = new Date();
+      // If any items are short, move to exception status for lead review
+      // Otherwise, move to completed status
+      if (hasShortItems) {
+        updates.status = "exception" as OrderStatus;
+        updates.exceptionAt = new Date();
+        updates.completedAt = new Date(); // Still record when picking finished
+      } else {
+        updates.status = "completed" as OrderStatus;
+        updates.completedAt = new Date();
+      }
     }
     
     const result = await db
@@ -428,6 +441,69 @@ export class DatabaseStorage implements IStorage {
     
     // All items must have fulfilledQuantity >= quantity
     return items.every(item => (item.fulfilledQuantity || 0) >= item.quantity);
+  }
+
+  // Exception handling methods
+  async getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]> {
+    const exceptionOrders = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.status, "exception"))
+      .orderBy(desc(orders.exceptionAt));
+    
+    const result: (Order & { items: OrderItem[] })[] = [];
+    for (const order of exceptionOrders) {
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+      result.push({ ...order, items });
+    }
+    
+    return result;
+  }
+
+  async resolveException(
+    orderId: number, 
+    resolution: string, 
+    resolvedBy: string, 
+    notes?: string
+  ): Promise<Order | null> {
+    // Determine the new status based on resolution
+    let newStatus: OrderStatus;
+    switch (resolution) {
+      case "ship_partial":
+        newStatus = "completed"; // Ready to ship what we have
+        break;
+      case "hold":
+        newStatus = "exception"; // Stay in exception, just record the decision
+        break;
+      case "resolved":
+        newStatus = "completed"; // Issue resolved, ready to ship
+        break;
+      case "cancelled":
+        newStatus = "cancelled";
+        break;
+      default:
+        newStatus = "completed";
+    }
+    
+    const updates: any = {
+      exceptionResolution: resolution,
+      exceptionResolvedAt: new Date(),
+      exceptionResolvedBy: resolvedBy,
+      exceptionNotes: notes || null,
+    };
+    
+    // Only change status if not "hold"
+    if (resolution !== "hold") {
+      updates.status = newStatus;
+    }
+    
+    const result = await db
+      .update(orders)
+      .set(updates)
+      .where(eq(orders.id, orderId))
+      .returning();
+    
+    return result[0] || null;
   }
 }
 
