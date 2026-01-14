@@ -937,21 +937,27 @@ export async function registerRoutes(
   
   // Order created - add to picking queue
   app.post("/api/shopify/webhooks/orders/create", async (req: Request, res: Response) => {
+    console.log("[ORDER WEBHOOK] Received orders/create webhook");
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
       const rawBody = (req as any).rawBody as Buffer | undefined;
       
+      console.log("[ORDER WEBHOOK] HMAC present:", !!hmac, "Raw body present:", !!rawBody);
+      
       if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
+        console.error("[ORDER WEBHOOK] Missing raw body for webhook verification");
         return res.status(400).json({ error: "Missing request body" });
       }
       
       if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+        console.error("[ORDER WEBHOOK] Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
       
+      console.log("[ORDER WEBHOOK] Signature verified successfully");
+      
       const payload = req.body as ShopifyOrder;
+      console.log("[ORDER WEBHOOK] Processing order:", payload.order_number, "Shopify ID:", payload.id);
       
       // Skip if order already exists
       const existing = await storage.getOrderByShopifyId(String(payload.id));

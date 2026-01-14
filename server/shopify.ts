@@ -220,11 +220,17 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
   const config = getShopifyConfig();
   const allOrders: ExtractedOrder[] = [];
   let pageInfo: string | null = null;
+  let pageCount = 0;
+  
+  console.log("[SHOPIFY SYNC] Starting to fetch unfulfilled orders...");
   
   do {
+    pageCount++;
     const url: string = pageInfo
       ? `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`
       : `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=open&fulfillment_status=unfulfilled,partial`;
+    
+    console.log(`[SHOPIFY SYNC] Fetching page ${pageCount}...`);
     
     const response: Response = await fetch(url, {
       headers: {
@@ -235,6 +241,7 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
     
     if (!response.ok) {
       if (response.status === 429) {
+        console.log("[SHOPIFY SYNC] Rate limited, waiting 2s...");
         await delay(2000);
         continue;
       }
@@ -243,6 +250,7 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
     }
     
     const data: ShopifyOrdersResponse = await response.json();
+    console.log(`[SHOPIFY SYNC] Page ${pageCount}: Got ${data.orders.length} orders`);
     
     for (const order of data.orders) {
       if (!order.cancelled_at) {
@@ -256,6 +264,7 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
       const nextMatch: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
       if (nextMatch) {
         pageInfo = nextMatch[1];
+        console.log(`[SHOPIFY SYNC] Found next page cursor`);
       }
     }
     
@@ -263,6 +272,8 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
       await delay(600);
     }
   } while (pageInfo);
+  
+  console.log(`[SHOPIFY SYNC] Complete: Fetched ${allOrders.length} total orders across ${pageCount} pages`);
   
   return allOrders;
 }
