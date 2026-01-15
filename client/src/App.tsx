@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
 import Layout from "@/components/layout/AppShell";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
@@ -112,6 +113,7 @@ function App() {
         <SettingsProvider>
           <TooltipProvider>
             <Toaster />
+            <PWAUpdatePrompt />
             <Router />
           </TooltipProvider>
         </SettingsProvider>
