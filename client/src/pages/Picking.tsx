@@ -1444,13 +1444,16 @@ export default function Picking() {
         setQueue(prev => prev.map(b =>
           b.id === activeBatchId ? { ...b, status: "completed" as const } : b
         ));
+        setActiveBatchId(null);
       } else {
         setSingleQueue(prev => prev.map(o =>
           o.id === activeOrderId ? { ...o, status: "completed" as const } : o
         ));
+        setActiveOrderId(null);
       }
       playSound("complete");
       triggerHaptic("heavy");
+      setCurrentItemIndex(0);
       setView("complete");
     }
   };
@@ -1486,18 +1489,21 @@ export default function Picking() {
       if (nextIndex !== -1) {
         setCurrentItemIndex(nextIndex);
       } else {
-        // All items done
+        // All items done - mark complete and clear active IDs to prevent re-claim attempts
         if (pickingMode === "batch") {
           setQueue(prev => prev.map(b => 
             b.id === activeBatchId ? { ...b, status: "completed" as const } : b
           ));
+          setActiveBatchId(null);
         } else {
           setSingleQueue(prev => prev.map(o => 
             o.id === activeOrderId ? { ...o, status: "completed" as const } : o
           ));
+          setActiveOrderId(null);
         }
         playSound("complete");
         triggerHaptic("heavy");
+        setCurrentItemIndex(0);
         setView("complete");
       }
     }
