@@ -9,9 +9,11 @@ export function PWAUpdatePrompt() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
 
+    let reg: ServiceWorkerRegistration | null = null;
+
     const registerSW = async () => {
       try {
-        const reg = await navigator.serviceWorker.register("/sw.js");
+        reg = await navigator.serviceWorker.register("/sw.js");
         setRegistration(reg);
 
         if (reg.waiting) {
@@ -19,7 +21,7 @@ export function PWAUpdatePrompt() {
         }
 
         reg.addEventListener("updatefound", () => {
-          const newWorker = reg.installing;
+          const newWorker = reg?.installing;
           if (!newWorker) return;
 
           newWorker.addEventListener("statechange", () => {
@@ -35,6 +37,13 @@ export function PWAUpdatePrompt() {
 
     registerSW();
 
+    // Check for updates every 60 seconds
+    const updateInterval = setInterval(() => {
+      if (reg) {
+        reg.update().catch(console.error);
+      }
+    }, 60000);
+
     let refreshing = false;
     navigator.serviceWorker.addEventListener("controllerchange", () => {
       if (!refreshing) {
@@ -42,6 +51,8 @@ export function PWAUpdatePrompt() {
         window.location.reload();
       }
     });
+
+    return () => clearInterval(updateInterval);
   }, []);
 
   const handleUpdate = () => {
