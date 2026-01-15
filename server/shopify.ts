@@ -227,9 +227,11 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
   
   do {
     pageCount++;
+    // Use status=any to catch all orders, then filter client-side
+    // The fulfillment_status filter sometimes misses orders with null status (Shopify API quirk)
     const url: string = pageInfo
       ? `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`
-      : `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=open&fulfillment_status=unfulfilled,partial`;
+      : `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any&fulfillment_status=unfulfilled,partial,null`;
     
     console.log(`[SHOPIFY SYNC] Fetching page ${pageCount}...`);
     
