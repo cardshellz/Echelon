@@ -218,6 +218,7 @@ interface SingleOrder {
   items: PickItem[];
   priority: "rush" | "high" | "normal";
   age: string;
+  orderDate?: string;
   status: "ready" | "in_progress" | "completed";
   assignee: string | null;
   onHold?: boolean;
@@ -464,12 +465,19 @@ export default function Picking() {
   }, [refetch, soundTheme]);
   
   // Transform API orders to SingleOrder format for UI
+  const formatOrderDate = (dateInput: string | Date | undefined | null): string => {
+    if (!dateInput) return "";
+    const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
+  
   const ordersFromApi: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
     id: String(order.id),
     orderNumber: order.orderNumber,
     customer: order.customerName,
     priority: order.priority as "rush" | "high" | "normal",
     age: getOrderAge(order.shopifyCreatedAt || order.createdAt),
+    orderDate: formatOrderDate(order.shopifyCreatedAt || order.createdAt),
     status: order.status === "in_progress" ? "in_progress" : 
             (order.status === "completed" || order.status === "ready_to_ship" || order.status === "shipped") ? "completed" : "ready",
     assignee: order.assignedPickerId,
@@ -2078,37 +2086,43 @@ export default function Picking() {
                 }}
                 data-testid={`card-order-${order.id}`}
               >
-                <CardContent className="p-3 md:p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3 md:gap-4">
+                <CardContent className="p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
                       <div className={cn(
-                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex items-center justify-center shrink-0",
-                        order.onHold ? "bg-slate-200 text-slate-500" : 
+                        "h-10 w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
+                        order.onHold ? "bg-slate-200 text-slate-600" : 
                         order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
                         order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                       )}>
-                        {order.onHold ? <Pause size={24} /> : order.status === "completed" ? <CheckCircle2 size={24} /> : <Package size={24} />}
+                        <span className="text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
+                        <span className="text-[9px] leading-none mt-0.5">units</span>
                       </div>
-                      <div>
-                        <div className="font-semibold flex items-center gap-2 text-base">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-semibold flex items-center gap-1.5 text-sm">
                           {order.orderNumber}
-                          {order.onHold && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-slate-400 text-slate-600 bg-slate-100">ON HOLD</Badge>}
-                          {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
-                          {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                          {order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
+                          {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1 py-0">RUSH</Badge>}
+                          {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         </div>
-                        <div className="text-sm text-muted-foreground flex items-center gap-1">
-                          <User size={12} /> {order.customer} • {order.items.length} items
+                        <div className="text-xs text-muted-foreground truncate">
+                          {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
                         </div>
+                        {order.orderDate && (
+                          <div className="text-[10px] text-muted-foreground/70">
+                            {order.orderDate}
+                          </div>
+                        )}
                         {order.status === "completed" && order.pickerName && (
-                          <div className="text-xs text-muted-foreground mt-0.5">
+                          <div className="text-[10px] text-muted-foreground">
                             Picked by {order.pickerName}
                           </div>
                         )}
                       </div>
                     </div>
-                    <div className="text-right flex items-center gap-2">
-                      <div className="text-sm text-muted-foreground flex items-center gap-1">
-                        <Clock size={14} /> {order.age}
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="text-xs text-muted-foreground flex items-center gap-0.5">
+                        <Clock size={12} /> {order.age}
                       </div>
                       {/* Admin/Lead: Hold/Release buttons */}
                       {isAdminOrLead && order.status === "ready" && !order.onHold && (
