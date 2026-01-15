@@ -898,6 +898,44 @@ export default function Picking() {
     }
   };
   
+  // Helper to parse age string like "45m" or "1h 5m" into total minutes
+  const parseAgeToMinutes = (age: string): number => {
+    let total = 0;
+    const hoursMatch = age.match(/(\d+)h/);
+    const minsMatch = age.match(/(\d+)m/);
+    if (hoursMatch) total += parseInt(hoursMatch[1], 10) * 60;
+    if (minsMatch) total += parseInt(minsMatch[1], 10);
+    return total;
+  };
+  
+  // Apply sorting logic consistent with the queue display
+  const applySortToOrders = (orders: SingleOrder[]): SingleOrder[] => {
+    return [...orders].sort((a, b) => {
+      let result = 0;
+      switch (sortBy) {
+        case "priority": {
+          const priorityOrder = { rush: 0, high: 1, normal: 2 };
+          result = priorityOrder[a.priority] - priorityOrder[b.priority];
+          break;
+        }
+        case "items":
+          result = a.items.length - b.items.length;
+          break;
+        case "order":
+          const aNum = a.orderNumber || a.id;
+          const bNum = b.orderNumber || b.id;
+          result = aNum.localeCompare(bNum);
+          break;
+        case "age":
+          result = parseAgeToMinutes(a.age) - parseAgeToMinutes(b.age);
+          break;
+        default:
+          result = 0;
+      }
+      return sortDirection === "desc" ? -result : result;
+    });
+  };
+  
   // Grab next available batch or order
   const handleGrabNext = async () => {
     // Refresh data first to avoid claiming stale orders
@@ -915,7 +953,9 @@ export default function Picking() {
       const freshQueue = ordersFromApi.filter(o => 
         o.status === "ready" && !o.onHold
       );
-      const nextOrder = freshQueue[0];
+      // Apply the same sorting as the displayed queue
+      const sortedQueue = applySortToOrders(freshQueue);
+      const nextOrder = sortedQueue[0];
       if (nextOrder) {
         handleStartPicking(nextOrder.id);
       }
@@ -1703,17 +1743,7 @@ export default function Picking() {
       return true;
     });
     
-    // Helper to parse age string like "45m" or "1h 5m" into total minutes
-    const parseAgeToMinutes = (age: string): number => {
-      let total = 0;
-      const hoursMatch = age.match(/(\d+)h/);
-      const minsMatch = age.match(/(\d+)m/);
-      if (hoursMatch) total += parseInt(hoursMatch[1], 10) * 60;
-      if (minsMatch) total += parseInt(minsMatch[1], 10);
-      return total;
-    };
-    
-    // Sort the filtered queue
+    // Sort the filtered queue (parseAgeToMinutes is defined above)
     const sortedQueue = [...filteredQueue].sort((a, b) => {
       let result = 0;
       switch (sortBy) {
