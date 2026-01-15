@@ -899,14 +899,23 @@ export default function Picking() {
   };
   
   // Grab next available batch or order
-  const handleGrabNext = () => {
+  const handleGrabNext = async () => {
+    // Refresh data first to avoid claiming stale orders
+    if (pickingMode === "single") {
+      await refetch();
+    }
+    
     if (pickingMode === "batch") {
       const nextBatch = queue.find(b => b.status === "ready");
       if (nextBatch) {
         handleStartPicking(nextBatch.id);
       }
     } else {
-      const nextOrder = singleQueue.find(o => o.status === "ready");
+      // Use fresh data from API, filtering out orders we just completed locally
+      const freshQueue = ordersFromApi.filter(o => 
+        o.status === "ready" && !o.onHold
+      );
+      const nextOrder = freshQueue[0];
       if (nextOrder) {
         handleStartPicking(nextOrder.id);
       }
