@@ -2210,80 +2210,74 @@ export default function Picking() {
         </div>
       </div>
       
-      {/* Completed Order Detail Dialog */}
+      {/* Completed Order Detail Dialog - Mobile Optimized */}
       <Dialog open={!!selectedCompletedOrder} onOpenChange={(open) => !open && setSelectedCompletedOrder(null)}>
-        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-              Order {selectedCompletedOrder?.orderNumber}
+        <DialogContent className="w-[95vw] max-w-md max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="p-3 pb-2 border-b shrink-0">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              {selectedCompletedOrder?.orderNumber}
             </DialogTitle>
-            <DialogDescription>
-              Completed order details
+            <DialogDescription className="text-xs">
+              {selectedCompletedOrder?.customer}
             </DialogDescription>
           </DialogHeader>
           
           {selectedCompletedOrder && (
-            <div className="space-y-4">
-              <div className="bg-muted/50 rounded-lg p-3 space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Customer</span>
-                  <span className="font-medium">{selectedCompletedOrder.customer}</span>
-                </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              <div className="bg-muted/50 rounded-lg p-2.5 space-y-1.5 text-xs">
                 {selectedCompletedOrder.pickerName && (
-                  <div className="flex justify-between text-sm">
+                  <div className="flex justify-between">
                     <span className="text-muted-foreground">Picked by</span>
                     <span className="font-medium">{selectedCompletedOrder.pickerName}</span>
                   </div>
                 )}
                 {selectedCompletedOrder.completedAt && (
-                  <div className="flex justify-between text-sm">
+                  <div className="flex justify-between">
                     <span className="text-muted-foreground">Completed</span>
                     <span className="font-medium">
                       {new Date(selectedCompletedOrder.completedAt).toLocaleString()}
                     </span>
                   </div>
                 )}
-                <div className="flex justify-between text-sm">
+                <div className="flex justify-between">
                   <span className="text-muted-foreground">Items</span>
                   <span className="font-medium">{selectedCompletedOrder.items.length} items</span>
                 </div>
               </div>
               
-              <div className="space-y-2">
-                <h4 className="text-sm font-medium text-muted-foreground">Picked Items</h4>
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-medium text-muted-foreground">Picked Items</h4>
                 {selectedCompletedOrder.items.map((item) => (
                   <div 
                     key={item.id} 
-                    className="flex items-center gap-3 p-2 border rounded-lg bg-background"
+                    className="flex items-center gap-2 p-2 border rounded-lg bg-background"
                   >
                     {item.image ? (
                       <img 
                         src={item.image} 
                         alt={item.name}
-                        className="h-10 w-10 rounded object-cover"
+                        className="h-8 w-8 rounded object-cover shrink-0"
                       />
                     ) : (
-                      <div className="h-10 w-10 rounded bg-muted flex items-center justify-center">
-                        <Package size={16} className="text-muted-foreground" />
+                      <div className="h-8 w-8 rounded bg-muted flex items-center justify-center shrink-0">
+                        <Package size={14} className="text-muted-foreground" />
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{item.name}</div>
-                      <div className="text-xs text-muted-foreground flex items-center gap-2">
-                        <span>{item.sku}</span>
-                        <span>•</span>
-                        <span>{item.location}</span>
+                      <div className="text-xs font-medium truncate">{item.name}</div>
+                      <div className="text-[10px] text-muted-foreground truncate">
+                        {item.sku} • {item.location}
                       </div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right shrink-0">
                       <div className={cn(
-                        "text-sm font-medium",
+                        "text-xs font-medium",
                         item.status === "completed" ? "text-emerald-600" : "text-amber-600"
                       )}>
                         {item.picked}/{item.qty}
                       </div>
-                      <div className="text-xs text-muted-foreground">
+                      <div className="text-[10px] text-muted-foreground">
                         {item.status === "short" ? "Short" : "Picked"}
                       </div>
                     </div>
@@ -2293,15 +2287,15 @@ export default function Picking() {
             </div>
           )}
           
-          <DialogFooter>
+          <div className="p-3 pt-2 border-t shrink-0">
             <Button 
               variant="outline" 
-              className="w-full"
+              className="w-full h-10"
               onClick={() => setSelectedCompletedOrder(null)}
             >
               Close
             </Button>
-          </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
       </>
@@ -3188,82 +3182,74 @@ export default function Picking() {
         </DialogContent>
       </Dialog>
       
-      {/* Completed Order Detail Dialog */}
+      {/* Completed Order Detail Dialog - Mobile Optimized */}
       <Dialog open={!!selectedCompletedOrder} onOpenChange={(open) => !open && setSelectedCompletedOrder(null)}>
-        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-              Order {selectedCompletedOrder?.orderNumber}
+        <DialogContent className="w-[95vw] max-w-md max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="p-3 pb-2 border-b shrink-0">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              {selectedCompletedOrder?.orderNumber}
             </DialogTitle>
-            <DialogDescription>
-              Completed order details
+            <DialogDescription className="text-xs">
+              {selectedCompletedOrder?.customer}
             </DialogDescription>
           </DialogHeader>
           
           {selectedCompletedOrder && (
-            <div className="space-y-4">
-              {/* Order Summary */}
-              <div className="bg-muted/50 rounded-lg p-3 space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Customer</span>
-                  <span className="font-medium">{selectedCompletedOrder.customer}</span>
-                </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-3">
+              <div className="bg-muted/50 rounded-lg p-2.5 space-y-1.5 text-xs">
                 {selectedCompletedOrder.pickerName && (
-                  <div className="flex justify-between text-sm">
+                  <div className="flex justify-between">
                     <span className="text-muted-foreground">Picked by</span>
                     <span className="font-medium">{selectedCompletedOrder.pickerName}</span>
                   </div>
                 )}
                 {selectedCompletedOrder.completedAt && (
-                  <div className="flex justify-between text-sm">
+                  <div className="flex justify-between">
                     <span className="text-muted-foreground">Completed</span>
                     <span className="font-medium">
                       {new Date(selectedCompletedOrder.completedAt).toLocaleString()}
                     </span>
                   </div>
                 )}
-                <div className="flex justify-between text-sm">
+                <div className="flex justify-between">
                   <span className="text-muted-foreground">Items</span>
                   <span className="font-medium">{selectedCompletedOrder.items.length} items</span>
                 </div>
               </div>
               
-              {/* Items List */}
-              <div className="space-y-2">
-                <h4 className="text-sm font-medium text-muted-foreground">Picked Items</h4>
+              <div className="space-y-1.5">
+                <h4 className="text-xs font-medium text-muted-foreground">Picked Items</h4>
                 {selectedCompletedOrder.items.map((item) => (
                   <div 
                     key={item.id} 
-                    className="flex items-center gap-3 p-2 border rounded-lg bg-background"
+                    className="flex items-center gap-2 p-2 border rounded-lg bg-background"
                   >
                     {item.image ? (
                       <img 
                         src={item.image} 
                         alt={item.name}
-                        className="h-10 w-10 rounded object-cover"
+                        className="h-8 w-8 rounded object-cover shrink-0"
                       />
                     ) : (
-                      <div className="h-10 w-10 rounded bg-muted flex items-center justify-center">
-                        <Package size={16} className="text-muted-foreground" />
+                      <div className="h-8 w-8 rounded bg-muted flex items-center justify-center shrink-0">
+                        <Package size={14} className="text-muted-foreground" />
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{item.name}</div>
-                      <div className="text-xs text-muted-foreground flex items-center gap-2">
-                        <span>{item.sku}</span>
-                        <span>•</span>
-                        <span>{item.location}</span>
+                      <div className="text-xs font-medium truncate">{item.name}</div>
+                      <div className="text-[10px] text-muted-foreground truncate">
+                        {item.sku} • {item.location}
                       </div>
                     </div>
-                    <div className="text-right">
+                    <div className="text-right shrink-0">
                       <div className={cn(
-                        "text-sm font-medium",
+                        "text-xs font-medium",
                         item.status === "completed" ? "text-emerald-600" : "text-amber-600"
                       )}>
                         {item.picked}/{item.qty}
                       </div>
-                      <div className="text-xs text-muted-foreground">
+                      <div className="text-[10px] text-muted-foreground">
                         {item.status === "short" ? "Short" : "Picked"}
                       </div>
                     </div>
@@ -3273,15 +3259,15 @@ export default function Picking() {
             </div>
           )}
           
-          <DialogFooter>
+          <div className="p-3 pt-2 border-t shrink-0">
             <Button 
               variant="outline" 
-              className="w-full"
+              className="w-full h-10"
               onClick={() => setSelectedCompletedOrder(null)}
             >
               Close
             </Button>
-          </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
       
