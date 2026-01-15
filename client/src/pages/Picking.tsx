@@ -1812,13 +1812,10 @@ export default function Picking() {
               {/* Exceptions Button - Admin/Lead Only */}
               {isAdminOrLead && (
                 <Button
-                  variant={view === "exceptions" ? "default" : "outline"}
+                  variant="outline"
                   size="sm"
-                  onClick={() => setView(view === "exceptions" ? "queue" : "exceptions")}
-                  className={cn(
-                    "gap-1.5 relative",
-                    view === "exceptions" && "bg-orange-600 hover:bg-orange-700"
-                  )}
+                  onClick={() => setView("exceptions")}
+                  className="gap-1.5 relative"
                   data-testid="button-exceptions"
                 >
                   <AlertTriangle className="h-4 w-4" />
@@ -2307,6 +2304,7 @@ export default function Picking() {
           picked: item.pickedQuantity,
           status,
           orderId: order.orderNumber,
+          image: item.imageUrl || "",
           barcode: item.barcode || undefined,
         };
       }),
