@@ -1772,275 +1772,239 @@ export default function Picking() {
     return (
       <>
       <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
-        <div className="bg-card border-b p-4 md:p-6">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-            <div>
-              <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
-                <PackageCheck className="h-6 w-6 text-primary" />
-                Picking Queue
-                <Badge variant="outline" className={cn(
-                  "text-xs ml-2",
-                  pickingMode === "batch" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-purple-50 text-purple-700 border-purple-200"
-                )}>
-                  {pickingMode === "batch" ? <Layers className="h-3 w-3 mr-1" /> : <Package className="h-3 w-3 mr-1" />}
-                  {pickingMode === "batch" ? "Batch Mode" : "Single Order"}
-                </Badge>
-              </h1>
-              <p className="text-muted-foreground text-sm">
-                {readyItems.length} {pickingMode === "batch" ? "batches" : "orders"} ready • {totalItemsToPick} items to pick
-              </p>
+        {/* Compact Header - Row 1: Title + Actions */}
+        <div className="bg-card border-b px-3 py-2 md:px-4 md:py-3">
+          <div className="flex items-center justify-between gap-2">
+            {/* Left: Title + Stats */}
+            <div className="flex items-center gap-2 min-w-0">
+              <PackageCheck className="h-5 w-5 text-primary shrink-0" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-sm md:text-base truncate">Queue</span>
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4">
+                    {readyItems.length} ready
+                  </Badge>
+                </div>
+                <p className="text-[10px] text-muted-foreground hidden sm:block">
+                  {totalItemsToPick} items to pick
+                </p>
+              </div>
             </div>
             
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Picking Mode Toggle */}
-              <div className="flex items-center rounded-lg border bg-muted/50 p-1">
+            {/* Right: Actions */}
+            <div className="flex items-center gap-1.5">
+              {/* Mode Toggle - Compact */}
+              <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
                 <Button
                   variant={pickingMode === "batch" ? "default" : "ghost"}
                   size="sm"
                   onClick={() => setPickingMode("batch")}
                   className={cn(
-                    "gap-1.5",
+                    "h-7 px-2 text-xs",
                     pickingMode === "batch" && "bg-primary shadow-sm"
                   )}
                   data-testid="button-batch-mode"
                 >
-                  <Layers className="h-4 w-4" />
-                  Batch
+                  <Layers className="h-3.5 w-3.5" />
                 </Button>
                 <Button
                   variant={pickingMode === "single" ? "default" : "ghost"}
                   size="sm"
                   onClick={() => setPickingMode("single")}
                   className={cn(
-                    "gap-1.5",
+                    "h-7 px-2 text-xs",
                     pickingMode === "single" && "bg-primary shadow-sm"
                   )}
                   data-testid="button-single-mode"
                 >
-                  <Package className="h-4 w-4" />
-                  Single
+                  <Package className="h-3.5 w-3.5" />
                 </Button>
               </div>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setScannerMode(!scannerMode)}
-                className={cn(scannerMode && "bg-primary text-primary-foreground")}
-                title="Scanner Mode"
-              >
-                <Smartphone className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={toggleFullscreen}
-                title="Fullscreen"
-              >
-                <Maximize className="h-4 w-4" />
-              </Button>
+              
+              {/* Sync Shopify - Icon only on mobile */}
               <Button 
                 variant="outline" 
-                size="sm" 
-                onClick={handleRefreshQueue}
-                disabled={isLoading}
-                data-testid="button-refresh-queue"
-              >
-                <RefreshCw className={cn("h-4 w-4 mr-2", isLoading && "animate-spin")} />
-                Refresh
-              </Button>
-              <Button 
-                variant="outline" 
-                size="sm" 
+                size="icon"
+                className="h-8 w-8"
                 onClick={handleSyncOrders}
                 disabled={isSyncing}
+                title="Sync Shopify"
                 data-testid="button-sync-orders"
               >
-                <CloudDownload className={cn("h-4 w-4 mr-2", isSyncing && "animate-bounce")} />
-                {isSyncing ? "Syncing..." : "Sync Shopify"}
+                <CloudDownload className={cn("h-4 w-4", isSyncing && "animate-bounce")} />
               </Button>
-              {ordersFromApi.length === 0 && (
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  onClick={handleResetDemo}
-                  data-testid="button-reset-demo"
-                >
-                  <RotateCcw className="h-4 w-4 mr-2" />
-                  Demo
-                </Button>
-              )}
-              <Button 
-                onClick={handleGrabNext}
-                className="bg-emerald-600 hover:bg-emerald-700 h-12 px-6 text-base"
-                disabled={readyItems.length === 0}
-                data-testid="button-grab-next"
-              >
-                <Zap className="h-5 w-5 mr-2" />
-                Grab Next
-              </Button>
-              {/* Exceptions Button - Admin/Lead Only */}
+              
+              {/* Exceptions - Admin/Lead Only */}
               {isAdminOrLead && (
                 <Button
                   variant="outline"
-                  size="sm"
+                  size="icon"
+                  className="h-8 w-8 relative"
                   onClick={() => setView("exceptions")}
-                  className="gap-1.5 relative"
+                  title="Exceptions"
                   data-testid="button-exceptions"
                 >
                   <AlertTriangle className="h-4 w-4" />
-                  Exceptions
                   {exceptionOrders.length > 0 && (
-                    <Badge variant="destructive" className="absolute -top-2 -right-2 h-5 w-5 p-0 flex items-center justify-center text-xs">
+                    <Badge variant="destructive" className="absolute -top-1.5 -right-1.5 h-4 w-4 p-0 flex items-center justify-center text-[10px]">
                       {exceptionOrders.length}
                     </Badge>
                   )}
                 </Button>
               )}
+              
+              {/* Grab Next - Primary Action */}
+              <Button 
+                onClick={handleGrabNext}
+                className="bg-emerald-600 hover:bg-emerald-700 h-9 px-3 text-sm font-medium"
+                disabled={readyItems.length === 0}
+                data-testid="button-grab-next"
+              >
+                <Zap className="h-4 w-4 mr-1" />
+                Grab Next
+              </Button>
             </div>
           </div>
 
-          {/* Claim Error Alert */}
+          {/* Claim Error Alert - Compact */}
           {claimError && (
-            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 shrink-0" />
-              <span>{claimError}</span>
+            <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs flex items-center gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span className="flex-1">{claimError}</span>
               <Button 
                 variant="ghost" 
                 size="sm" 
                 onClick={() => setClaimError(null)}
-                className="ml-auto h-6 px-2 text-amber-800 hover:text-amber-900"
+                className="h-5 px-1.5 text-amber-800 hover:text-amber-900"
               >
-                Dismiss
+                <X className="h-3 w-3" />
               </Button>
             </div>
           )}
 
-          {/* Queue Stats - Clickable Filters */}
-          <div className={cn("grid gap-2 md:gap-3 mt-4", isAdminOrLead && holdItems.length > 0 ? "grid-cols-5" : "grid-cols-4")}>
-            <div 
+          {/* Row 2: Filter Tabs - Horizontal Scroll */}
+          <div className="flex items-center gap-1.5 mt-2 overflow-x-auto pb-1 -mx-1 px-1">
+            <button 
               className={cn(
-                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-primary/50",
-                activeFilter === "ready" ? "bg-primary/20 ring-2 ring-primary" : "bg-muted/50"
+                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                activeFilter === "ready" 
+                  ? "bg-primary text-primary-foreground" 
+                  : "bg-muted/60 text-muted-foreground hover:bg-muted"
               )}
               onClick={() => setActiveFilter(activeFilter === "ready" ? "all" : "ready")}
               data-testid="filter-ready"
             >
-              <div className="text-xl md:text-2xl font-bold text-primary">{readyItems.length}</div>
-              <div className="text-[10px] md:text-xs text-muted-foreground">Ready</div>
-            </div>
-            <div 
+              <span className="font-bold">{readyItems.length}</span> Ready
+            </button>
+            <button 
               className={cn(
-                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-amber-500/50",
-                activeFilter === "active" ? "bg-amber-100 ring-2 ring-amber-500" : "bg-muted/50"
+                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                activeFilter === "active" 
+                  ? "bg-amber-500 text-white" 
+                  : "bg-muted/60 text-muted-foreground hover:bg-muted"
               )}
               onClick={() => setActiveFilter(activeFilter === "active" ? "all" : "active")}
               data-testid="filter-active"
             >
-              <div className="text-xl md:text-2xl font-bold text-amber-600">{inProgressItems.length}</div>
-              <div className="text-[10px] md:text-xs text-muted-foreground">Active</div>
-            </div>
-            <div 
+              <span className="font-bold">{inProgressItems.length}</span> Active
+            </button>
+            <button 
               className={cn(
-                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-red-500/50",
-                activeFilter === "rush" ? "bg-red-100 ring-2 ring-red-500" : "bg-muted/50"
+                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                activeFilter === "rush" 
+                  ? "bg-red-500 text-white" 
+                  : "bg-muted/60 text-muted-foreground hover:bg-muted"
               )}
               onClick={() => setActiveFilter(activeFilter === "rush" ? "all" : "rush")}
               data-testid="filter-rush"
             >
-              <div className="text-xl md:text-2xl font-bold text-red-600">{readyItems.filter(item => item.priority === "rush").length}</div>
-              <div className="text-[10px] md:text-xs text-muted-foreground">Rush</div>
-            </div>
-            {/* Hold filter - only visible to admins when there are held orders */}
+              <span className="font-bold">{readyItems.filter(item => item.priority === "rush").length}</span> Rush
+            </button>
             {isAdminOrLead && holdItems.length > 0 && (
-              <div 
+              <button 
                 className={cn(
-                  "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-slate-500/50",
-                  activeFilter === "hold" ? "bg-slate-200 ring-2 ring-slate-500" : "bg-muted/50"
+                  "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                  activeFilter === "hold" 
+                    ? "bg-slate-500 text-white" 
+                    : "bg-muted/60 text-muted-foreground hover:bg-muted"
                 )}
                 onClick={() => setActiveFilter(activeFilter === "hold" ? "all" : "hold")}
                 data-testid="filter-hold"
               >
-                <div className="text-xl md:text-2xl font-bold text-slate-600">{holdItems.length}</div>
-                <div className="text-[10px] md:text-xs text-muted-foreground">On Hold</div>
-              </div>
+                <span className="font-bold">{holdItems.length}</span> Hold
+              </button>
             )}
-            <div 
+            <button 
               className={cn(
-                "rounded-lg p-2 md:p-3 text-center cursor-pointer transition-all hover:ring-2 hover:ring-emerald-500/50",
-                activeFilter === "done" ? "bg-emerald-100 ring-2 ring-emerald-500" : "bg-muted/50"
+                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                activeFilter === "done" 
+                  ? "bg-emerald-500 text-white" 
+                  : "bg-muted/60 text-muted-foreground hover:bg-muted"
               )}
               onClick={() => setActiveFilter(activeFilter === "done" ? "all" : "done")}
               data-testid="filter-done"
             >
-              <div className="text-xl md:text-2xl font-bold text-emerald-600">{completedItems.length}</div>
-              <div className="text-[10px] md:text-xs text-muted-foreground">Done</div>
-            </div>
+              <span className="font-bold">{completedItems.length}</span> Done
+            </button>
           </div>
         </div>
 
-        {/* Search and Sort Controls */}
-        <div className="px-3 md:px-6 pt-3 md:pt-4">
-          <div className="flex flex-col sm:flex-row gap-2">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search order, customer, or SKU..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 pr-9"
-                data-testid="input-search-queue"
-              />
-              {searchQuery && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
-                  onClick={() => setSearchQuery("")}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-                <SelectTrigger className="w-full sm:w-[140px]" data-testid="select-sort">
-                  <SelectValue placeholder="Sort by..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="priority">Priority</SelectItem>
-                  <SelectItem value="items">Item Count</SelectItem>
-                  <SelectItem value="order">Order #</SelectItem>
-                  <SelectItem value="age">Order Age</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                size="icon"
-                onClick={() => setSortDirection(sortDirection === "asc" ? "desc" : "asc")}
-                className="h-10 w-10"
-                title={sortDirection === "desc" ? "Sorted high to low (click to reverse)" : "Sorted low to high (click to reverse)"}
-                data-testid="button-sort-direction"
-              >
-                {sortDirection === "desc" ? (
-                  <ArrowDown className="h-4 w-4" />
-                ) : (
-                  <ArrowUp className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-          </div>
-          {(searchQuery || activeFilter !== "all") && (
-            <div className="flex items-center gap-2 mt-2 text-sm text-muted-foreground">
-              <span>Showing {sortedQueue.length} results</span>
+        {/* Search and Sort - Compact Row */}
+        <div className="px-3 py-2 bg-muted/30 border-b flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-8 pl-8 pr-8 text-sm"
+              data-testid="input-search-queue"
+            />
+            {searchQuery && (
               <Button
                 variant="ghost"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
+                size="icon"
+                className="absolute right-0.5 top-1/2 -translate-y-1/2 h-6 w-6"
+                onClick={() => setSearchQuery("")}
               >
-                Clear filters
+                <X className="h-3.5 w-3.5" />
               </Button>
-            </div>
+            )}
+          </div>
+          <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+            <SelectTrigger className="w-[110px] h-8 text-xs" data-testid="select-sort">
+              <SelectValue placeholder="Sort..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="priority">Priority</SelectItem>
+              <SelectItem value="items">Items</SelectItem>
+              <SelectItem value="order">Order #</SelectItem>
+              <SelectItem value="age">Age</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={() => setSortDirection(sortDirection === "asc" ? "desc" : "asc")}
+            className="h-8 w-8 shrink-0"
+            title={sortDirection === "desc" ? "Oldest first" : "Newest first"}
+            data-testid="button-sort-direction"
+          >
+            {sortDirection === "desc" ? (
+              <ArrowDown className="h-3.5 w-3.5" />
+            ) : (
+              <ArrowUp className="h-3.5 w-3.5" />
+            )}
+          </Button>
+          {(searchQuery || activeFilter !== "all") && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs shrink-0"
+              onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
+            >
+              Clear
+            </Button>
           )}
         </div>
 
