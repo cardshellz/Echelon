@@ -1580,23 +1580,37 @@ export default function Picking() {
   
   // Release order handler - shows dialog if partially picked
   const handleReleaseOrder = async (orderId: number) => {
+    console.log("[RELEASE] Attempting to release order:", orderId);
     const order = singleQueue.find(o => o.id === String(orderId));
-    const pickedCount = order?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
+    console.log("[RELEASE] Found order in singleQueue:", order ? "yes" : "no");
+    
+    // Also check API data directly for more accurate item status
+    const apiOrder = ordersFromApi.find(o => o.id === String(orderId));
+    console.log("[RELEASE] Found order in API data:", apiOrder ? "yes" : "no");
+    
+    // Use API data if local queue doesn't have the order
+    const checkOrder = order || apiOrder;
+    const pickedCount = checkOrder?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
+    console.log("[RELEASE] Picked/short item count:", pickedCount);
     
     if (pickedCount === 0) {
       // No items picked - just release immediately
       try {
+        console.log("[RELEASE] No picked items, releasing immediately with reset");
         await releaseMutation.mutateAsync({ orderId, resetProgress: true });
+        toast({ title: "Order released", description: "Order is back in the queue" });
         if (view === "picking") {
           setView("queue");
           setActiveOrderId(null);
           setCurrentItemIndex(0);
         }
       } catch (error) {
-        console.error("Failed to release:", error);
+        console.error("[RELEASE] Failed to release:", error);
+        toast({ title: "Failed to release", description: "Please try again", variant: "destructive" });
       }
     } else {
       // Partially picked - show confirmation dialog
+      console.log("[RELEASE] Has picked items, showing dialog");
       setReleaseOrderId(orderId);
       setReleaseDialogOpen(true);
     }
@@ -1605,13 +1619,23 @@ export default function Picking() {
   // Confirm release with chosen option
   const confirmRelease = async (resetProgress: boolean) => {
     if (releaseOrderId) {
-      await releaseMutation.mutateAsync({ orderId: releaseOrderId, resetProgress });
-      setReleaseDialogOpen(false);
-      setReleaseOrderId(null);
-      if (view === "picking") {
-        setView("queue");
-        setActiveOrderId(null);
-        setCurrentItemIndex(0);
+      try {
+        console.log("[RELEASE] Confirming release with resetProgress:", resetProgress);
+        await releaseMutation.mutateAsync({ orderId: releaseOrderId, resetProgress });
+        toast({ 
+          title: "Order released", 
+          description: resetProgress ? "Order reset and back in queue" : "Order released, progress kept" 
+        });
+        setReleaseDialogOpen(false);
+        setReleaseOrderId(null);
+        if (view === "picking") {
+          setView("queue");
+          setActiveOrderId(null);
+          setCurrentItemIndex(0);
+        }
+      } catch (error) {
+        console.error("[RELEASE] Failed to confirm release:", error);
+        toast({ title: "Failed to release", description: "Please try again", variant: "destructive" });
       }
     }
   };
