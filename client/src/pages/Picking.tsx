@@ -2890,7 +2890,14 @@ export default function Picking() {
                         <span className={cn("text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                           {item.location}
                         </span>
-                        <span className={cn("text-xs px-1.5 py-0.5 rounded flex-shrink-0", isCompleted ? "bg-emerald-100 text-emerald-700" : "bg-slate-100")}>
+                        <span className={cn(
+                          "text-base font-bold px-2 py-0.5 rounded flex-shrink-0",
+                          isCompleted 
+                            ? "bg-emerald-100 text-emerald-700" 
+                            : item.qty > 1 
+                              ? "bg-amber-100 text-amber-800 ring-2 ring-amber-400" 
+                              : "bg-slate-100 text-slate-700"
+                        )}>
                           {item.picked}/{item.qty}
                         </span>
                       </div>
