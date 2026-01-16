@@ -1,12 +1,13 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema } from "@shared/schema";
+import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
+import { inventoryService } from "./inventory";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -448,10 +449,45 @@ export async function registerRoutes(
       const id = parseInt(req.params.id);
       const { status, pickedQuantity, shortReason } = req.body;
       
+      // Get item before update to check if this is a status change to completed
+      const beforeItem = await storage.getOrderItemById(id);
+      
       const item = await storage.updateOrderItemStatus(id, status, pickedQuantity, shortReason);
       
       if (!item) {
         return res.status(404).json({ error: "Item not found" });
+      }
+      
+      // If item was just marked as completed, decrement inventory
+      if (status === "completed" && beforeItem?.status !== "completed") {
+        try {
+          // Get inventory item by SKU
+          const inventoryItem = await storage.getInventoryItemBySku(item.sku);
+          if (inventoryItem) {
+            // Calculate base units to decrement based on picked quantity
+            // For now, we assume 1 unit picked = 1 base unit
+            // In the future, this will look up the UOM variant and use unitsPerVariant
+            const pickedUnits = pickedQuantity || item.quantity;
+            
+            // Get the first pickable location for this item that has stock
+            const levels = await storage.getInventoryLevelsByItemId(inventoryItem.id);
+            const pickableLevel = levels.find(l => l.onHandBase > 0);
+            
+            if (pickableLevel) {
+              await inventoryService.pickItem(
+                inventoryItem.id,
+                pickableLevel.warehouseLocationId,
+                pickedUnits,
+                item.orderId,
+                req.session.user?.id
+              );
+              console.log(`Inventory decremented: ${pickedUnits} units of ${item.sku} picked for order ${item.orderId}`);
+            }
+          }
+        } catch (inventoryError) {
+          // Log but don't fail the pick operation - inventory sync can be reconciled later
+          console.warn(`Inventory decrement failed for ${item.sku}:`, inventoryError);
+        }
       }
       
       // Update order progress
@@ -1224,6 +1260,254 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Order cancelled webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });
+    }
+  });
+
+  // ============================================
+  // INVENTORY MANAGEMENT (WMS) API
+  // ============================================
+
+  // Warehouse Locations
+  app.get("/api/inventory/locations", async (req, res) => {
+    try {
+      const locations = await storage.getAllWarehouseLocations();
+      res.json(locations);
+    } catch (error) {
+      console.error("Error fetching warehouse locations:", error);
+      res.status(500).json({ error: "Failed to fetch locations" });
+    }
+  });
+
+  app.post("/api/inventory/locations", async (req, res) => {
+    try {
+      const parsed = insertWarehouseLocationSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid location data", details: parsed.error });
+      }
+      const location = await storage.createWarehouseLocation(parsed.data);
+      res.status(201).json(location);
+    } catch (error) {
+      console.error("Error creating warehouse location:", error);
+      res.status(500).json({ error: "Failed to create location" });
+    }
+  });
+
+  // Inventory Items (Master SKUs)
+  app.get("/api/inventory/items", async (req, res) => {
+    try {
+      const items = await storage.getAllInventoryItems();
+      res.json(items);
+    } catch (error) {
+      console.error("Error fetching inventory items:", error);
+      res.status(500).json({ error: "Failed to fetch items" });
+    }
+  });
+
+  app.get("/api/inventory/items/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const summary = await inventoryService.getInventoryItemSummary(id);
+      if (!summary) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching inventory item:", error);
+      res.status(500).json({ error: "Failed to fetch item" });
+    }
+  });
+
+  app.post("/api/inventory/items", async (req, res) => {
+    try {
+      const parsed = insertInventoryItemSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid item data", details: parsed.error });
+      }
+      const item = await storage.createInventoryItem(parsed.data);
+      res.status(201).json(item);
+    } catch (error) {
+      console.error("Error creating inventory item:", error);
+      res.status(500).json({ error: "Failed to create item" });
+    }
+  });
+
+  // UOM Variants
+  app.get("/api/inventory/variants", async (req, res) => {
+    try {
+      const variants = await storage.getAllUomVariants();
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching UOM variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
+  app.post("/api/inventory/variants", async (req, res) => {
+    try {
+      const parsed = insertUomVariantSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid variant data", details: parsed.error });
+      }
+      const variant = await storage.createUomVariant(parsed.data);
+      res.status(201).json(variant);
+    } catch (error) {
+      console.error("Error creating UOM variant:", error);
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
+  // Inventory Levels & Adjustments
+  app.get("/api/inventory/levels/:itemId", async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const levels = await storage.getInventoryLevelsByItemId(itemId);
+      res.json(levels);
+    } catch (error) {
+      console.error("Error fetching inventory levels:", error);
+      res.status(500).json({ error: "Failed to fetch levels" });
+    }
+  });
+
+  app.post("/api/inventory/adjust", async (req, res) => {
+    try {
+      const { inventoryItemId, warehouseLocationId, baseUnitsDelta, reason } = req.body;
+      const userId = req.session.user?.id;
+      
+      if (!inventoryItemId || !warehouseLocationId || baseUnitsDelta === undefined || !reason) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+      
+      await inventoryService.adjustInventory(
+        inventoryItemId,
+        warehouseLocationId,
+        baseUnitsDelta,
+        reason,
+        userId
+      );
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error adjusting inventory:", error);
+      res.status(500).json({ error: "Failed to adjust inventory" });
+    }
+  });
+
+  app.post("/api/inventory/receive", async (req, res) => {
+    try {
+      const { inventoryItemId, warehouseLocationId, baseUnits, referenceId, notes } = req.body;
+      const userId = req.session.user?.id;
+      
+      if (!inventoryItemId || !warehouseLocationId || !baseUnits || !referenceId) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+      
+      await inventoryService.receiveInventory(
+        inventoryItemId,
+        warehouseLocationId,
+        baseUnits,
+        referenceId,
+        notes,
+        userId
+      );
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error receiving inventory:", error);
+      res.status(500).json({ error: "Failed to receive inventory" });
+    }
+  });
+
+  // Inventory Transactions (Audit Trail)
+  app.get("/api/inventory/transactions/:itemId", async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const limit = parseInt(req.query.limit as string) || 100;
+      const transactions = await storage.getInventoryTransactionsByItemId(itemId, limit);
+      res.json(transactions);
+    } catch (error) {
+      console.error("Error fetching inventory transactions:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  });
+
+  // Channel Feeds
+  app.get("/api/inventory/channel-feeds", async (req, res) => {
+    try {
+      const channelType = (req.query.channel as string) || "shopify";
+      const feeds = await storage.getChannelFeedsByChannel(channelType);
+      res.json(feeds);
+    } catch (error) {
+      console.error("Error fetching channel feeds:", error);
+      res.status(500).json({ error: "Failed to fetch feeds" });
+    }
+  });
+
+  // Full inventory summary with all items and their variant availability
+  app.get("/api/inventory/summary", async (req, res) => {
+    try {
+      const items = await storage.getAllInventoryItems();
+      const summaries = await Promise.all(
+        items.map(item => inventoryService.getInventoryItemSummary(item.id))
+      );
+      res.json(summaries.filter(Boolean));
+    } catch (error) {
+      console.error("Error fetching inventory summary:", error);
+      res.status(500).json({ error: "Failed to fetch summary" });
+    }
+  });
+
+  // Sync inventory levels to Shopify for a specific item or all items
+  app.post("/api/inventory/sync-shopify", async (req, res) => {
+    try {
+      const { inventoryItemId } = req.body;
+      
+      // Get all items or a specific one
+      const items = inventoryItemId 
+        ? [await storage.getAllInventoryItems().then(all => all.find(i => i.id === inventoryItemId))].filter(Boolean)
+        : await storage.getAllInventoryItems();
+      
+      const updates: InventoryLevelUpdate[] = [];
+      
+      for (const item of items) {
+        if (!item) continue;
+        
+        // Get all variants for this item
+        const variants = await storage.getUomVariantsByInventoryItemId(item.id);
+        
+        // Get channel feeds to find Shopify variant IDs
+        for (const variant of variants) {
+          const feeds = await storage.getChannelFeedsByVariantId(variant.id);
+          const shopifyFeed = feeds.find(f => f.channelType === "shopify");
+          
+          if (shopifyFeed) {
+            // Calculate availability for this variant
+            const summary = await inventoryService.getInventoryItemSummary(item.id);
+            const variantAvail = summary?.variants.find(v => v.variantId === variant.id);
+            
+            if (variantAvail) {
+              updates.push({
+                shopifyVariantId: shopifyFeed.externalVariantId,
+                available: variantAvail.available,
+              });
+            }
+          }
+        }
+      }
+      
+      if (updates.length === 0) {
+        return res.json({ message: "No variants with Shopify channel feeds found", synced: 0 });
+      }
+      
+      const result = await syncInventoryToShopify(updates);
+      res.json({ 
+        message: "Shopify inventory sync completed",
+        success: result.success,
+        failed: result.failed,
+        total: updates.length,
+      });
+    } catch (error) {
+      console.error("Error syncing inventory to Shopify:", error);
+      res.status(500).json({ error: "Failed to sync inventory" });
     }
   });
 

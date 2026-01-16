@@ -133,3 +133,181 @@ export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
 
 export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
 export type OrderItem = typeof orderItems.$inferSelect;
+
+// ============================================
+// INVENTORY MANAGEMENT SYSTEM (WMS)
+// ============================================
+
+// Location types for warehouse management
+export const locationTypeEnum = ["forward_pick", "bulk_storage", "receiving", "pallet"] as const;
+export type LocationType = typeof locationTypeEnum[number];
+
+// Movement policy - how strict is inventory tracking for this movement type
+export const movementPolicyEnum = ["implicit", "soft_log", "require_scan"] as const;
+export type MovementPolicy = typeof movementPolicyEnum[number];
+
+// Warehouse locations (bins, pallets, racks, etc.)
+export const warehouseLocations = pgTable("warehouse_locations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 50 }).notNull().unique(), // e.g., "A-01-02-B", "PALLET-R3-L2"
+  name: text("name"), // Friendly name
+  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"),
+  zone: varchar("zone", { length: 10 }).notNull().default("A"),
+  isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
+  parentLocationId: integer("parent_location_id"), // Replenishment source (references self)
+  movementPolicy: varchar("movement_policy", { length: 20 }).notNull().default("implicit"),
+  minQty: integer("min_qty"), // Trigger replenishment alert when below this
+  maxQty: integer("max_qty"), // Maximum capacity
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertWarehouseLocationSchema = createInsertSchema(warehouseLocations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertWarehouseLocation = z.infer<typeof insertWarehouseLocationSchema>;
+export type WarehouseLocation = typeof warehouseLocations.$inferSelect;
+
+// Master inventory items (base SKU level)
+export const inventoryItems = pgTable("inventory_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  baseSku: varchar("base_sku", { length: 100 }).notNull().unique(), // e.g., "EG-STD-SLV"
+  name: text("name").notNull(),
+  description: text("description"),
+  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"), // "each", "unit", etc.
+  costPerUnit: integer("cost_per_unit"), // Cost in cents
+  imageUrl: text("image_url"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInventoryItemSchema = createInsertSchema(inventoryItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertInventoryItem = z.infer<typeof insertInventoryItemSchema>;
+export type InventoryItem = typeof inventoryItems.$inferSelect;
+
+// UOM Variants - sellable SKUs at different pack levels
+export const uomVariants = pgTable("uom_variants", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  sku: varchar("sku", { length: 100 }).notNull().unique(), // e.g., "EG-STD-SLV-P100"
+  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
+  name: text("name").notNull(), // "Easy Glide Sleeves - Pack of 100"
+  unitsPerVariant: integer("units_per_variant").notNull(), // 100 for P100, 500 for B500, etc.
+  hierarchyLevel: integer("hierarchy_level").notNull().default(1), // 1=smallest, 2, 3, 4=largest
+  parentVariantId: integer("parent_variant_id"), // For replenishment chain (P1 <- B25 <- C250)
+  barcode: varchar("barcode", { length: 100 }),
+  imageUrl: text("image_url"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertUomVariantSchema = createInsertSchema(uomVariants).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertUomVariant = z.infer<typeof insertUomVariantSchema>;
+export type UomVariant = typeof uomVariants.$inferSelect;
+
+// Inventory levels per location (tracked in BASE UNITS)
+export const inventoryLevels = pgTable("inventory_levels", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
+  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
+  variantId: integer("variant_id").references(() => uomVariants.id), // Which variant is stored here (for location assignment)
+  onHandBase: integer("on_hand_base").notNull().default(0), // Physical count in base units
+  reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders
+  pickedBase: integer("picked_base").notNull().default(0), // In picker carts
+  packedBase: integer("packed_base").notNull().default(0), // Boxed, awaiting ship (future)
+  backorderBase: integer("backorder_base").notNull().default(0), // Backorder demand
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInventoryLevelSchema = createInsertSchema(inventoryLevels).omit({
+  id: true,
+  updatedAt: true,
+});
+
+export type InsertInventoryLevel = z.infer<typeof insertInventoryLevelSchema>;
+export type InventoryLevel = typeof inventoryLevels.$inferSelect;
+
+// Transaction types for audit trail
+export const transactionTypeEnum = [
+  "receipt",      // PO received
+  "pick",         // Picked for order
+  "adjustment",   // Manual count adjustment
+  "break",        // Case/pack broken into smaller units
+  "assemble",     // Smaller units assembled into larger pack (future)
+  "replenish",    // Moved from bulk to pick location
+  "transfer",     // Moved between locations
+  "reserve",      // Reserved for order
+  "unreserve",    // Reservation released (cancel, short)
+  "ship",         // Shipped out
+  "return",       // Customer return (future)
+] as const;
+export type TransactionType = typeof transactionTypeEnum[number];
+
+// Inventory transactions ledger (audit trail)
+export const inventoryTransactions = pgTable("inventory_transactions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
+  variantId: integer("variant_id").references(() => uomVariants.id),
+  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id),
+  transactionType: varchar("transaction_type", { length: 30 }).notNull(),
+  baseQtyDelta: integer("base_qty_delta").notNull(), // Positive = add, negative = remove
+  sourceState: varchar("source_state", { length: 20 }), // "on_hand", "reserved", "picked", etc.
+  targetState: varchar("target_state", { length: 20 }), // "reserved", "picked", "shipped", etc.
+  orderId: integer("order_id").references(() => orders.id), // Link to order if applicable
+  orderItemId: integer("order_item_id").references(() => orderItems.id),
+  referenceType: varchar("reference_type", { length: 30 }), // "order", "po", "adjustment", etc.
+  referenceId: varchar("reference_id", { length: 100 }), // External reference ID
+  notes: text("notes"),
+  isImplicit: integer("is_implicit").notNull().default(0), // 1 = auto-generated, 0 = explicit scan
+  userId: varchar("user_id", { length: 100 }), // Who performed the action
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInventoryTransactionSchema = createInsertSchema(inventoryTransactions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertInventoryTransaction = z.infer<typeof insertInventoryTransactionSchema>;
+export type InventoryTransaction = typeof inventoryTransactions.$inferSelect;
+
+// Channel feeds - maps variants to external channel IDs (Shopify, future marketplaces)
+export const channelTypeEnum = ["shopify", "amazon", "ebay", "wholesale"] as const;
+export type ChannelType = typeof channelTypeEnum[number];
+
+export const channelFeeds = pgTable("channel_feeds", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  variantId: integer("variant_id").notNull().references(() => uomVariants.id),
+  channelType: varchar("channel_type", { length: 30 }).notNull().default("shopify"),
+  channelVariantId: varchar("channel_variant_id", { length: 100 }).notNull(), // Shopify variant ID
+  channelProductId: varchar("channel_product_id", { length: 100 }), // Shopify product ID
+  channelSku: varchar("channel_sku", { length: 100 }), // SKU as it appears in channel
+  isActive: integer("is_active").notNull().default(1), // 1 = sync enabled
+  lastSyncedAt: timestamp("last_synced_at"),
+  lastSyncedQty: integer("last_synced_qty"), // Last quantity pushed to channel
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelFeedSchema = createInsertSchema(channelFeeds).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelFeed = z.infer<typeof insertChannelFeedSchema>;
+export type ChannelFeed = typeof channelFeeds.$inferSelect;

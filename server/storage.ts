@@ -11,13 +11,31 @@ import {
   type InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
+  type WarehouseLocation,
+  type InsertWarehouseLocation,
+  type InventoryItem,
+  type InsertInventoryItem,
+  type UomVariant,
+  type InsertUomVariant,
+  type InventoryLevel,
+  type InsertInventoryLevel,
+  type InventoryTransaction,
+  type InsertInventoryTransaction,
+  type ChannelFeed,
+  type InsertChannelFeed,
   users,
   productLocations,
   orders,
-  orderItems
+  orderItems,
+  warehouseLocations,
+  inventoryItems,
+  uomVariants,
+  inventoryLevels,
+  inventoryTransactions,
+  channelFeeds
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, inArray, notInArray, and, isNull, sql, desc } from "drizzle-orm";
+import { eq, inArray, notInArray, and, isNull, sql, desc, asc } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -53,6 +71,7 @@ export interface IStorage {
   
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
+  getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
   updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string): Promise<OrderItem | null>;
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number): Promise<Order | null>;
@@ -65,6 +84,47 @@ export interface IStorage {
   // Exception handling
   getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   resolveException(orderId: number, resolution: string, resolvedBy: string, notes?: string): Promise<Order | null>;
+  
+  // ============================================
+  // INVENTORY MANAGEMENT (WMS)
+  // ============================================
+  
+  // Warehouse Locations
+  getAllWarehouseLocations(): Promise<WarehouseLocation[]>;
+  getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined>;
+  createWarehouseLocation(location: InsertWarehouseLocation): Promise<WarehouseLocation>;
+  updateWarehouseLocation(id: number, updates: Partial<InsertWarehouseLocation>): Promise<WarehouseLocation | null>;
+  
+  // Inventory Items (Master SKUs)
+  getAllInventoryItems(): Promise<InventoryItem[]>;
+  getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
+  getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
+  createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
+  
+  // UOM Variants
+  getAllUomVariants(): Promise<UomVariant[]>;
+  getUomVariantBySku(sku: string): Promise<UomVariant | undefined>;
+  getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]>;
+  createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
+  
+  // Inventory Levels
+  getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
+  getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
+  upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
+  adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number }): Promise<InventoryLevel | null>;
+  getTotalOnHandByItemId(inventoryItemId: number, pickableOnly?: boolean): Promise<number>;
+  getTotalReservedByItemId(inventoryItemId: number): Promise<number>;
+  
+  // Inventory Transactions
+  createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction>;
+  getInventoryTransactionsByItemId(inventoryItemId: number, limit?: number): Promise<InventoryTransaction[]>;
+  
+  // Channel Feeds
+  getChannelFeedsByVariantId(variantId: number): Promise<ChannelFeed[]>;
+  getChannelFeedByVariantAndChannel(variantId: number, channelType: string): Promise<ChannelFeed | undefined>;
+  upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed>;
+  updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null>;
+  getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: UomVariant })[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -316,6 +376,11 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
   }
 
+  async getOrderItemById(itemId: number): Promise<OrderItem | undefined> {
+    const result = await db.select().from(orderItems).where(eq(orderItems.id, itemId)).limit(1);
+    return result[0];
+  }
+
   async updateOrderItemStatus(
     itemId: number, 
     status: ItemStatus, 
@@ -504,6 +569,273 @@ export class DatabaseStorage implements IStorage {
       .returning();
     
     return result[0] || null;
+  }
+
+  // ============================================
+  // INVENTORY MANAGEMENT (WMS) IMPLEMENTATIONS
+  // ============================================
+
+  // Warehouse Locations
+  async getAllWarehouseLocations(): Promise<WarehouseLocation[]> {
+    return await db.select().from(warehouseLocations).orderBy(asc(warehouseLocations.code));
+  }
+
+  async getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined> {
+    const result = await db.select().from(warehouseLocations).where(eq(warehouseLocations.code, code.toUpperCase()));
+    return result[0];
+  }
+
+  async createWarehouseLocation(location: InsertWarehouseLocation): Promise<WarehouseLocation> {
+    const result = await db.insert(warehouseLocations).values({
+      ...location,
+      code: location.code.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  async updateWarehouseLocation(id: number, updates: Partial<InsertWarehouseLocation>): Promise<WarehouseLocation | null> {
+    const result = await db
+      .update(warehouseLocations)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(warehouseLocations.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  // Inventory Items (Master SKUs)
+  async getAllInventoryItems(): Promise<InventoryItem[]> {
+    return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
+  }
+
+  async getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined> {
+    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.baseSku, baseSku.toUpperCase()));
+    return result[0];
+  }
+
+  async getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined> {
+    // First try to match as a base SKU
+    const byBase = await this.getInventoryItemByBaseSku(sku);
+    if (byBase) return byBase;
+    
+    // Then try to find via variant SKU
+    const variant = await this.getUomVariantBySku(sku);
+    if (variant) {
+      const result = await db.select().from(inventoryItems).where(eq(inventoryItems.id, variant.inventoryItemId));
+      return result[0];
+    }
+    
+    return undefined;
+  }
+
+  async createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
+    const result = await db.insert(inventoryItems).values({
+      ...item,
+      baseSku: item.baseSku.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  // UOM Variants
+  async getAllUomVariants(): Promise<UomVariant[]> {
+    return await db.select().from(uomVariants).orderBy(asc(uomVariants.sku));
+  }
+
+  async getUomVariantBySku(sku: string): Promise<UomVariant | undefined> {
+    const result = await db.select().from(uomVariants).where(eq(uomVariants.sku, sku.toUpperCase()));
+    return result[0];
+  }
+
+  async getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]> {
+    return await db
+      .select()
+      .from(uomVariants)
+      .where(eq(uomVariants.inventoryItemId, inventoryItemId))
+      .orderBy(asc(uomVariants.hierarchyLevel));
+  }
+
+  async createUomVariant(variant: InsertUomVariant): Promise<UomVariant> {
+    const result = await db.insert(uomVariants).values({
+      ...variant,
+      sku: variant.sku.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  // Inventory Levels
+  async getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]> {
+    return await db
+      .select()
+      .from(inventoryLevels)
+      .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
+  }
+
+  async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined> {
+    const result = await db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+        eq(inventoryLevels.variantId, variantId)
+      ));
+    return result[0];
+  }
+
+  async upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
+    // Check if exists
+    const existing = await db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.inventoryItemId, level.inventoryItemId),
+        eq(inventoryLevels.warehouseLocationId, level.warehouseLocationId)
+      ));
+    
+    if (existing[0]) {
+      const result = await db
+        .update(inventoryLevels)
+        .set({ ...level, updatedAt: new Date() })
+        .where(eq(inventoryLevels.id, existing[0].id))
+        .returning();
+      return result[0];
+    } else {
+      const result = await db.insert(inventoryLevels).values(level).returning();
+      return result[0];
+    }
+  }
+
+  async adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number }): Promise<InventoryLevel | null> {
+    const updates: any = { updatedAt: new Date() };
+    
+    // Delta-based updates: values are added to current amounts
+    if (adjustments.onHandBase !== undefined) {
+      updates.onHandBase = sql`${inventoryLevels.onHandBase} + ${adjustments.onHandBase}`;
+    }
+    if (adjustments.reservedBase !== undefined) {
+      updates.reservedBase = sql`${inventoryLevels.reservedBase} + ${adjustments.reservedBase}`;
+    }
+    if (adjustments.pickedBase !== undefined) {
+      updates.pickedBase = sql`${inventoryLevels.pickedBase} + ${adjustments.pickedBase}`;
+    }
+    
+    const result = await db
+      .update(inventoryLevels)
+      .set(updates)
+      .where(eq(inventoryLevels.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async getTotalOnHandByItemId(inventoryItemId: number, pickableOnly: boolean = false): Promise<number> {
+    if (pickableOnly) {
+      const result = await db
+        .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)` })
+        .from(inventoryLevels)
+        .innerJoin(warehouseLocations, eq(inventoryLevels.warehouseLocationId, warehouseLocations.id))
+        .where(and(
+          eq(inventoryLevels.inventoryItemId, inventoryItemId),
+          eq(warehouseLocations.isPickable, 1)
+        ));
+      return result[0]?.total || 0;
+    } else {
+      const result = await db
+        .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)` })
+        .from(inventoryLevels)
+        .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
+      return result[0]?.total || 0;
+    }
+  }
+
+  async getTotalReservedByItemId(inventoryItemId: number): Promise<number> {
+    const result = await db
+      .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)` })
+      .from(inventoryLevels)
+      .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
+    return result[0]?.total || 0;
+  }
+
+  // Inventory Transactions
+  async createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
+    const result = await db.insert(inventoryTransactions).values(transaction).returning();
+    return result[0];
+  }
+
+  async getInventoryTransactionsByItemId(inventoryItemId: number, limit: number = 100): Promise<InventoryTransaction[]> {
+    return await db
+      .select()
+      .from(inventoryTransactions)
+      .where(eq(inventoryTransactions.inventoryItemId, inventoryItemId))
+      .orderBy(desc(inventoryTransactions.createdAt))
+      .limit(limit);
+  }
+
+  // Channel Feeds
+  async getChannelFeedsByVariantId(variantId: number): Promise<ChannelFeed[]> {
+    return await db
+      .select()
+      .from(channelFeeds)
+      .where(eq(channelFeeds.variantId, variantId));
+  }
+
+  async getChannelFeedByVariantAndChannel(variantId: number, channelType: string): Promise<ChannelFeed | undefined> {
+    const result = await db
+      .select()
+      .from(channelFeeds)
+      .where(and(
+        eq(channelFeeds.variantId, variantId),
+        eq(channelFeeds.channelType, channelType)
+      ));
+    return result[0];
+  }
+
+  async upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed> {
+    const existing = await this.getChannelFeedByVariantAndChannel(feed.variantId, feed.channelType || "shopify");
+    
+    if (existing) {
+      const result = await db
+        .update(channelFeeds)
+        .set({ ...feed, updatedAt: new Date() })
+        .where(eq(channelFeeds.id, existing.id))
+        .returning();
+      return result[0];
+    } else {
+      const result = await db.insert(channelFeeds).values(feed).returning();
+      return result[0];
+    }
+  }
+
+  async updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null> {
+    const result = await db
+      .update(channelFeeds)
+      .set({ 
+        lastSyncedAt: new Date(),
+        lastSyncedQty: qty,
+        updatedAt: new Date()
+      })
+      .where(eq(channelFeeds.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: UomVariant })[]> {
+    const result = await db
+      .select({
+        id: channelFeeds.id,
+        variantId: channelFeeds.variantId,
+        channelType: channelFeeds.channelType,
+        channelVariantId: channelFeeds.channelVariantId,
+        channelProductId: channelFeeds.channelProductId,
+        channelSku: channelFeeds.channelSku,
+        isActive: channelFeeds.isActive,
+        lastSyncedAt: channelFeeds.lastSyncedAt,
+        lastSyncedQty: channelFeeds.lastSyncedQty,
+        createdAt: channelFeeds.createdAt,
+        updatedAt: channelFeeds.updatedAt,
+        variant: uomVariants
+      })
+      .from(channelFeeds)
+      .innerJoin(uomVariants, eq(channelFeeds.variantId, uomVariants.id))
+      .where(eq(channelFeeds.channelType, channelType));
+    return result as (ChannelFeed & { variant: UomVariant })[];
   }
 }
 

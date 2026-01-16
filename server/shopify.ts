@@ -327,6 +327,117 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
   };
 }
 
+// ============================================
+// INVENTORY SYNC TO SHOPIFY
+// ============================================
+
+export interface InventoryLevelUpdate {
+  shopifyVariantId: string;
+  available: number;
+}
+
+export async function updateShopifyInventoryLevel(
+  shopifyVariantId: string,
+  available: number
+): Promise<boolean> {
+  const config = getShopifyConfig();
+  
+  try {
+    // First, we need to get the inventory_item_id for this variant
+    const variantUrl = `https://${config.store}.myshopify.com/admin/api/2024-01/variants/${shopifyVariantId}.json`;
+    const variantResponse = await fetch(variantUrl, {
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!variantResponse.ok) {
+      console.error(`[SHOPIFY INVENTORY] Failed to fetch variant ${shopifyVariantId}: ${variantResponse.status}`);
+      return false;
+    }
+    
+    const variantData = await variantResponse.json();
+    const inventoryItemId = variantData.variant?.inventory_item_id;
+    
+    if (!inventoryItemId) {
+      console.error(`[SHOPIFY INVENTORY] No inventory_item_id found for variant ${shopifyVariantId}`);
+      return false;
+    }
+    
+    // Get the location ID (we need at least one location to set inventory)
+    const locationsUrl = `https://${config.store}.myshopify.com/admin/api/2024-01/locations.json`;
+    const locationsResponse = await fetch(locationsUrl, {
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!locationsResponse.ok) {
+      console.error(`[SHOPIFY INVENTORY] Failed to fetch locations: ${locationsResponse.status}`);
+      return false;
+    }
+    
+    const locationsData = await locationsResponse.json();
+    const locationId = locationsData.locations?.[0]?.id;
+    
+    if (!locationId) {
+      console.error(`[SHOPIFY INVENTORY] No locations found in Shopify`);
+      return false;
+    }
+    
+    // Set the inventory level
+    const setUrl = `https://${config.store}.myshopify.com/admin/api/2024-01/inventory_levels/set.json`;
+    const setResponse = await fetch(setUrl, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        location_id: locationId,
+        inventory_item_id: inventoryItemId,
+        available: Math.max(0, available), // Shopify doesn't allow negative
+      }),
+    });
+    
+    if (!setResponse.ok) {
+      const error = await setResponse.text();
+      console.error(`[SHOPIFY INVENTORY] Failed to set inventory: ${setResponse.status} - ${error}`);
+      return false;
+    }
+    
+    console.log(`[SHOPIFY INVENTORY] Updated variant ${shopifyVariantId} to ${available} available`);
+    return true;
+  } catch (error) {
+    console.error(`[SHOPIFY INVENTORY] Error updating variant ${shopifyVariantId}:`, error);
+    return false;
+  }
+}
+
+export async function syncInventoryToShopify(
+  updates: InventoryLevelUpdate[]
+): Promise<{ success: number; failed: number }> {
+  let success = 0;
+  let failed = 0;
+  
+  for (const update of updates) {
+    // Rate limit between updates
+    await delay(300);
+    
+    const result = await updateShopifyInventoryLevel(update.shopifyVariantId, update.available);
+    if (result) {
+      success++;
+    } else {
+      failed++;
+    }
+  }
+  
+  console.log(`[SHOPIFY INVENTORY] Sync complete: ${success} succeeded, ${failed} failed`);
+  return { success, failed };
+}
+
 // Fetch fulfillment status for specific order IDs from Shopify
 export interface OrderFulfillmentStatus {
   shopifyOrderId: string;
