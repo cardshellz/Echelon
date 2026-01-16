@@ -91,6 +91,7 @@ export interface IStorage {
   
   // Warehouse Locations
   getAllWarehouseLocations(): Promise<WarehouseLocation[]>;
+  getWarehouseLocationById(id: number): Promise<WarehouseLocation | undefined>;
   getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined>;
   createWarehouseLocation(location: InsertWarehouseLocation): Promise<WarehouseLocation>;
   updateWarehouseLocation(id: number, updates: Partial<InsertWarehouseLocation>): Promise<WarehouseLocation | null>;
@@ -108,10 +109,11 @@ export interface IStorage {
   createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
   
   // Inventory Levels
+  getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
-  adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number }): Promise<InventoryLevel | null>;
+  adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
   getTotalOnHandByItemId(inventoryItemId: number, pickableOnly?: boolean): Promise<number>;
   getTotalReservedByItemId(inventoryItemId: number): Promise<number>;
   
@@ -580,6 +582,11 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(warehouseLocations).orderBy(asc(warehouseLocations.code));
   }
 
+  async getWarehouseLocationById(id: number): Promise<WarehouseLocation | undefined> {
+    const result = await db.select().from(warehouseLocations).where(eq(warehouseLocations.id, id));
+    return result[0];
+  }
+
   async getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined> {
     const result = await db.select().from(warehouseLocations).where(eq(warehouseLocations.code, code.toUpperCase()));
     return result[0];
@@ -662,6 +669,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Inventory Levels
+  async getAllInventoryLevels(): Promise<InventoryLevel[]> {
+    return await db.select().from(inventoryLevels);
+  }
+
   async getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]> {
     return await db
       .select()
@@ -703,7 +714,7 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number }): Promise<InventoryLevel | null> {
+  async adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null> {
     const updates: any = { updatedAt: new Date() };
     
     // Delta-based updates: values are added to current amounts
@@ -715,6 +726,9 @@ export class DatabaseStorage implements IStorage {
     }
     if (adjustments.pickedBase !== undefined) {
       updates.pickedBase = sql`${inventoryLevels.pickedBase} + ${adjustments.pickedBase}`;
+    }
+    if (adjustments.backorderBase !== undefined) {
+      updates.backorderBase = sql`${inventoryLevels.backorderBase} + ${adjustments.backorderBase}`;
     }
     
     const result = await db

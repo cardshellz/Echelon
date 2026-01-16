@@ -51,11 +51,11 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
   let pageInfo: string | null = null;
   
   do {
-    const url = pageInfo
+    const url: string = pageInfo
       ? `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
       : `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
     
-    const response = await fetch(url, {
+    const response: Response = await fetch(url, {
       headers: {
         "X-Shopify-Access-Token": config.accessToken,
         "Content-Type": "application/json",
@@ -97,10 +97,10 @@ export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: st
     }
     
     // Handle pagination via Link header
-    const linkHeader = response.headers.get("Link");
+    const linkHeader: string | null = response.headers.get("Link");
     pageInfo = null;
     if (linkHeader) {
-      const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+      const nextMatch: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
       if (nextMatch) {
         pageInfo = nextMatch[1];
       }
@@ -436,6 +436,67 @@ export async function syncInventoryToShopify(
   
   console.log(`[SHOPIFY INVENTORY] Sync complete: ${success} succeeded, ${failed} failed`);
   return { success, failed };
+}
+
+/**
+ * Sync inventory levels to Shopify for all variants of an inventory item
+ * Uses channel feeds to map our variants to Shopify variant IDs
+ * Returns the number of variants successfully synced
+ */
+export async function syncInventoryItemToShopify(
+  inventoryItemId: number,
+  storage: any // Using any to avoid circular import
+): Promise<{ synced: number; skipped: number }> {
+  let synced = 0;
+  let skipped = 0;
+  
+  try {
+    // Get all variants for this inventory item
+    const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
+    
+    // Calculate total ATP for this item
+    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, true);
+    const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
+    const atp = onHand - reserved;
+    
+    for (const variant of variants) {
+      // Get channel feed for this variant
+      const feeds = await storage.getChannelFeedsByVariantId(variant.id);
+      const shopifyFeed = feeds.find((f: any) => f.channelType === "shopify" && f.isActive);
+      
+      if (!shopifyFeed) {
+        skipped++;
+        continue;
+      }
+      
+      // Calculate available quantity for this variant
+      const available = Math.floor(atp / variant.unitsPerVariant);
+      
+      // Skip if no change from last sync
+      if (shopifyFeed.lastSyncedQty === available) {
+        skipped++;
+        continue;
+      }
+      
+      // Rate limit
+      await delay(300);
+      
+      // Update Shopify
+      const success = await updateShopifyInventoryLevel(shopifyFeed.channelVariantId, available);
+      
+      if (success) {
+        // Update last synced in channel feed
+        await storage.updateChannelFeedSyncStatus(shopifyFeed.id, available);
+        synced++;
+      }
+    }
+    
+    console.log(`[SHOPIFY SYNC] Item ${inventoryItemId}: synced ${synced}, skipped ${skipped}`);
+  } catch (error) {
+    console.error(`[SHOPIFY SYNC] Error syncing item ${inventoryItemId}:`, error);
+  }
+  
+  return { synced, skipped };
 }
 
 // Fetch fulfillment status for specific order IDs from Shopify

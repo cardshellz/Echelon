@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
@@ -360,7 +360,7 @@ export async function registerRoutes(
         : orders.filter(order => order.onHold === 0);
       
       // Get all unique picker IDs and lookup their display names
-      const pickerIds = [...new Set(filteredOrders.map(o => o.assignedPickerId).filter(Boolean))] as string[];
+      const pickerIds = Array.from(new Set(filteredOrders.map(o => o.assignedPickerId).filter(Boolean))) as string[];
       const pickerMap = new Map<string, string>();
       
       for (const pickerId of pickerIds) {
@@ -461,27 +461,64 @@ export async function registerRoutes(
       // If item was just marked as completed, decrement inventory
       if (status === "completed" && beforeItem?.status !== "completed") {
         try {
-          // Get inventory item by SKU
-          const inventoryItem = await storage.getInventoryItemBySku(item.sku);
-          if (inventoryItem) {
-            // Calculate base units to decrement based on picked quantity
-            // For now, we assume 1 unit picked = 1 base unit
-            // In the future, this will look up the UOM variant and use unitsPerVariant
-            const pickedUnits = pickedQuantity || item.quantity;
+          const pickedQty = pickedQuantity || item.quantity;
+          
+          // First, try to find UOM variant by SKU (sellable SKU like EG-STD-SLV-P100)
+          const uomVariant = await storage.getUomVariantBySku(item.sku);
+          
+          let inventoryItemId: number | null = null;
+          let baseUnitsToDecrement: number;
+          
+          if (uomVariant) {
+            // UOM-aware: multiply picked quantity by unitsPerVariant
+            inventoryItemId = uomVariant.inventoryItemId;
+            baseUnitsToDecrement = pickedQty * uomVariant.unitsPerVariant;
+            console.log(`[Inventory] UOM conversion: ${pickedQty} x ${uomVariant.sku} (${uomVariant.unitsPerVariant} units each) = ${baseUnitsToDecrement} base units`);
+          } else {
+            // Fallback: try to find by base SKU, assume 1:1 conversion
+            const inventoryItem = await storage.getInventoryItemBySku(item.sku);
+            if (inventoryItem) {
+              inventoryItemId = inventoryItem.id;
+              baseUnitsToDecrement = pickedQty; // 1:1 if no variant found
+              console.log(`[Inventory] No UOM variant found for ${item.sku}, using 1:1 conversion: ${baseUnitsToDecrement} base units`);
+            } else {
+              baseUnitsToDecrement = 0;
+            }
+          }
+          
+          if (inventoryItemId) {
+            // Get pickable locations with stock, prioritize forward pick bins
+            const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+            const allLocations = await storage.getAllWarehouseLocations();
             
-            // Get the first pickable location for this item that has stock
-            const levels = await storage.getInventoryLevelsByItemId(inventoryItem.id);
-            const pickableLevel = levels.find(l => l.onHandBase > 0);
+            // Sort by location type priority: forward_pick > bulk_storage > others
+            const sortedLevels = levels
+              .filter(l => l.onHandBase > 0)
+              .sort((a, b) => {
+                const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
+                const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
+                const priorityOrder = { forward_pick: 0, pallet: 1, bulk_storage: 2, receiving: 3 };
+                const priorityA = priorityOrder[locA?.locationType as keyof typeof priorityOrder] ?? 99;
+                const priorityB = priorityOrder[locB?.locationType as keyof typeof priorityOrder] ?? 99;
+                return priorityA - priorityB;
+              });
+            
+            const pickableLevel = sortedLevels[0];
             
             if (pickableLevel) {
               await inventoryService.pickItem(
-                inventoryItem.id,
+                inventoryItemId,
                 pickableLevel.warehouseLocationId,
-                pickedUnits,
+                baseUnitsToDecrement,
                 item.orderId,
                 req.session.user?.id
               );
-              console.log(`Inventory decremented: ${pickedUnits} units of ${item.sku} picked for order ${item.orderId}`);
+              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of item ${inventoryItemId} from location ${pickableLevel.warehouseLocationId}`);
+              
+              // Sync to Shopify (async - don't block response)
+              syncInventoryItemToShopify(inventoryItemId, storage).catch(err => 
+                console.warn(`[Inventory] Shopify sync failed for item ${inventoryItemId}:`, err)
+              );
             }
           }
         } catch (inventoryError) {
@@ -1180,7 +1217,7 @@ export async function registerRoutes(
       }
       
       // Create order
-      await storage.createOrderWithItems({
+      const createdOrder = await storage.createOrderWithItems({
         shopifyOrderId: orderData.shopifyOrderId,
         orderNumber: orderData.orderNumber,
         customerName: orderData.customerName,
@@ -1191,6 +1228,61 @@ export async function registerRoutes(
       }, enrichedItems);
       
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);
+      
+      // Reserve inventory for each line item (async - don't block response)
+      (async () => {
+        const inventoryItemsToSync = new Set<number>();
+        
+        // Get the created order items to get their IDs
+        const createdOrderItems = await storage.getOrderItems(createdOrder.id);
+        
+        for (const item of enrichedItems) {
+          try {
+            // Find the corresponding order item by shopifyLineItemId (most reliable)
+            // Fall back to SKU matching if line item ID is not available
+            const orderItem = createdOrderItems.find(oi => 
+              (item.shopifyLineItemId && oi.shopifyLineItemId === item.shopifyLineItemId) ||
+              oi.sku === item.sku
+            );
+            const orderItemId = orderItem?.id || 0;
+            
+            // Look up UOM variant to get unitsPerVariant
+            const uomVariant = await storage.getUomVariantBySku(item.sku);
+            
+            if (uomVariant) {
+              const baseUnits = item.quantity * uomVariant.unitsPerVariant;
+              
+              // Find a location with stock to reserve from
+              const levels = await storage.getInventoryLevelsByItemId(uomVariant.inventoryItemId);
+              const levelWithStock = levels.find((l: any) => l.onHandBase >= baseUnits);
+              
+              if (levelWithStock) {
+                await inventoryService.reserveForOrder(
+                  uomVariant.inventoryItemId,
+                  levelWithStock.warehouseLocationId,
+                  baseUnits,
+                  createdOrder.id,
+                  orderItemId,
+                  undefined
+                );
+                inventoryItemsToSync.add(uomVariant.inventoryItemId);
+                console.log(`[ORDER WEBHOOK] Reserved ${baseUnits} base units for ${item.sku} (orderItemId: ${orderItemId})`);
+              }
+            }
+          } catch (err) {
+            console.warn(`[ORDER WEBHOOK] Failed to reserve inventory for ${item.sku}:`, err);
+          }
+        }
+        
+        // Sync affected inventory items to Shopify (push sibling variant updates)
+        for (const inventoryItemId of Array.from(inventoryItemsToSync)) {
+          try {
+            await syncInventoryItemToShopify(inventoryItemId, storage);
+          } catch (err) {
+            console.warn(`[ORDER WEBHOOK] Failed to sync item ${inventoryItemId} to Shopify:`, err);
+          }
+        }
+      })();
       
       broadcastOrdersUpdated();
       
@@ -1417,6 +1509,58 @@ export async function registerRoutes(
     }
   });
 
+  // Replenishment - move stock from bulk to pick location
+  app.post("/api/inventory/replenish", async (req, res) => {
+    try {
+      const { inventoryItemId, targetLocationId, requestedUnits } = req.body;
+      const userId = req.session.user?.id;
+      
+      if (!inventoryItemId || !targetLocationId || !requestedUnits) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+      
+      const result = await inventoryService.replenishLocation(
+        inventoryItemId,
+        targetLocationId,
+        requestedUnits,
+        userId
+      );
+      
+      res.json({ 
+        success: result.replenished > 0,
+        replenished: result.replenished,
+        sourceLocationId: result.sourceLocationId,
+      });
+    } catch (error) {
+      console.error("Error replenishing inventory:", error);
+      res.status(500).json({ error: "Failed to replenish inventory" });
+    }
+  });
+
+  // Get locations needing replenishment
+  app.get("/api/inventory/replenishment-needed", async (req, res) => {
+    try {
+      const inventoryItemId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
+      const locations = await inventoryService.getLocationsNeedingReplenishment(inventoryItemId);
+      res.json(locations);
+    } catch (error) {
+      console.error("Error fetching replenishment needs:", error);
+      res.status(500).json({ error: "Failed to fetch replenishment needs" });
+    }
+  });
+
+  // Check backorder status for an item
+  app.get("/api/inventory/backorder-status/:itemId", async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const status = await inventoryService.checkBackorderStatus(itemId);
+      res.json(status);
+    } catch (error) {
+      console.error("Error checking backorder status:", error);
+      res.status(500).json({ error: "Failed to check backorder status" });
+    }
+  });
+
   // Inventory Transactions (Audit Trail)
   app.get("/api/inventory/transactions/:itemId", async (req, res) => {
     try {
@@ -1486,7 +1630,7 @@ export async function registerRoutes(
             
             if (variantAvail) {
               updates.push({
-                shopifyVariantId: shopifyFeed.externalVariantId,
+                shopifyVariantId: shopifyFeed.channelVariantId,
                 available: variantAvail.available,
               });
             }

@@ -123,10 +123,13 @@ The application includes Progressive Web App configuration with a manifest.json 
   - This supports **split shipments** - if an order has 3 items but only 2 ship, it stays in the queue until the 3rd ships
   - Digital items (memberships, etc.) are excluded during import, so partial fulfillments with only digital items remaining are handled correctly
 
-## PLANNED: Inventory Management System (WMS)
+## IMPLEMENTED: Inventory Management System (WMS)
+
+### Status: Phase 1 Complete ✅
+All Phase 1 deliverables have been implemented and are operational.
 
 ### Architecture Overview
-Build WMS first (before OMS page) - inventory is the missing piece. OMS page is just visibility into existing Shopify orders.
+The WMS is now the source of truth for inventory. Echelon owns on-hand/ATP calculations, and syncs to Shopify.
 
 ### Core Principles
 1. **Base Unit Tracking** - All inventory stored as base units (individual items)
@@ -199,9 +202,46 @@ System auto-calculates movements without extra picker scans:
 5. **locations** - Warehouse locations with type, is_pickable, parent location (replenishment chain)
 6. **channel_feeds** - Maps UOM variants to Shopify variant IDs for sync
 
-### Phase 1 Deliverables
-1. Extended database schema
-2. Core inventory service (allocation, ATP calculation, variant cascade)
-3. Shopify sync with sibling variant updates
-4. WMS tab with stock dashboard, adjustments, alerts
-5. Wire picking to auto-decrement inventory
+### Phase 1 Deliverables (COMPLETED)
+1. ✅ Extended database schema (6 tables: warehouse_locations, inventory_items, uom_variants, inventory_levels, inventory_transactions, channel_feeds)
+2. ✅ Core inventory service (allocation, ATP calculation, variant cascade, replenishment, backorder handling)
+3. ✅ Shopify sync with sibling variant updates (via channel feeds, syncs after picks and order creation)
+4. ✅ WMS tab with stock dashboard, adjustments, item/variant/location views
+5. ✅ Wire picking to auto-decrement inventory (UOM-aware conversions, location priority)
+
+### WMS API Endpoints
+- `GET /api/inventory/summary` - Full inventory summary with ATP calculations
+- `GET /api/inventory/items` - All inventory items
+- `POST /api/inventory/items` - Create inventory item
+- `GET /api/inventory/variants` - All UOM variants
+- `POST /api/inventory/variants` - Create UOM variant
+- `GET /api/inventory/locations` - All warehouse locations
+- `POST /api/inventory/locations` - Create warehouse location
+- `GET /api/inventory/levels` - All inventory levels
+- `POST /api/inventory/levels` - Upsert inventory level
+- `POST /api/inventory/adjust` - Manual inventory adjustment
+- `POST /api/inventory/receive` - Receive inventory from PO
+- `POST /api/inventory/replenish` - Move stock from bulk to pick location
+- `GET /api/inventory/replenishment-needed` - Get locations below min qty
+- `GET /api/inventory/backorder-status/:itemId` - Check backorder status
+- `GET /api/inventory/transactions/:itemId` - Audit trail for an item
+- `GET /api/inventory/channel-feeds` - Channel feed mappings
+- `POST /api/inventory/sync-shopify` - Sync inventory levels to Shopify
+
+### How Inventory Flows
+1. **Order Created (Shopify webhook)** → Reserve base units, push sibling variants to Shopify
+2. **Picker Claims** → No inventory change
+3. **Item Picked** → Decrement onHand, release reserved, increment picked; sync to Shopify
+4. **Order Shipped** → Decrement picked (item leaves building)
+
+### Key Service Functions (server/inventory.ts)
+- `calculateATP()` - ATP = onHand (pickable) - reserved
+- `calculateVariantAvailability()` - floor(ATP / unitsPerVariant) for each variant
+- `reserveForOrder()` - Increase reserved bucket
+- `pickItem()` - Decrement onHand, release reserved, increment picked
+- `recordShipment()` - Decrement picked
+- `receiveInventory()` - Add to onHand
+- `adjustInventory()` - Manual adjustment (cycle count, write-off)
+- `replenishLocation()` - Move stock from parent (bulk) to child (pickable) location
+- `checkBackorderStatus()` - Check if ATP < 0
+- `getLocationsNeedingReplenishment()` - Find locations below minQty
