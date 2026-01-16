@@ -122,3 +122,86 @@ The application includes Progressive Web App configuration with a manifest.json 
   - An order is marked "shipped" only when ALL tracked physical items are fully fulfilled
   - This supports **split shipments** - if an order has 3 items but only 2 ship, it stays in the queue until the 3rd ships
   - Digital items (memberships, etc.) are excluded during import, so partial fulfillments with only digital items remaining are handled correctly
+
+## PLANNED: Inventory Management System (WMS)
+
+### Architecture Overview
+Build WMS first (before OMS page) - inventory is the missing piece. OMS page is just visibility into existing Shopify orders.
+
+### Core Principles
+1. **Base Unit Tracking** - All inventory stored as base units (individual items)
+2. **WMS is Source of Truth** - Echelon owns on-hand/ATP, Shopify reflects what we push
+3. **UOM Variants** - Same product sold at different pack sizes (P1, P100, B500, C10000)
+4. **Implicit Movements** - System auto-calculates inventory movements from picker actions (for now)
+
+### SKU Hierarchy Model
+Each product has a base SKU with sellable variants at different pack levels:
+```
+Base SKU: EG-STD-SLV (Easy Glide Standard Sleeve)
+├── EG-STD-SLV-P1     (Pack of 1)      - units_per: 1
+├── EG-STD-SLV-P100   (Pack of 100)    - units_per: 100
+├── EG-STD-SLV-B500   (Box of 500)     - units_per: 500
+└── EG-STD-SLV-C10000 (Case of 10000)  - units_per: 10000
+```
+
+**Availability Calculation:** `available = floor(base_units / units_per_variant)`
+
+### Location Model
+- **One SKU variant per location** - No mixing eaches and cases in same bin
+- **Location types**: Forward Pick (pickable), Bulk Storage (not pickable), Receiving Dock
+- **Replenishment chain**: Bulk → Pickable Pallet → Case Bin → Each Bin
+- Example: P1 location depleted → replenish from B25 location (open 1 box = 25 P1 units)
+
+### Inventory States (Buckets)
+| Bucket | Description |
+|--------|-------------|
+| On Hand | Total physical units in warehouse |
+| Reserved | Allocated to orders, waiting to be picked |
+| Picked | In picker's cart |
+| Packed | Boxed, awaiting ship (future) |
+| Shipped | Gone from warehouse (future) |
+| ATP | Available-to-Promise = On Hand (pickable) - Reserved |
+
+### Order Lifecycle & Inventory Flow
+1. **Order Created (Shopify)** → Reserve base units, recalc ATP, push sibling variants to Shopify
+2. **Picker Claims** → No inventory change
+3. **Item Scanned** → Move from Reserved → Picked
+4. **Order Complete** → Move from Picked → Shipped, deduct On Hand
+
+### Shopify Sync Strategy
+- **Push absolute numbers** (not deltas) to prevent drift
+- **On order received**: Push SIBLING variants only (Shopify already decremented the sold variant)
+- **On PO received / adjustment**: Push ALL variants
+- **Nightly reconciliation**: Pull Shopify, compare to our ATP, overwrite mismatches, alert anomalies
+
+### Implicit Movement (Current Phase)
+System auto-calculates movements without extra picker scans:
+- Picker picks P1 but location empty → System auto-replenishes from B25, logs transaction
+- Picker picks case from pallet → System deducts from pallet location
+- All movements logged for audit trail
+
+**Movement Policy Matrix**: Each movement type has strictness level (implicit, soft log, require scan). Can dial up over time.
+
+### Business Rules Confirmed
+- No loose items - use P1 SKUs for singles
+- Case/inner pack breaking is normal - auto-logged
+- Allow negative inventory → triggers backorder status
+- Multi-location support required
+- Shopify variant deletion does NOT delete our inventory (alert + break channel link)
+- Large orders: partial ship + backorder remainder
+- Bulk-to-pickable moves CAN require scans now
+
+### Database Tables Needed
+1. **inventory_items** - Master SKU with base unit, cost, etc.
+2. **uom_variants** - Sellable SKUs with conversion factors, parent/child hierarchy
+3. **inventory_levels** - Qty per location (on_hand, reserved, picked, packed, atp in base units)
+4. **inventory_transactions** - Ledger of all movements (picks, receipts, adjustments, breaks)
+5. **locations** - Warehouse locations with type, is_pickable, parent location (replenishment chain)
+6. **channel_feeds** - Maps UOM variants to Shopify variant IDs for sync
+
+### Phase 1 Deliverables
+1. Extended database schema
+2. Core inventory service (allocation, ATP calculation, variant cascade)
+3. Shopify sync with sibling variant updates
+4. WMS tab with stock dashboard, adjustments, alerts
+5. Wire picking to auto-decrement inventory
