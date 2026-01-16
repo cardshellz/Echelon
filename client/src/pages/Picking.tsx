@@ -417,12 +417,13 @@ export default function Picking() {
     }
   });
   
-  // WebSocket for real-time order updates
+  // WebSocket for real-time order updates and version detection
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     let ws: WebSocket | null = null;
     let reconnectTimeout: NodeJS.Timeout | null = null;
+    let currentVersion: string | null = null;
     
     const connect = () => {
       ws = new WebSocket(wsUrl);
@@ -439,6 +440,17 @@ export default function Picking() {
             refetch();
             if (soundTheme !== "silent") {
               playSoundLib("success", soundTheme);
+            }
+          } else if (data.type === "version") {
+            if (currentVersion === null) {
+              // First connection - store the version
+              currentVersion = data.version;
+              console.log(`[Version] Initial: ${currentVersion}`);
+            } else if (currentVersion !== data.version) {
+              // Version changed - new deployment!
+              console.log(`[Version] Update detected: ${currentVersion} -> ${data.version}`);
+              // Auto-reload to get new version
+              window.location.reload();
             }
           }
         } catch (e) {

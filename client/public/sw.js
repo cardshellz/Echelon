@@ -1,5 +1,4 @@
-const CACHE_VERSION = Date.now();
-const CACHE_NAME = `echelon-v${CACHE_VERSION}`;
+const CACHE_NAME = 'echelon-v1';
 const urlsToCache = [
   '/',
   '/picking',
@@ -7,7 +6,6 @@ const urlsToCache = [
 ];
 
 self.addEventListener('install', (event) => {
-  console.log('[SW] Installing new version:', CACHE_NAME);
   self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME)
