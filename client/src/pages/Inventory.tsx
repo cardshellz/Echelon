@@ -165,6 +165,23 @@ export default function Inventory() {
     },
   });
 
+  const migrateLocationsMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", "/api/inventory/migrate-locations", {});
+      return response.json();
+    },
+    onSuccess: (data: { created: number; skipped: number; total: number }) => {
+      toast({ 
+        title: "Locations synced to WMS", 
+        description: `Created ${data.created} locations, skipped ${data.skipped} (of ${data.total} total)` 
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/locations"] });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to sync locations", description: error.message, variant: "destructive" });
+    },
+  });
+
   const filteredItems = inventorySummary.filter(item => 
     item.baseSku.toLowerCase().includes(searchQuery.toLowerCase()) ||
     item.name.toLowerCase().includes(searchQuery.toLowerCase())
@@ -223,6 +240,16 @@ export default function Inventory() {
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => refetchInventory()}>
               <RefreshCw size={16} className="mr-1" /> Refresh
+            </Button>
+            <Button 
+              variant="outline" 
+              size="sm"
+              onClick={() => migrateLocationsMutation.mutate()}
+              disabled={migrateLocationsMutation.isPending}
+              data-testid="button-sync-locations"
+            >
+              <MapPin size={16} className="mr-1" /> 
+              {migrateLocationsMutation.isPending ? "Syncing..." : "Sync Locations"}
             </Button>
             <Button variant="outline" className="gap-2">
               <Download size={16} /> Export
