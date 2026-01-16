@@ -180,6 +180,26 @@ export async function registerRoutes(
     }
   });
 
+  // Helper to sync product_location to warehouse_locations (WMS source of truth)
+  async function ensureWarehouseLocation(locationCode: string, zone: string): Promise<void> {
+    try {
+      const existing = await storage.getWarehouseLocationByCode(locationCode.toUpperCase());
+      if (!existing) {
+        await storage.createWarehouseLocation({
+          code: locationCode.toUpperCase(),
+          name: `Bin ${locationCode.toUpperCase()}`,
+          locationType: "forward_pick",
+          zone: zone.toUpperCase(),
+          isPickable: 1,
+          movementPolicy: "implicit",
+        });
+        console.log(`[WMS] Created warehouse location: ${locationCode}`);
+      }
+    } catch (err) {
+      console.warn(`[WMS] Could not ensure warehouse location ${locationCode}:`, err);
+    }
+  }
+
   // Create location
   app.post("/api/locations", async (req, res) => {
     try {
@@ -190,6 +210,10 @@ export async function registerRoutes(
       }
       
       const location = await storage.createProductLocation(parsed.data);
+      
+      // Sync to WMS warehouse_locations
+      await ensureWarehouseLocation(location.location, location.zone);
+      
       res.status(201).json(location);
     } catch (error: any) {
       console.error("Error creating location:", error);
@@ -215,6 +239,9 @@ export async function registerRoutes(
       if (!location) {
         return res.status(404).json({ error: "Location not found" });
       }
+      
+      // Sync to WMS warehouse_locations
+      await ensureWarehouseLocation(location.location, location.zone);
       
       res.json(location);
     } catch (error: any) {
@@ -1230,27 +1257,28 @@ export async function registerRoutes(
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);
       
       // Reserve inventory for each line item (async - don't block response)
+      const itemsToReserve = [...enrichedItems]; // Copy for async context
       (async () => {
         const inventoryItemsToSync = new Set<number>();
         
         // Get the created order items to get their IDs
         const createdOrderItems = await storage.getOrderItems(createdOrder.id);
         
-        for (const item of enrichedItems) {
+        for (const enrichedItem of itemsToReserve) {
           try {
             // Find the corresponding order item by shopifyLineItemId (most reliable)
             // Fall back to SKU matching if line item ID is not available
             const orderItem = createdOrderItems.find(oi => 
-              (item.shopifyLineItemId && oi.shopifyLineItemId === item.shopifyLineItemId) ||
-              oi.sku === item.sku
+              (enrichedItem.shopifyLineItemId && oi.shopifyLineItemId === enrichedItem.shopifyLineItemId) ||
+              oi.sku === enrichedItem.sku
             );
             const orderItemId = orderItem?.id || 0;
             
             // Look up UOM variant to get unitsPerVariant
-            const uomVariant = await storage.getUomVariantBySku(item.sku);
+            const uomVariant = await storage.getUomVariantBySku(enrichedItem.sku);
             
             if (uomVariant) {
-              const baseUnits = item.quantity * uomVariant.unitsPerVariant;
+              const baseUnits = enrichedItem.quantity * uomVariant.unitsPerVariant;
               
               // Find a location with stock to reserve from
               const levels = await storage.getInventoryLevelsByItemId(uomVariant.inventoryItemId);
@@ -1266,11 +1294,11 @@ export async function registerRoutes(
                   undefined
                 );
                 inventoryItemsToSync.add(uomVariant.inventoryItemId);
-                console.log(`[ORDER WEBHOOK] Reserved ${baseUnits} base units for ${item.sku} (orderItemId: ${orderItemId})`);
+                console.log(`[ORDER WEBHOOK] Reserved ${baseUnits} base units for ${enrichedItem.sku} (orderItemId: ${orderItemId})`);
               }
             }
           } catch (err) {
-            console.warn(`[ORDER WEBHOOK] Failed to reserve inventory for ${item.sku}:`, err);
+            console.warn(`[ORDER WEBHOOK] Failed to reserve inventory for ${enrichedItem.sku}:`, err);
           }
         }
         
@@ -1652,6 +1680,51 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error syncing inventory to Shopify:", error);
       res.status(500).json({ error: "Failed to sync inventory" });
+    }
+  });
+
+  // Migrate existing product_locations to warehouse_locations (one-time sync)
+  app.post("/api/inventory/migrate-locations", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const productLocs = await storage.getAllProductLocations();
+      let created = 0;
+      let skipped = 0;
+      
+      for (const loc of productLocs) {
+        if (loc.location === "UNASSIGNED") {
+          skipped++;
+          continue;
+        }
+        
+        const existing = await storage.getWarehouseLocationByCode(loc.location.toUpperCase());
+        if (!existing) {
+          await storage.createWarehouseLocation({
+            code: loc.location.toUpperCase(),
+            name: `Bin ${loc.location.toUpperCase()}`,
+            locationType: "forward_pick",
+            zone: loc.zone.toUpperCase(),
+            isPickable: 1,
+            movementPolicy: "implicit",
+          });
+          created++;
+        } else {
+          skipped++;
+        }
+      }
+      
+      res.json({ 
+        message: "Location migration completed",
+        created,
+        skipped,
+        total: productLocs.length,
+      });
+    } catch (error) {
+      console.error("Error migrating locations:", error);
+      res.status(500).json({ error: "Failed to migrate locations" });
     }
   });
 
