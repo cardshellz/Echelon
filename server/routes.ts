@@ -181,19 +181,24 @@ export async function registerRoutes(
   });
 
   // Helper to sync product_location to warehouse_locations (WMS source of truth)
-  async function ensureWarehouseLocation(locationCode: string, zone: string): Promise<void> {
+  async function ensureWarehouseLocation(locationCode: string, zone?: string | null): Promise<void> {
     try {
-      const existing = await storage.getWarehouseLocationByCode(locationCode.toUpperCase());
+      if (!locationCode || locationCode === "UNASSIGNED") return;
+      
+      const code = locationCode.toUpperCase();
+      const safeZone = (zone || code.split("-")[0] || "U").toUpperCase();
+      
+      const existing = await storage.getWarehouseLocationByCode(code);
       if (!existing) {
         await storage.createWarehouseLocation({
-          code: locationCode.toUpperCase(),
-          name: `Bin ${locationCode.toUpperCase()}`,
+          code,
+          name: `Bin ${code}`,
           locationType: "forward_pick",
-          zone: zone.toUpperCase(),
+          zone: safeZone,
           isPickable: 1,
           movementPolicy: "implicit",
         });
-        console.log(`[WMS] Created warehouse location: ${locationCode}`);
+        console.log(`[WMS] Created warehouse location: ${code}`);
       }
     } catch (err) {
       console.warn(`[WMS] Could not ensure warehouse location ${locationCode}:`, err);
@@ -1692,35 +1697,46 @@ export async function registerRoutes(
       
       const productLocs = await storage.getAllProductLocations();
       let created = 0;
+      let updated = 0;
       let skipped = 0;
+      const errors: string[] = [];
       
       for (const loc of productLocs) {
-        if (loc.location === "UNASSIGNED") {
-          skipped++;
-          continue;
-        }
-        
-        const existing = await storage.getWarehouseLocationByCode(loc.location.toUpperCase());
-        if (!existing) {
-          await storage.createWarehouseLocation({
-            code: loc.location.toUpperCase(),
-            name: `Bin ${loc.location.toUpperCase()}`,
-            locationType: "forward_pick",
-            zone: loc.zone.toUpperCase(),
-            isPickable: 1,
-            movementPolicy: "implicit",
-          });
-          created++;
-        } else {
-          skipped++;
+        try {
+          if (!loc.location || loc.location === "UNASSIGNED") {
+            skipped++;
+            continue;
+          }
+          
+          const code = loc.location.toUpperCase();
+          const zone = (loc.zone || code.split("-")[0] || "U").toUpperCase();
+          
+          const existing = await storage.getWarehouseLocationByCode(code);
+          if (!existing) {
+            await storage.createWarehouseLocation({
+              code,
+              name: `Bin ${code}`,
+              locationType: "forward_pick",
+              zone,
+              isPickable: 1,
+              movementPolicy: "implicit",
+            });
+            created++;
+          } else {
+            skipped++;
+          }
+        } catch (err: any) {
+          errors.push(`${loc.sku}: ${err.message}`);
         }
       }
       
       res.json({ 
         message: "Location migration completed",
         created,
+        updated,
         skipped,
         total: productLocs.length,
+        errors: errors.slice(0, 10),
       });
     } catch (error) {
       console.error("Error migrating locations:", error);
