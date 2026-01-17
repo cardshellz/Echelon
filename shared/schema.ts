@@ -192,6 +192,9 @@ export const pickingLogs = pgTable("picking_logs", {
   deviceType: varchar("device_type", { length: 20 }), // "mobile", "desktop", "scanner"
   sessionId: varchar("session_id", { length: 100 }), // Group actions in a picking session
   
+  // Pick method - how was this item picked?
+  pickMethod: varchar("pick_method", { length: 20 }), // "scan", "manual", "pick_all", "button"
+  
   // Status snapshots
   orderStatusBefore: varchar("order_status_before", { length: 20 }),
   orderStatusAfter: varchar("order_status_after", { length: 20 }),

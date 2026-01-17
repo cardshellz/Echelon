@@ -58,6 +58,7 @@ interface PickingLog {
   notes: string | null;
   deviceType: string | null;
   sessionId: string | null;
+  pickMethod: string | null;
   orderStatusBefore: string | null;
   orderStatusAfter: string | null;
   itemStatusBefore: string | null;
@@ -286,6 +287,7 @@ export default function PickingLogs() {
                   <tr className="border-b">
                     <th className="text-left py-2 px-3">Timestamp</th>
                     <th className="text-left py-2 px-3">Action</th>
+                    <th className="text-left py-2 px-3">Method</th>
                     <th className="text-left py-2 px-3">Picker</th>
                     <th className="text-left py-2 px-3">Order</th>
                     <th className="text-left py-2 px-3">SKU</th>
@@ -322,6 +324,22 @@ export default function PickingLogs() {
                             </div>
                             <span className="font-medium">{config.label}</span>
                           </div>
+                        </td>
+                        <td className="py-2 px-3">
+                          {log.pickMethod ? (
+                            <Badge 
+                              variant="outline" 
+                              className={cn(
+                                "text-xs",
+                                log.pickMethod === "scan" && "bg-green-50 text-green-700 border-green-200",
+                                log.pickMethod === "pick_all" && "bg-amber-50 text-amber-700 border-amber-200",
+                                log.pickMethod === "button" && "bg-blue-50 text-blue-700 border-blue-200",
+                                log.pickMethod === "manual" && "bg-gray-50 text-gray-700 border-gray-200"
+                              )}
+                            >
+                              {log.pickMethod === "pick_all" ? "Pick All" : log.pickMethod}
+                            </Badge>
+                          ) : "—"}
                         </td>
                         <td className="py-2 px-3">
                           {log.pickerName || log.pickerId || "—"}

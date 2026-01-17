@@ -545,7 +545,7 @@ export async function registerRoutes(
   app.patch("/api/picking/items/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { status, pickedQuantity, shortReason } = req.body;
+      const { status, pickedQuantity, shortReason, pickMethod } = req.body;
       
       // Get item before update to check if this is a status change to completed
       const beforeItem = await storage.getOrderItemById(id);
@@ -573,7 +573,7 @@ export async function registerRoutes(
         actionType = "item_picked"; // default
       }
       
-      await storage.createPickingLog({
+      storage.createPickingLog({
         actionType,
         pickerId: pickerId || undefined,
         pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -593,7 +593,8 @@ export async function registerRoutes(
         itemStatusAfter: item.status,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+        pickMethod: pickMethod || "manual", // "scan", "manual", "pick_all", "button"
+      }).catch(err => console.warn("[PickingLog] Failed to log item action:", err.message));
       
       // If item was just marked as completed, decrement inventory
       if (status === "completed" && beforeItem?.status !== "completed") {
@@ -685,10 +686,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      // Log the order completion
+      // Log the order completion (non-blocking)
       const pickerId = order.assignedPickerId;
       const picker = pickerId ? await storage.getUser(pickerId) : null;
-      await storage.createPickingLog({
+      storage.createPickingLog({
         actionType: "order_completed",
         pickerId: pickerId || undefined,
         pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -699,7 +700,7 @@ export async function registerRoutes(
         orderStatusAfter: order.status,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log order_completed:", err.message));
       
       res.json(order);
     } catch (error) {
@@ -734,8 +735,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      // Log the hold action
-      await storage.createPickingLog({
+      // Log the hold action (non-blocking)
+      storage.createPickingLog({
         actionType: "order_held",
         pickerId: req.session.user.id,
         pickerName: req.session.user.displayName || req.session.user.username,
@@ -747,7 +748,7 @@ export async function registerRoutes(
         reason: req.body?.reason,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log order_held:", err.message));
       
       res.json(order);
     } catch (error) {
@@ -771,8 +772,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      // Log the unhold action
-      await storage.createPickingLog({
+      // Log the unhold action (non-blocking)
+      storage.createPickingLog({
         actionType: "order_unhold",
         pickerId: req.session.user.id,
         pickerName: req.session.user.displayName || req.session.user.username,
@@ -783,7 +784,7 @@ export async function registerRoutes(
         orderStatusAfter: order.status,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log order_unhold:", err.message));
       
       res.json(order);
     } catch (error) {
@@ -830,8 +831,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      // Log the exception resolution
-      await storage.createPickingLog({
+      // Log the exception resolution (non-blocking)
+      storage.createPickingLog({
         actionType: "exception_resolved",
         pickerId: req.session.user.id,
         pickerName: req.session.user.displayName || req.session.user.username,
@@ -844,7 +845,7 @@ export async function registerRoutes(
         notes,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log exception_resolved:", err.message));
       
       broadcastOrdersUpdated();
       res.json(order);

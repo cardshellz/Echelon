@@ -100,12 +100,13 @@ async function updateOrderItem(
   itemId: number, 
   status: ItemStatus, 
   pickedQuantity?: number, 
-  shortReason?: string
+  shortReason?: string,
+  pickMethod?: "scan" | "manual" | "pick_all" | "button"
 ): Promise<OrderItem> {
   const res = await fetch(`/api/picking/items/${itemId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, pickedQuantity, shortReason }),
+    body: JSON.stringify({ status, pickedQuantity, shortReason, pickMethod }),
   });
   if (!res.ok) throw new Error("Failed to update item");
   return res.json();
@@ -635,12 +636,13 @@ export default function Picking() {
   
   // Mutation for updating items
   const updateItemMutation = useMutation({
-    mutationFn: ({ itemId, status, pickedQuantity, shortReason }: { 
+    mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: { 
       itemId: number; 
       status: ItemStatus; 
       pickedQuantity?: number; 
       shortReason?: string;
-    }) => updateOrderItem(itemId, status, pickedQuantity, shortReason),
+      pickMethod?: "scan" | "manual" | "pick_all" | "button";
+    }) => updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod),
     onSuccess: (updatedItem) => {
       // Update the query cache with the new item status
       queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
@@ -1057,7 +1059,8 @@ export default function Picking() {
       updateItemMutation.mutate({ 
         itemId: currentItem.id, 
         status: newStatus, 
-        pickedQuantity: newPicked 
+        pickedQuantity: newPicked,
+        pickMethod: "scan"
       });
     }
     
@@ -1117,7 +1120,8 @@ export default function Picking() {
         itemId: currentItem.id, 
         status: "short" as ItemStatus, 
         pickedQuantity: shortQty,
-        shortReason: shortPickReason || undefined
+        shortReason: shortPickReason || undefined,
+        pickMethod: "button"
       });
     }
     
@@ -1303,7 +1307,8 @@ export default function Picking() {
       updateItemMutation.mutate({ 
         itemId: item.id, 
         status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
-        pickedQuantity: newPicked 
+        pickedQuantity: newPicked,
+        pickMethod: "scan"
       });
     }
     
@@ -1384,7 +1389,8 @@ export default function Picking() {
       updateItemMutation.mutate({ 
         itemId: item.id, 
         status: "completed" as ItemStatus, 
-        pickedQuantity: qty 
+        pickedQuantity: qty,
+        pickMethod: "pick_all"
       });
     }
     
@@ -1467,7 +1473,8 @@ export default function Picking() {
       updateItemMutation.mutate({ 
         itemId: item.id, 
         status: "short" as ItemStatus, 
-        pickedQuantity: 0 
+        pickedQuantity: 0,
+        pickMethod: "button"
       });
     }
     
