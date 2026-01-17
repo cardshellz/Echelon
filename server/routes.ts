@@ -474,11 +474,27 @@ export async function registerRoutes(
         return res.status(400).json({ error: "pickerId is required" });
       }
       
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.claimOrder(id, pickerId);
       
       if (!order) {
         return res.status(409).json({ error: "Order is no longer available" });
       }
+      
+      // Log the claim action
+      const picker = await storage.getUser(pickerId);
+      await storage.createPickingLog({
+        actionType: "order_claimed",
+        pickerId,
+        pickerName: picker?.displayName || picker?.username || pickerId,
+        pickerRole: picker?.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       const items = await storage.getOrderItems(id);
       res.json({ ...order, items });
@@ -492,12 +508,31 @@ export async function registerRoutes(
   app.post("/api/picking/orders/:id/release", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { resetProgress = true } = req.body || {};
+      const { resetProgress = true, reason } = req.body || {};
+      
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.releaseOrder(id, resetProgress);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      
+      // Log the release action
+      const pickerId = orderBefore?.assignedPickerId;
+      const picker = pickerId ? await storage.getUser(pickerId) : null;
+      await storage.createPickingLog({
+        actionType: "order_released",
+        pickerId: pickerId || undefined,
+        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+        pickerRole: picker?.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        reason: reason || (resetProgress ? "Progress reset" : "Progress preserved"),
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       res.json(order);
     } catch (error) {
@@ -520,6 +555,45 @@ export async function registerRoutes(
       if (!item) {
         return res.status(404).json({ error: "Item not found" });
       }
+      
+      // Log the item pick/short action
+      const order = await storage.getOrderById(item.orderId);
+      const pickerId = order?.assignedPickerId;
+      const picker = pickerId ? await storage.getUser(pickerId) : null;
+      
+      // Determine action type based on status change
+      let actionType: string;
+      if (status === "completed") {
+        actionType = "item_picked";
+      } else if (status === "short") {
+        actionType = "item_shorted";
+      } else if (pickedQuantity !== undefined && beforeItem?.pickedQuantity !== pickedQuantity) {
+        actionType = "item_quantity_adjusted";
+      } else {
+        actionType = "item_picked"; // default
+      }
+      
+      await storage.createPickingLog({
+        actionType,
+        pickerId: pickerId || undefined,
+        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+        pickerRole: picker?.role,
+        orderId: item.orderId,
+        orderNumber: order?.orderNumber,
+        orderItemId: item.id,
+        sku: item.sku,
+        itemName: item.name,
+        locationCode: item.location,
+        qtyRequested: item.quantity,
+        qtyBefore: beforeItem?.pickedQuantity || 0,
+        qtyAfter: item.pickedQuantity,
+        qtyDelta: item.pickedQuantity - (beforeItem?.pickedQuantity || 0),
+        reason: shortReason,
+        itemStatusBefore: beforeItem?.status,
+        itemStatusAfter: item.status,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       // If item was just marked as completed, decrement inventory
       if (status === "completed" && beforeItem?.status !== "completed") {
@@ -604,11 +678,28 @@ export async function registerRoutes(
   app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.updateOrderStatus(id, "ready_to_ship");
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      
+      // Log the order completion
+      const pickerId = order.assignedPickerId;
+      const picker = pickerId ? await storage.getUser(pickerId) : null;
+      await storage.createPickingLog({
+        actionType: "order_completed",
+        pickerId: pickerId || undefined,
+        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+        pickerRole: picker?.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       res.json(order);
     } catch (error) {
@@ -636,11 +727,27 @@ export async function registerRoutes(
       }
       
       const id = parseInt(req.params.id);
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.holdOrder(id);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      
+      // Log the hold action
+      await storage.createPickingLog({
+        actionType: "order_held",
+        pickerId: req.session.user.id,
+        pickerName: req.session.user.displayName || req.session.user.username,
+        pickerRole: req.session.user.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        reason: req.body?.reason,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       res.json(order);
     } catch (error) {
@@ -657,11 +764,26 @@ export async function registerRoutes(
       }
       
       const id = parseInt(req.params.id);
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.releaseHoldOrder(id);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      
+      // Log the unhold action
+      await storage.createPickingLog({
+        actionType: "order_unhold",
+        pickerId: req.session.user.id,
+        pickerName: req.session.user.displayName || req.session.user.username,
+        pickerRole: req.session.user.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       res.json(order);
     } catch (error) {
@@ -701,11 +823,28 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid resolution. Must be: ship_partial, hold, resolved, or cancelled" });
       }
       
+      const orderBefore = await storage.getOrderById(id);
       const order = await storage.resolveException(id, resolution, req.session.user.id, notes);
       
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      
+      // Log the exception resolution
+      await storage.createPickingLog({
+        actionType: "exception_resolved",
+        pickerId: req.session.user.id,
+        pickerName: req.session.user.displayName || req.session.user.username,
+        pickerRole: req.session.user.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        reason: resolution,
+        notes,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      });
       
       broadcastOrdersUpdated();
       res.json(order);
