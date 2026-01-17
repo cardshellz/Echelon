@@ -854,6 +854,116 @@ export async function registerRoutes(
     }
   });
 
+  // ===== PICKING LOGS API =====
+
+  // Get picking logs with filters (admin/lead only)
+  app.get("/api/picking/logs", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const filters: {
+        startDate?: Date;
+        endDate?: Date;
+        actionType?: string;
+        pickerId?: string;
+        orderNumber?: string;
+        sku?: string;
+        limit?: number;
+        offset?: number;
+      } = {};
+      
+      if (req.query.startDate) {
+        filters.startDate = new Date(req.query.startDate as string);
+      }
+      if (req.query.endDate) {
+        filters.endDate = new Date(req.query.endDate as string);
+      }
+      if (req.query.actionType) {
+        filters.actionType = req.query.actionType as string;
+      }
+      if (req.query.pickerId) {
+        filters.pickerId = req.query.pickerId as string;
+      }
+      if (req.query.orderNumber) {
+        filters.orderNumber = req.query.orderNumber as string;
+      }
+      if (req.query.sku) {
+        filters.sku = req.query.sku as string;
+      }
+      filters.limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+      filters.offset = parseInt(req.query.offset as string) || 0;
+      
+      const [logs, count] = await Promise.all([
+        storage.getPickingLogs(filters),
+        storage.getPickingLogsCount(filters),
+      ]);
+      
+      res.json({ logs, count, limit: filters.limit, offset: filters.offset });
+    } catch (error) {
+      console.error("Error fetching picking logs:", error);
+      res.status(500).json({ error: "Failed to fetch picking logs" });
+    }
+  });
+
+  // Get order timeline (logs for a specific order)
+  app.get("/api/picking/orders/:id/timeline", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const id = parseInt(req.params.id);
+      const order = await storage.getOrderById(id);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      const logs = await storage.getPickingLogsByOrderId(id);
+      
+      // Calculate metrics from the logs
+      const claimLog = logs.find(l => l.actionType === "order_claimed");
+      const completeLog = logs.find(l => l.actionType === "order_completed");
+      const itemPicks = logs.filter(l => l.actionType === "item_picked" || l.actionType === "item_shorted");
+      
+      const metrics = {
+        claimedAt: claimLog?.timestamp,
+        completedAt: completeLog?.timestamp,
+        claimToCompleteMs: claimLog && completeLog ? 
+          new Date(completeLog.timestamp).getTime() - new Date(claimLog.timestamp).getTime() : null,
+        totalItemsPicked: itemPicks.length,
+        shortedItems: logs.filter(l => l.actionType === "item_shorted").length,
+        queueWaitMs: order.shopifyCreatedAt && claimLog ? 
+          new Date(claimLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
+        c2pMs: order.shopifyCreatedAt && completeLog ?
+          new Date(completeLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
+      };
+      
+      res.json({ order, logs, metrics });
+    } catch (error) {
+      console.error("Error fetching order timeline:", error);
+      res.status(500).json({ error: "Failed to fetch order timeline" });
+    }
+  });
+
+  // Get action types for filtering
+  app.get("/api/picking/logs/action-types", async (req, res) => {
+    res.json([
+      { value: "order_claimed", label: "Order Claimed" },
+      { value: "order_released", label: "Order Released" },
+      { value: "order_completed", label: "Order Completed" },
+      { value: "item_picked", label: "Item Picked" },
+      { value: "item_shorted", label: "Item Shorted" },
+      { value: "item_quantity_adjusted", label: "Quantity Adjusted" },
+      { value: "order_held", label: "Order Held" },
+      { value: "order_unhold", label: "Order Unhold" },
+      { value: "order_exception", label: "Order Exception" },
+      { value: "exception_resolved", label: "Exception Resolved" },
+    ]);
+  });
+
   // Shopify Sync API
   app.post("/api/shopify/sync", async (req, res) => {
     try {
