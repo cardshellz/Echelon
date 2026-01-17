@@ -135,6 +135,82 @@ export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
 export type OrderItem = typeof orderItems.$inferSelect;
 
 // ============================================
+// PICKING LOGS (Audit Trail)
+// ============================================
+
+// Action types for picking operations
+export const pickingActionTypeEnum = [
+  "order_claimed",      // Picker claimed an order
+  "order_released",     // Picker released an order back to queue
+  "order_completed",    // All items picked, order completed
+  "item_picked",        // Individual item scanned/picked
+  "item_shorted",       // Item marked as short
+  "item_quantity_adjusted", // Picker changed picked quantity
+  "order_held",         // Admin put order on hold
+  "order_unhold",       // Admin released hold
+  "order_exception",    // Order moved to exception status
+  "exception_resolved", // Exception resolved by lead
+] as const;
+export type PickingActionType = typeof pickingActionTypeEnum[number];
+
+// Picking logs table for full audit trail
+export const pickingLogs = pgTable("picking_logs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  
+  // When
+  timestamp: timestamp("timestamp").defaultNow().notNull(),
+  
+  // What action
+  actionType: varchar("action_type", { length: 30 }).notNull(),
+  
+  // Who
+  pickerId: varchar("picker_id", { length: 100 }),
+  pickerName: varchar("picker_name", { length: 100 }),
+  pickerRole: varchar("picker_role", { length: 20 }),
+  
+  // Which order
+  orderId: integer("order_id").references(() => orders.id, { onDelete: "set null" }),
+  orderNumber: varchar("order_number", { length: 50 }),
+  
+  // Which item (for item-level actions)
+  orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }),
+  itemName: text("item_name"),
+  locationCode: varchar("location_code", { length: 50 }),
+  
+  // Quantities
+  qtyRequested: integer("qty_requested"),        // How many were needed
+  qtyBefore: integer("qty_before"),              // Picked qty before action
+  qtyAfter: integer("qty_after"),                // Picked qty after action
+  qtyDelta: integer("qty_delta"),                // Change amount
+  
+  // Context
+  reason: text("reason"),                        // Short reason, release reason, etc.
+  notes: text("notes"),                          // Additional notes
+  
+  // Device/session info
+  deviceType: varchar("device_type", { length: 20 }), // "mobile", "desktop", "scanner"
+  sessionId: varchar("session_id", { length: 100 }), // Group actions in a picking session
+  
+  // Status snapshots
+  orderStatusBefore: varchar("order_status_before", { length: 20 }),
+  orderStatusAfter: varchar("order_status_after", { length: 20 }),
+  itemStatusBefore: varchar("item_status_before", { length: 20 }),
+  itemStatusAfter: varchar("item_status_after", { length: 20 }),
+  
+  // Metadata for extensibility
+  metadata: jsonb("metadata"),
+});
+
+export const insertPickingLogSchema = createInsertSchema(pickingLogs).omit({
+  id: true,
+  timestamp: true,
+});
+
+export type InsertPickingLog = z.infer<typeof insertPickingLogSchema>;
+export type PickingLog = typeof pickingLogs.$inferSelect;
+
+// ============================================
 // INVENTORY MANAGEMENT SYSTEM (WMS)
 // ============================================
 

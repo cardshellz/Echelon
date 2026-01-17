@@ -23,6 +23,8 @@ import {
   type InsertInventoryTransaction,
   type ChannelFeed,
   type InsertChannelFeed,
+  type PickingLog,
+  type InsertPickingLog,
   users,
   productLocations,
   orders,
@@ -32,10 +34,11 @@ import {
   uomVariants,
   inventoryLevels,
   inventoryTransactions,
-  channelFeeds
+  channelFeeds,
+  pickingLogs
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, inArray, notInArray, and, isNull, sql, desc, asc } from "drizzle-orm";
+import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -127,6 +130,30 @@ export interface IStorage {
   upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed>;
   updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null>;
   getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: UomVariant })[]>;
+  
+  // ============================================
+  // PICKING LOGS (Audit Trail)
+  // ============================================
+  createPickingLog(log: InsertPickingLog): Promise<PickingLog>;
+  getPickingLogsByOrderId(orderId: number): Promise<PickingLog[]>;
+  getPickingLogs(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    actionType?: string;
+    pickerId?: string;
+    orderNumber?: string;
+    sku?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<PickingLog[]>;
+  getPickingLogsCount(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    actionType?: string;
+    pickerId?: string;
+    orderNumber?: string;
+    sku?: string;
+  }): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -850,6 +877,111 @@ export class DatabaseStorage implements IStorage {
       .innerJoin(uomVariants, eq(channelFeeds.variantId, uomVariants.id))
       .where(eq(channelFeeds.channelType, channelType));
     return result as (ChannelFeed & { variant: UomVariant })[];
+  }
+
+  // ============================================
+  // PICKING LOGS (Audit Trail)
+  // ============================================
+
+  async createPickingLog(log: InsertPickingLog): Promise<PickingLog> {
+    const result = await db.insert(pickingLogs).values(log).returning();
+    return result[0];
+  }
+
+  async getPickingLogsByOrderId(orderId: number): Promise<PickingLog[]> {
+    return await db
+      .select()
+      .from(pickingLogs)
+      .where(eq(pickingLogs.orderId, orderId))
+      .orderBy(asc(pickingLogs.timestamp));
+  }
+
+  async getPickingLogs(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    actionType?: string;
+    pickerId?: string;
+    orderNumber?: string;
+    sku?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<PickingLog[]> {
+    const conditions = [];
+    
+    if (filters.startDate) {
+      conditions.push(gte(pickingLogs.timestamp, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(pickingLogs.timestamp, filters.endDate));
+    }
+    if (filters.actionType) {
+      conditions.push(eq(pickingLogs.actionType, filters.actionType));
+    }
+    if (filters.pickerId) {
+      conditions.push(eq(pickingLogs.pickerId, filters.pickerId));
+    }
+    if (filters.orderNumber) {
+      conditions.push(like(pickingLogs.orderNumber, `%${filters.orderNumber}%`));
+    }
+    if (filters.sku) {
+      conditions.push(like(pickingLogs.sku, `%${filters.sku.toUpperCase()}%`));
+    }
+    
+    let query = db.select().from(pickingLogs);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as any;
+    }
+    
+    query = query.orderBy(desc(pickingLogs.timestamp)) as any;
+    
+    if (filters.limit) {
+      query = query.limit(filters.limit) as any;
+    }
+    if (filters.offset) {
+      query = query.offset(filters.offset) as any;
+    }
+    
+    return await query;
+  }
+
+  async getPickingLogsCount(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    actionType?: string;
+    pickerId?: string;
+    orderNumber?: string;
+    sku?: string;
+  }): Promise<number> {
+    const conditions = [];
+    
+    if (filters.startDate) {
+      conditions.push(gte(pickingLogs.timestamp, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(pickingLogs.timestamp, filters.endDate));
+    }
+    if (filters.actionType) {
+      conditions.push(eq(pickingLogs.actionType, filters.actionType));
+    }
+    if (filters.pickerId) {
+      conditions.push(eq(pickingLogs.pickerId, filters.pickerId));
+    }
+    if (filters.orderNumber) {
+      conditions.push(like(pickingLogs.orderNumber, `%${filters.orderNumber}%`));
+    }
+    if (filters.sku) {
+      conditions.push(like(pickingLogs.sku, `%${filters.sku.toUpperCase()}%`));
+    }
+    
+    let query = db.select({ count: sql<number>`count(*)` }).from(pickingLogs);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as any;
+    }
+    
+    const result = await query;
+    return Number(result[0]?.count || 0);
   }
 }
 
