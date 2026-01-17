@@ -481,9 +481,9 @@ export async function registerRoutes(
         return res.status(409).json({ error: "Order is no longer available" });
       }
       
-      // Log the claim action
+      // Log the claim action (non-blocking)
       const picker = await storage.getUser(pickerId);
-      await storage.createPickingLog({
+      storage.createPickingLog({
         actionType: "order_claimed",
         pickerId,
         pickerName: picker?.displayName || picker?.username || pickerId,
@@ -494,7 +494,7 @@ export async function registerRoutes(
         orderStatusAfter: order.status,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log order_claimed:", err.message));
       
       const items = await storage.getOrderItems(id);
       res.json({ ...order, items });
@@ -517,10 +517,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      // Log the release action
+      // Log the release action (non-blocking)
       const pickerId = orderBefore?.assignedPickerId;
       const picker = pickerId ? await storage.getUser(pickerId) : null;
-      await storage.createPickingLog({
+      storage.createPickingLog({
         actionType: "order_released",
         pickerId: pickerId || undefined,
         pickerName: picker?.displayName || picker?.username || pickerId || undefined,
@@ -532,7 +532,7 @@ export async function registerRoutes(
         reason: reason || (resetProgress ? "Progress reset" : "Progress preserved"),
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
-      });
+      }).catch(err => console.warn("[PickingLog] Failed to log order_released:", err.message));
       
       res.json(order);
     } catch (error) {
