@@ -1456,6 +1456,46 @@ export default function Picking() {
     playSound("success");
     triggerHaptic("medium");
     handleListItemPickDirect(idx, item.qty);
+    
+    // Blur the input to prevent keyboard from popping up
+    if (manualInputRef.current) {
+      manualInputRef.current.blur();
+    }
+    
+    // Scroll to next pending item after a short delay (to allow state to update)
+    setTimeout(() => {
+      const updatedWork = pickingMode === "batch"
+        ? queue.find(b => b.id === activeBatchId)
+        : localSingleQueue.find(o => o.id === activeOrderId) || singleQueue.find(o => o.id === activeOrderId);
+      
+      if (!updatedWork) return;
+      
+      // Find next pending item after the one we just picked
+      let nextItem = null;
+      for (let i = idx + 1; i < updatedWork.items.length; i++) {
+        if (updatedWork.items[i].status === "pending" || updatedWork.items[i].status === "in_progress") {
+          nextItem = updatedWork.items[i];
+          break;
+        }
+      }
+      // Wrap around if not found
+      if (!nextItem) {
+        for (let i = 0; i < idx; i++) {
+          if (updatedWork.items[i].status === "pending" || updatedWork.items[i].status === "in_progress") {
+            nextItem = updatedWork.items[i];
+            break;
+          }
+        }
+      }
+      
+      // Scroll to the next item using its id
+      if (nextItem) {
+        const nextItemElement = document.querySelector(`[data-testid="list-item-${nextItem.id}"]`);
+        if (nextItemElement) {
+          nextItemElement.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+      }
+    }, 100);
   };
   
   // Handle clicking short pick button on list item
