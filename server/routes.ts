@@ -387,9 +387,31 @@ export async function registerRoutes(
       // Filter out held orders unless user is admin/lead
       const user = req.session.user;
       const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
-      const filteredOrders = isAdminOrLead 
-        ? orders 
-        : orders.filter(order => order.onHold === 0);
+      
+      // Filter out completed orders older than 24 hours (only for pickers, admins can see all)
+      const now = new Date();
+      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      
+      const filteredOrders = orders.filter(order => {
+        // Filter on-hold orders for non-admins
+        if (order.onHold === 1 && !isAdminOrLead) {
+          return false;
+        }
+        
+        // Always include non-completed orders
+        if (order.status !== "completed") {
+          return true;
+        }
+        
+        // For completed orders: admins/leads can see all, pickers only see last 24 hours
+        if (order.completedAt) {
+          const completedDate = new Date(order.completedAt);
+          if (completedDate < twentyFourHoursAgo && !isAdminOrLead) {
+            return false; // Exclude old completed orders for pickers
+          }
+        }
+        return true;
+      });
       
       // Get all unique picker IDs and lookup their display names
       const pickerIds = Array.from(new Set(filteredOrders.map(o => o.assignedPickerId).filter(Boolean))) as string[];
@@ -402,13 +424,22 @@ export async function registerRoutes(
         }
       }
       
-      // Add picker display name to orders
-      const ordersWithPickerNames = filteredOrders.map(order => ({
-        ...order,
-        pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
-      }));
+      // Add picker display name and C2P (Click to Pick) time to orders
+      const ordersWithMetadata = filteredOrders.map(order => {
+        // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
+        let c2pMs: number | null = null;
+        if (order.completedAt && order.shopifyCreatedAt) {
+          c2pMs = new Date(order.completedAt).getTime() - new Date(order.shopifyCreatedAt).getTime();
+        }
+        
+        return {
+          ...order,
+          pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
+          c2pMs, // Click to Pick time in milliseconds
+        };
+      });
       
-      res.json(ordersWithPickerNames);
+      res.json(ordersWithMetadata);
     } catch (error) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });

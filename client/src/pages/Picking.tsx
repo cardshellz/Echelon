@@ -46,6 +46,7 @@ import type { Order, OrderItem, ItemStatus } from "@shared/schema";
 interface OrderWithItems extends Order {
   items: OrderItem[];
   pickerName?: string | null;
+  c2pMs?: number | null; // Click to Pick time in milliseconds
 }
 
 // API functions
@@ -147,6 +148,25 @@ function getOrderAge(createdAt: Date | string): string {
   return `${hours}h ${mins}m`;
 }
 
+// Format C2P (Click to Pick) time from milliseconds
+function formatC2P(c2pMs: number | null | undefined): string | null {
+  if (!c2pMs || c2pMs < 0) return null;
+  
+  const totalMinutes = Math.floor(c2pMs / 60000);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  const mins = totalMinutes % 60;
+  
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (totalHours > 0) {
+    return `${totalHours}h ${mins}m`;
+  }
+  return `${mins}m`;
+}
+
 // Generate a simple picker ID (in production, this would come from auth)
 function getPickerId(): string {
   let pickerId = localStorage.getItem("pickerId");
@@ -224,6 +244,7 @@ interface SingleOrder {
   onHold?: boolean;
   pickerName?: string | null;
   completedAt?: string | null;
+  c2p?: string | null; // Click to Pick time formatted (e.g., "2d 3h")
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -496,6 +517,7 @@ export default function Picking() {
     onHold: order.onHold === 1,
     pickerName: order.pickerName || null,
     completedAt: order.completedAt ? String(order.completedAt) : null,
+    c2p: formatC2P(order.c2pMs), // Click to Pick time
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -2133,9 +2155,15 @@ export default function Picking() {
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      <div className="text-xs text-muted-foreground flex items-center gap-0.5">
-                        <Clock size={12} /> {order.age}
-                      </div>
+                      {order.status === "completed" && order.c2p ? (
+                        <div className="text-xs text-emerald-600 flex items-center gap-0.5 font-medium" title="Click to Pick time">
+                          C2P {order.c2p}
+                        </div>
+                      ) : (
+                        <div className="text-xs text-muted-foreground flex items-center gap-0.5">
+                          <Clock size={12} /> {order.age}
+                        </div>
+                      )}
                       {/* Admin/Lead: Hold/Release buttons */}
                       {isAdminOrLead && order.status === "ready" && !order.onHold && (
                         <Button
