@@ -13,6 +13,7 @@ import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
 import Picking from "@/pages/Picking";
+import PickingLogs from "@/pages/PickingLogs";
 import Locations from "@/pages/Locations";
 import Integrations from "@/pages/Integrations";
 import Users from "@/pages/Users";
@@ -85,6 +86,9 @@ function Router() {
           <ProtectedRoute component={Dropship} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/picking" component={Picking} />
+        <Route path="/picking/logs">
+          <ProtectedRoute component={PickingLogs} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/locations">
           <ProtectedRoute component={Locations} allowedRoles={["admin", "lead"]} />
         </Route>
