@@ -96,6 +96,17 @@ async function releaseHoldOrder(orderId: number): Promise<Order> {
   return res.json();
 }
 
+async function forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order> {
+  const res = await fetch(`/api/orders/${orderId}/force-release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ resetProgress }),
+  });
+  if (!res.ok) throw new Error("Failed to force release order");
+  return res.json();
+}
+
 async function updateOrderItem(
   itemId: number, 
   status: ItemStatus, 
@@ -628,6 +639,30 @@ export default function Picking() {
       playSound("error");
       toast({
         title: "Failed to release order",
+        description: "Please try again",
+        variant: "destructive",
+      });
+    },
+  });
+  
+  // Mutation for force releasing stuck orders (admin only)
+  const forceReleaseMutation = useMutation({
+    mutationFn: ({ orderId, resetProgress }: { orderId: number; resetProgress?: boolean }) => 
+      forceReleaseOrder(orderId, resetProgress),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      setLocalSingleQueue(prev => prev.filter(o => o.id !== String(data.id)));
+      playSound("success");
+      toast({
+        title: "Order force released",
+        description: `Order ${data.orderNumber} has been released and is back in the queue`,
+      });
+    },
+    onError: (error) => {
+      console.error("Failed to force release:", error);
+      playSound("error");
+      toast({
+        title: "Failed to force release",
         description: "Please try again",
         variant: "destructive",
       });
@@ -2262,6 +2297,25 @@ export default function Picking() {
                         >
                           <Unlock className="h-4 w-4 mr-1" />
                           Release
+                        </Button>
+                      )}
+                      {/* Admin: Force release for stuck orders */}
+                      {isAdminOrLead && order.status === "in_progress" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`Force release order ${order.orderNumber}? This will put it back in the queue.`)) {
+                              forceReleaseMutation.mutate({ orderId: parseInt(order.id), resetProgress: false });
+                            }
+                          }}
+                          data-testid={`button-force-release-${order.id}`}
+                          title="Force release stuck order (admin)"
+                        >
+                          <AlertTriangle className="h-4 w-4 mr-1" />
+                          Force
                         </Button>
                       )}
                       {order.status === "completed" && (

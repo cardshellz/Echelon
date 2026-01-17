@@ -793,6 +793,51 @@ export async function registerRoutes(
     }
   });
 
+  // Force release an order (admin only) - for stuck orders
+  app.post("/api/orders/:id/force-release", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const id = parseInt(req.params.id);
+      const { resetProgress } = req.body;
+      
+      const orderBefore = await storage.getOrderById(id);
+      if (!orderBefore) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      // Force release: clear assignment and optionally reset progress
+      const order = await storage.forceReleaseOrder(id, resetProgress === true);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      // Log the force release (non-blocking)
+      storage.createPickingLog({
+        actionType: "order_released",
+        pickerId: req.session.user.id,
+        pickerName: req.session.user.displayName || req.session.user.username,
+        pickerRole: req.session.user.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        reason: "Admin force release",
+        notes: resetProgress ? "Progress was reset" : "Progress preserved",
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      }).catch(err => console.warn("[PickingLog] Failed to log force_release:", err.message));
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error force releasing order:", error);
+      res.status(500).json({ error: "Failed to force release order" });
+    }
+  });
+
   // ===== EXCEPTION HANDLING =====
   
   // Get all orders in exception status (admin/lead only)

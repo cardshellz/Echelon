@@ -68,6 +68,7 @@ export interface IStorage {
   createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
   releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
+  forceReleaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
@@ -362,6 +363,37 @@ export class DatabaseStorage implements IStorage {
       status: "ready" as OrderStatus,
       assignedPickerId: null,
       startedAt: null,
+    };
+    
+    if (resetProgress) {
+      orderUpdates.pickedCount = 0;
+      orderUpdates.completedAt = null;
+    }
+    
+    const result = await db
+      .update(orders)
+      .set(orderUpdates)
+      .where(eq(orders.id, orderId))
+      .returning();
+    
+    if (resetProgress) {
+      await db
+        .update(orderItems)
+        .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
+        .where(eq(orderItems.orderId, orderId));
+    }
+    
+    return result[0] || null;
+  }
+
+  async forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
+    // Force release clears assignment and hold status, optionally resets progress
+    const orderUpdates: any = {
+      status: "ready" as OrderStatus,
+      assignedPickerId: null,
+      startedAt: null,
+      onHold: 0,
+      heldAt: null,
     };
     
     if (resetProgress) {
