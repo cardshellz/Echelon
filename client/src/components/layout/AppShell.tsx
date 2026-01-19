@@ -61,9 +61,12 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: "separator", label: "Operations", roles: ["admin", "lead"] },
     { type: 'link', label: "Inventory (WMS)", icon: Package, href: "/inventory", roles: ["admin", "lead"] },
     { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-    { type: 'link', label: "Picking & Packing", icon: ClipboardList, href: "/picking" },
+    { type: "separator", label: "Picking & Packing" },
+    { type: 'link', label: "Picking Queue", icon: ClipboardList, href: "/picking" },
     { type: 'link', label: "Picking Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
+    { type: 'link', label: "Picking Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
     { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
+    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
     { type: 'link', label: "Product Locations", icon: MapPin, href: "/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
     { type: "separator", label: "Dropship & Integrations", roles: ["admin", "lead"] },
@@ -72,7 +75,6 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "User Management", icon: Users, href: "/users", roles: ["admin"] },
     { type: "separator", label: "Management", roles: ["admin", "lead"] },
     { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing", roles: ["admin", "lead"] },
-    { type: 'link', label: "Analytics", icon: BarChart3, href: "/analytics", roles: ["admin", "lead"] },
   ];
   
   const navItems = allNavItems.filter(item => {
