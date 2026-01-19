@@ -2378,8 +2378,12 @@ export default function Picking() {
                   if (order.status === "ready" && !order.onHold) {
                     handleStartPicking(order.id);
                   } else if (order.status === "completed") {
-                    console.log("Opening completed order dialog:", order.orderNumber);
+                    console.log("Opening completed order dialog:", order.orderNumber, order);
+                    toast({ title: "Opening order details", description: order.orderNumber });
                     setSelectedCompletedOrder(order);
+                  } else if (order.status === "in_progress") {
+                    // For in-progress orders, resume picking
+                    handleStartPicking(order.id);
                   }
                 }}
                 data-testid={`card-order-${order.id}`}
