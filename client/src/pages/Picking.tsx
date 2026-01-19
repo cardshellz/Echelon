@@ -179,15 +179,6 @@ function formatC2P(c2pMs: number | null | undefined): string | null {
   return `${mins}m`;
 }
 
-// Generate a simple picker ID (in production, this would come from auth)
-function getPickerId(): string {
-  let pickerId = localStorage.getItem("pickerId");
-  if (!pickerId) {
-    pickerId = `picker-${Math.random().toString(36).substring(2, 8)}`;
-    localStorage.setItem("pickerId", pickerId);
-  }
-  return pickerId;
-}
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -416,7 +407,7 @@ export default function Picking() {
     }
   };
   const queryClient = useQueryClient();
-  const pickerId = getPickerId();
+  const pickerId = user?.id || "";
   
   // Fetch orders from API - auto-refresh every 15s and when window regains focus
   const { data: apiOrders = [], isLoading, refetch, dataUpdatedAt } = useQuery({
