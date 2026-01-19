@@ -133,6 +133,52 @@ export async function registerRoutes(
     }
   });
   
+  // Update user (admin only)
+  app.patch("/api/users/:id", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const userId = req.params.id;
+      const { displayName, role, password, active } = req.body;
+      
+      // Build update data
+      const updateData: { displayName?: string; role?: string; password?: string; active?: number } = {};
+      
+      if (displayName !== undefined) updateData.displayName = displayName;
+      if (role !== undefined) updateData.role = role;
+      if (active !== undefined) updateData.active = active;
+      
+      // If password is provided, hash it
+      if (password && password.trim()) {
+        updateData.password = await bcrypt.hash(password, 10);
+      }
+      
+      const user = await storage.updateUser(userId, updateData);
+      
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      // Return safe user (without password)
+      const safeUser: SafeUser = {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        displayName: user.displayName,
+        active: user.active,
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+      };
+      
+      res.json(safeUser);
+    } catch (error) {
+      console.error("Error updating user:", error);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+  
   // Product Locations API
   
   // Get all locations

@@ -45,6 +45,7 @@ export interface IStorage {
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUserLastLogin(id: string): Promise<void>;
+  updateUser(id: string, data: { displayName?: string; role?: string; password?: string; active?: number }): Promise<User | undefined>;
   getAllUsers(): Promise<SafeUser[]>;
   
   // Product Locations
@@ -176,6 +177,19 @@ export class DatabaseStorage implements IStorage {
 
   async updateUserLastLogin(id: string): Promise<void> {
     await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, id));
+  }
+
+  async updateUser(id: string, data: { displayName?: string; role?: string; password?: string; active?: number }): Promise<User | undefined> {
+    const updateData: Partial<{ displayName: string; role: string; password: string; active: number }> = {};
+    if (data.displayName !== undefined) updateData.displayName = data.displayName;
+    if (data.role !== undefined) updateData.role = data.role;
+    if (data.password !== undefined) updateData.password = data.password;
+    if (data.active !== undefined) updateData.active = data.active;
+    
+    if (Object.keys(updateData).length === 0) return undefined;
+    
+    const result = await db.update(users).set(updateData).where(eq(users.id, id)).returning();
+    return result[0];
   }
 
   async getAllUsers(): Promise<SafeUser[]> {

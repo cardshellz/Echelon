@@ -9,7 +9,8 @@ import {
   User,
   Clock,
   CheckCircle,
-  XCircle
+  XCircle,
+  Pencil
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -60,6 +61,19 @@ const usersApi = {
     }
     return res.json();
   },
+  update: async (id: string, data: { displayName?: string; role?: string; password?: string; active?: number }): Promise<SafeUser> => {
+    const res = await fetch(`/api/users/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || "Failed to update user");
+    }
+    return res.json();
+  },
 };
 
 export default function Users() {
@@ -77,6 +91,15 @@ export default function Users() {
   const [newRole, setNewRole] = useState("picker");
   const [error, setError] = useState("");
   
+  // Edit state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<SafeUser | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState("");
+  const [editRole, setEditRole] = useState("");
+  const [editPassword, setEditPassword] = useState("");
+  const [editActive, setEditActive] = useState(true);
+  const [editError, setEditError] = useState("");
+  
   const createMutation = useMutation({
     mutationFn: usersApi.create,
     onSuccess: () => {
@@ -89,12 +112,61 @@ export default function Users() {
     },
   });
   
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { displayName?: string; role?: string; password?: string; active?: number } }) => 
+      usersApi.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      setEditDialogOpen(false);
+      resetEditForm();
+    },
+    onError: (err: Error) => {
+      setEditError(err.message);
+    },
+  });
+  
   const resetForm = () => {
     setNewUsername("");
     setNewPassword("");
     setNewDisplayName("");
     setNewRole("picker");
     setError("");
+  };
+  
+  const resetEditForm = () => {
+    setEditingUser(null);
+    setEditDisplayName("");
+    setEditRole("");
+    setEditPassword("");
+    setEditActive(true);
+    setEditError("");
+  };
+  
+  const openEditDialog = (user: SafeUser) => {
+    setEditingUser(user);
+    setEditDisplayName(user.displayName || "");
+    setEditRole(user.role);
+    setEditActive(user.active === 1);
+    setEditPassword("");
+    setEditError("");
+    setEditDialogOpen(true);
+  };
+  
+  const handleUpdate = () => {
+    if (!editingUser) return;
+    setEditError("");
+    
+    const data: { displayName?: string; role?: string; password?: string; active?: number } = {
+      displayName: editDisplayName.trim() || editingUser.username,
+      role: editRole,
+      active: editActive ? 1 : 0,
+    };
+    
+    if (editPassword.trim()) {
+      data.password = editPassword;
+    }
+    
+    updateMutation.mutate({ id: editingUser.id, data });
   };
   
   const handleCreate = () => {
@@ -201,6 +273,7 @@ export default function Users() {
                   <TableHead>Status</TableHead>
                   <TableHead>Last Login</TableHead>
                   <TableHead>Created</TableHead>
+                  <TableHead className="w-[80px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -245,6 +318,16 @@ export default function Users() {
                       <span className="text-sm text-muted-foreground">
                         {formatDistanceToNow(new Date(user.createdAt), { addSuffix: true })}
                       </span>
+                    </TableCell>
+                    <TableCell>
+                      <Button 
+                        variant="ghost" 
+                        size="sm"
+                        onClick={() => openEditDialog(user)}
+                        data-testid={`button-edit-user-${user.id}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -332,6 +415,96 @@ export default function Users() {
               data-testid="button-create-user"
             >
               {createMutation.isPending ? "Creating..." : "Create User"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      <Dialog open={editDialogOpen} onOpenChange={(open) => { setEditDialogOpen(open); if (!open) resetEditForm(); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="h-5 w-5" />
+              Edit User
+            </DialogTitle>
+            <DialogDescription>
+              Update user details for @{editingUser?.username}
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4 py-4">
+            {editError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-sm">
+                {editError}
+              </div>
+            )}
+            
+            <div className="space-y-2">
+              <Label htmlFor="edit-displayName">Display Name</Label>
+              <Input
+                id="edit-displayName"
+                placeholder="e.g., John Smith"
+                value={editDisplayName}
+                onChange={(e) => setEditDisplayName(e.target.value)}
+                data-testid="input-edit-displayname"
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="edit-role">Role</Label>
+              <Select value={editRole} onValueChange={setEditRole}>
+                <SelectTrigger data-testid="select-edit-role">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="picker">Picker - Can only pick orders</SelectItem>
+                  <SelectItem value="lead">Lead - Full ops access</SelectItem>
+                  <SelectItem value="admin">Admin - Full access + integrations</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="edit-password">New Password (leave blank to keep current)</Label>
+              <Input
+                id="edit-password"
+                type="password"
+                placeholder="Enter new password"
+                value={editPassword}
+                onChange={(e) => setEditPassword(e.target.value)}
+                data-testid="input-edit-password"
+              />
+            </div>
+            
+            <div className="flex items-center justify-between">
+              <Label htmlFor="edit-active">Account Status</Label>
+              <div className="flex items-center gap-2">
+                <span className={cn("text-sm", editActive ? "text-green-600" : "text-red-600")}>
+                  {editActive ? "Active" : "Inactive"}
+                </span>
+                <Button
+                  type="button"
+                  variant={editActive ? "default" : "destructive"}
+                  size="sm"
+                  onClick={() => setEditActive(!editActive)}
+                  data-testid="button-toggle-active"
+                >
+                  {editActive ? "Deactivate" : "Activate"}
+                </Button>
+              </div>
+            </div>
+          </div>
+          
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setEditDialogOpen(false); resetEditForm(); }}>
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleUpdate} 
+              disabled={updateMutation.isPending}
+              data-testid="button-save-user"
+            >
+              {updateMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>
           </DialogFooter>
         </DialogContent>
