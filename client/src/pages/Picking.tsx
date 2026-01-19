@@ -34,7 +34,10 @@ import {
   Unlock,
   Pause,
   Play,
-  Truck
+  Truck,
+  Plus,
+  Minus,
+  Edit3
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
@@ -1583,6 +1586,194 @@ export default function Picking() {
     }
   };
   
+  // Handle manual +1 pick (without scan) - tracks as "manual" pick method
+  const handleListItemManualPickOne = (idx: number) => {
+    if (!activeWork) return;
+    
+    const item = activeWork.items[idx];
+    if (!item || item.status === "completed" || item.status === "short") return;
+    
+    const newPicked = item.picked + 1;
+    const isItemComplete = newPicked >= item.qty;
+    
+    playSound("success");
+    triggerHaptic("light");
+    
+    // Visual feedback
+    setLastScannedItemId(item.id);
+    setTimeout(() => setLastScannedItemId(null), 1000);
+    
+    // Sync with API for real items (both single and batch modes)
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem) {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
+        pickedQuantity: newPicked,
+        pickMethod: "manual"
+      });
+    }
+    
+    if (pickingMode === "batch") {
+      setQueue(prev => {
+        const updated = prev.map(batch => {
+          if (batch.id !== activeBatchId) return batch;
+          const newItems = batch.items.map((it, i) => {
+            if (i !== idx) return it;
+            return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
+          });
+          return { ...batch, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    } else {
+      setLocalSingleQueue(prev => {
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
+        const updated = base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          const newItems = order.items.map((it, i) => {
+            if (i !== idx) return it;
+            return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
+          });
+          return { ...order, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    }
+  };
+  
+  // Handle decrement (-1) - for correcting over-picks
+  const handleListItemDecrement = (idx: number) => {
+    if (!activeWork) return;
+    
+    const item = activeWork.items[idx];
+    if (!item || item.picked <= 0) return;
+    
+    const newPicked = item.picked - 1;
+    const newStatus: ItemStatus = newPicked === 0 ? "pending" : "in_progress";
+    
+    triggerHaptic("light");
+    
+    // Sync with API for real items (both single and batch modes)
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem) {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: newStatus, 
+        pickedQuantity: newPicked,
+        pickMethod: "manual"
+      });
+    }
+    
+    if (pickingMode === "batch") {
+      setQueue(prev => {
+        const updated = prev.map(batch => {
+          if (batch.id !== activeBatchId) return batch;
+          const newItems = batch.items.map((it, i) => {
+            if (i !== idx) return it;
+            return { ...it, picked: newPicked, status: newStatus };
+          });
+          return { ...batch, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    } else {
+      setLocalSingleQueue(prev => {
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
+        const updated = base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          const newItems = order.items.map((it, i) => {
+            if (i !== idx) return it;
+            return { ...it, picked: newPicked, status: newStatus };
+          });
+          return { ...order, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    }
+  };
+  
+  // State and handler for editing item quantity directly
+  const [editQtyOpen, setEditQtyOpen] = useState(false);
+  const [editQtyIdx, setEditQtyIdx] = useState<number | null>(null);
+  const [editQtyValue, setEditQtyValue] = useState(0);
+  
+  const openEditQtyDialog = (idx: number) => {
+    if (!activeWork) return;
+    const item = activeWork.items[idx];
+    if (!item) return;
+    setEditQtyIdx(idx);
+    setEditQtyValue(item.picked);
+    setEditQtyOpen(true);
+  };
+  
+  const handleEditQtyConfirm = () => {
+    if (!activeWork || editQtyIdx === null) return;
+    
+    const item = activeWork.items[editQtyIdx];
+    if (!item) return;
+    
+    const newPicked = Math.max(0, Math.min(item.qty, editQtyValue));
+    const isItemComplete = newPicked >= item.qty;
+    const newStatus: ItemStatus = newPicked === 0 ? "pending" : isItemComplete ? "completed" : "in_progress";
+    
+    // Sync with API for real items (both single and batch modes)
+    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
+    if (isRealItem) {
+      updateItemMutation.mutate({ 
+        itemId: item.id, 
+        status: newStatus, 
+        pickedQuantity: newPicked,
+        pickMethod: "manual"
+      });
+    }
+    
+    if (pickingMode === "batch") {
+      setQueue(prev => {
+        const updated = prev.map(batch => {
+          if (batch.id !== activeBatchId) return batch;
+          const newItems = batch.items.map((it, i) => {
+            if (i !== editQtyIdx) return it;
+            return { ...it, picked: newPicked, status: newStatus };
+          });
+          return { ...batch, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    } else {
+      setLocalSingleQueue(prev => {
+        const orderExists = prev.some(o => o.id === activeOrderId);
+        const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
+        const updated = base.map(order => {
+          if (order.id !== activeOrderId) return order;
+          const newItems = order.items.map((it, i) => {
+            if (i !== editQtyIdx) return it;
+            return { ...it, picked: newPicked, status: newStatus };
+          });
+          return { ...order, items: newItems };
+        });
+        // Check completion after state update
+        setTimeout(() => checkAndCompleteWork(), 100);
+        return updated;
+      });
+    }
+    
+    setEditQtyOpen(false);
+    setEditQtyIdx(null);
+  };
+  
   // Check if all items are done and complete the work (used by list view)
   const checkAndCompleteWork = () => {
     // Re-fetch current state to check completion
@@ -3022,14 +3213,18 @@ export default function Picking() {
                         <span className={cn("text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                           {item.location}
                         </span>
-                        <span className={cn(
-                          "text-base font-bold px-2 py-0.5 rounded flex-shrink-0",
-                          isCompleted 
-                            ? "bg-emerald-100 text-emerald-700" 
-                            : "bg-amber-100 text-amber-800"
-                        )}>
+                        <button
+                          onClick={() => openEditQtyDialog(idx)}
+                          className={cn(
+                            "text-base font-bold px-2 py-0.5 rounded flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all",
+                            isCompleted 
+                              ? "bg-emerald-100 text-emerald-700" 
+                              : "bg-amber-100 text-amber-800"
+                          )}
+                          data-testid={`qty-badge-${item.id}`}
+                        >
                           {item.picked}/{item.qty}
-                        </span>
+                        </button>
                       </div>
                       <div className="text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
                       <div className="text-[10px] font-mono text-slate-400 truncate">{item.sku}</div>
@@ -3037,19 +3232,54 @@ export default function Picking() {
                     </div>
                     
                     {/* Buttons - fixed width, always visible */}
-                    <div className="flex-shrink-0 w-[88px] flex gap-1 justify-end">
+                    <div className="flex-shrink-0 flex gap-1 justify-end">
                       {!isCompleted ? (
-                        <>
-                          <Button size="icon" className="h-10 w-10 bg-emerald-500 text-white flex-shrink-0" onClick={() => handleListItemPick(idx)} data-testid={`button-pick-${item.id}`}>
-                            <CheckCircle2 className="h-5 w-5" />
+                        <div className="flex gap-1">
+                          {/* -1 Button */}
+                          <Button 
+                            size="icon" 
+                            variant="outline"
+                            className="h-9 w-9 border-slate-300 text-slate-600 flex-shrink-0"
+                            onClick={() => handleListItemDecrement(idx)}
+                            disabled={item.picked <= 0}
+                            data-testid={`button-minus-${item.id}`}
+                          >
+                            <Minus className="h-4 w-4" />
                           </Button>
-                          <Button size="icon" variant="outline" className="h-10 w-10 border-amber-400 text-amber-600 flex-shrink-0" onClick={() => handleListItemShort(idx)} data-testid={`button-short-${item.id}`}>
-                            <AlertTriangle className="h-5 w-5" />
+                          {/* +1 Button */}
+                          <Button 
+                            size="icon" 
+                            variant="outline"
+                            className="h-9 w-9 border-blue-400 text-blue-600 flex-shrink-0"
+                            onClick={() => handleListItemManualPickOne(idx)}
+                            disabled={item.picked >= item.qty}
+                            data-testid={`button-plus-${item.id}`}
+                          >
+                            <Plus className="h-4 w-4" />
                           </Button>
-                        </>
+                          {/* Pick All Button */}
+                          <Button 
+                            size="icon" 
+                            className="h-9 w-9 bg-emerald-500 text-white flex-shrink-0" 
+                            onClick={() => handleListItemPick(idx)} 
+                            data-testid={`button-pick-${item.id}`}
+                          >
+                            <CheckCircle2 className="h-4 w-4" />
+                          </Button>
+                          {/* Short Button */}
+                          <Button 
+                            size="icon" 
+                            variant="outline" 
+                            className="h-9 w-9 border-amber-400 text-amber-600 flex-shrink-0" 
+                            onClick={() => handleListItemShort(idx)} 
+                            data-testid={`button-short-${item.id}`}
+                          >
+                            <AlertTriangle className="h-4 w-4" />
+                          </Button>
+                        </div>
                       ) : (
-                        <div className="h-10 w-10 flex items-center justify-center">
-                          {item.status === "completed" ? <CheckCircle2 className="h-6 w-6 text-emerald-500" /> : <AlertTriangle className="h-6 w-6 text-amber-500" />}
+                        <div className="h-9 w-9 flex items-center justify-center">
+                          {item.status === "completed" ? <CheckCircle2 className="h-5 w-5 text-emerald-500" /> : <AlertTriangle className="h-5 w-5 text-amber-500" />}
                         </div>
                       )}
                     </div>
@@ -3135,6 +3365,74 @@ export default function Picking() {
               variant="ghost" 
               className="w-full h-12"
               onClick={() => { setMultiQtyOpen(false); setPickQty(1); }}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Edit Quantity Dialog */}
+      <Dialog open={editQtyOpen} onOpenChange={setEditQtyOpen}>
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle className="text-center text-xl">Edit Picked Qty</DialogTitle>
+            <DialogDescription className="text-center">
+              Tap number to type directly or use +/- buttons
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="py-6 space-y-4">
+            <div className="flex items-center justify-center gap-4">
+              <Button 
+                variant="outline" 
+                size="icon"
+                className="h-14 w-14 text-2xl"
+                onClick={() => setEditQtyValue(Math.max(0, editQtyValue - 1))}
+              >
+                -
+              </Button>
+              <Input
+                type="number"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={editQtyValue}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value) || 0;
+                  const maxQty = editQtyIdx !== null && activeWork ? activeWork.items[editQtyIdx]?.qty || 0 : 0;
+                  setEditQtyValue(Math.max(0, Math.min(maxQty, val)));
+                }}
+                className="w-24 h-16 text-4xl font-bold text-center border-2 border-primary/50"
+                data-testid="input-edit-qty"
+              />
+              <Button 
+                variant="outline" 
+                size="icon"
+                className="h-14 w-14 text-2xl"
+                onClick={() => {
+                  const maxQty = editQtyIdx !== null && activeWork ? activeWork.items[editQtyIdx]?.qty || 0 : 0;
+                  setEditQtyValue(Math.min(maxQty, editQtyValue + 1));
+                }}
+              >
+                +
+              </Button>
+            </div>
+            <p className="text-center text-muted-foreground">
+              of {editQtyIdx !== null && activeWork ? activeWork.items[editQtyIdx]?.qty : 0} needed
+            </p>
+          </div>
+          
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button 
+              className="w-full h-14 text-lg bg-primary hover:bg-primary/90"
+              onClick={handleEditQtyConfirm}
+            >
+              Set to {editQtyValue}
+            </Button>
+            <Button 
+              variant="ghost" 
+              className="w-full h-12"
+              onClick={() => { setEditQtyOpen(false); setEditQtyIdx(null); }}
             >
               Cancel
             </Button>
