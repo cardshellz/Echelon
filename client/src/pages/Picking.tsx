@@ -723,6 +723,7 @@ export default function Picking() {
   const [shortPickOpen, setShortPickOpen] = useState(false);
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
+  const [shortPickListIndex, setShortPickListIndex] = useState<number | null>(null);
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
   const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
@@ -1136,17 +1137,24 @@ export default function Picking() {
     }, 300);
   };
   
-  // Short pick
+  // Short pick - works for both card view (currentItem) and list view (shortPickListIndex)
   const handleShortPick = () => {
-    if (!activeWork || !currentItem) return;
+    if (!activeWork) return;
+    
+    // Determine which item we're shorting
+    const isListView = shortPickListIndex !== null;
+    const itemIndex = isListView ? shortPickListIndex : currentItemIndex;
+    const targetItem = isListView ? activeWork.items[shortPickListIndex] : currentItem;
+    
+    if (!targetItem) return;
     
     const shortQty = parseInt(shortPickQty) || 0;
     
     // Sync with API if this is a real order item
-    const isRealItem = !isNaN(currentItem.id) && ordersFromApi.length > 0;
+    const isRealItem = !isNaN(targetItem.id) && ordersFromApi.length > 0;
     if (isRealItem && pickingMode === "single") {
       updateItemMutation.mutate({ 
-        itemId: currentItem.id, 
+        itemId: targetItem.id, 
         status: "short" as ItemStatus, 
         pickedQuantity: shortQty,
         shortReason: shortPickReason || undefined,
@@ -1159,7 +1167,7 @@ export default function Picking() {
         if (batch.id !== activeBatchId) return batch;
         
         const newItems = batch.items.map((item, idx) => {
-          if (idx !== currentItemIndex) return item;
+          if (idx !== itemIndex) return item;
           return {
             ...item,
             picked: shortQty,
@@ -1174,7 +1182,7 @@ export default function Picking() {
         if (order.id !== activeOrderId) return order;
         
         const newItems = order.items.map((item, idx) => {
-          if (idx !== currentItemIndex) return item;
+          if (idx !== itemIndex) return item;
           return {
             ...item,
             picked: shortQty,
@@ -1192,11 +1200,15 @@ export default function Picking() {
     setShortPickOpen(false);
     setShortPickReason("");
     setShortPickQty("0");
+    setShortPickListIndex(null);
     
-    setTimeout(() => {
-      advanceToNext();
-      maintainFocus();
-    }, 300);
+    // Only advance to next in card view, not list view
+    if (!isListView) {
+      setTimeout(() => {
+        advanceToNext();
+        maintainFocus();
+      }, 300);
+    }
   };
   
   // Helper to add debug log entry
@@ -1527,8 +1539,21 @@ export default function Picking() {
     }, 100);
   };
   
-  // Handle clicking short pick button on list item
+  // Handle clicking short pick button on list item - opens dialog
   const handleListItemShort = (idx: number) => {
+    if (!activeWork) return;
+    const item = activeWork.items[idx];
+    if (!item || item.status === "completed" || item.status === "short") return;
+    
+    // Set the current picked qty as the short qty default
+    setShortPickQty(String(item.picked || 0));
+    setShortPickReason("");
+    setShortPickListIndex(idx);
+    setShortPickOpen(true);
+  };
+  
+  // Legacy immediate short (kept for compatibility, not used currently)
+  const handleListItemShortImmediate = (idx: number) => {
     if (!activeWork) return;
     const item = activeWork.items[idx];
     if (!item || item.status === "completed" || item.status === "short") return;
@@ -3572,17 +3597,33 @@ export default function Picking() {
       </Dialog>
       
       {/* Short Pick Dialog */}
-      <Dialog open={shortPickOpen} onOpenChange={setShortPickOpen}>
+      <Dialog open={shortPickOpen} onOpenChange={(open) => { if (!open) { setShortPickOpen(false); setShortPickListIndex(null); } }}>
         <DialogContent className="max-w-xs">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2 text-amber-600">
               <AlertTriangle className="h-5 w-5" />
               Short Pick
             </DialogTitle>
+            {(() => {
+              const targetItem = shortPickListIndex !== null 
+                ? activeWork?.items[shortPickListIndex] 
+                : currentItem;
+              return targetItem && (
+                <DialogDescription className="text-center">
+                  <span className="font-medium">{targetItem.sku}</span>
+                  <br />
+                  <span className="text-xs">Need {targetItem.qty}, picked {targetItem.picked || 0}</span>
+                </DialogDescription>
+              );
+            })()}
           </DialogHeader>
           
           <div className="py-4 space-y-4">
             <RadioGroup value={shortPickReason} onValueChange={setShortPickReason} className="space-y-3">
+              <div className="flex items-center space-x-3 p-3 border rounded-lg">
+                <RadioGroupItem value="out_of_stock" id="out_of_stock" />
+                <Label htmlFor="out_of_stock" className="flex-1 cursor-pointer">Out of Stock</Label>
+              </div>
               <div className="flex items-center space-x-3 p-3 border rounded-lg">
                 <RadioGroupItem value="not_found" id="not_found" />
                 <Label htmlFor="not_found" className="flex-1 cursor-pointer">Not at location</Label>
@@ -3608,7 +3649,7 @@ export default function Picking() {
                   type="number" 
                   value={shortPickQty} 
                   onChange={(e) => setShortPickQty(e.target.value)}
-                  max={currentItem?.qty}
+                  max={(shortPickListIndex !== null ? activeWork?.items[shortPickListIndex]?.qty : currentItem?.qty) || 0}
                   min={0}
                   className="h-12 text-lg text-center"
                 />
