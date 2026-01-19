@@ -2060,6 +2060,113 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================
+  // ORDER HISTORY API
+  // ============================================
+  
+  app.get("/api/orders/history", async (req, res) => {
+    try {
+      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const filters: any = {};
+      
+      if (req.query.orderNumber) filters.orderNumber = req.query.orderNumber as string;
+      if (req.query.customerName) filters.customerName = req.query.customerName as string;
+      if (req.query.sku) filters.sku = req.query.sku as string;
+      if (req.query.pickerId) filters.pickerId = req.query.pickerId as string;
+      if (req.query.priority) filters.priority = req.query.priority as string;
+      if (req.query.status) {
+        const statusParam = req.query.status as string;
+        filters.status = statusParam.split(',');
+      }
+      if (req.query.startDate) filters.startDate = new Date(req.query.startDate as string);
+      if (req.query.endDate) filters.endDate = new Date(req.query.endDate as string);
+      if (req.query.limit) filters.limit = parseInt(req.query.limit as string, 10);
+      if (req.query.offset) filters.offset = parseInt(req.query.offset as string, 10);
+      
+      const [orders, total] = await Promise.all([
+        storage.getOrderHistory(filters),
+        storage.getOrderHistoryCount(filters)
+      ]);
+      
+      res.json({ orders, total });
+    } catch (error) {
+      console.error("Error fetching order history:", error);
+      res.status(500).json({ error: "Failed to fetch order history" });
+    }
+  });
+  
+  app.get("/api/orders/:id/detail", async (req, res) => {
+    try {
+      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const orderId = parseInt(req.params.id, 10);
+      if (isNaN(orderId)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+      
+      const detail = await storage.getOrderDetail(orderId);
+      if (!detail) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      res.json(detail);
+    } catch (error) {
+      console.error("Error fetching order detail:", error);
+      res.status(500).json({ error: "Failed to fetch order detail" });
+    }
+  });
+  
+  app.get("/api/orders/history/export", async (req, res) => {
+    try {
+      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const filters: any = { limit: 1000 };
+      
+      if (req.query.orderNumber) filters.orderNumber = req.query.orderNumber as string;
+      if (req.query.customerName) filters.customerName = req.query.customerName as string;
+      if (req.query.sku) filters.sku = req.query.sku as string;
+      if (req.query.pickerId) filters.pickerId = req.query.pickerId as string;
+      if (req.query.priority) filters.priority = req.query.priority as string;
+      if (req.query.status) {
+        const statusParam = req.query.status as string;
+        filters.status = statusParam.split(',');
+      }
+      if (req.query.startDate) filters.startDate = new Date(req.query.startDate as string);
+      if (req.query.endDate) filters.endDate = new Date(req.query.endDate as string);
+      
+      const orders = await storage.getOrderHistory(filters);
+      
+      const csvData = orders.map(order => ({
+        orderNumber: order.orderNumber,
+        customerName: order.customerName,
+        status: order.status,
+        priority: order.priority,
+        itemCount: order.itemCount,
+        pickedCount: order.pickedCount,
+        picker: order.pickerName || 'N/A',
+        createdAt: order.createdAt?.toISOString() || '',
+        completedAt: order.completedAt?.toISOString() || '',
+        shopifyOrderId: order.shopifyOrderId,
+      }));
+      
+      const csv = Papa.unparse(csvData);
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=order-history-${new Date().toISOString().split('T')[0]}.csv`);
+      res.send(csv);
+    } catch (error) {
+      console.error("Error exporting order history:", error);
+      res.status(500).json({ error: "Failed to export order history" });
+    }
+  });
+
   // Migrate existing product_locations to warehouse_locations (one-time sync)
   app.post("/api/inventory/migrate-locations", async (req, res) => {
     try {

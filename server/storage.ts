@@ -156,6 +156,38 @@ export interface IStorage {
     orderNumber?: string;
     sku?: string;
   }): Promise<number>;
+  
+  // ============================================
+  // ORDER HISTORY
+  // ============================================
+  getOrderHistory(filters: {
+    orderNumber?: string;
+    customerName?: string;
+    sku?: string;
+    pickerId?: string;
+    status?: string[];
+    priority?: string;
+    startDate?: Date;
+    endDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<(Order & { items: OrderItem[]; pickerName?: string })[]>;
+  getOrderHistoryCount(filters: {
+    orderNumber?: string;
+    customerName?: string;
+    sku?: string;
+    pickerId?: string;
+    status?: string[];
+    priority?: string;
+    startDate?: Date;
+    endDate?: Date;
+  }): Promise<number>;
+  getOrderDetail(orderId: number): Promise<{
+    order: Order;
+    items: OrderItem[];
+    pickingLogs: PickingLog[];
+    picker?: { id: string; displayName: string | null };
+  } | null>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1028,6 +1060,182 @@ export class DatabaseStorage implements IStorage {
     
     const result = await query;
     return Number(result[0]?.count || 0);
+  }
+  
+  // ============================================
+  // ORDER HISTORY
+  // ============================================
+  
+  async getOrderHistory(filters: {
+    orderNumber?: string;
+    customerName?: string;
+    sku?: string;
+    pickerId?: string;
+    status?: string[];
+    priority?: string;
+    startDate?: Date;
+    endDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<(Order & { items: OrderItem[]; pickerName?: string })[]> {
+    const conditions = [];
+    
+    // Default to completed/shipped/cancelled orders (historical)
+    const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
+    const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
+    conditions.push(inArray(orders.status, statuses as any));
+    
+    if (filters.orderNumber) {
+      conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
+    }
+    if (filters.customerName) {
+      conditions.push(like(orders.customerName, `%${filters.customerName}%`));
+    }
+    if (filters.pickerId) {
+      conditions.push(eq(orders.assignedPickerId, filters.pickerId));
+    }
+    if (filters.priority) {
+      conditions.push(eq(orders.priority, filters.priority));
+    }
+    if (filters.startDate) {
+      conditions.push(gte(orders.completedAt, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(orders.completedAt, filters.endDate));
+    }
+    
+    // If filtering by SKU, find matching order IDs first (before pagination)
+    if (filters.sku) {
+      const skuFilter = filters.sku.toUpperCase();
+      const ordersWithSku = await db
+        .select({ orderId: orderItems.orderId })
+        .from(orderItems)
+        .where(like(orderItems.sku, `%${skuFilter}%`));
+      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
+      
+      if (matchingOrderIds.length === 0) {
+        return []; // No orders match the SKU filter
+      }
+      conditions.push(inArray(orders.id, matchingOrderIds));
+    }
+    
+    let query = db.select().from(orders);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as any;
+    }
+    
+    query = query.orderBy(desc(orders.completedAt), desc(orders.createdAt)) as any;
+    
+    const limit = filters.limit || 50;
+    query = query.limit(limit) as any;
+    
+    if (filters.offset) {
+      query = query.offset(filters.offset) as any;
+    }
+    
+    const orderList = await query;
+    
+    // Get items and picker names for each order
+    const results: (Order & { items: OrderItem[]; pickerName?: string })[] = [];
+    
+    for (const order of orderList) {
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+      
+      let pickerName: string | undefined;
+      if (order.assignedPickerId) {
+        const picker = await db.select({ displayName: users.displayName }).from(users).where(eq(users.id, order.assignedPickerId));
+        pickerName = picker[0]?.displayName || undefined;
+      }
+      
+      results.push({ ...order, items, pickerName });
+    }
+    
+    return results;
+  }
+  
+  async getOrderHistoryCount(filters: {
+    orderNumber?: string;
+    customerName?: string;
+    sku?: string;
+    pickerId?: string;
+    status?: string[];
+    priority?: string;
+    startDate?: Date;
+    endDate?: Date;
+  }): Promise<number> {
+    const conditions = [];
+    
+    const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
+    const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
+    conditions.push(inArray(orders.status, statuses as any));
+    
+    if (filters.orderNumber) {
+      conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
+    }
+    if (filters.customerName) {
+      conditions.push(like(orders.customerName, `%${filters.customerName}%`));
+    }
+    if (filters.pickerId) {
+      conditions.push(eq(orders.assignedPickerId, filters.pickerId));
+    }
+    if (filters.priority) {
+      conditions.push(eq(orders.priority, filters.priority));
+    }
+    if (filters.startDate) {
+      conditions.push(gte(orders.completedAt, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(orders.completedAt, filters.endDate));
+    }
+    
+    // If filtering by SKU, we need a subquery approach
+    if (filters.sku) {
+      const skuFilter = filters.sku.toUpperCase();
+      const ordersWithSku = await db
+        .select({ orderId: orderItems.orderId })
+        .from(orderItems)
+        .where(like(orderItems.sku, `%${skuFilter}%`));
+      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
+      
+      if (matchingOrderIds.length === 0) return 0;
+      conditions.push(inArray(orders.id, matchingOrderIds));
+    }
+    
+    let query = db.select({ count: sql<number>`count(*)` }).from(orders);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as any;
+    }
+    
+    const result = await query;
+    return Number(result[0]?.count || 0);
+  }
+  
+  async getOrderDetail(orderId: number): Promise<{
+    order: Order;
+    items: OrderItem[];
+    pickingLogs: PickingLog[];
+    picker?: { id: string; displayName: string | null };
+  } | null> {
+    const order = await db.select().from(orders).where(eq(orders.id, orderId));
+    if (order.length === 0) return null;
+    
+    const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+    const logs = await db.select().from(pickingLogs).where(eq(pickingLogs.orderId, orderId)).orderBy(asc(pickingLogs.timestamp));
+    
+    let picker: { id: string; displayName: string | null } | undefined;
+    if (order[0].assignedPickerId) {
+      const pickerResult = await db.select({ id: users.id, displayName: users.displayName }).from(users).where(eq(users.id, order[0].assignedPickerId));
+      picker = pickerResult[0];
+    }
+    
+    return {
+      order: order[0],
+      items,
+      pickingLogs: logs,
+      picker
+    };
   }
 }
 
