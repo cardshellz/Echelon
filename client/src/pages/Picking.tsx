@@ -112,7 +112,7 @@ async function updateOrderItem(
   status: ItemStatus, 
   pickedQuantity?: number, 
   shortReason?: string,
-  pickMethod?: "scan" | "manual" | "pick_all" | "button"
+  pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short"
 ): Promise<OrderItem> {
   const res = await fetch(`/api/picking/items/${itemId}`, {
     method: "PATCH",
@@ -667,7 +667,7 @@ export default function Picking() {
       status: ItemStatus; 
       pickedQuantity?: number; 
       shortReason?: string;
-      pickMethod?: "scan" | "manual" | "pick_all" | "button";
+      pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
     }) => updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod),
     onSuccess: (updatedItem) => {
       // Update the query cache with the new item status
@@ -1147,7 +1147,7 @@ export default function Picking() {
         status: "short" as ItemStatus, 
         pickedQuantity: shortQty,
         shortReason: shortPickReason || undefined,
-        pickMethod: "button"
+        pickMethod: "short"
       });
     }
     
@@ -1540,7 +1540,7 @@ export default function Picking() {
         itemId: item.id, 
         status: "short" as ItemStatus, 
         pickedQuantity: 0,
-        pickMethod: "button"
+        pickMethod: "short"
       });
     }
     

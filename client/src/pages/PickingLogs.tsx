@@ -333,11 +333,15 @@ export default function PickingLogs() {
                                 "text-xs",
                                 log.pickMethod === "scan" && "bg-green-50 text-green-700 border-green-200",
                                 log.pickMethod === "pick_all" && "bg-amber-50 text-amber-700 border-amber-200",
+                                log.pickMethod === "short" && "bg-red-50 text-red-700 border-red-200",
                                 log.pickMethod === "button" && "bg-blue-50 text-blue-700 border-blue-200",
                                 log.pickMethod === "manual" && "bg-gray-50 text-gray-700 border-gray-200"
                               )}
                             >
-                              {log.pickMethod === "pick_all" ? "Pick All" : log.pickMethod}
+                              {log.pickMethod === "pick_all" ? "Pick All" : 
+                               log.pickMethod === "short" ? "Short" :
+                               log.pickMethod === "scan" ? "Scan" : 
+                               log.pickMethod}
                             </Badge>
                           ) : "—"}
                         </td>
