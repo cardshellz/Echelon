@@ -52,6 +52,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { Order, OrderItem, PickingLog } from "@shared/schema";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 type OrderWithItems = Order & { items: OrderItem[]; pickerName?: string };
 
@@ -177,6 +178,7 @@ export default function OrderHistory() {
   const [page, setPage] = useState(0);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
+  const isMobile = useIsMobile();
   const pageSize = 25;
 
   const getDateRange = () => {
@@ -551,9 +553,9 @@ export default function OrderHistory() {
         )}
       </div>
 
-      {selectedOrderId && (
+      {selectedOrderId && isMobile && (
         <Sheet open={!!selectedOrderId} onOpenChange={() => setSelectedOrderId(null)}>
-          <SheetContent className="w-full sm:max-w-lg lg:hidden p-0">
+          <SheetContent className="w-full sm:max-w-lg p-0">
             <OrderDetailPanel
               detail={orderDetail}
               loading={detailLoading}
