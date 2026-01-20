@@ -25,6 +25,8 @@ import {
   type InsertChannelFeed,
   type PickingLog,
   type InsertPickingLog,
+  type AdjustmentReason,
+  type InsertAdjustmentReason,
   users,
   productLocations,
   orders,
@@ -35,7 +37,8 @@ import {
   inventoryLevels,
   inventoryTransactions,
   channelFeeds,
-  pickingLogs
+  pickingLogs,
+  adjustmentReasons
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -126,6 +129,22 @@ export interface IStorage {
   // Inventory Transactions
   createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction>;
   getInventoryTransactionsByItemId(inventoryItemId: number, limit?: number): Promise<InventoryTransaction[]>;
+  getInventoryTransactions(filters: {
+    batchId?: string;
+    transactionType?: string;
+    startDate?: Date;
+    endDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<InventoryTransaction[]>;
+  
+  // Adjustment Reasons
+  getAllAdjustmentReasons(): Promise<AdjustmentReason[]>;
+  getActiveAdjustmentReasons(): Promise<AdjustmentReason[]>;
+  getAdjustmentReasonByCode(code: string): Promise<AdjustmentReason | undefined>;
+  getAdjustmentReasonById(id: number): Promise<AdjustmentReason | undefined>;
+  createAdjustmentReason(reason: InsertAdjustmentReason): Promise<AdjustmentReason>;
+  updateAdjustmentReason(id: number, updates: Partial<InsertAdjustmentReason>): Promise<AdjustmentReason | null>;
   
   // Channel Feeds
   getChannelFeedsByVariantId(variantId: number): Promise<ChannelFeed[]>;
@@ -898,6 +917,77 @@ export class DatabaseStorage implements IStorage {
       .where(eq(inventoryTransactions.inventoryItemId, inventoryItemId))
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(limit);
+  }
+
+  async getInventoryTransactions(filters: {
+    batchId?: string;
+    transactionType?: string;
+    startDate?: Date;
+    endDate?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<InventoryTransaction[]> {
+    const conditions = [];
+    if (filters.batchId) conditions.push(eq(inventoryTransactions.batchId, filters.batchId));
+    if (filters.transactionType) conditions.push(eq(inventoryTransactions.transactionType, filters.transactionType));
+    if (filters.startDate) conditions.push(gte(inventoryTransactions.createdAt, filters.startDate));
+    if (filters.endDate) conditions.push(lte(inventoryTransactions.createdAt, filters.endDate));
+    
+    let query = db
+      .select()
+      .from(inventoryTransactions)
+      .orderBy(desc(inventoryTransactions.createdAt))
+      .limit(filters.limit || 100)
+      .offset(filters.offset || 0);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    
+    return await query;
+  }
+
+  // Adjustment Reasons
+  async getAllAdjustmentReasons(): Promise<AdjustmentReason[]> {
+    return await db.select().from(adjustmentReasons).orderBy(asc(adjustmentReasons.sortOrder));
+  }
+
+  async getActiveAdjustmentReasons(): Promise<AdjustmentReason[]> {
+    return await db
+      .select()
+      .from(adjustmentReasons)
+      .where(eq(adjustmentReasons.isActive, 1))
+      .orderBy(asc(adjustmentReasons.sortOrder));
+  }
+
+  async getAdjustmentReasonByCode(code: string): Promise<AdjustmentReason | undefined> {
+    const result = await db
+      .select()
+      .from(adjustmentReasons)
+      .where(eq(adjustmentReasons.code, code.toUpperCase()));
+    return result[0];
+  }
+
+  async getAdjustmentReasonById(id: number): Promise<AdjustmentReason | undefined> {
+    const result = await db.select().from(adjustmentReasons).where(eq(adjustmentReasons.id, id));
+    return result[0];
+  }
+
+  async createAdjustmentReason(reason: InsertAdjustmentReason): Promise<AdjustmentReason> {
+    const result = await db.insert(adjustmentReasons).values({
+      ...reason,
+      code: reason.code.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  async updateAdjustmentReason(id: number, updates: Partial<InsertAdjustmentReason>): Promise<AdjustmentReason | null> {
+    const result = await db
+      .update(adjustmentReasons)
+      .set(updates)
+      .where(eq(adjustmentReasons.id, id))
+      .returning();
+    return result[0] || null;
   }
 
   // Channel Feeds

@@ -2656,6 +2656,96 @@ export async function registerRoutes(
     }
   });
 
+  // Adjustment Reasons API
+  app.get("/api/inventory/adjustment-reasons", async (req, res) => {
+    try {
+      const reasons = await storage.getActiveAdjustmentReasons();
+      res.json(reasons);
+    } catch (error) {
+      console.error("Error fetching adjustment reasons:", error);
+      res.status(500).json({ error: "Failed to fetch adjustment reasons" });
+    }
+  });
+
+  app.post("/api/inventory/adjustment-reasons", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      const reason = await storage.createAdjustmentReason(req.body);
+      res.status(201).json(reason);
+    } catch (error) {
+      console.error("Error creating adjustment reason:", error);
+      res.status(500).json({ error: "Failed to create adjustment reason" });
+    }
+  });
+
+  // Seed default adjustment reasons
+  app.post("/api/inventory/adjustment-reasons/seed", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const defaultReasons = [
+        { code: "CSV_UPLOAD", name: "CSV Bulk Upload", description: "Inventory updated via CSV file upload", transactionType: "csv_upload", sortOrder: 1 },
+        { code: "CYCLE_COUNT", name: "Cycle Count", description: "Physical count adjustment during cycle counting", transactionType: "adjustment", requiresNote: 1, sortOrder: 2 },
+        { code: "RECEIVING", name: "Receiving", description: "Goods received from purchase order", transactionType: "receipt", sortOrder: 3 },
+        { code: "DAMAGED", name: "Damaged Goods", description: "Items removed due to damage", transactionType: "adjustment", requiresNote: 1, sortOrder: 4 },
+        { code: "EXPIRED", name: "Expired", description: "Items removed due to expiration", transactionType: "adjustment", sortOrder: 5 },
+        { code: "RETURN", name: "Customer Return", description: "Items returned by customer", transactionType: "return", sortOrder: 6 },
+        { code: "TRANSFER", name: "Location Transfer", description: "Items moved between locations", transactionType: "transfer", sortOrder: 7 },
+        { code: "SHRINKAGE", name: "Shrinkage/Loss", description: "Unexplained inventory loss", transactionType: "adjustment", requiresNote: 1, sortOrder: 8 },
+        { code: "FOUND", name: "Found Inventory", description: "Previously unaccounted inventory found", transactionType: "adjustment", sortOrder: 9 },
+        { code: "SHOPIFY_SYNC", name: "Shopify Sync", description: "Adjustment from Shopify inventory sync", transactionType: "adjustment", sortOrder: 10 },
+        { code: "MANUAL_ADJ", name: "Manual Adjustment", description: "Manual inventory correction", transactionType: "adjustment", requiresNote: 1, sortOrder: 11 },
+        { code: "PICKING", name: "Order Picking", description: "Items picked for customer order", transactionType: "pick", sortOrder: 12 },
+        { code: "SHORT_PICK", name: "Short Pick", description: "Unable to pick full quantity", transactionType: "pick", requiresNote: 1, sortOrder: 13 },
+      ];
+
+      const created = [];
+      const skipped = [];
+
+      for (const reason of defaultReasons) {
+        const existing = await storage.getAdjustmentReasonByCode(reason.code);
+        if (existing) {
+          skipped.push(reason.code);
+        } else {
+          const newReason = await storage.createAdjustmentReason(reason);
+          created.push(newReason);
+        }
+      }
+
+      res.json({ 
+        message: `Seeded ${created.length} reason codes, skipped ${skipped.length} existing`,
+        created: created.map(r => r.code),
+        skipped
+      });
+    } catch (error) {
+      console.error("Error seeding adjustment reasons:", error);
+      res.status(500).json({ error: "Failed to seed adjustment reasons" });
+    }
+  });
+
+  // Inventory Transactions History
+  app.get("/api/inventory/transactions", async (req, res) => {
+    try {
+      const { batchId, transactionType, startDate, endDate, limit, offset } = req.query;
+      const transactions = await storage.getInventoryTransactions({
+        batchId: batchId as string,
+        transactionType: transactionType as string,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+      res.json(transactions);
+    } catch (error) {
+      console.error("Error fetching transactions:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  });
+
   // CSV Inventory Upload - bulk update inventory levels
   app.post("/api/inventory/upload-csv", upload.single("file"), async (req, res) => {
     try {
@@ -2685,6 +2775,18 @@ export async function registerRoutes(
       const userId = req.session.user.id;
       let successCount = 0;
       let errorCount = 0;
+
+      // Generate a unique batch ID for this upload
+      const batchId = `CSV-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      
+      // Try to get the CSV_UPLOAD reason code (optional - table may not exist yet)
+      let csvReason: any = null;
+      try {
+        csvReason = await storage.getAdjustmentReasonByCode("CSV_UPLOAD");
+      } catch (err) {
+        // Reason codes table not set up yet - continue without it
+        console.log("Note: adjustment_reasons table not available, continuing without reason codes");
+      }
 
       for (let i = 0; i < parsed.data.length; i++) {
         const row = parsed.data[i];
@@ -2772,17 +2874,29 @@ export async function registerRoutes(
             });
           }
 
-          // Log the transaction
+          // Log the transaction with before/after snapshots
+          const baseQtyBefore = existingLevel ? existingLevel.onHandBase : 0;
+          const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
+          const baseQtyDelta = baseUnits - baseQtyBefore;
+          const variantQtyDelta = quantity - variantQtyBefore;
+
           await inventoryService.logTransaction({
             inventoryItemId: inventoryItem.id,
             warehouseLocationId: warehouseLocation.id,
             variantId: variant?.id,
-            transactionType: "adjustment",
-            baseQtyDelta: existingLevel ? (baseUnits - existingLevel.onHandBase) : baseUnits,
+            transactionType: "csv_upload",
+            reasonId: csvReason?.id,
+            baseQtyDelta,
+            variantQtyDelta,
+            baseQtyBefore,
+            baseQtyAfter: baseUnits,
+            variantQtyBefore,
+            variantQtyAfter: quantity,
+            batchId,
             targetState: "on_hand",
             referenceType: "csv_import",
-            referenceId: `CSV-${new Date().toISOString().slice(0, 10)}`,
-            notes: `CSV import: Set ${sku} at ${locationCode} to ${quantity}`,
+            referenceId: batchId,
+            notes: `CSV import: Set ${sku} at ${locationCode} to ${quantity} units (was ${variantQtyBefore})`,
             userId,
             isImplicit: 0,
           });
@@ -2797,6 +2911,7 @@ export async function registerRoutes(
 
       res.json({
         success: true,
+        batchId,
         summary: {
           totalRows: parsed.data.length,
           successCount,

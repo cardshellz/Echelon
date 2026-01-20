@@ -334,8 +334,30 @@ export const transactionTypeEnum = [
   "unreserve",    // Reservation released (cancel, short)
   "ship",         // Shipped out
   "return",       // Customer return (future)
+  "csv_upload",   // Bulk update from CSV file
 ] as const;
 export type TransactionType = typeof transactionTypeEnum[number];
+
+// Standardized adjustment reasons lookup table
+export const adjustmentReasons = pgTable("adjustment_reasons", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 30 }).notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  transactionType: varchar("transaction_type", { length: 30 }).notNull(),
+  requiresNote: integer("requires_note").notNull().default(0),
+  isActive: integer("is_active").notNull().default(1),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAdjustmentReasonSchema = createInsertSchema(adjustmentReasons).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertAdjustmentReason = z.infer<typeof insertAdjustmentReasonSchema>;
+export type AdjustmentReason = typeof adjustmentReasons.$inferSelect;
 
 // Inventory transactions ledger (audit trail)
 export const inventoryTransactions = pgTable("inventory_transactions", {
@@ -344,7 +366,14 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   variantId: integer("variant_id").references(() => uomVariants.id),
   warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id),
   transactionType: varchar("transaction_type", { length: 30 }).notNull(),
+  reasonId: integer("reason_id").references(() => adjustmentReasons.id),
   baseQtyDelta: integer("base_qty_delta").notNull(), // Positive = add, negative = remove
+  variantQtyDelta: integer("variant_qty_delta"), // Delta in variant units
+  baseQtyBefore: integer("base_qty_before"), // Snapshot: on_hand before this change
+  baseQtyAfter: integer("base_qty_after"), // Snapshot: on_hand after this change
+  variantQtyBefore: integer("variant_qty_before"), // Snapshot: variant qty before
+  variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after
+  batchId: varchar("batch_id", { length: 50 }), // Groups transactions from same operation (e.g., CSV upload)
   sourceState: varchar("source_state", { length: 20 }), // "on_hand", "reserved", "picked", etc.
   targetState: varchar("target_state", { length: 20 }), // "reserved", "picked", "shipped", etc.
   orderId: integer("order_id").references(() => orders.id), // Link to order if applicable
