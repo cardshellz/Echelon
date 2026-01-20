@@ -420,3 +420,246 @@ export const insertChannelFeedSchema = createInsertSchema(channelFeeds).omit({
 
 export type InsertChannelFeed = z.infer<typeof insertChannelFeedSchema>;
 export type ChannelFeed = typeof channelFeeds.$inferSelect;
+
+// ============================================
+// MULTI-CHANNEL INFRASTRUCTURE
+// ============================================
+
+// Channel types and ownership
+export const channelOwnershipEnum = ["internal", "partner"] as const;
+export type ChannelOwnership = typeof channelOwnershipEnum[number];
+
+export const channelProviderEnum = ["shopify", "ebay", "amazon", "etsy", "manual"] as const;
+export type ChannelProvider = typeof channelProviderEnum[number];
+
+export const channelStatusEnum = ["active", "paused", "pending_setup", "error"] as const;
+export type ChannelStatus = typeof channelStatusEnum[number];
+
+// Channels - the core entity for all sales channels
+export const channels = pgTable("channels", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name", { length: 100 }).notNull(),
+  type: varchar("type", { length: 20 }).notNull().default("internal"), // internal or partner
+  provider: varchar("provider", { length: 30 }).notNull(), // shopify, ebay, amazon, etc.
+  status: varchar("status", { length: 20 }).notNull().default("pending_setup"),
+  isDefault: integer("is_default").notNull().default(0), // 1 = primary channel for this provider
+  priority: integer("priority").notNull().default(0), // Higher = sync first
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelSchema = createInsertSchema(channels).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannel = z.infer<typeof insertChannelSchema>;
+export type Channel = typeof channels.$inferSelect;
+
+// Channel connections - credentials and API settings per channel
+export const channelConnections = pgTable("channel_connections", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  shopDomain: varchar("shop_domain", { length: 255 }), // e.g., "mystore.myshopify.com"
+  accessToken: text("access_token"), // Encrypted in production
+  refreshToken: text("refresh_token"),
+  webhookSecret: varchar("webhook_secret", { length: 255 }),
+  apiVersion: varchar("api_version", { length: 20 }),
+  scopes: text("scopes"), // Comma-separated OAuth scopes
+  expiresAt: timestamp("expires_at"),
+  lastSyncAt: timestamp("last_sync_at"),
+  syncStatus: varchar("sync_status", { length: 20 }).default("never"), // ok, error, never, syncing
+  syncError: text("sync_error"),
+  metadata: jsonb("metadata"), // Provider-specific settings
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelConnectionSchema = createInsertSchema(channelConnections).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelConnection = z.infer<typeof insertChannelConnectionSchema>;
+export type ChannelConnection = typeof channelConnections.$inferSelect;
+
+// Partner profiles - extra info for dropship/wholesale partners
+export const partnerProfiles = pgTable("partner_profiles", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }).unique(),
+  companyName: varchar("company_name", { length: 200 }).notNull(),
+  contactName: varchar("contact_name", { length: 100 }),
+  contactEmail: varchar("contact_email", { length: 255 }),
+  contactPhone: varchar("contact_phone", { length: 50 }),
+  billingEmail: varchar("billing_email", { length: 255 }),
+  discountPercent: integer("discount_percent").default(0), // Wholesale discount off retail
+  markupPercent: integer("markup_percent").default(0), // Their markup on cost
+  slaDays: integer("sla_days").default(3), // Fulfillment SLA in business days
+  allowBackorder: integer("allow_backorder").notNull().default(0),
+  autoFulfill: integer("auto_fulfill").notNull().default(0), // Auto-process orders
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertPartnerProfileSchema = createInsertSchema(partnerProfiles).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertPartnerProfile = z.infer<typeof insertPartnerProfileSchema>;
+export type PartnerProfile = typeof partnerProfiles.$inferSelect;
+
+// Channel reservations - priority stock allocation per channel
+export const channelReservations = pgTable("channel_reservations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }),
+  reserveBaseQty: integer("reserve_base_qty").notNull().default(0), // Base units reserved for this channel
+  minStockBase: integer("min_stock_base").default(0), // Minimum stock to maintain (alert threshold)
+  maxStockBase: integer("max_stock_base"), // Maximum to list (cap availability)
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelReservationSchema = createInsertSchema(channelReservations).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelReservation = z.infer<typeof insertChannelReservationSchema>;
+export type ChannelReservation = typeof channelReservations.$inferSelect;
+
+// ============================================
+// CATALOG / LISTING MANAGEMENT
+// ============================================
+
+// Catalog products - master listing content (source of truth)
+export const catalogProducts = pgTable("catalog_products", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }).unique(),
+  title: varchar("title", { length: 500 }).notNull(),
+  description: text("description"), // HTML/markdown
+  bulletPoints: jsonb("bullet_points"), // Array of feature bullet points
+  category: varchar("category", { length: 200 }),
+  subcategory: varchar("subcategory", { length: 200 }),
+  brand: varchar("brand", { length: 100 }),
+  manufacturer: varchar("manufacturer", { length: 200 }),
+  tags: jsonb("tags"), // Array of tags
+  seoTitle: varchar("seo_title", { length: 200 }),
+  seoDescription: text("seo_description"),
+  status: varchar("status", { length: 20 }).notNull().default("draft"), // draft, active, archived
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertCatalogProductSchema = createInsertSchema(catalogProducts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertCatalogProduct = z.infer<typeof insertCatalogProductSchema>;
+export type CatalogProduct = typeof catalogProducts.$inferSelect;
+
+// Catalog assets - master media library
+export const catalogAssets = pgTable("catalog_assets", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  catalogProductId: integer("catalog_product_id").notNull().references(() => catalogProducts.id, { onDelete: "cascade" }),
+  assetType: varchar("asset_type", { length: 20 }).notNull().default("image"), // image, video, document
+  url: text("url").notNull(),
+  altText: varchar("alt_text", { length: 500 }),
+  position: integer("position").notNull().default(0), // Sort order
+  isPrimary: integer("is_primary").notNull().default(0), // 1 = main image
+  width: integer("width"),
+  height: integer("height"),
+  fileSize: integer("file_size"), // Bytes
+  mimeType: varchar("mime_type", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertCatalogAssetSchema = createInsertSchema(catalogAssets).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertCatalogAsset = z.infer<typeof insertCatalogAssetSchema>;
+export type CatalogAsset = typeof catalogAssets.$inferSelect;
+
+// Channel product overrides - per-channel content customization
+export const channelProductOverrides = pgTable("channel_product_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  catalogProductId: integer("catalog_product_id").notNull().references(() => catalogProducts.id, { onDelete: "cascade" }),
+  titleOverride: varchar("title_override", { length: 500 }), // NULL = use master
+  descriptionOverride: text("description_override"),
+  bulletPointsOverride: jsonb("bullet_points_override"),
+  categoryOverride: varchar("category_override", { length: 200 }), // Channel-specific category mapping
+  tagsOverride: jsonb("tags_override"),
+  isListed: integer("is_listed").notNull().default(1), // 0 = hide from this channel
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelProductOverrideSchema = createInsertSchema(channelProductOverrides).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelProductOverride = z.infer<typeof insertChannelProductOverrideSchema>;
+export type ChannelProductOverride = typeof channelProductOverrides.$inferSelect;
+
+// Channel pricing - per-channel, per-variant pricing
+export const channelPricing = pgTable("channel_pricing", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }),
+  price: integer("price").notNull(), // In cents
+  compareAtPrice: integer("compare_at_price"), // MSRP / strikethrough price
+  cost: integer("cost"), // For margin tracking
+  currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelPricingSchema = createInsertSchema(channelPricing).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelPricing = z.infer<typeof insertChannelPricingSchema>;
+export type ChannelPricing = typeof channelPricing.$inferSelect;
+
+// Channel listings - external IDs after pushing to channel
+export const channelListings = pgTable("channel_listings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }),
+  externalProductId: varchar("external_product_id", { length: 100 }),
+  externalVariantId: varchar("external_variant_id", { length: 100 }),
+  externalSku: varchar("external_sku", { length: 100 }),
+  externalUrl: text("external_url"), // Link to listing on marketplace
+  lastSyncedQty: integer("last_synced_qty"),
+  lastSyncedPrice: integer("last_synced_price"), // In cents
+  lastSyncedAt: timestamp("last_synced_at"),
+  syncStatus: varchar("sync_status", { length: 20 }).default("pending"), // pending, synced, error
+  syncError: text("sync_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertChannelListingSchema = createInsertSchema(channelListings).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelListing = z.infer<typeof insertChannelListingSchema>;
+export type ChannelListing = typeof channelListings.$inferSelect;
