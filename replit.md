@@ -95,9 +95,13 @@ The system includes foundational tables for multi-channel sales and dropship par
 #### Catalog Management
 - **catalog_products**: Master listing content (title, description, bullets, SEO)
 - **catalog_assets**: Master media library (images, videos)
-- **channel_product_overrides**: Per-channel content customization (NULL = use master)
+- **channel_product_overrides**: Per-channel product content customization (NULL = use master)
+- **channel_variant_overrides**: Per-channel variant customization (name, SKU, barcode)
+- **channel_asset_overrides**: Per-channel media customization (hide/show, reorder)
 - **channel_pricing**: Per-channel, per-variant pricing
 - **channel_listings**: External IDs after pushing to marketplace
+
+All override and allocation tables enforce uniqueness constraints (one row per channel+entity) to ensure correct ATP calculations and sync operations.
 
 #### ATP Calculation with Reserves
 ```

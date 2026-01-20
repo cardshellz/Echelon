@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -524,7 +524,9 @@ export const channelReservations = pgTable("channel_reservations", {
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_reservations_channel_item_idx").on(table.channelId, table.inventoryItemId),
+]);
 
 export const insertChannelReservationSchema = createInsertSchema(channelReservations).omit({
   id: true,
@@ -604,7 +606,9 @@ export const channelProductOverrides = pgTable("channel_product_overrides", {
   isListed: integer("is_listed").notNull().default(1), // 0 = hide from this channel
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_product_overrides_channel_product_idx").on(table.channelId, table.catalogProductId),
+]);
 
 export const insertChannelProductOverrideSchema = createInsertSchema(channelProductOverrides).omit({
   id: true,
@@ -626,7 +630,9 @@ export const channelPricing = pgTable("channel_pricing", {
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_pricing_channel_variant_idx").on(table.channelId, table.variantId),
+]);
 
 export const insertChannelPricingSchema = createInsertSchema(channelPricing).omit({
   id: true,
@@ -653,7 +659,9 @@ export const channelListings = pgTable("channel_listings", {
   syncError: text("sync_error"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  uniqueIndex("channel_listings_channel_variant_idx").on(table.channelId, table.variantId),
+]);
 
 export const insertChannelListingSchema = createInsertSchema(channelListings).omit({
   id: true,
@@ -663,3 +671,52 @@ export const insertChannelListingSchema = createInsertSchema(channelListings).om
 
 export type InsertChannelListing = z.infer<typeof insertChannelListingSchema>;
 export type ChannelListing = typeof channelListings.$inferSelect;
+
+// Channel variant overrides - per-channel variant-level customization
+export const channelVariantOverrides = pgTable("channel_variant_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }),
+  nameOverride: varchar("name_override", { length: 500 }), // NULL = use master
+  skuOverride: varchar("sku_override", { length: 100 }), // Channel-specific SKU
+  barcodeOverride: varchar("barcode_override", { length: 100 }),
+  weightOverride: integer("weight_override"), // In grams
+  isListed: integer("is_listed").notNull().default(1), // 0 = hide this variant from channel
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("channel_variant_overrides_channel_variant_idx").on(table.channelId, table.variantId),
+]);
+
+export const insertChannelVariantOverrideSchema = createInsertSchema(channelVariantOverrides).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelVariantOverride = z.infer<typeof insertChannelVariantOverrideSchema>;
+export type ChannelVariantOverride = typeof channelVariantOverrides.$inferSelect;
+
+// Channel asset overrides - per-channel media customization
+export const channelAssetOverrides = pgTable("channel_asset_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  catalogAssetId: integer("catalog_asset_id").notNull().references(() => catalogAssets.id, { onDelete: "cascade" }),
+  urlOverride: text("url_override"), // Channel-specific image URL
+  altTextOverride: varchar("alt_text_override", { length: 500 }),
+  positionOverride: integer("position_override"), // Different sort order per channel
+  isIncluded: integer("is_included").notNull().default(1), // 0 = exclude this asset from channel
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("channel_asset_overrides_channel_asset_idx").on(table.channelId, table.catalogAssetId),
+]);
+
+export const insertChannelAssetOverrideSchema = createInsertSchema(channelAssetOverrides).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelAssetOverride = z.infer<typeof insertChannelAssetOverrideSchema>;
+export type ChannelAssetOverride = typeof channelAssetOverrides.$inferSelect;
