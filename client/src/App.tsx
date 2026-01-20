@@ -19,6 +19,7 @@ import OrderHistory from "@/pages/OrderHistory";
 import Locations from "@/pages/Locations";
 import Integrations from "@/pages/Integrations";
 import Users from "@/pages/Users";
+import Roles from "@/pages/Roles";
 import Login from "@/pages/Login";
 import NotFound from "@/pages/not-found";
 
@@ -105,6 +106,9 @@ function Router() {
         </Route>
         <Route path="/users">
           <ProtectedRoute component={Users} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/roles">
+          <ProtectedRoute component={Roles} allowedRoles={["admin"]} />
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />

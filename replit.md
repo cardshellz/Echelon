@@ -33,8 +33,40 @@ Key tables include `users` (authentication with role-based access), `product_loc
 
 ### Authentication & Authorization
 - Session-based authentication using `express-session`.
-- Role-based access control with `admin`, `lead`, and `picker` roles.
 - Default users: admin/admin123 and picker1/picker123.
+
+#### Role-Based Access Control (RBAC)
+The system implements a flexible, database-driven RBAC system with the following components:
+
+**Database Tables:**
+- `auth_roles`: Custom roles created by admin (e.g., "Warehouse Manager", "Inventory Clerk")
+- `auth_permissions`: Individual permissions as `resource:action` pairs
+- `auth_role_permissions`: Links roles to their allowed permissions
+- `auth_user_roles`: Assigns roles to users (supports multiple roles per user)
+
+**Permission Model:**
+Permissions follow a `resource:action` pattern for easy extension:
+| Resource | Actions | Description |
+|----------|---------|-------------|
+| dashboard | view | Dashboard access |
+| inventory | view, create, edit, adjust, upload, receive | Inventory management |
+| orders | view, claim, edit, cancel, hold, priority, resolve_exception | Order management |
+| picking | view, perform, complete | Picking operations |
+| channels | view, create, edit, sync, delete | Multi-channel management |
+| reports | view, export | Reporting access |
+| users | view, create, edit, delete, manage_roles | User administration |
+| roles | view, create, edit, delete | Role management |
+| settings | view, edit | System settings |
+
+**System Roles (built-in, cannot be deleted):**
+- Administrator: Full system access
+- Team Lead: Manage picking operations and resolve exceptions
+- Picker: Perform picking operations only
+
+**Implementation:**
+- Backend: `requirePermission(resource, action)` middleware on API routes
+- Frontend: `hasPermission()` and `hasAnyPermission()` helpers in auth context
+- Admin UI: `/roles` page for creating roles, editing permissions, and assigning to users
 
 ### Inventory Management System (WMS)
 Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Key inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP. The system implements implicit inventory movements based on picker actions and provides a robust Shopify sync strategy for inventory levels.

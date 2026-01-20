@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema } from "@shared/schema";
@@ -9,13 +9,41 @@ import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { inventoryService } from "./inventory";
 import multer from "multer";
+import { seedRBAC, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+// Permission checking middleware
+function requirePermission(resource: string, action: string) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+    
+    const allowed = await hasPermission(req.session.user.id, resource, action);
+    if (!allowed) {
+      return res.status(403).json({ error: `Permission denied: ${resource}:${action}` });
+    }
+    
+    next();
+  };
+}
+
+// Authentication middleware (just checks if logged in)
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  if (!req.session.user) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+  next();
+}
 
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  
+  // Seed RBAC permissions and roles on startup
+  await seedRBAC();
   
   // Auth API
   app.post("/api/auth/login", async (req, res) => {
@@ -67,21 +95,27 @@ export async function registerRoutes(
     });
   });
   
-  app.get("/api/auth/me", (req, res) => {
+  app.get("/api/auth/me", async (req, res) => {
     if (req.session.user) {
-      res.json({ user: req.session.user });
+      try {
+        const permissions = await getUserPermissions(req.session.user.id);
+        const roles = await getUserRoles(req.session.user.id);
+        res.json({ 
+          user: req.session.user,
+          permissions,
+          roles: roles.map(r => r.name),
+        });
+      } catch (error) {
+        res.json({ user: req.session.user, permissions: [], roles: [] });
+      }
     } else {
       res.status(401).json({ error: "Not authenticated" });
     }
   });
   
-  // User Management API (admin only)
-  app.get("/api/users", async (req, res) => {
+  // User Management API
+  app.get("/api/users", requirePermission("users", "view"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
-        return res.status(403).json({ error: "Admin access required" });
-      }
-      
       const users = await storage.getAllUsers();
       res.json(users);
     } catch (error) {
@@ -90,11 +124,8 @@ export async function registerRoutes(
     }
   });
   
-  app.post("/api/users", async (req, res) => {
+  app.post("/api/users", requirePermission("users", "create"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
-        return res.status(403).json({ error: "Admin access required" });
-      }
       
       const { username, password, role, displayName } = req.body;
       
@@ -136,13 +167,9 @@ export async function registerRoutes(
     }
   });
   
-  // Update user (admin only)
-  app.patch("/api/users/:id", async (req, res) => {
+  // Update user
+  app.patch("/api/users/:id", requirePermission("users", "edit"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
-        return res.status(403).json({ error: "Admin access required" });
-      }
-      
       const userId = req.params.id;
       const { displayName, role, password, active } = req.body;
       
@@ -179,6 +206,116 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error updating user:", error);
       res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+  
+  // RBAC Management API
+  
+  // Get all roles
+  app.get("/api/roles", requirePermission("roles", "view"), async (req, res) => {
+    try {
+      const roles = await getAllRoles();
+      res.json(roles);
+    } catch (error) {
+      console.error("Error fetching roles:", error);
+      res.status(500).json({ error: "Failed to fetch roles" });
+    }
+  });
+  
+  // Get all permissions
+  app.get("/api/permissions", requirePermission("roles", "view"), async (req, res) => {
+    try {
+      const permissions = await getAllPermissions();
+      res.json(permissions);
+    } catch (error) {
+      console.error("Error fetching permissions:", error);
+      res.status(500).json({ error: "Failed to fetch permissions" });
+    }
+  });
+  
+  // Get permissions for a role
+  app.get("/api/roles/:id/permissions", requirePermission("roles", "view"), async (req, res) => {
+    try {
+      const roleId = parseInt(req.params.id);
+      const permissions = await getRolePermissions(roleId);
+      res.json(permissions);
+    } catch (error) {
+      console.error("Error fetching role permissions:", error);
+      res.status(500).json({ error: "Failed to fetch role permissions" });
+    }
+  });
+  
+  // Create a new role
+  app.post("/api/roles", requirePermission("roles", "create"), async (req, res) => {
+    try {
+      const { name, description, permissionIds } = req.body;
+      
+      if (!name) {
+        return res.status(400).json({ error: "Role name is required" });
+      }
+      
+      const role = await createRole(name, description || null, permissionIds || []);
+      res.status(201).json(role);
+    } catch (error) {
+      console.error("Error creating role:", error);
+      res.status(500).json({ error: "Failed to create role" });
+    }
+  });
+  
+  // Update role permissions
+  app.put("/api/roles/:id/permissions", requirePermission("roles", "edit"), async (req, res) => {
+    try {
+      const roleId = parseInt(req.params.id);
+      const { permissionIds } = req.body;
+      
+      await updateRolePermissions(roleId, permissionIds || []);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error updating role permissions:", error);
+      res.status(500).json({ error: "Failed to update role permissions" });
+    }
+  });
+  
+  // Delete a role
+  app.delete("/api/roles/:id", requirePermission("roles", "delete"), async (req, res) => {
+    try {
+      const roleId = parseInt(req.params.id);
+      const success = await deleteRole(roleId);
+      
+      if (!success) {
+        return res.status(400).json({ error: "Cannot delete system roles" });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting role:", error);
+      res.status(500).json({ error: "Failed to delete role" });
+    }
+  });
+  
+  // Get roles for a user
+  app.get("/api/users/:id/roles", requirePermission("users", "view"), async (req, res) => {
+    try {
+      const userId = req.params.id;
+      const roles = await getUserRoles(userId);
+      res.json(roles);
+    } catch (error) {
+      console.error("Error fetching user roles:", error);
+      res.status(500).json({ error: "Failed to fetch user roles" });
+    }
+  });
+  
+  // Assign roles to user
+  app.put("/api/users/:id/roles", requirePermission("users", "manage_roles"), async (req, res) => {
+    try {
+      const userId = req.params.id;
+      const { roleIds } = req.body;
+      
+      await assignUserRoles(userId, roleIds || []);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error assigning user roles:", error);
+      res.status(500).json({ error: "Failed to assign user roles" });
     }
   });
   
