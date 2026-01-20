@@ -74,3 +74,35 @@ Echelon integrates with Shopify for product and order synchronization.
 - **Webhook Endpoints**: Handles real-time updates for product creation/update/deletion, order creation/cancellation, and fulfillment creation/update.
 - **Environment Variables**: Requires `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, and `SHOPIFY_API_SECRET`.
 - **Fulfillment Flow**: Supports split shipments and tracks fulfilled quantities per item, marking an order shipped only when all physical items are fulfilled.
+
+### Multi-Channel Infrastructure (Foundation)
+The system includes foundational tables for multi-channel sales and dropship partner support:
+
+#### Channel Management
+- **channels**: Core entity for all sales channels (internal stores and partner stores)
+  - `type`: "internal" (your stores) or "partner" (dropship partners)
+  - `provider`: shopify, ebay, amazon, etsy, manual
+  - `status`: active, paused, pending_setup, error
+- **channel_connections**: API credentials and sync status per channel
+- **partner_profiles**: Extra info for dropship partners (company, contact, SLA, discounts)
+
+#### Inventory Allocation
+- **channel_reservations**: Priority stock allocation per channel per inventory item
+  - `reserve_base_qty`: Base units reserved exclusively for this channel
+  - `min_stock_base`: Alert threshold
+  - `max_stock_base`: Cap availability
+
+#### Catalog Management
+- **catalog_products**: Master listing content (title, description, bullets, SEO)
+- **catalog_assets**: Master media library (images, videos)
+- **channel_product_overrides**: Per-channel content customization (NULL = use master)
+- **channel_pricing**: Per-channel, per-variant pricing
+- **channel_listings**: External IDs after pushing to marketplace
+
+#### ATP Calculation with Reserves
+```
+Global ATP = On Hand Base - Reserved Base - Sum(Channel Reserves)
+Channel ATP = floor((Global ATP + Channel Reserve) / units_per_variant)
+```
+
+This architecture supports internal multi-channel sales and future dropship partner integrations without schema rework.
