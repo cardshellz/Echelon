@@ -1067,10 +1067,10 @@ export async function registerRoutes(
       // Get all unique SKUs from product_locations
       const productLocations = await storage.getAllProductLocations();
       
-      // Pattern: base-sku-[P|B|C]###
+      // FIXED Pattern: base SKU is everything BEFORE the final -[P|B|C]### suffix
       // P = Pack, B = Box, C = Case
       // Number = quantity of pieces
-      const variantPattern = /^(.+?)[-_]?(P|B|C)(\d+)$/i;
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
       
       // Group SKUs by base SKU and collect variants
       const baseSkuMap: Record<string, {
@@ -1199,6 +1199,239 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error in bootstrap dry run:", error);
       res.status(500).json({ error: "Failed to run bootstrap analysis" });
+    }
+  });
+
+  // EXECUTE: Bootstrap inventory from product_locations - writes to database
+  app.post("/api/inventory/bootstrap", async (req, res) => {
+    try {
+      const user = req.session?.user;
+      if (!user || user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const productLocations = await storage.getAllProductLocations();
+      
+      // Pattern: base SKU is everything BEFORE the final -[P|B|C]### suffix
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      
+      // Group SKUs by base SKU
+      const baseSkuMap: Record<string, {
+        baseSku: string;
+        name: string;
+        variants: Array<{
+          sku: string;
+          type: string;
+          pieces: number;
+          name: string;
+          location: string;
+          barcode: string | null;
+        }>;
+      }> = {};
+
+      const skusWithoutVariant: Array<{ sku: string; name: string; location: string; barcode: string | null }> = [];
+
+      for (const pl of productLocations) {
+        const match = pl.sku.match(variantPattern);
+        
+        if (match) {
+          const baseSku = match[1];
+          const variantType = match[2].toUpperCase();
+          const pieces = parseInt(match[3], 10);
+          
+          if (!baseSkuMap[baseSku]) {
+            let baseName = pl.name;
+            const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case|1 Holder|1 Pack)\s+(of\s+)?\d*.*/i);
+            if (packMatch) {
+              baseName = baseName.substring(0, packMatch.index).trim();
+            }
+            
+            baseSkuMap[baseSku] = { baseSku, name: baseName, variants: [] };
+          }
+          
+          baseSkuMap[baseSku].variants.push({
+            sku: pl.sku,
+            type: variantType === 'P' ? 'pack' : variantType === 'B' ? 'box' : 'case',
+            pieces,
+            name: pl.name,
+            location: pl.location,
+            barcode: pl.barcode
+          });
+        } else {
+          skusWithoutVariant.push({
+            sku: pl.sku,
+            name: pl.name,
+            location: pl.location,
+            barcode: pl.barcode
+          });
+        }
+      }
+
+      let inventoryItemsCreated = 0;
+      let variantsCreated = 0;
+      let locationsCreated = 0;
+      let levelsCreated = 0;
+      const errors: string[] = [];
+
+      // Process base SKUs with variants
+      for (const [baseSku, data] of Object.entries(baseSkuMap)) {
+        try {
+          // Check if inventory item already exists
+          let invItem = await storage.getInventoryItemByBaseSku(baseSku);
+          
+          if (!invItem) {
+            invItem = await storage.createInventoryItem({
+              baseSku,
+              name: data.name,
+              baseUnit: 'each',
+              trackingType: 'serialized',
+              status: 'active'
+            });
+            inventoryItemsCreated++;
+          }
+
+          // Sort variants by pieces (smallest first for hierarchy)
+          const sortedVariants = data.variants.sort((a, b) => a.pieces - b.pieces);
+          const createdVariantIds: Record<string, number> = {};
+
+          for (let idx = 0; idx < sortedVariants.length; idx++) {
+            const v = sortedVariants[idx];
+            
+            // Check if variant already exists
+            let variant = await storage.getUomVariantBySku(v.sku);
+            
+            if (!variant) {
+              const parentVariantId = idx > 0 ? createdVariantIds[sortedVariants[idx - 1].sku] : null;
+              
+              variant = await storage.createUomVariant({
+                inventoryItemId: invItem.id,
+                sku: v.sku,
+                variantName: v.name,
+                uomType: v.type,
+                unitsPerVariant: v.pieces,
+                hierarchyLevel: v.type === 'pack' ? 1 : v.type === 'box' ? 2 : 3,
+                parentVariantId,
+                barcode: v.barcode,
+                status: 'active'
+              });
+              variantsCreated++;
+            }
+            createdVariantIds[v.sku] = variant.id;
+
+            // Create warehouse location if needed
+            let warehouseLoc = await storage.getWarehouseLocationByCode(v.location);
+            if (!warehouseLoc && v.location && v.location !== 'UNASSIGNED') {
+              warehouseLoc = await storage.createWarehouseLocation({
+                code: v.location,
+                name: v.location,
+                locationType: 'forward_pick',
+                zone: v.location.charAt(0) || 'A',
+                isPickable: 1,
+                movementPolicy: 'implicit'
+              });
+              locationsCreated++;
+            }
+
+            // Create inventory level if location exists
+            if (warehouseLoc) {
+              const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLoc.id, variant.id);
+              if (!existingLevel) {
+                await storage.upsertInventoryLevel({
+                  inventoryItemId: invItem.id,
+                  uomVariantId: variant.id,
+                  warehouseLocationId: warehouseLoc.id,
+                  onHandBase: 0,
+                  reservedBase: 0,
+                  pickedBase: 0,
+                  backorderBase: 0
+                });
+                levelsCreated++;
+              }
+            }
+          }
+        } catch (err: any) {
+          errors.push(`Error processing ${baseSku}: ${err.message}`);
+        }
+      }
+
+      // Process standalone SKUs (no variant suffix) as P1
+      for (const item of skusWithoutVariant) {
+        try {
+          let invItem = await storage.getInventoryItemByBaseSku(item.sku);
+          
+          if (!invItem) {
+            invItem = await storage.createInventoryItem({
+              baseSku: item.sku,
+              name: item.name,
+              baseUnit: 'each',
+              trackingType: 'serialized',
+              status: 'active'
+            });
+            inventoryItemsCreated++;
+          }
+
+          let variant = await storage.getUomVariantBySku(item.sku);
+          if (!variant) {
+            variant = await storage.createUomVariant({
+              inventoryItemId: invItem.id,
+              sku: item.sku,
+              variantName: item.name,
+              uomType: 'pack',
+              unitsPerVariant: 1,
+              hierarchyLevel: 1,
+              barcode: item.barcode,
+              status: 'active'
+            });
+            variantsCreated++;
+          }
+
+          let warehouseLoc = await storage.getWarehouseLocationByCode(item.location);
+          if (!warehouseLoc && item.location && item.location !== 'UNASSIGNED') {
+            warehouseLoc = await storage.createWarehouseLocation({
+              code: item.location,
+              name: item.location,
+              locationType: 'forward_pick',
+              zone: item.location.charAt(0) || 'A',
+              isPickable: 1,
+              movementPolicy: 'implicit'
+            });
+            locationsCreated++;
+          }
+
+          if (warehouseLoc) {
+            const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLoc.id, variant.id);
+            if (!existingLevel) {
+              await storage.upsertInventoryLevel({
+                inventoryItemId: invItem.id,
+                uomVariantId: variant.id,
+                warehouseLocationId: warehouseLoc.id,
+                onHandBase: 0,
+                reservedBase: 0,
+                pickedBase: 0,
+                backorderBase: 0
+              });
+              levelsCreated++;
+            }
+          }
+        } catch (err: any) {
+          errors.push(`Error processing standalone ${item.sku}: ${err.message}`);
+        }
+      }
+
+      res.json({
+        success: true,
+        summary: {
+          inventoryItemsCreated,
+          variantsCreated,
+          locationsCreated,
+          levelsCreated
+        },
+        errors: errors.length > 0 ? errors : undefined,
+        message: "Bootstrap complete. Inventory items, variants, and levels have been created."
+      });
+    } catch (error) {
+      console.error("Error in bootstrap:", error);
+      res.status(500).json({ error: "Failed to bootstrap inventory" });
     }
   });
 
