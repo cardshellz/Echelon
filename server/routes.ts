@@ -1306,13 +1306,11 @@ export async function registerRoutes(
               variant = await storage.createUomVariant({
                 inventoryItemId: invItem.id,
                 sku: v.sku,
-                variantName: v.name,
-                uomType: v.type,
+                name: v.name || `${data.name} - ${v.type} of ${v.pieces}`,
                 unitsPerVariant: v.pieces,
                 hierarchyLevel: v.type === 'pack' ? 1 : v.type === 'box' ? 2 : 3,
                 parentVariantId,
-                barcode: v.barcode,
-                status: 'active'
+                barcode: v.barcode
               });
               variantsCreated++;
             }
@@ -1375,12 +1373,10 @@ export async function registerRoutes(
             variant = await storage.createUomVariant({
               inventoryItemId: invItem.id,
               sku: item.sku,
-              variantName: item.name,
-              uomType: 'pack',
+              name: item.name || item.sku,
               unitsPerVariant: 1,
               hierarchyLevel: 1,
-              barcode: item.barcode,
-              status: 'active'
+              barcode: item.barcode
             });
             variantsCreated++;
           }
@@ -1584,9 +1580,8 @@ export async function registerRoutes(
       }
 
       // Get completed orders in date range
-      const allOrders = await storage.getOrders();
+      const allOrders = await storage.getOrdersWithItems(["completed"]);
       const completedOrders = allOrders.filter(o => 
-        o.status === "completed" && 
         o.completedAt && 
         new Date(o.completedAt) >= startDate
       );
@@ -2550,6 +2545,17 @@ export async function registerRoutes(
       res.json(variants);
     } catch (error) {
       console.error("Error fetching UOM variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
+  app.get("/api/inventory/items/:id/variants", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const variants = await storage.getUomVariantsByInventoryItemId(id);
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching variants for item:", error);
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
