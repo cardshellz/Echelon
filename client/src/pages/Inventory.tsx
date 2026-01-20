@@ -187,10 +187,10 @@ export default function Inventory() {
     item.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  const totalOnHand = inventorySummary.reduce((sum, item) => sum + item.totalOnHandBase, 0);
-  const totalReserved = inventorySummary.reduce((sum, item) => sum + item.totalReservedBase, 0);
-  const totalATP = inventorySummary.reduce((sum, item) => sum + item.totalAtpBase, 0);
-  const lowStockItems = inventorySummary.filter(item => item.totalAtpBase <= 0).length;
+  const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandBase || 0), 0);
+  const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedBase || 0), 0);
+  const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpBase || 0), 0);
+  const lowStockItems = inventorySummary.filter(item => Number(item.totalAtpBase || 0) <= 0).length;
 
   const handleAdjustClick = (item: InventoryItemSummary) => {
     setSelectedItem(item);
@@ -265,7 +265,7 @@ export default function Inventory() {
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
               <Boxes size={12} /> Total SKUs
             </div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">{inventorySummary.length}</div>
+            <div className="text-2xl font-bold font-mono text-foreground mt-1">{variants.length}</div>
           </div>
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
