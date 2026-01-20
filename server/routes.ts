@@ -8,6 +8,9 @@ import type { InsertOrderItem, SafeUser } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { inventoryService } from "./inventory";
+import multer from "multer";
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 export async function registerRoutes(
   httpServer: Server,
@@ -2651,6 +2654,168 @@ export async function registerRoutes(
       console.error("Error adjusting inventory:", error);
       res.status(500).json({ error: "Failed to adjust inventory" });
     }
+  });
+
+  // CSV Inventory Upload - bulk update inventory levels
+  app.post("/api/inventory/upload-csv", upload.single("file"), async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      const csvContent = req.file.buffer.toString("utf-8");
+      const parsed = Papa.parse<{ location_code: string; sku: string; quantity: string }>(csvContent, {
+        header: true,
+        skipEmptyLines: true,
+        transformHeader: (header) => header.trim().toLowerCase().replace(/\s+/g, "_"),
+      });
+
+      if (parsed.errors.length > 0) {
+        return res.status(400).json({ 
+          error: "CSV parsing errors", 
+          details: parsed.errors.slice(0, 5) 
+        });
+      }
+
+      const results: { row: number; sku: string; location: string; status: string; message: string }[] = [];
+      const userId = req.session.user.id;
+      let successCount = 0;
+      let errorCount = 0;
+
+      for (let i = 0; i < parsed.data.length; i++) {
+        const row = parsed.data[i];
+        const rowNum = i + 2; // Account for header row
+
+        const locationCode = row.location_code?.trim();
+        const sku = row.sku?.trim();
+        const quantityStr = row.quantity?.trim();
+
+        if (!locationCode || !sku || !quantityStr) {
+          results.push({ row: rowNum, sku: sku || "", location: locationCode || "", status: "error", message: "Missing required fields (location_code, sku, quantity)" });
+          errorCount++;
+          continue;
+        }
+
+        const quantity = parseInt(quantityStr, 10);
+        if (isNaN(quantity) || quantity < 0) {
+          results.push({ row: rowNum, sku, location: locationCode, status: "error", message: "Invalid quantity (must be a non-negative number)" });
+          errorCount++;
+          continue;
+        }
+
+        // Find the warehouse location
+        const warehouseLocation = await storage.getWarehouseLocationByCode(locationCode);
+        if (!warehouseLocation) {
+          results.push({ row: rowNum, sku, location: locationCode, status: "error", message: `Location not found: ${locationCode}` });
+          errorCount++;
+          continue;
+        }
+
+        // Try to find as variant SKU first, then as base SKU
+        let variant = await storage.getUomVariantBySku(sku);
+        let inventoryItem: any = null;
+        
+        if (variant) {
+          // Found as variant SKU - get the inventory item directly from the variant's reference
+          const items = await storage.getAllInventoryItems();
+          inventoryItem = items.find(item => item.id === variant!.inventoryItemId) || null;
+        } else {
+          // Try as base SKU - find the inventory item and use unitsPerVariant=1
+          inventoryItem = await storage.getInventoryItemByBaseSku(sku);
+        }
+        
+        if (!inventoryItem) {
+          results.push({ row: rowNum, sku, location: locationCode, status: "error", message: `SKU not found: ${sku}` });
+          errorCount++;
+          continue;
+        }
+
+        try {
+          // Calculate base units
+          const unitsPerVariant = variant?.unitsPerVariant || 1;
+          const baseUnits = quantity * unitsPerVariant;
+
+          // Find existing level or create new one
+          const existingLevels = await storage.getInventoryLevelsByItemId(inventoryItem.id);
+          const existingLevel = existingLevels.find(l => 
+            l.warehouseLocationId === warehouseLocation.id && 
+            (variant ? l.variantId === variant.id : !l.variantId)
+          );
+
+          if (existingLevel) {
+            // Calculate delta from current value
+            const currentOnHand = existingLevel.onHandBase;
+            const currentVarQty = existingLevel.variantQty || 0;
+            const onHandDelta = baseUnits - currentOnHand;
+            const varQtyDelta = quantity - currentVarQty;
+
+            await storage.adjustInventoryLevel(existingLevel.id, {
+              onHandBase: onHandDelta,
+              variantQty: varQtyDelta,
+            });
+          } else {
+            // Create new level
+            await storage.upsertInventoryLevel({
+              inventoryItemId: inventoryItem.id,
+              warehouseLocationId: warehouseLocation.id,
+              variantId: variant?.id || null,
+              variantQty: quantity,
+              onHandBase: baseUnits,
+              reservedBase: 0,
+              pickedBase: 0,
+              packedBase: 0,
+              backorderBase: 0,
+            });
+          }
+
+          // Log the transaction
+          await inventoryService.logTransaction({
+            inventoryItemId: inventoryItem.id,
+            warehouseLocationId: warehouseLocation.id,
+            variantId: variant?.id,
+            transactionType: "adjustment",
+            baseQtyDelta: existingLevel ? (baseUnits - existingLevel.onHandBase) : baseUnits,
+            targetState: "on_hand",
+            referenceType: "csv_import",
+            referenceId: `CSV-${new Date().toISOString().slice(0, 10)}`,
+            notes: `CSV import: Set ${sku} at ${locationCode} to ${quantity}`,
+            userId,
+            isImplicit: 0,
+          });
+
+          results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${quantity} units (${baseUnits} base units)` });
+          successCount++;
+        } catch (err: any) {
+          results.push({ row: rowNum, sku, location: locationCode, status: "error", message: err.message || "Database error" });
+          errorCount++;
+        }
+      }
+
+      res.json({
+        success: true,
+        summary: {
+          totalRows: parsed.data.length,
+          successCount,
+          errorCount,
+        },
+        results,
+      });
+    } catch (error) {
+      console.error("Error processing CSV upload:", error);
+      res.status(500).json({ error: "Failed to process CSV upload" });
+    }
+  });
+
+  // CSV Template download
+  app.get("/api/inventory/csv-template", (req, res) => {
+    const template = "location_code,sku,quantity\nFP-A-01,EG-SLV-STD-P100,50\nBK-B-02,EG-SLV-STD-B500,10\n";
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=inventory_template.csv");
+    res.send(template);
   });
 
   app.post("/api/inventory/receive", async (req, res) => {

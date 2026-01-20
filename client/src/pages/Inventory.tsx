@@ -13,7 +13,11 @@ import {
   AlertTriangle,
   TrendingUp,
   Boxes,
-  MapPin
+  MapPin,
+  Upload,
+  FileSpreadsheet,
+  CheckCircle,
+  XCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -116,6 +120,10 @@ export default function Inventory() {
   const [adjustmentReason, setAdjustmentReason] = useState("");
   const [addItemDialogOpen, setAddItemDialogOpen] = useState(false);
   const [newItemForm, setNewItemForm] = useState({ baseSku: "", name: "", description: "" });
+  const [csvUploadOpen, setCsvUploadOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [csvResults, setCsvResults] = useState<{ row: number; sku: string; location: string; status: string; message: string }[] | null>(null);
+  const [csvUploading, setCsvUploading] = useState(false);
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -225,6 +233,50 @@ export default function Inventory() {
     return <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">In Stock</Badge>;
   };
 
+  const handleCsvUpload = async () => {
+    if (!csvFile) return;
+    
+    setCsvUploading(true);
+    setCsvResults(null);
+    
+    try {
+      const formData = new FormData();
+      formData.append("file", csvFile);
+      
+      const response = await fetch("/api/inventory/upload-csv", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || "Upload failed");
+      }
+      
+      setCsvResults(data.results);
+      toast({
+        title: "CSV processed",
+        description: `${data.summary.successCount} updated, ${data.summary.errorCount} errors`,
+      });
+      
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
+    } catch (error: any) {
+      toast({
+        title: "Upload failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    } finally {
+      setCsvUploading(false);
+    }
+  };
+
+  const handleDownloadTemplate = () => {
+    window.location.href = "/api/inventory/csv-template";
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="border-b bg-card p-6 pb-4">
@@ -251,6 +303,9 @@ export default function Inventory() {
             >
               <MapPin size={16} className="mr-1" /> 
               {migrateLocationsMutation.isPending ? "Syncing..." : "Sync Locations"}
+            </Button>
+            <Button variant="outline" className="gap-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
+              <Upload size={16} /> Upload CSV
             </Button>
             <Button variant="outline" className="gap-2">
               <Download size={16} /> Export
@@ -595,6 +650,100 @@ export default function Inventory() {
             >
               {createItemMutation.isPending ? "Creating..." : "Create Item"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={csvUploadOpen} onOpenChange={(open) => {
+        setCsvUploadOpen(open);
+        if (!open) {
+          setCsvFile(null);
+          setCsvResults(null);
+        }
+      }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileSpreadsheet className="h-5 w-5" />
+              Upload Inventory CSV
+            </DialogTitle>
+            <DialogDescription>
+              Upload a CSV file to update inventory levels in bulk. The CSV should have columns: location_code, sku, quantity
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4 flex-1 overflow-auto">
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleDownloadTemplate}>
+                <Download size={14} className="mr-1" /> Download Template
+              </Button>
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="csvFile">Select CSV File</Label>
+              <Input
+                id="csvFile"
+                type="file"
+                accept=".csv"
+                onChange={(e) => {
+                  setCsvFile(e.target.files?.[0] || null);
+                  setCsvResults(null);
+                }}
+              />
+              {csvFile && (
+                <p className="text-sm text-muted-foreground">
+                  Selected: {csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)
+                </p>
+              )}
+            </div>
+
+            {csvResults && (
+              <div className="space-y-2">
+                <Label>Results</Label>
+                <div className="rounded-md border max-h-60 overflow-auto">
+                  <Table>
+                    <TableHeader className="sticky top-0 bg-muted">
+                      <TableRow>
+                        <TableHead className="w-16">Row</TableHead>
+                        <TableHead>SKU</TableHead>
+                        <TableHead>Location</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Message</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {csvResults.map((result, idx) => (
+                        <TableRow key={idx} className={result.status === "error" ? "bg-red-50" : "bg-green-50"}>
+                          <TableCell className="font-mono text-xs">{result.row}</TableCell>
+                          <TableCell className="font-mono text-xs">{result.sku}</TableCell>
+                          <TableCell className="font-mono text-xs">{result.location}</TableCell>
+                          <TableCell>
+                            {result.status === "success" ? (
+                              <CheckCircle className="h-4 w-4 text-green-600" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-600" />
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs">{result.message}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCsvUploadOpen(false)}>
+              {csvResults ? "Close" : "Cancel"}
+            </Button>
+            {!csvResults && (
+              <Button 
+                onClick={handleCsvUpload}
+                disabled={!csvFile || csvUploading}
+              >
+                {csvUploading ? "Uploading..." : "Upload & Process"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
