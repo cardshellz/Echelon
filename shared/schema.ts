@@ -298,17 +298,18 @@ export const insertUomVariantSchema = createInsertSchema(uomVariants).omit({
 export type InsertUomVariant = z.infer<typeof insertUomVariantSchema>;
 export type UomVariant = typeof uomVariants.$inferSelect;
 
-// Inventory levels per location (tracked in BASE UNITS)
+// Inventory levels per location - tracks both physical variant count and base units
 export const inventoryLevels = pgTable("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
-  variantId: integer("variant_id").references(() => uomVariants.id), // Which variant is stored here (for location assignment)
-  onHandBase: integer("on_hand_base").notNull().default(0), // Physical count in base units
-  reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders
-  pickedBase: integer("picked_base").notNull().default(0), // In picker carts
-  packedBase: integer("packed_base").notNull().default(0), // Boxed, awaiting ship (future)
-  backorderBase: integer("backorder_base").notNull().default(0), // Backorder demand
+  variantId: integer("variant_id").references(() => uomVariants.id), // Which variant is stored here
+  variantQty: integer("variant_qty").notNull().default(0), // Physical count of variant units (e.g., 5 boxes)
+  onHandBase: integer("on_hand_base").notNull().default(0), // Derived: variantQty * unitsPerVariant
+  reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders (in base units)
+  pickedBase: integer("picked_base").notNull().default(0), // In picker carts (in base units)
+  packedBase: integer("packed_base").notNull().default(0), // Boxed, awaiting ship (in base units)
+  backorderBase: integer("backorder_base").notNull().default(0), // Backorder demand (in base units)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

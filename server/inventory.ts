@@ -16,6 +16,7 @@ export interface VariantAvailability {
   onHandBase: number;
   reservedBase: number;
   atpBase: number;
+  variantQty: number; // Physical count of this variant across all locations
 }
 
 export interface InventoryItemSummary {
@@ -43,23 +44,32 @@ export class InventoryService {
   /**
    * Calculate available quantity for each UOM variant based on base ATP
    * Returns floor(ATP / units_per_variant) for each variant
+   * Also includes physical variant quantity from inventory levels
    */
   async calculateVariantAvailability(inventoryItemId: number): Promise<VariantAvailability[]> {
     const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
     const atp = await this.calculateATP(inventoryItemId);
     const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, true);
     const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
     
-    return variants.map(variant => ({
-      variantId: variant.id,
-      sku: variant.sku,
-      name: variant.name,
-      unitsPerVariant: variant.unitsPerVariant,
-      available: Math.floor(atp / variant.unitsPerVariant),
-      onHandBase: onHand,
-      reservedBase: reserved,
-      atpBase: atp,
-    }));
+    return variants.map(variant => {
+      // Sum variantQty across all locations for this variant
+      const variantLevels = levels.filter(l => l.variantId === variant.id);
+      const totalVariantQty = variantLevels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
+      
+      return {
+        variantId: variant.id,
+        sku: variant.sku,
+        name: variant.name,
+        unitsPerVariant: variant.unitsPerVariant,
+        available: Math.floor(atp / variant.unitsPerVariant),
+        onHandBase: onHand,
+        reservedBase: reserved,
+        atpBase: atp,
+        variantQty: totalVariantQty,
+      };
+    });
   }
 
   /**
@@ -258,18 +268,30 @@ export class InventoryService {
     baseUnits: number,
     referenceId: string,
     notes?: string,
-    userId?: string
+    userId?: string,
+    variantId?: number,
+    variantQty?: number
   ): Promise<void> {
     const existing = await storage.getInventoryLevelsByItemId(inventoryItemId);
-    const levelAtLocation = existing.find(l => l.warehouseLocationId === warehouseLocationId);
+    
+    // If receiving by variant, find/create level for that specific variant
+    const levelAtLocation = variantId 
+      ? existing.find(l => l.warehouseLocationId === warehouseLocationId && l.variantId === variantId)
+      : existing.find(l => l.warehouseLocationId === warehouseLocationId);
     
     if (levelAtLocation) {
-      // Delta: add to onHand (positive delta)
-      await storage.adjustInventoryLevel(levelAtLocation.id, { onHandBase: baseUnits });
+      // Delta: add to onHand (positive delta) and variantQty if provided
+      const adjustments: any = { onHandBase: baseUnits };
+      if (variantQty !== undefined) {
+        adjustments.variantQty = variantQty;
+      }
+      await storage.adjustInventoryLevel(levelAtLocation.id, adjustments);
     } else {
       await storage.upsertInventoryLevel({
         inventoryItemId,
         warehouseLocationId,
+        variantId: variantId || null,
+        variantQty: variantQty || 0,
         onHandBase: baseUnits,
         reservedBase: 0,
         pickedBase: 0,
@@ -281,6 +303,7 @@ export class InventoryService {
     await this.logTransaction({
       inventoryItemId,
       warehouseLocationId,
+      variantId: variantId || undefined,
       transactionType: "receipt",
       baseQtyDelta: baseUnits,
       targetState: "on_hand",

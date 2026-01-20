@@ -39,6 +39,13 @@ Key tables include `users` (authentication with role-based access), `product_loc
 ### Inventory Management System (WMS)
 Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Key inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP. The system implements implicit inventory movements based on picker actions and provides a robust Shopify sync strategy for inventory levels.
 
+#### Dual-Level Inventory Tracking
+The system tracks inventory at two levels simultaneously:
+- **Variant Quantity (variantQty)**: Physical count of variant units (e.g., "5 boxes") for receiving, cycle counts, and warehouse operations
+- **Base Units (onHandBase)**: Derived count in smallest unit (e.g., "2,500 pieces") for purchasing, ATP calculations, and order fulfillment
+- Receiving flow accepts variant-level quantities and automatically calculates base units: `baseUnits = variantQty × unitsPerVariant`
+- Example: Receiving 5 boxes of SKU-B500 (500 pieces per box) → variantQty=5, onHandBase=2500
+
 Core WMS functionalities:
 - Extended database schema for inventory management (inventory_items, uom_variants, inventory_levels, inventory_transactions, locations, channel_feeds).
 - Inventory service for allocation, ATP calculation, variant cascading, replenishment, and backorder handling.

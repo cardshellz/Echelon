@@ -56,6 +56,7 @@ interface VariantAvailability {
   onHandBase: number;
   reservedBase: number;
   atpBase: number;
+  variantQty: number;
 }
 
 interface InventoryItemSummary {
@@ -390,7 +391,7 @@ export default function Inventory() {
                           <div className="flex flex-wrap gap-1">
                             {item.variants.slice(0, 3).map((v, i) => (
                               <Badge key={i} variant="outline" className="text-[10px]">
-                                {v.sku.split("-").pop()} ({v.available})
+                                {v.sku.split("-").pop()} ({v.variantQty || 0})
                               </Badge>
                             ))}
                             {item.variants.length > 3 && (

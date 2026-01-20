@@ -2612,12 +2612,23 @@ export async function registerRoutes(
 
   app.post("/api/inventory/receive", async (req, res) => {
     try {
-      const { inventoryItemId, warehouseLocationId, baseUnits, referenceId, notes } = req.body;
+      const { inventoryItemId, warehouseLocationId, variantId, variantQty, referenceId, notes } = req.body;
       const userId = req.session.user?.id;
       
-      if (!inventoryItemId || !warehouseLocationId || !baseUnits || !referenceId) {
-        return res.status(400).json({ error: "Missing required fields" });
+      if (!inventoryItemId || !warehouseLocationId || !variantId || !variantQty || !referenceId) {
+        return res.status(400).json({ error: "Missing required fields: inventoryItemId, warehouseLocationId, variantId, variantQty, referenceId" });
       }
+      
+      // Get the variant to calculate base units
+      const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
+      const targetVariant = variants.find(v => v.id === variantId);
+      
+      if (!targetVariant) {
+        return res.status(400).json({ error: "Variant not found" });
+      }
+      
+      // Calculate base units from variant quantity
+      const baseUnits = variantQty * targetVariant.unitsPerVariant;
       
       await inventoryService.receiveInventory(
         inventoryItemId,
@@ -2625,10 +2636,12 @@ export async function registerRoutes(
         baseUnits,
         referenceId,
         notes,
-        userId
+        userId,
+        variantId,
+        variantQty
       );
       
-      res.json({ success: true });
+      res.json({ success: true, baseUnitsReceived: baseUnits, variantQtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
       res.status(500).json({ error: "Failed to receive inventory" });

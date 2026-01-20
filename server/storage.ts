@@ -118,7 +118,7 @@ export interface IStorage {
   getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
-  adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
+  adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
   getTotalOnHandByItemId(inventoryItemId: number, pickableOnly?: boolean): Promise<number>;
   getTotalReservedByItemId(inventoryItemId: number): Promise<number>;
   
@@ -819,10 +819,13 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async adjustInventoryLevel(id: number, adjustments: { onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null> {
+  async adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null> {
     const updates: any = { updatedAt: new Date() };
     
     // Delta-based updates: values are added to current amounts
+    if (adjustments.variantQty !== undefined) {
+      updates.variantQty = sql`${inventoryLevels.variantQty} + ${adjustments.variantQty}`;
+    }
     if (adjustments.onHandBase !== undefined) {
       updates.onHandBase = sql`${inventoryLevels.onHandBase} + ${adjustments.onHandBase}`;
     }
