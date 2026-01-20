@@ -1056,6 +1056,152 @@ export async function registerRoutes(
     ]);
   });
 
+  // DRY RUN: Parse SKUs and show what inventory items/variants would be created
+  app.post("/api/inventory/bootstrap/dry-run", async (req, res) => {
+    try {
+      const user = req.session?.user;
+      if (!user || user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      // Get all unique SKUs from product_locations
+      const productLocations = await storage.getAllProductLocations();
+      
+      // Pattern: base-sku-[P|B|C]###
+      // P = Pack, B = Box, C = Case
+      // Number = quantity of pieces
+      const variantPattern = /^(.+?)[-_]?(P|B|C)(\d+)$/i;
+      
+      // Group SKUs by base SKU and collect variants
+      const baseSkuMap: Record<string, {
+        baseSku: string;
+        name: string;
+        variants: Array<{
+          sku: string;
+          type: string;
+          pieces: number;
+          name: string;
+          location: string;
+        }>;
+      }> = {};
+
+      const skusWithoutVariant: Array<{ sku: string; name: string; location: string }> = [];
+
+      for (const pl of productLocations) {
+        const match = pl.sku.match(variantPattern);
+        
+        if (match) {
+          const baseSku = match[1];
+          const variantType = match[2].toUpperCase();
+          const pieces = parseInt(match[3], 10);
+          
+          if (!baseSkuMap[baseSku]) {
+            // Extract base name (remove variant suffix from name too)
+            let baseName = pl.name;
+            const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case)\s+of\s+\d+.*/i);
+            if (packMatch) {
+              baseName = baseName.substring(0, packMatch.index).trim();
+            }
+            
+            baseSkuMap[baseSku] = {
+              baseSku,
+              name: baseName,
+              variants: []
+            };
+          }
+          
+          baseSkuMap[baseSku].variants.push({
+            sku: pl.sku,
+            type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
+            pieces,
+            name: pl.name,
+            location: pl.location
+          });
+        } else {
+          // No variant suffix - will create as P1
+          skusWithoutVariant.push({
+            sku: pl.sku,
+            name: pl.name,
+            location: pl.location
+          });
+        }
+      }
+
+      // Build hierarchy for each base SKU
+      const results: Array<{
+        baseSku: string;
+        baseName: string;
+        variants: Array<{
+          sku: string;
+          type: string;
+          pieces: number;
+          hierarchyLevel: number;
+          parentVariant: string | null;
+        }>;
+      }> = [];
+
+      for (const [baseSku, data] of Object.entries(baseSkuMap)) {
+        // Sort variants by pieces ascending (smallest first = lowest in hierarchy)
+        const sortedVariants = data.variants.sort((a, b) => a.pieces - b.pieces);
+        
+        const variantsWithHierarchy = sortedVariants.map((v, idx) => {
+          // Hierarchy: Pack (1) < Box (2) < Case (3)
+          let hierarchyLevel = 1;
+          if (v.type === 'Box') hierarchyLevel = 2;
+          if (v.type === 'Case') hierarchyLevel = 3;
+          
+          // Parent is the next smaller variant (if any)
+          let parentVariant: string | null = null;
+          if (idx > 0) {
+            parentVariant = sortedVariants[idx - 1].sku;
+          }
+          
+          return {
+            sku: v.sku,
+            type: v.type,
+            pieces: v.pieces,
+            hierarchyLevel,
+            parentVariant
+          };
+        });
+
+        results.push({
+          baseSku,
+          baseName: data.name,
+          variants: variantsWithHierarchy
+        });
+      }
+
+      // Add SKUs without variant as their own items with P1 variant
+      const standaloneItems = skusWithoutVariant.map(s => ({
+        baseSku: s.sku,
+        baseName: s.name,
+        variants: [{
+          sku: s.sku,
+          type: 'Pack',
+          pieces: 1,
+          hierarchyLevel: 1,
+          parentVariant: null
+        }]
+      }));
+
+      res.json({
+        summary: {
+          totalSkusAnalyzed: productLocations.length,
+          baseSkusWithVariants: Object.keys(baseSkuMap).length,
+          standaloneSkus: skusWithoutVariant.length,
+          totalVariantsToCreate: results.reduce((sum, r) => sum + r.variants.length, 0) + standaloneItems.length
+        },
+        baseSkusWithVariants: results,
+        standaloneItems: standaloneItems.slice(0, 20), // Limit output
+        message: "DRY RUN - No data written. Review above and POST to /api/inventory/bootstrap to execute."
+      });
+    } catch (error) {
+      console.error("Error in bootstrap dry run:", error);
+      res.status(500).json({ error: "Failed to run bootstrap analysis" });
+    }
+  });
+
   // Backfill picking logs from existing order data - Admin only
   app.post("/api/picking/logs/backfill", async (req, res) => {
     try {
