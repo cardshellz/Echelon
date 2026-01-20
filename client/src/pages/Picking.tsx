@@ -99,6 +99,17 @@ async function releaseHoldOrder(orderId: number): Promise<Order> {
   return res.json();
 }
 
+async function setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order> {
+  const res = await fetch(`/api/orders/${orderId}/priority`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ priority }),
+  });
+  if (!res.ok) throw new Error("Failed to set priority");
+  return res.json();
+}
+
 async function forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order> {
   const res = await fetch(`/api/orders/${orderId}/force-release`, {
     method: "POST",
@@ -633,6 +644,29 @@ export default function Picking() {
       playSound("error");
       toast({
         title: "Failed to release order",
+        description: "Please try again",
+        variant: "destructive",
+      });
+    },
+  });
+  
+  // Mutation for setting order priority (admin/lead only)
+  const rushMutation = useMutation({
+    mutationFn: ({ orderId, priority }: { orderId: number; priority: "rush" | "high" | "normal" }) => 
+      setOrderPriority(orderId, priority),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      playSound("success");
+      toast({
+        title: data.priority === "rush" ? "Order marked as RUSH" : "Order priority updated",
+        description: `Order ${data.orderNumber} is now ${data.priority} priority`,
+      });
+    },
+    onError: (error) => {
+      console.error("Failed to set priority:", error);
+      playSound("error");
+      toast({
+        title: "Failed to set priority",
         description: "Please try again",
         variant: "destructive",
       });
@@ -2456,6 +2490,41 @@ export default function Picking() {
                         <div className="text-xs text-muted-foreground flex items-center gap-0.5">
                           <Clock size={12} /> {order.age}
                         </div>
+                      )}
+                      {/* Admin/Lead: Rush/Unrush buttons */}
+                      {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority !== "rush" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFlashingOrderId(order.id);
+                            rushMutation.mutate({ orderId: parseInt(order.id), priority: "rush" });
+                            setTimeout(() => setFlashingOrderId(null), 600);
+                          }}
+                          data-testid={`button-rush-${order.id}`}
+                        >
+                          <Zap className="h-4 w-4 mr-1" />
+                          Rush
+                        </Button>
+                      )}
+                      {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority === "rush" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-2 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFlashingOrderId(order.id);
+                            rushMutation.mutate({ orderId: parseInt(order.id), priority: "normal" });
+                            setTimeout(() => setFlashingOrderId(null), 600);
+                          }}
+                          data-testid={`button-unrush-${order.id}`}
+                        >
+                          <Zap className="h-4 w-4 mr-1" />
+                          Unrush
+                        </Button>
                       )}
                       {/* Admin/Lead: Hold/Release buttons */}
                       {isAdminOrLead && order.status === "ready" && !order.onHold && (

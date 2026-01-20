@@ -78,3 +78,16 @@ export async function releaseHoldOrder(orderId: number): Promise<void> {
     throw new Error(error.error || "Failed to release hold");
   }
 }
+
+export async function setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<void> {
+  const response = await fetch(`${API_BASE}/orders/${orderId}/priority`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ priority }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: "Failed to set priority" }));
+    throw new Error(error.error || "Failed to set priority");
+  }
+}

@@ -839,6 +839,49 @@ export async function registerRoutes(
     }
   });
 
+  // Set order priority (admin/lead only)
+  app.post("/api/orders/:id/priority", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const id = parseInt(req.params.id);
+      const { priority } = req.body;
+      
+      if (!priority || !["rush", "high", "normal"].includes(priority)) {
+        return res.status(400).json({ error: "Invalid priority. Must be rush, high, or normal" });
+      }
+      
+      const orderBefore = await storage.getOrderById(id);
+      const order = await storage.setOrderPriority(id, priority);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      // Log the priority change (non-blocking)
+      storage.createPickingLog({
+        actionType: "priority_changed",
+        pickerId: req.session.user.id,
+        pickerName: req.session.user.displayName || req.session.user.username,
+        pickerRole: req.session.user.role,
+        orderId: id,
+        orderNumber: order.orderNumber,
+        orderStatusBefore: orderBefore?.status,
+        orderStatusAfter: order.status,
+        reason: `Priority changed from ${orderBefore?.priority || 'normal'} to ${priority}`,
+        deviceType: req.headers["x-device-type"] as string || "desktop",
+        sessionId: req.sessionID,
+      }).catch(err => console.warn("[PickingLog] Failed to log priority_changed:", err.message));
+      
+      res.json(order);
+    } catch (error) {
+      console.error("Error setting priority:", error);
+      res.status(500).json({ error: "Failed to set priority" });
+    }
+  });
+
   // Force release an order (admin only) - for stuck orders
   app.post("/api/orders/:id/force-release", async (req, res) => {
     try {

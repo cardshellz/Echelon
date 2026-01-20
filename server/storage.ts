@@ -73,6 +73,7 @@ export interface IStorage {
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
+  setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null>;
   
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
@@ -573,6 +574,15 @@ export class DatabaseStorage implements IStorage {
     const result = await db
       .update(orders)
       .set({ onHold: 0, heldAt: null })
+      .where(eq(orders.id, orderId))
+      .returning();
+    return result[0] || null;
+  }
+
+  async setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null> {
+    const result = await db
+      .update(orders)
+      .set({ priority })
       .where(eq(orders.id, orderId))
       .returning();
     return result[0] || null;
