@@ -217,26 +217,105 @@ export type PickingLog = typeof pickingLogs.$inferSelect;
 // INVENTORY MANAGEMENT SYSTEM (WMS)
 // ============================================
 
-// Location types for warehouse management
-export const locationTypeEnum = ["forward_pick", "bulk_storage", "receiving", "pallet"] as const;
-export type LocationType = typeof locationTypeEnum[number];
-
 // Movement policy - how strict is inventory tracking for this movement type
 export const movementPolicyEnum = ["implicit", "soft_log", "require_scan"] as const;
 export type MovementPolicy = typeof movementPolicyEnum[number];
 
+// Warehouse zone types
+export const zoneTypeEnum = ["RCV", "BULK", "FWD", "PACK", "SHIP"] as const;
+export type ZoneType = typeof zoneTypeEnum[number];
+
+// Location types for warehouse management
+export const locationTypeEnum = ["forward_pick", "bulk_storage", "receiving", "packing", "shipping", "staging", "pallet"] as const;
+export type LocationType = typeof locationTypeEnum[number];
+
+// Warehouse zones (optional - for organizing locations)
+export const warehouseZones = pgTable("warehouse_zones", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 10 }).notNull().unique(), // RCV, BULK, FWD, PACK, SHIP
+  name: varchar("name", { length: 50 }).notNull(), // "Receiving Dock", "Bulk Storage", etc.
+  description: text("description"),
+  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"),
+  isPickable: integer("is_pickable").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertWarehouseZoneSchema = createInsertSchema(warehouseZones).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertWarehouseZone = z.infer<typeof insertWarehouseZoneSchema>;
+export type WarehouseZone = typeof warehouseZones.$inferSelect;
+
+// Helper function to generate location code from hierarchy (used on backend)
+export function generateLocationCode(parts: {
+  zone?: string | null;
+  aisle?: string | null;
+  bay?: string | null;
+  level?: string | null;
+  bin?: string | null;
+}): string {
+  // Clean and normalize each segment
+  const cleanSegment = (s: string | null | undefined): string | null => {
+    if (s == null) return null;
+    const trimmed = s.trim().toUpperCase();
+    return trimmed === '' ? null : trimmed;
+  };
+  
+  // Pad bay to 2 digits if numeric
+  const padBay = (bay: string | null): string | null => {
+    if (bay == null) return null;
+    const num = parseInt(bay, 10);
+    if (!isNaN(num)) return num.toString().padStart(2, '0');
+    return bay; // Keep as-is if not numeric
+  };
+  
+  const segments = [
+    cleanSegment(parts.zone),
+    cleanSegment(parts.aisle),
+    padBay(cleanSegment(parts.bay)),
+    cleanSegment(parts.level),
+    cleanSegment(parts.bin),
+  ].filter((s): s is string => s != null);
+  
+  if (segments.length === 0) {
+    throw new Error('Location must have at least one hierarchy field (zone, aisle, bay, level, or bin)');
+  }
+  
+  return segments.join('-');
+}
+
 // Warehouse locations (bins, pallets, racks, etc.)
 export const warehouseLocations = pgTable("warehouse_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  code: varchar("code", { length: 50 }).notNull().unique(), // e.g., "A-01-02-B", "PALLET-R3-L2"
-  name: text("name"), // Friendly name
-  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"),
-  zone: varchar("zone", { length: 10 }).notNull().default("A"),
+  code: varchar("code", { length: 50 }).notNull().unique(), // Auto-generated from hierarchy: "BULK-A-02-C-1"
+  name: text("name"), // Friendly name (optional)
+  
+  // Hierarchical location structure (all optional for flexibility)
+  zone: varchar("zone", { length: 10 }), // RCV, BULK, FWD, PACK, SHIP
+  aisle: varchar("aisle", { length: 5 }), // A, B, C or 01, 02...
+  bay: varchar("bay", { length: 5 }), // 01, 02, 03... (2-digit padded)
+  level: varchar("level", { length: 5 }), // A=floor, B=1st shelf, C=2nd shelf...
+  bin: varchar("bin", { length: 5 }), // 1, 2, 3... (subdivision within level)
+  
+  // Location metadata
+  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"), // forward_pick, bulk_storage, receiving, packing, shipping
   isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
-  parentLocationId: integer("parent_location_id"), // Replenishment source (references self)
+  pickSequence: integer("pick_sequence"), // Walk order for optimized picking (null = not sequenced)
+  
+  // Replenishment chain
+  parentLocationId: integer("parent_location_id"), // Bulk location that feeds this forward pick
   movementPolicy: varchar("movement_policy", { length: 20 }).notNull().default("implicit"),
-  minQty: integer("min_qty"), // Trigger replenishment alert when below this
-  maxQty: integer("max_qty"), // Maximum capacity
+  
+  // Capacity constraints
+  minQty: integer("min_qty"), // Trigger replenishment alert when below
+  maxQty: integer("max_qty"), // Maximum units this location can hold
+  maxWeight: integer("max_weight"), // Max weight in lbs (optional)
+  widthInches: integer("width_inches"), // Physical dimensions for slotting
+  heightInches: integer("height_inches"),
+  depthInches: integer("depth_inches"),
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

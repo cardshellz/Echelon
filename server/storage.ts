@@ -13,6 +13,8 @@ import {
   type ItemStatus,
   type WarehouseLocation,
   type InsertWarehouseLocation,
+  type WarehouseZone,
+  type InsertWarehouseZone,
   type InventoryItem,
   type InsertInventoryItem,
   type UomVariant,
@@ -40,6 +42,7 @@ import {
   orders,
   orderItems,
   warehouseLocations,
+  warehouseZones,
   inventoryItems,
   uomVariants,
   inventoryLevels,
@@ -50,7 +53,8 @@ import {
   channels,
   channelConnections,
   partnerProfiles,
-  channelReservations
+  channelReservations,
+  generateLocationCode
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -110,12 +114,20 @@ export interface IStorage {
   // INVENTORY MANAGEMENT (WMS)
   // ============================================
   
+  // Warehouse Zones
+  getAllWarehouseZones(): Promise<WarehouseZone[]>;
+  getWarehouseZoneByCode(code: string): Promise<WarehouseZone | undefined>;
+  createWarehouseZone(zone: InsertWarehouseZone): Promise<WarehouseZone>;
+  updateWarehouseZone(id: number, updates: Partial<InsertWarehouseZone>): Promise<WarehouseZone | null>;
+  deleteWarehouseZone(id: number): Promise<boolean>;
+  
   // Warehouse Locations
   getAllWarehouseLocations(): Promise<WarehouseLocation[]>;
   getWarehouseLocationById(id: number): Promise<WarehouseLocation | undefined>;
   getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined>;
-  createWarehouseLocation(location: InsertWarehouseLocation): Promise<WarehouseLocation>;
-  updateWarehouseLocation(id: number, updates: Partial<InsertWarehouseLocation>): Promise<WarehouseLocation | null>;
+  createWarehouseLocation(location: Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation>;
+  updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null>;
+  deleteWarehouseLocation(id: number): Promise<boolean>;
   
   // Inventory Items (Master SKUs)
   getAllInventoryItems(): Promise<InventoryItem[]>;
@@ -747,6 +759,38 @@ export class DatabaseStorage implements IStorage {
   // INVENTORY MANAGEMENT (WMS) IMPLEMENTATIONS
   // ============================================
 
+  // Warehouse Zones
+  async getAllWarehouseZones(): Promise<WarehouseZone[]> {
+    return await db.select().from(warehouseZones).orderBy(asc(warehouseZones.code));
+  }
+
+  async getWarehouseZoneByCode(code: string): Promise<WarehouseZone | undefined> {
+    const result = await db.select().from(warehouseZones).where(eq(warehouseZones.code, code.toUpperCase()));
+    return result[0];
+  }
+
+  async createWarehouseZone(zone: InsertWarehouseZone): Promise<WarehouseZone> {
+    const result = await db.insert(warehouseZones).values({
+      ...zone,
+      code: zone.code.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  async updateWarehouseZone(id: number, updates: Partial<InsertWarehouseZone>): Promise<WarehouseZone | null> {
+    const result = await db
+      .update(warehouseZones)
+      .set(updates)
+      .where(eq(warehouseZones.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteWarehouseZone(id: number): Promise<boolean> {
+    const result = await db.delete(warehouseZones).where(eq(warehouseZones.id, id)).returning();
+    return result.length > 0;
+  }
+
   // Warehouse Locations
   async getAllWarehouseLocations(): Promise<WarehouseLocation[]> {
     return await db.select().from(warehouseLocations).orderBy(asc(warehouseLocations.code));
@@ -762,21 +806,51 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async createWarehouseLocation(location: InsertWarehouseLocation): Promise<WarehouseLocation> {
+  async createWarehouseLocation(location: Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation> {
+    // generateLocationCode throws if no hierarchy fields provided
+    const code = generateLocationCode(location);
+    
+    // Check for duplicate code
+    const existing = await this.getWarehouseLocationByCode(code);
+    if (existing) {
+      throw new Error(`Location code "${code}" already exists`);
+    }
+    
     const result = await db.insert(warehouseLocations).values({
       ...location,
-      code: location.code.toUpperCase(),
+      code,
     }).returning();
     return result[0];
   }
 
-  async updateWarehouseLocation(id: number, updates: Partial<InsertWarehouseLocation>): Promise<WarehouseLocation | null> {
+  async updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null> {
+    // Get existing location to merge hierarchy fields
+    const existing = await this.getWarehouseLocationById(id);
+    if (!existing) return null;
+    
+    // Merge updates with existing values for code regeneration
+    const merged = { ...existing, ...updates };
+    const newCode = generateLocationCode(merged);
+    
+    // Check if the new code would conflict with another location
+    if (newCode !== existing.code) {
+      const conflict = await this.getWarehouseLocationByCode(newCode);
+      if (conflict && conflict.id !== id) {
+        throw new Error(`Location code "${newCode}" already exists`);
+      }
+    }
+    
     const result = await db
       .update(warehouseLocations)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...updates, code: newCode, updatedAt: new Date() })
       .where(eq(warehouseLocations.id, id))
       .returning();
     return result[0] || null;
+  }
+
+  async deleteWarehouseLocation(id: number): Promise<boolean> {
+    const result = await db.delete(warehouseLocations).where(eq(warehouseLocations.id, id)).returning();
+    return result.length > 0;
   }
 
   // Inventory Items (Master SKUs)

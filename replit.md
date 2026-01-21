@@ -78,6 +78,29 @@ The system tracks inventory at two levels simultaneously:
 - Receiving flow accepts variant-level quantities and automatically calculates base units: `baseUnits = variantQty × unitsPerVariant`
 - Example: Receiving 5 boxes of SKU-B500 (500 pieces per box) → variantQty=5, onHandBase=2500
 
+#### Hierarchical Warehouse Locations
+The system uses a scalable 5-level hierarchy for bin locations that adapts from small warehouses to enterprise scale:
+
+| Level | Field | Example | Description |
+|-------|-------|---------|-------------|
+| 1 | Zone | `BULK` | Area of warehouse (RCV, BULK, FWD, PACK, SHIP) |
+| 2 | Aisle | `A` | Row/corridor |
+| 3 | Bay | `02` | Position along the aisle (2-digit padded) |
+| 4 | Level | `C` | Vertical position (A=floor, B=1st shelf...) |
+| 5 | Bin | `1` | Subdivision within that shelf spot |
+
+**Smart Display Logic**: Only populated fields are shown in the location code:
+- Zone=null, Aisle=A, Bay=3, Level=null → Shows: **A-03**
+- Zone=BULK, Aisle=A, Bay=2, Level=C → Shows: **BULK-A-02-C**
+
+**Location Types**: forward_pick, bulk_storage, receiving, packing, shipping, staging, pallet
+
+**Database Tables**:
+- `warehouse_zones`: Zone definitions with default location type
+- `warehouse_locations`: Full hierarchy with pickSequence, capacity constraints, replenishment chains
+
+**UI**: `/warehouse/locations` page with Locations and Zones tabs for managing the hierarchy.
+
 Core WMS functionalities:
 - Extended database schema for inventory management (inventory_items, uom_variants, inventory_levels, inventory_transactions, locations, channel_feeds).
 - Inventory service for allocation, ATP calculation, variant cascading, replenishment, and backorder handling.

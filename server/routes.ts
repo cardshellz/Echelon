@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
@@ -2657,7 +2657,128 @@ export async function registerRoutes(
   // INVENTORY MANAGEMENT (WMS) API
   // ============================================
 
-  // Warehouse Locations
+  // Warehouse Zones
+  app.get("/api/warehouse/zones", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const zones = await storage.getAllWarehouseZones();
+      res.json(zones);
+    } catch (error) {
+      console.error("Error fetching warehouse zones:", error);
+      res.status(500).json({ error: "Failed to fetch zones" });
+    }
+  });
+
+  app.post("/api/warehouse/zones", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const parsed = insertWarehouseZoneSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid zone data", details: parsed.error.errors });
+      }
+      const zone = await storage.createWarehouseZone(parsed.data);
+      res.status(201).json(zone);
+    } catch (error: any) {
+      console.error("Error creating warehouse zone:", error);
+      if (error.code === '23505') {
+        return res.status(400).json({ error: "Zone code already exists" });
+      }
+      res.status(500).json({ error: "Failed to create zone" });
+    }
+  });
+
+  app.patch("/api/warehouse/zones/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const zone = await storage.updateWarehouseZone(id, req.body);
+      if (!zone) {
+        return res.status(404).json({ error: "Zone not found" });
+      }
+      res.json(zone);
+    } catch (error) {
+      console.error("Error updating warehouse zone:", error);
+      res.status(500).json({ error: "Failed to update zone" });
+    }
+  });
+
+  app.delete("/api/warehouse/zones/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteWarehouseZone(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Zone not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting warehouse zone:", error);
+      res.status(500).json({ error: "Failed to delete zone" });
+    }
+  });
+
+  // Warehouse Locations (hierarchical)
+  app.get("/api/warehouse/locations", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const locations = await storage.getAllWarehouseLocations();
+      res.json(locations);
+    } catch (error) {
+      console.error("Error fetching warehouse locations:", error);
+      res.status(500).json({ error: "Failed to fetch locations" });
+    }
+  });
+
+  app.get("/api/warehouse/locations/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const location = await storage.getWarehouseLocationById(id);
+      if (!location) {
+        return res.status(404).json({ error: "Location not found" });
+      }
+      res.json(location);
+    } catch (error) {
+      console.error("Error fetching warehouse location:", error);
+      res.status(500).json({ error: "Failed to fetch location" });
+    }
+  });
+
+  app.post("/api/warehouse/locations", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      // Storage layer handles validation and code generation
+      const location = await storage.createWarehouseLocation(req.body);
+      res.status(201).json(location);
+    } catch (error: any) {
+      console.error("Error creating warehouse location:", error);
+      // Return user-friendly error message
+      res.status(400).json({ error: error.message || "Failed to create location" });
+    }
+  });
+
+  app.patch("/api/warehouse/locations/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const location = await storage.updateWarehouseLocation(id, req.body);
+      if (!location) {
+        return res.status(404).json({ error: "Location not found" });
+      }
+      res.json(location);
+    } catch (error: any) {
+      console.error("Error updating warehouse location:", error);
+      res.status(400).json({ error: error.message || "Failed to update location" });
+    }
+  });
+
+  app.delete("/api/warehouse/locations/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteWarehouseLocation(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Location not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting warehouse location:", error);
+      res.status(500).json({ error: "Failed to delete location" });
+    }
+  });
+
+  // Legacy Warehouse Locations (for backward compatibility with existing /api/inventory/locations)
   app.get("/api/inventory/locations", async (req, res) => {
     try {
       const locations = await storage.getAllWarehouseLocations();
