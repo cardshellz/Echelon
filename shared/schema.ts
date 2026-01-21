@@ -287,9 +287,35 @@ export function generateLocationCode(parts: {
   return segments.join('-');
 }
 
+// Warehouses (physical warehouse buildings/sites)
+export const warehouses = pgTable("warehouses", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 20 }).notNull().unique(), // Short code: "EAST", "WEST", "HQ"
+  name: varchar("name", { length: 200 }).notNull(), // Full name: "East Coast Distribution Center"
+  address: text("address"),
+  city: varchar("city", { length: 100 }),
+  state: varchar("state", { length: 50 }),
+  postalCode: varchar("postal_code", { length: 20 }),
+  country: varchar("country", { length: 50 }).default("US"),
+  timezone: varchar("timezone", { length: 50 }).default("America/New_York"),
+  isActive: integer("is_active").notNull().default(1),
+  isDefault: integer("is_default").notNull().default(0), // Default warehouse for new orders
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertWarehouseSchema = createInsertSchema(warehouses).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertWarehouse = z.infer<typeof insertWarehouseSchema>;
+export type Warehouse = typeof warehouses.$inferSelect;
+
 // Warehouse locations (bins, pallets, racks, etc.)
 export const warehouseLocations = pgTable("warehouse_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "cascade" }), // Which warehouse this location belongs to
   code: varchar("code", { length: 50 }).notNull().unique(), // Auto-generated from hierarchy: "BULK-A-02-C-1"
   name: text("name"), // Friendly name (optional)
   
