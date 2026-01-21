@@ -2778,6 +2778,78 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk delete warehouse locations
+  app.post("/api/warehouse/locations/bulk-delete", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: "No location IDs provided" });
+      }
+      let deleted = 0;
+      for (const id of ids) {
+        const result = await storage.deleteWarehouseLocation(id);
+        if (result) deleted++;
+      }
+      res.json({ success: true, deleted });
+    } catch (error) {
+      console.error("Error bulk deleting warehouse locations:", error);
+      res.status(500).json({ error: "Failed to delete locations" });
+    }
+  });
+
+  // Bulk import warehouse locations from CSV
+  app.post("/api/warehouse/locations/bulk-import", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const { locations } = req.body;
+      if (!Array.isArray(locations) || locations.length === 0) {
+        return res.status(400).json({ error: "No locations provided" });
+      }
+      
+      const results = { created: 0, errors: [] as string[] };
+      
+      for (let i = 0; i < locations.length; i++) {
+        const loc = locations[i];
+        const rowNum = i + 2; // Row 1 is header, data starts at row 2
+        
+        try {
+          // Validate that at least one hierarchy field is present
+          const zone = loc.zone?.trim() || null;
+          const aisle = loc.aisle?.trim() || null;
+          const bay = loc.bay?.toString().trim() || null;
+          const level = loc.level?.trim() || null;
+          const bin = loc.bin?.toString().trim() || null;
+          
+          if (!zone && !aisle && !bay && !level && !bin) {
+            results.errors.push(`Row ${rowNum}: At least one hierarchy field required (zone, aisle, bay, level, or bin)`);
+            continue;
+          }
+          
+          await storage.createWarehouseLocation({
+            zone,
+            aisle,
+            bay,
+            level,
+            bin,
+            name: loc.name?.trim() || null,
+            locationType: (loc.locationType || loc.location_type || "forward_pick").trim(),
+            isPickable: loc.isPickable !== undefined ? parseInt(loc.isPickable) : 1,
+            pickSequence: loc.pickSequence || loc.pick_sequence ? parseInt(loc.pickSequence || loc.pick_sequence) : null,
+            minQty: loc.minQty || loc.min_qty ? parseInt(loc.minQty || loc.min_qty) : null,
+            maxQty: loc.maxQty || loc.max_qty ? parseInt(loc.maxQty || loc.max_qty) : null,
+          });
+          results.created++;
+        } catch (err: any) {
+          results.errors.push(`Row ${rowNum}: ${err.message}`);
+        }
+      }
+      
+      res.json(results);
+    } catch (error: any) {
+      console.error("Error bulk importing warehouse locations:", error);
+      res.status(500).json({ error: error.message || "Failed to import locations" });
+    }
+  });
+
   // Legacy Warehouse Locations (for backward compatibility with existing /api/inventory/locations)
   app.get("/api/inventory/locations", async (req, res) => {
     try {

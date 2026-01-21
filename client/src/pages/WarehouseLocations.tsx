@@ -11,7 +11,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight } from "lucide-react";
+import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 
 interface WarehouseZone {
   id: number;
@@ -68,7 +70,10 @@ export default function WarehouseLocations() {
   const [activeTab, setActiveTab] = useState("locations");
   const [isCreateLocationOpen, setIsCreateLocationOpen] = useState(false);
   const [isCreateZoneOpen, setIsCreateZoneOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
   const [editingLocation, setEditingLocation] = useState<WarehouseLocation | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [csvData, setCsvData] = useState("");
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -163,6 +168,58 @@ export default function WarehouseLocations() {
     },
     onError: () => {
       toast({ title: "Error", description: "Failed to delete location", variant: "destructive" });
+    },
+  });
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const res = await fetch("/api/warehouse/locations/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) throw new Error("Failed to delete locations");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
+      setSelectedIds(new Set());
+      toast({ title: `Deleted ${data.deleted} locations` });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to delete locations", variant: "destructive" });
+    },
+  });
+
+  const bulkImportMutation = useMutation({
+    mutationFn: async (locations: any[]) => {
+      const res = await fetch("/api/warehouse/locations/bulk-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locations }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "Failed to import locations");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
+      setIsImportOpen(false);
+      setCsvData("");
+      if (data.errors?.length > 0) {
+        toast({ 
+          title: `Imported ${data.created} locations`, 
+          description: `${data.errors.length} errors: ${data.errors.slice(0, 3).join(", ")}${data.errors.length > 3 ? "..." : ""}`,
+          variant: "default" 
+        });
+      } else {
+        toast({ title: `Successfully imported ${data.created} locations` });
+      }
+    },
+    onError: (error: Error) => {
+      toast({ title: "Import failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -269,6 +326,91 @@ export default function WarehouseLocations() {
     return parts.join('-') || '---';
   };
 
+  const toggleSelectAll = () => {
+    if (selectedIds.size === locations.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(locations.map(l => l.id)));
+    }
+  };
+
+  const toggleSelect = (id: number) => {
+    const newSet = new Set(selectedIds);
+    if (newSet.has(id)) {
+      newSet.delete(id);
+    } else {
+      newSet.add(id);
+    }
+    setSelectedIds(newSet);
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedIds.size === 0) return;
+    if (confirm(`Delete ${selectedIds.size} location(s)? This cannot be undone.`)) {
+      bulkDeleteMutation.mutate(Array.from(selectedIds));
+    }
+  };
+
+  const parseCsv = (csv: string) => {
+    // Normalize line endings (Windows \r\n, old Mac \r, Unix \n)
+    const normalized = csv.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    const lines = normalized.split('\n').filter(line => line.trim());
+    if (lines.length < 2) return [];
+    
+    const headers = lines[0].toLowerCase().split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+    const rows = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      // Simple CSV parsing - handles basic quoted values
+      const values: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (const char of line) {
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          values.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.trim());
+      
+      const row: any = {};
+      headers.forEach((header, idx) => {
+        const val = values[idx]?.replace(/^"|"$/g, '');
+        if (val) row[header] = val;
+      });
+      if (Object.keys(row).length > 0) rows.push(row);
+    }
+    return rows;
+  };
+
+  const handleImport = () => {
+    const locations = parseCsv(csvData);
+    if (locations.length === 0) {
+      toast({ title: "No data found", description: "Please check your CSV format", variant: "destructive" });
+      return;
+    }
+    bulkImportMutation.mutate(locations);
+  };
+
+  const downloadTemplate = () => {
+    const template = "zone,aisle,bay,level,bin,name,location_type,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,forward_pick,1\nBULK,B,02,B,,Bulk B2,bulk_storage,";
+    const blob = new Blob([template], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'warehouse_locations_template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   if (!canView) {
     return (
       <div className="p-8 text-center text-muted-foreground">
@@ -307,19 +449,50 @@ export default function WarehouseLocations() {
           <div className="flex justify-between items-center">
             <div className="text-sm text-muted-foreground">
               Location code format: <code className="bg-muted px-1 rounded">ZONE-AISLE-BAY-LEVEL-BIN</code>
+              {selectedIds.size > 0 && (
+                <span className="ml-4 text-primary font-medium">{selectedIds.size} selected</span>
+              )}
             </div>
-            {canCreate && (
-              <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location">
-                <Plus className="h-4 w-4 mr-2" />
-                Add Location
-              </Button>
-            )}
+            <div className="flex gap-2">
+              {selectedIds.size > 0 && canEdit && (
+                <Button 
+                  variant="destructive" 
+                  onClick={handleBulkDelete}
+                  disabled={bulkDeleteMutation.isPending}
+                  data-testid="btn-bulk-delete"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete Selected ({selectedIds.size})
+                </Button>
+              )}
+              {canCreate && (
+                <>
+                  <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv">
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import CSV
+                  </Button>
+                  <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location">
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Location
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
 
           <Card>
             <Table>
               <TableHeader>
                 <TableRow>
+                  {canEdit && (
+                    <TableHead className="w-[40px]">
+                      <Checkbox
+                        checked={locations.length > 0 && selectedIds.size === locations.length}
+                        onCheckedChange={toggleSelectAll}
+                        data-testid="checkbox-select-all"
+                      />
+                    </TableHead>
+                  )}
                   <TableHead>Location Code</TableHead>
                   <TableHead>Zone</TableHead>
                   <TableHead>Aisle</TableHead>
@@ -334,17 +507,26 @@ export default function WarehouseLocations() {
               <TableBody>
                 {locationsLoading ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center py-8">Loading...</TableCell>
+                    <TableCell colSpan={canEdit ? 11 : 9} className="text-center py-8">Loading...</TableCell>
                   </TableRow>
                 ) : locations.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
-                      No locations defined yet. Add your first location to get started.
+                    <TableCell colSpan={canEdit ? 11 : 9} className="text-center py-8 text-muted-foreground">
+                      No locations defined yet. Add your first location or import from CSV.
                     </TableCell>
                   </TableRow>
                 ) : (
                   locations.map((loc) => (
-                    <TableRow key={loc.id} data-testid={`location-row-${loc.id}`}>
+                    <TableRow key={loc.id} data-testid={`location-row-${loc.id}`} className={selectedIds.has(loc.id) ? "bg-muted/50" : ""}>
+                      {canEdit && (
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedIds.has(loc.id)}
+                            onCheckedChange={() => toggleSelect(loc.id)}
+                            data-testid={`checkbox-location-${loc.id}`}
+                          />
+                        </TableCell>
+                      )}
                       <TableCell className="font-mono font-medium">{loc.code}</TableCell>
                       <TableCell>{loc.zone || '-'}</TableCell>
                       <TableCell>{loc.aisle || '-'}</TableCell>
@@ -773,6 +955,60 @@ export default function WarehouseLocations() {
               data-testid="btn-save-zone"
             >
               Create Zone
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* CSV Import Dialog */}
+      <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Import Locations from CSV</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <p className="text-sm text-muted-foreground">
+                Upload a CSV file with columns: zone, aisle, bay, level, bin, name, location_type, pick_sequence
+              </p>
+              <Button variant="outline" size="sm" onClick={downloadTemplate} data-testid="btn-download-template">
+                <Download className="h-4 w-4 mr-2" />
+                Download Template
+              </Button>
+            </div>
+            
+            <div>
+              <Label>Paste CSV Data</Label>
+              <Textarea
+                className="font-mono text-sm h-64"
+                placeholder="zone,aisle,bay,level,bin,name,location_type,pick_sequence
+FWD,A,01,A,1,Forward Pick A1,forward_pick,1
+BULK,B,02,B,,Bulk B2,bulk_storage,"
+                value={csvData}
+                onChange={(e) => setCsvData(e.target.value)}
+                data-testid="textarea-csv-data"
+              />
+            </div>
+
+            <div className="text-sm text-muted-foreground">
+              <p><strong>Supported columns:</strong></p>
+              <ul className="list-disc list-inside mt-1">
+                <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy (at least one required)</li>
+                <li><code>name</code> - Friendly name (optional)</li>
+                <li><code>location_type</code> - forward_pick, bulk_storage, receiving, packing, shipping (default: forward_pick)</li>
+                <li><code>pick_sequence</code> - Picking order number (optional)</li>
+              </ul>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setIsImportOpen(false); setCsvData(""); }}>Cancel</Button>
+            <Button 
+              onClick={handleImport}
+              disabled={!csvData.trim() || bulkImportMutation.isPending}
+              data-testid="btn-run-import"
+            >
+              <Upload className="h-4 w-4 mr-2" />
+              {bulkImportMutation.isPending ? "Importing..." : "Import Locations"}
             </Button>
           </DialogFooter>
         </DialogContent>
