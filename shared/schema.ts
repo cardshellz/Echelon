@@ -36,7 +36,7 @@ export const productLocations = pgTable("product_locations", {
   name: text("name").notNull(),
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
-  warehouseLocationId: integer("warehouse_location_id"), // FK to warehouse_locations (optional for backward compat)
+  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // FK to warehouse_locations
   status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // Product barcode from Shopify for scanner matching
