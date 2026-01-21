@@ -76,6 +76,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Channel Reserves", icon: Package, href: "/channels/reserves", roles: ["admin", "lead"] },
     { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship", roles: ["admin", "lead"] },
     { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations", roles: ["admin"] },
+    { type: "separator", label: "Administration", roles: ["admin"] },
     { type: 'link', label: "User Management", icon: Users, href: "/users", roles: ["admin"] },
     { type: 'link', label: "Roles & Permissions", icon: Shield, href: "/roles", roles: ["admin"] },
     { type: "separator", label: "Management", roles: ["admin", "lead"] },
