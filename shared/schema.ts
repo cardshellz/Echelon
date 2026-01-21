@@ -382,7 +382,7 @@ export type UomVariant = typeof uomVariants.$inferSelect;
 export const inventoryLevels = pgTable("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
-  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
+  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
   variantId: integer("variant_id").references(() => uomVariants.id), // Which variant is stored here
   variantQty: integer("variant_qty").notNull().default(0), // Physical count of variant units (e.g., 5 boxes)
   onHandBase: integer("on_hand_base").notNull().default(0), // Derived: variantQty * unitsPerVariant
@@ -444,7 +444,7 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
   variantId: integer("variant_id").references(() => uomVariants.id),
-  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id),
+  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
   transactionType: varchar("transaction_type", { length: 30 }).notNull(),
   reasonId: integer("reason_id").references(() => adjustmentReasons.id),
   baseQtyDelta: integer("base_qty_delta").notNull(), // Positive = add, negative = remove
