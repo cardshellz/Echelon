@@ -11,6 +11,8 @@ import {
   type InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
+  type Warehouse,
+  type InsertWarehouse,
   type WarehouseLocation,
   type InsertWarehouseLocation,
   type WarehouseZone,
@@ -41,6 +43,7 @@ import {
   productLocations,
   orders,
   orderItems,
+  warehouses,
   warehouseLocations,
   warehouseZones,
   inventoryItems,
@@ -115,6 +118,14 @@ export interface IStorage {
   // ============================================
   
   // Warehouse Zones
+  // Warehouses (physical sites)
+  getAllWarehouses(): Promise<Warehouse[]>;
+  getWarehouseById(id: number): Promise<Warehouse | undefined>;
+  getWarehouseByCode(code: string): Promise<Warehouse | undefined>;
+  createWarehouse(warehouse: InsertWarehouse): Promise<Warehouse>;
+  updateWarehouse(id: number, updates: Partial<InsertWarehouse>): Promise<Warehouse | null>;
+  deleteWarehouse(id: number): Promise<boolean>;
+  
   getAllWarehouseZones(): Promise<WarehouseZone[]>;
   getWarehouseZoneByCode(code: string): Promise<WarehouseZone | undefined>;
   createWarehouseZone(zone: InsertWarehouseZone): Promise<WarehouseZone>;
@@ -758,6 +769,47 @@ export class DatabaseStorage implements IStorage {
   // ============================================
   // INVENTORY MANAGEMENT (WMS) IMPLEMENTATIONS
   // ============================================
+
+  // Warehouses (physical sites)
+  async getAllWarehouses(): Promise<Warehouse[]> {
+    return await db.select().from(warehouses).orderBy(asc(warehouses.name));
+  }
+
+  async getWarehouseById(id: number): Promise<Warehouse | undefined> {
+    const result = await db.select().from(warehouses).where(eq(warehouses.id, id));
+    return result[0];
+  }
+
+  async getWarehouseByCode(code: string): Promise<Warehouse | undefined> {
+    const result = await db.select().from(warehouses).where(eq(warehouses.code, code.toUpperCase()));
+    return result[0];
+  }
+
+  async createWarehouse(warehouse: InsertWarehouse): Promise<Warehouse> {
+    const result = await db.insert(warehouses).values({
+      ...warehouse,
+      code: warehouse.code.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+
+  async updateWarehouse(id: number, updates: Partial<InsertWarehouse>): Promise<Warehouse | null> {
+    const result = await db
+      .update(warehouses)
+      .set({
+        ...updates,
+        code: updates.code ? updates.code.toUpperCase() : undefined,
+        updatedAt: new Date(),
+      })
+      .where(eq(warehouses.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteWarehouse(id: number): Promise<boolean> {
+    const result = await db.delete(warehouses).where(eq(warehouses.id, id)).returning();
+    return result.length > 0;
+  }
 
   // Warehouse Zones
   async getAllWarehouseZones(): Promise<WarehouseZone[]> {

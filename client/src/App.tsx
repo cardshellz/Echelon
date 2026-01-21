@@ -18,6 +18,7 @@ import PickingMetrics from "@/pages/PickingMetrics";
 import OrderHistory from "@/pages/OrderHistory";
 import Locations from "@/pages/Locations";
 import WarehouseLocations from "@/pages/WarehouseLocations";
+import Warehouses from "@/pages/Warehouses";
 import Integrations from "@/pages/Integrations";
 import Users from "@/pages/Users";
 import Roles from "@/pages/Roles";
@@ -106,6 +107,9 @@ function Router() {
         </Route>
         <Route path="/warehouse/locations">
           <ProtectedRoute component={WarehouseLocations} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/warehouses">
+          <ProtectedRoute component={Warehouses} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/integrations">
           <ProtectedRoute component={Integrations} allowedRoles={["admin"]} />
