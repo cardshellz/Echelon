@@ -22,7 +22,8 @@ import {
   LogOut,
   FileText,
   History,
-  Shield
+  Shield,
+  Store
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -70,7 +71,9 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
     { type: 'link', label: "Product Locations", icon: MapPin, href: "/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
-    { type: "separator", label: "Dropship & Integrations", roles: ["admin", "lead"] },
+    { type: "separator", label: "Channels & Integrations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Sales Channels", icon: Store, href: "/channels", roles: ["admin", "lead"] },
+    { type: 'link', label: "Channel Reserves", icon: Package, href: "/channels/reserves", roles: ["admin", "lead"] },
     { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship", roles: ["admin", "lead"] },
     { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations", roles: ["admin"] },
     { type: 'link', label: "User Management", icon: Users, href: "/users", roles: ["admin"] },

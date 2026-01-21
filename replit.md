@@ -107,10 +107,23 @@ Echelon integrates with Shopify for product and order synchronization.
 - **Environment Variables**: Requires `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, and `SHOPIFY_API_SECRET`.
 - **Fulfillment Flow**: Supports split shipments and tracks fulfilled quantities per item, marking an order shipped only when all physical items are fulfilled.
 
-### Multi-Channel Infrastructure (Foundation)
-The system includes foundational tables for multi-channel sales and dropship partner support:
+### Multi-Channel Infrastructure
+The system includes full UI and API support for multi-channel sales and dropship partner management:
 
-#### Channel Management
+#### Channel Management UI (`/channels`)
+- **Sales Channels Page**: Grid view of connected channels with status indicators
+- **Channel Cards**: Show provider icon, name, status, sync status, last sync time
+- **Quick Actions**: Toggle active/paused, view connection details, delete
+- **Channel Detail Modal**: Tabs for Settings, Connection, and Partner Info
+- **Create Channel**: Add new internal stores or partner/dropship channels
+
+#### Channel Reserves UI (`/channels/reserves`)
+- **Reserves Table**: View all inventory allocations across channels
+- **Channel Filter**: Filter reserves by specific channel
+- **Create Reserve**: Allocate inventory items to channels with min/max stock thresholds
+- **Summary Cards**: Active channels count, total reserves, total reserved units
+
+#### Channel Management API
 - **channels**: Core entity for all sales channels (internal stores and partner stores)
   - `type`: "internal" (your stores) or "partner" (dropship partners)
   - `provider`: shopify, ebay, amazon, etsy, manual

@@ -27,6 +27,14 @@ import {
   type InsertPickingLog,
   type AdjustmentReason,
   type InsertAdjustmentReason,
+  type Channel,
+  type InsertChannel,
+  type ChannelConnection,
+  type InsertChannelConnection,
+  type PartnerProfile,
+  type InsertPartnerProfile,
+  type ChannelReservation,
+  type InsertChannelReservation,
   users,
   productLocations,
   orders,
@@ -38,7 +46,11 @@ import {
   inventoryTransactions,
   channelFeeds,
   pickingLogs,
-  adjustmentReasons
+  adjustmentReasons,
+  channels,
+  channelConnections,
+  partnerProfiles,
+  channelReservations
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -208,6 +220,30 @@ export interface IStorage {
     pickingLogs: PickingLog[];
     picker?: { id: string; displayName: string | null };
   } | null>;
+  
+  // ============================================
+  // CHANNELS MANAGEMENT
+  // ============================================
+  getAllChannels(): Promise<Channel[]>;
+  getChannelById(id: number): Promise<Channel | undefined>;
+  createChannel(channel: InsertChannel): Promise<Channel>;
+  updateChannel(id: number, updates: Partial<InsertChannel>): Promise<Channel | null>;
+  deleteChannel(id: number): Promise<boolean>;
+  
+  // Channel Connections
+  getChannelConnection(channelId: number): Promise<ChannelConnection | undefined>;
+  upsertChannelConnection(connection: InsertChannelConnection): Promise<ChannelConnection>;
+  updateChannelConnectionSyncStatus(channelId: number, status: string, error?: string | null): Promise<void>;
+  
+  // Partner Profiles
+  getPartnerProfile(channelId: number): Promise<PartnerProfile | undefined>;
+  upsertPartnerProfile(profile: InsertPartnerProfile): Promise<PartnerProfile>;
+  
+  // Channel Reservations
+  getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; inventoryItem?: InventoryItem })[]>;
+  getChannelReservationByChannelAndItem(channelId: number, inventoryItemId: number): Promise<ChannelReservation | undefined>;
+  upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation>;
+  deleteChannelReservation(id: number): Promise<boolean>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1339,6 +1375,135 @@ export class DatabaseStorage implements IStorage {
       pickingLogs: logs,
       picker
     };
+  }
+  
+  // ============================================
+  // CHANNELS MANAGEMENT
+  // ============================================
+  async getAllChannels(): Promise<Channel[]> {
+    return db.select().from(channels).orderBy(asc(channels.priority), asc(channels.name));
+  }
+  
+  async getChannelById(id: number): Promise<Channel | undefined> {
+    const result = await db.select().from(channels).where(eq(channels.id, id));
+    return result[0];
+  }
+  
+  async createChannel(channel: InsertChannel): Promise<Channel> {
+    const result = await db.insert(channels).values(channel).returning();
+    return result[0];
+  }
+  
+  async updateChannel(id: number, updates: Partial<InsertChannel>): Promise<Channel | null> {
+    const result = await db.update(channels)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(channels.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteChannel(id: number): Promise<boolean> {
+    const result = await db.delete(channels).where(eq(channels.id, id)).returning();
+    return result.length > 0;
+  }
+  
+  // Channel Connections
+  async getChannelConnection(channelId: number): Promise<ChannelConnection | undefined> {
+    const result = await db.select().from(channelConnections).where(eq(channelConnections.channelId, channelId));
+    return result[0];
+  }
+  
+  async upsertChannelConnection(connection: InsertChannelConnection): Promise<ChannelConnection> {
+    const existing = await this.getChannelConnection(connection.channelId);
+    if (existing) {
+      const result = await db.update(channelConnections)
+        .set({ ...connection, updatedAt: new Date() })
+        .where(eq(channelConnections.channelId, connection.channelId))
+        .returning();
+      return result[0];
+    }
+    const result = await db.insert(channelConnections).values(connection).returning();
+    return result[0];
+  }
+  
+  async updateChannelConnectionSyncStatus(channelId: number, status: string, error?: string | null): Promise<void> {
+    await db.update(channelConnections)
+      .set({ 
+        syncStatus: status, 
+        syncError: error,
+        lastSyncAt: status === 'ok' ? new Date() : undefined,
+        updatedAt: new Date() 
+      })
+      .where(eq(channelConnections.channelId, channelId));
+  }
+  
+  // Partner Profiles
+  async getPartnerProfile(channelId: number): Promise<PartnerProfile | undefined> {
+    const result = await db.select().from(partnerProfiles).where(eq(partnerProfiles.channelId, channelId));
+    return result[0];
+  }
+  
+  async upsertPartnerProfile(profile: InsertPartnerProfile): Promise<PartnerProfile> {
+    const existing = await this.getPartnerProfile(profile.channelId);
+    if (existing) {
+      const result = await db.update(partnerProfiles)
+        .set({ ...profile, updatedAt: new Date() })
+        .where(eq(partnerProfiles.channelId, profile.channelId))
+        .returning();
+      return result[0];
+    }
+    const result = await db.insert(partnerProfiles).values(profile).returning();
+    return result[0];
+  }
+  
+  // Channel Reservations
+  async getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; inventoryItem?: InventoryItem })[]> {
+    let query = db.select({
+      reservation: channelReservations,
+      channel: channels,
+      inventoryItem: inventoryItems
+    })
+    .from(channelReservations)
+    .leftJoin(channels, eq(channelReservations.channelId, channels.id))
+    .leftJoin(inventoryItems, eq(channelReservations.inventoryItemId, inventoryItems.id));
+    
+    if (channelId) {
+      query = query.where(eq(channelReservations.channelId, channelId)) as any;
+    }
+    
+    const results = await query.orderBy(asc(channels.name));
+    return results.map(r => ({
+      ...r.reservation,
+      channel: r.channel || undefined,
+      inventoryItem: r.inventoryItem || undefined
+    }));
+  }
+  
+  async getChannelReservationByChannelAndItem(channelId: number, inventoryItemId: number): Promise<ChannelReservation | undefined> {
+    const result = await db.select().from(channelReservations)
+      .where(and(
+        eq(channelReservations.channelId, channelId),
+        eq(channelReservations.inventoryItemId, inventoryItemId)
+      ));
+    return result[0];
+  }
+  
+  async upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation> {
+    const existing = await this.getChannelReservationByChannelAndItem(reservation.channelId, reservation.inventoryItemId);
+    if (existing) {
+      const result = await db.update(channelReservations)
+        .set({ ...reservation, updatedAt: new Date() })
+        .where(eq(channelReservations.id, existing.id))
+        .returning();
+      return result[0];
+    }
+    const result = await db.insert(channelReservations).values(reservation).returning();
+    return result[0];
+  }
+  
+  async deleteChannelReservation(id: number): Promise<boolean> {
+    const result = await db.delete(channelReservations).where(eq(channelReservations.id, id)).returning();
+    return result.length > 0;
   }
 }
 

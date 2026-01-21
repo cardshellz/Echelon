@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser } from "@shared/schema";
@@ -3358,6 +3358,217 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error exporting order history:", error);
       res.status(500).json({ error: "Failed to export order history" });
+    }
+  });
+
+  // ============================================
+  // CHANNELS MANAGEMENT API
+  // ============================================
+  
+  // Get all channels
+  app.get("/api/channels", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const allChannels = await storage.getAllChannels();
+      
+      // Enrich with connection info
+      const enrichedChannels = await Promise.all(
+        allChannels.map(async (channel) => {
+          const connection = await storage.getChannelConnection(channel.id);
+          const partnerProfile = channel.type === 'partner' 
+            ? await storage.getPartnerProfile(channel.id)
+            : null;
+          return {
+            ...channel,
+            connection: connection || null,
+            partnerProfile: partnerProfile || null
+          };
+        })
+      );
+      
+      res.json(enrichedChannels);
+    } catch (error) {
+      console.error("Error fetching channels:", error);
+      res.status(500).json({ error: "Failed to fetch channels" });
+    }
+  });
+  
+  // Get single channel
+  app.get("/api/channels/:id", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      const connection = await storage.getChannelConnection(channelId);
+      const partnerProfile = channel.type === 'partner' 
+        ? await storage.getPartnerProfile(channelId)
+        : null;
+      
+      res.json({
+        ...channel,
+        connection: connection || null,
+        partnerProfile: partnerProfile || null
+      });
+    } catch (error) {
+      console.error("Error fetching channel:", error);
+      res.status(500).json({ error: "Failed to fetch channel" });
+    }
+  });
+  
+  // Create channel
+  app.post("/api/channels", requirePermission("channels", "create"), async (req, res) => {
+    try {
+      const channelData = {
+        ...req.body,
+        priority: req.body.priority ?? 0,
+        isDefault: req.body.isDefault ?? 0,
+        status: req.body.status ?? "pending_setup",
+      };
+      
+      const parseResult = insertChannelSchema.safeParse(channelData);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Invalid channel data", details: parseResult.error.errors });
+      }
+      
+      const channel = await storage.createChannel(parseResult.data);
+      res.status(201).json(channel);
+    } catch (error) {
+      console.error("Error creating channel:", error);
+      res.status(500).json({ error: "Failed to create channel" });
+    }
+  });
+  
+  // Update channel
+  app.put("/api/channels/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.updateChannel(channelId, req.body);
+      
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      res.json(channel);
+    } catch (error) {
+      console.error("Error updating channel:", error);
+      res.status(500).json({ error: "Failed to update channel" });
+    }
+  });
+  
+  // Delete channel
+  app.delete("/api/channels/:id", requirePermission("channels", "delete"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const deleted = await storage.deleteChannel(channelId);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting channel:", error);
+      res.status(500).json({ error: "Failed to delete channel" });
+    }
+  });
+  
+  // Update channel connection
+  app.put("/api/channels/:id/connection", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      const connection = await storage.upsertChannelConnection({
+        channelId,
+        ...req.body
+      });
+      
+      res.json(connection);
+    } catch (error) {
+      console.error("Error updating channel connection:", error);
+      res.status(500).json({ error: "Failed to update channel connection" });
+    }
+  });
+  
+  // Update partner profile
+  app.put("/api/channels/:id/partner-profile", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      if (channel.type !== 'partner') {
+        return res.status(400).json({ error: "Partner profile only available for partner channels" });
+      }
+      
+      const profile = await storage.upsertPartnerProfile({
+        channelId,
+        ...req.body
+      });
+      
+      res.json(profile);
+    } catch (error) {
+      console.error("Error updating partner profile:", error);
+      res.status(500).json({ error: "Failed to update partner profile" });
+    }
+  });
+  
+  // ============================================
+  // CHANNEL RESERVATIONS API
+  // ============================================
+  
+  // Get all reservations (optionally filtered by channel)
+  app.get("/api/channel-reservations", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = req.query.channelId ? parseInt(req.query.channelId as string) : undefined;
+      const reservations = await storage.getChannelReservations(channelId);
+      res.json(reservations);
+    } catch (error) {
+      console.error("Error fetching reservations:", error);
+      res.status(500).json({ error: "Failed to fetch reservations" });
+    }
+  });
+  
+  // Upsert reservation
+  app.post("/api/channel-reservations", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const parseResult = insertChannelReservationSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: "Invalid reservation data", details: parseResult.error.errors });
+      }
+      
+      const reservation = await storage.upsertChannelReservation(parseResult.data);
+      res.json(reservation);
+    } catch (error) {
+      console.error("Error creating reservation:", error);
+      res.status(500).json({ error: "Failed to create reservation" });
+    }
+  });
+  
+  // Delete reservation
+  app.delete("/api/channel-reservations/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteChannelReservation(id);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Reservation not found" });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting reservation:", error);
+      res.status(500).json({ error: "Failed to delete reservation" });
     }
   });
 

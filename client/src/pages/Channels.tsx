@@ -1,0 +1,533 @@
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "@/lib/auth";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
+import { 
+  Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle, 
+  Clock, Pause, Play, ExternalLink, Building2, Package, Lock
+} from "lucide-react";
+
+interface ChannelConnection {
+  id: number;
+  channelId: number;
+  shopDomain: string | null;
+  lastSyncAt: string | null;
+  syncStatus: string | null;
+  syncError: string | null;
+}
+
+interface PartnerProfile {
+  id: number;
+  channelId: number;
+  companyName: string;
+  contactName: string | null;
+  contactEmail: string | null;
+  discountPercent: number;
+  slaDays: number;
+}
+
+interface Channel {
+  id: number;
+  name: string;
+  type: string;
+  provider: string;
+  status: string;
+  isDefault: number;
+  priority: number;
+  createdAt: string;
+  connection: ChannelConnection | null;
+  partnerProfile: PartnerProfile | null;
+}
+
+const PROVIDER_OPTIONS = [
+  { value: "shopify", label: "Shopify", icon: "🛒" },
+  { value: "ebay", label: "eBay", icon: "🏷️" },
+  { value: "amazon", label: "Amazon", icon: "📦" },
+  { value: "etsy", label: "Etsy", icon: "🎨" },
+  { value: "manual", label: "Manual Entry", icon: "✏️" },
+];
+
+const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "destructive" | "outline"; label: string }> = {
+  active: { variant: "default", label: "Active" },
+  paused: { variant: "secondary", label: "Paused" },
+  pending_setup: { variant: "outline", label: "Pending Setup" },
+  error: { variant: "destructive", label: "Error" },
+};
+
+export default function Channels() {
+  const { hasPermission } = useAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
+  const [newChannel, setNewChannel] = useState({
+    name: "",
+    type: "internal",
+    provider: "shopify",
+    status: "pending_setup",
+  });
+
+  const canView = hasPermission("channels", "view");
+  const canCreate = hasPermission("channels", "create");
+  const canEdit = hasPermission("channels", "edit");
+  const canDelete = hasPermission("channels", "delete");
+
+  const { data: channels = [], isLoading } = useQuery<Channel[]>({
+    queryKey: ["/api/channels"],
+    queryFn: async () => {
+      const res = await fetch("/api/channels", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch channels");
+      return res.json();
+    },
+    enabled: canView,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (data: typeof newChannel) => {
+      const res = await fetch("/api/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to create channel");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+      setIsCreateOpen(false);
+      setNewChannel({ name: "", type: "internal", provider: "shopify", status: "pending_setup" });
+      toast({ title: "Channel created successfully" });
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message, variant: "destructive" });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async ({ id, ...data }: { id: number; [key: string]: any }) => {
+      const res = await fetch(`/api/channels/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to update channel");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+      toast({ title: "Channel updated" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/channels/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to delete channel");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+      setSelectedChannel(null);
+      toast({ title: "Channel deleted" });
+    },
+  });
+
+  const handleStatusToggle = (channel: Channel) => {
+    const newStatus = channel.status === "active" ? "paused" : "active";
+    updateMutation.mutate({ id: channel.id, status: newStatus });
+  };
+
+  const getSyncStatusIcon = (connection: ChannelConnection | null) => {
+    if (!connection) return <Clock className="h-4 w-4 text-muted-foreground" />;
+    switch (connection.syncStatus) {
+      case "ok": return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+      case "error": return <AlertCircle className="h-4 w-4 text-destructive" />;
+      case "syncing": return <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />;
+      default: return <Clock className="h-4 w-4 text-muted-foreground" />;
+    }
+  };
+
+  const getProviderIcon = (provider: string) => {
+    const opt = PROVIDER_OPTIONS.find(p => p.value === provider);
+    return opt?.icon || "🔗";
+  };
+
+  if (!canView) {
+    return (
+      <div className="flex items-center justify-center h-96" data-testid="page-channels-no-access">
+        <Card className="p-6 text-center">
+          <Lock className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+          <h2 className="text-xl font-semibold">Access Denied</h2>
+          <p className="text-muted-foreground mt-2">You don't have permission to view channels.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6" data-testid="page-channels">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
+            <Store className="h-8 w-8 text-primary" />
+            Sales Channels
+          </h1>
+          <p className="text-muted-foreground">Manage your connected stores and marketplace integrations</p>
+        </div>
+        {canCreate && (
+          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <DialogTrigger asChild>
+              <Button data-testid="button-create-channel">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Channel
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Add New Channel</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-4">
+                <div className="space-y-2">
+                  <Label htmlFor="channel-name">Channel Name</Label>
+                  <Input
+                    id="channel-name"
+                    value={newChannel.name}
+                    onChange={(e) => setNewChannel(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="e.g., Shopify Main Store"
+                    data-testid="input-channel-name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="channel-type">Type</Label>
+                  <Select
+                    value={newChannel.type}
+                    onValueChange={(value) => setNewChannel(prev => ({ ...prev, type: value }))}
+                  >
+                    <SelectTrigger data-testid="select-channel-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="internal">Internal Store</SelectItem>
+                      <SelectItem value="partner">Partner / Dropship</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="channel-provider">Provider</Label>
+                  <Select
+                    value={newChannel.provider}
+                    onValueChange={(value) => setNewChannel(prev => ({ ...prev, provider: value }))}
+                  >
+                    <SelectTrigger data-testid="select-channel-provider">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROVIDER_OPTIONS.map(opt => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          <span className="flex items-center gap-2">
+                            <span>{opt.icon}</span>
+                            <span>{opt.label}</span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  onClick={() => createMutation.mutate(newChannel)}
+                  disabled={!newChannel.name || createMutation.isPending}
+                  data-testid="button-submit-channel"
+                >
+                  Create Channel
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      ) : channels.length === 0 ? (
+        <Card className="p-12 text-center">
+          <Store className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+          <h2 className="text-xl font-semibold mb-2">No Channels Connected</h2>
+          <p className="text-muted-foreground mb-4">Add your first sales channel to start syncing orders and inventory.</p>
+          {canCreate && (
+            <Button onClick={() => setIsCreateOpen(true)}>
+              <Plus className="h-4 w-4 mr-2" />
+              Add Your First Channel
+            </Button>
+          )}
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {channels.map(channel => (
+            <Card 
+              key={channel.id} 
+              className={`relative overflow-hidden transition-all cursor-pointer hover:shadow-md ${
+                channel.status === 'active' ? 'border-l-4 border-l-emerald-500' : 
+                channel.status === 'error' ? 'border-l-4 border-l-destructive' :
+                channel.status === 'paused' ? 'border-l-4 border-l-amber-400' : ''
+              }`}
+              onClick={() => setSelectedChannel(channel)}
+              data-testid={`channel-card-${channel.id}`}
+            >
+              <CardHeader className="pb-2">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 bg-muted rounded-md flex items-center justify-center text-xl">
+                      {getProviderIcon(channel.provider)}
+                    </div>
+                    <div>
+                      <CardTitle className="text-base">{channel.name}</CardTitle>
+                      <CardDescription className="capitalize">
+                        {channel.provider} • {channel.type === 'partner' ? 'Partner' : 'Internal'}
+                      </CardDescription>
+                    </div>
+                  </div>
+                  {canEdit && (
+                    <Switch
+                      checked={channel.status === 'active'}
+                      onCheckedChange={() => handleStatusToggle(channel)}
+                      onClick={(e) => e.stopPropagation()}
+                      data-testid={`switch-channel-status-${channel.id}`}
+                    />
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  {getSyncStatusIcon(channel.connection)}
+                  <span>
+                    {channel.connection?.lastSyncAt 
+                      ? `Last sync: ${new Date(channel.connection.lastSyncAt).toLocaleDateString()}`
+                      : 'Never synced'}
+                  </span>
+                </div>
+                {channel.connection?.syncError && (
+                  <p className="text-xs text-destructive mt-2 line-clamp-2">
+                    {channel.connection.syncError}
+                  </p>
+                )}
+              </CardContent>
+              <CardFooter className="pt-0">
+                <Badge variant={STATUS_BADGES[channel.status]?.variant || 'outline'}>
+                  {STATUS_BADGES[channel.status]?.label || channel.status}
+                </Badge>
+                {channel.isDefault === 1 && (
+                  <Badge variant="secondary" className="ml-2">Primary</Badge>
+                )}
+              </CardFooter>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Channel Detail Dialog */}
+      <Dialog open={!!selectedChannel} onOpenChange={(open) => !open && setSelectedChannel(null)}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          {selectedChannel && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <span className="text-xl">{getProviderIcon(selectedChannel.provider)}</span>
+                  {selectedChannel.name}
+                </DialogTitle>
+              </DialogHeader>
+              
+              <Tabs defaultValue="settings" className="mt-4">
+                <TabsList>
+                  <TabsTrigger value="settings">Settings</TabsTrigger>
+                  <TabsTrigger value="connection">Connection</TabsTrigger>
+                  {selectedChannel.type === 'partner' && (
+                    <TabsTrigger value="partner">Partner Info</TabsTrigger>
+                  )}
+                </TabsList>
+                
+                <TabsContent value="settings" className="space-y-4 mt-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Status</Label>
+                      <Select
+                        value={selectedChannel.status}
+                        onValueChange={(value) => {
+                          updateMutation.mutate({ id: selectedChannel.id, status: value });
+                          setSelectedChannel({ ...selectedChannel, status: value });
+                        }}
+                        disabled={!canEdit}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="active">Active</SelectItem>
+                          <SelectItem value="paused">Paused</SelectItem>
+                          <SelectItem value="pending_setup">Pending Setup</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Priority</Label>
+                      <Input
+                        type="number"
+                        value={selectedChannel.priority}
+                        onChange={(e) => {
+                          const priority = parseInt(e.target.value) || 0;
+                          updateMutation.mutate({ id: selectedChannel.id, priority });
+                          setSelectedChannel({ ...selectedChannel, priority });
+                        }}
+                        disabled={!canEdit}
+                      />
+                      <p className="text-xs text-muted-foreground">Higher priority syncs first</p>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                    <div>
+                      <p className="font-medium">Primary Channel</p>
+                      <p className="text-sm text-muted-foreground">
+                        Make this the default channel for {selectedChannel.provider}
+                      </p>
+                    </div>
+                    <Switch
+                      checked={selectedChannel.isDefault === 1}
+                      onCheckedChange={(checked) => {
+                        updateMutation.mutate({ id: selectedChannel.id, isDefault: checked ? 1 : 0 });
+                        setSelectedChannel({ ...selectedChannel, isDefault: checked ? 1 : 0 });
+                      }}
+                      disabled={!canEdit}
+                    />
+                  </div>
+                </TabsContent>
+                
+                <TabsContent value="connection" className="space-y-4 mt-4">
+                  {selectedChannel.connection ? (
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+                        {getSyncStatusIcon(selectedChannel.connection)}
+                        <div>
+                          <p className="font-medium capitalize">{selectedChannel.connection.syncStatus || 'Never synced'}</p>
+                          {selectedChannel.connection.lastSyncAt && (
+                            <p className="text-sm text-muted-foreground">
+                              Last sync: {new Date(selectedChannel.connection.lastSyncAt).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {selectedChannel.connection.shopDomain && (
+                        <div className="space-y-2">
+                          <Label>Shop Domain</Label>
+                          <div className="flex items-center gap-2">
+                            <Input value={selectedChannel.connection.shopDomain} readOnly />
+                            <Button variant="outline" size="icon" asChild>
+                              <a href={`https://${selectedChannel.connection.shopDomain}`} target="_blank" rel="noopener noreferrer">
+                                <ExternalLink className="h-4 w-4" />
+                              </a>
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                      
+                      {selectedChannel.connection.syncError && (
+                        <div className="p-3 bg-destructive/10 text-destructive rounded-lg">
+                          <p className="text-sm font-medium">Sync Error</p>
+                          <p className="text-sm">{selectedChannel.connection.syncError}</p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8">
+                      <Settings className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                      <p className="text-muted-foreground">No connection configured yet.</p>
+                      <Button className="mt-4" variant="outline">
+                        Configure Connection
+                      </Button>
+                    </div>
+                  )}
+                </TabsContent>
+                
+                {selectedChannel.type === 'partner' && (
+                  <TabsContent value="partner" className="space-y-4 mt-4">
+                    {selectedChannel.partnerProfile ? (
+                      <div className="space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <Label className="text-muted-foreground">Company</Label>
+                            <p className="font-medium">{selectedChannel.partnerProfile.companyName}</p>
+                          </div>
+                          <div>
+                            <Label className="text-muted-foreground">Contact</Label>
+                            <p className="font-medium">{selectedChannel.partnerProfile.contactName || '-'}</p>
+                          </div>
+                          <div>
+                            <Label className="text-muted-foreground">Email</Label>
+                            <p className="font-medium">{selectedChannel.partnerProfile.contactEmail || '-'}</p>
+                          </div>
+                          <div>
+                            <Label className="text-muted-foreground">Discount %</Label>
+                            <p className="font-medium">{selectedChannel.partnerProfile.discountPercent}%</p>
+                          </div>
+                          <div>
+                            <Label className="text-muted-foreground">SLA Days</Label>
+                            <p className="font-medium">{selectedChannel.partnerProfile.slaDays} days</p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-center py-8">
+                        <Building2 className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                        <p className="text-muted-foreground">No partner profile configured.</p>
+                        <Button className="mt-4" variant="outline">
+                          Add Partner Details
+                        </Button>
+                      </div>
+                    )}
+                  </TabsContent>
+                )}
+              </Tabs>
+              
+              {canDelete && (
+                <div className="flex justify-end mt-4 pt-4 border-t">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm('Are you sure you want to delete this channel?')) {
+                        deleteMutation.mutate(selectedChannel.id);
+                      }
+                    }}
+                    data-testid="button-delete-channel"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete Channel
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
