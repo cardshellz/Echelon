@@ -16,7 +16,8 @@ import {
   Package,
   FileText,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  AlertCircle
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,15 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+
+interface WarehouseLocation {
+  id: number;
+  code: string;
+  zone: string | null;
+  locationType: string;
+}
 
 export default function Locations() {
   const queryClient = useQueryClient();
@@ -50,6 +60,12 @@ export default function Locations() {
     queryKey: ["locations"],
     queryFn: locationsApi.getAll,
   });
+
+  // Fetch warehouse locations for dropdown
+  const { data: warehouseLocations = [] } = useQuery<WarehouseLocation[]>({
+    queryKey: ["/api/warehouse/locations"],
+  });
+
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editLocation, setEditLocation] = useState("");
@@ -62,6 +78,14 @@ export default function Locations() {
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Group warehouse locations by zone for easier selection
+  const locationsByZone = warehouseLocations.reduce((acc, loc) => {
+    const zone = loc.zone || "Other";
+    if (!acc[zone]) acc[zone] = [];
+    acc[zone].push(loc);
+    return acc;
+  }, {} as Record<string, WarehouseLocation[]>);
   
   // Mutations
   const createMutation = useMutation({
@@ -110,10 +134,15 @@ export default function Locations() {
   
   // Save edit
   const handleSaveEdit = (id: number) => {
-    const zone = editLocation.split("-")[0]?.toUpperCase() || "A";
+    const selectedWarehouseLoc = warehouseLocations.find(l => l.code === editLocation);
+    const zone = selectedWarehouseLoc?.zone || editLocation.split("-")[0]?.toUpperCase() || "A";
     updateMutation.mutate({ 
       id, 
-      data: { location: editLocation.toUpperCase(), zone } 
+      data: { 
+        location: editLocation.toUpperCase(), 
+        zone,
+        warehouseLocationId: selectedWarehouseLoc?.id 
+      } as any
     });
   };
   
@@ -127,14 +156,17 @@ export default function Locations() {
   const handleAdd = () => {
     if (!newSku || !newLocation) return;
     
-    const zone = newLocation.split("-")[0]?.toUpperCase() || "A";
+    // Find the selected warehouse location to get zone and id
+    const selectedWarehouseLoc = warehouseLocations.find(l => l.code === newLocation);
+    const zone = selectedWarehouseLoc?.zone || newLocation.split("-")[0]?.toUpperCase() || "A";
     
     createMutation.mutate({
       sku: newSku.toUpperCase(),
       name: newName || newSku.toUpperCase(),
       location: newLocation.toUpperCase(),
       zone,
-    });
+      warehouseLocationId: selectedWarehouseLoc?.id,
+    } as any);
   };
   
   // Delete
@@ -311,16 +343,25 @@ export default function Locations() {
                     <TableCell className="text-muted-foreground">{loc.name}</TableCell>
                     <TableCell>
                       {editingId === loc.id ? (
-                        <Input 
-                          value={editLocation}
-                          onChange={(e) => setEditLocation(e.target.value)}
-                          className="h-8 w-28 font-mono uppercase"
-                          autoFocus
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleSaveEdit(loc.id);
-                            if (e.key === "Escape") handleCancelEdit();
-                          }}
-                        />
+                        <Select value={editLocation} onValueChange={setEditLocation}>
+                          <SelectTrigger className="h-8 w-36 font-mono">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent className="max-h-64">
+                            {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                              <React.Fragment key={zone}>
+                                <div className="px-2 py-1 text-xs font-semibold text-muted-foreground bg-muted">
+                                  {zone}
+                                </div>
+                                {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                                  <SelectItem key={wloc.id} value={wloc.code} className="font-mono text-sm">
+                                    {wloc.code}
+                                  </SelectItem>
+                                ))}
+                              </React.Fragment>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       ) : (
                         <Badge variant="outline" className="font-mono bg-primary/5">
                           <MapPin className="h-3 w-3 mr-1" />
@@ -423,6 +464,7 @@ export default function Locations() {
                 value={newSku}
                 onChange={(e) => setNewSku(e.target.value)}
                 className="uppercase"
+                data-testid="input-new-sku"
               />
             </div>
             <div className="space-y-2">
@@ -432,17 +474,39 @@ export default function Locations() {
                 placeholder="e.g. Nike Air Max 90 Black"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
+                data-testid="input-new-name"
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="location">Bin Location *</Label>
-              <Input 
-                id="location"
-                placeholder="e.g. A-01-02-B"
-                value={newLocation}
-                onChange={(e) => setNewLocation(e.target.value)}
-                className="uppercase font-mono"
-              />
+              {warehouseLocations.length === 0 ? (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    No warehouse locations exist. <a href="/warehouse/locations" className="underline">Create locations first</a>.
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Select value={newLocation} onValueChange={setNewLocation} data-testid="select-new-location">
+                  <SelectTrigger className="font-mono">
+                    <SelectValue placeholder="Select a bin location" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                      <React.Fragment key={zone}>
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground bg-muted">
+                          Zone: {zone}
+                        </div>
+                        {locs.sort((a, b) => a.code.localeCompare(b.code)).map((loc) => (
+                          <SelectItem key={loc.id} value={loc.code} className="font-mono">
+                            {loc.code}
+                          </SelectItem>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
           </div>
           
@@ -450,7 +514,7 @@ export default function Locations() {
             <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAdd} disabled={!newSku || !newLocation}>
+            <Button onClick={handleAdd} disabled={!newSku || !newLocation || warehouseLocations.length === 0}>
               Add Location
             </Button>
           </DialogFooter>

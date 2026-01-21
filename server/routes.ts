@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
-import type { InsertOrderItem, SafeUser } from "@shared/schema";
+import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { inventoryService } from "./inventory";
@@ -400,10 +400,24 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
       }
       
-      const location = await storage.createProductLocation(parsed.data);
+      const data = parsed.data as InsertProductLocation;
       
-      // Sync to WMS warehouse_locations
-      await ensureWarehouseLocation(location.location, location.zone);
+      // Validate that warehouse location exists
+      const warehouseLoc = await storage.getWarehouseLocationByCode(data.location);
+      if (!warehouseLoc) {
+        return res.status(400).json({ 
+          error: `Bin location "${data.location}" does not exist. Please create it first in Warehouse Locations.` 
+        });
+      }
+      
+      // Add warehouseLocationId to the data
+      const dataWithRef = {
+        ...data,
+        warehouseLocationId: warehouseLoc.id,
+        zone: warehouseLoc.zone || data.zone, // Use zone from warehouse location
+      };
+      
+      const location = await storage.createProductLocation(dataWithRef);
       
       res.status(201).json(location);
     } catch (error: any) {
@@ -411,7 +425,7 @@ export async function registerRoutes(
       if (error.code === "23505") { // Unique constraint violation
         return res.status(409).json({ error: "SKU already exists" });
       }
-      res.status(500).json({ error: "Failed to create location" });
+      res.status(500).json({ error: error.message || "Failed to create location" });
     }
   });
 
@@ -425,14 +439,26 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
       }
       
-      const location = await storage.updateProductLocation(id, parsed.data);
+      const data = parsed.data as UpdateProductLocation;
+      
+      // If location is being updated, validate it exists in warehouse locations
+      let dataWithRef: any = { ...data };
+      if (data.location) {
+        const warehouseLoc = await storage.getWarehouseLocationByCode(data.location);
+        if (!warehouseLoc) {
+          return res.status(400).json({ 
+            error: `Bin location "${data.location}" does not exist. Please create it first in Warehouse Locations.` 
+          });
+        }
+        dataWithRef.warehouseLocationId = warehouseLoc.id;
+        dataWithRef.zone = warehouseLoc.zone || data.zone;
+      }
+      
+      const location = await storage.updateProductLocation(id, dataWithRef);
       
       if (!location) {
         return res.status(404).json({ error: "Location not found" });
       }
-      
-      // Sync to WMS warehouse_locations
-      await ensureWarehouseLocation(location.location, location.zone);
       
       res.json(location);
     } catch (error: any) {
@@ -440,7 +466,7 @@ export async function registerRoutes(
       if (error.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
       }
-      res.status(500).json({ error: "Failed to update location" });
+      res.status(500).json({ error: error.message || "Failed to update location" });
     }
   });
 
