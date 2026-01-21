@@ -2798,8 +2798,11 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Location not found" });
       }
       res.json({ success: true });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting warehouse location:", error);
+      if (error.code === "23503") {
+        return res.status(409).json({ error: "Cannot delete location - products are assigned to it. Remove products first." });
+      }
       res.status(500).json({ error: "Failed to delete location" });
     }
   });
@@ -2812,9 +2815,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No location IDs provided" });
       }
       let deleted = 0;
+      const errors: string[] = [];
       for (const id of ids) {
-        const result = await storage.deleteWarehouseLocation(id);
-        if (result) deleted++;
+        try {
+          const result = await storage.deleteWarehouseLocation(id);
+          if (result) deleted++;
+        } catch (err: any) {
+          if (err.code === "23503") {
+            errors.push(`Location ${id} has products assigned`);
+          }
+        }
+      }
+      if (errors.length > 0) {
+        return res.json({ success: true, deleted, errors });
       }
       res.json({ success: true, deleted });
     } catch (error) {
