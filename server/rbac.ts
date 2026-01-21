@@ -61,8 +61,8 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "settings", action: "edit", description: "Edit system settings", category: "settings" },
   
   // Shopify Sync
-  { resource: "shopify", action: "view", description: "View Shopify sync status", category: "channels" },
-  { resource: "shopify", action: "sync", description: "Trigger Shopify sync", category: "channels" },
+  { resource: "shopify", action: "view", description: "View Shopify sync status", category: "shopify" },
+  { resource: "shopify", action: "sync", description: "Trigger Shopify sync", category: "shopify" },
   
   // Locations
   { resource: "locations", action: "view", description: "View warehouse locations", category: "inventory" },

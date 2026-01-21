@@ -221,8 +221,8 @@ export default function Roles() {
                                 checked={selectedPermissions.includes(perm.id)}
                                 onCheckedChange={() => handleCreatePermissionToggle(perm.id)}
                               />
-                              <label htmlFor={`create-perm-${perm.id}`} className="text-sm">
-                                {perm.resource}:{perm.action}
+                              <label htmlFor={`create-perm-${perm.id}`} className="text-sm capitalize">
+                                {perm.action.replace(/_/g, ' ')}
                               </label>
                             </div>
                           ))}
@@ -328,8 +328,8 @@ export default function Roles() {
                           className="flex items-center justify-between p-3 border rounded-lg"
                         >
                           <div>
-                            <div className="font-medium">
-                              {perm.resource}:{perm.action}
+                            <div className="font-medium capitalize">
+                              {perm.action.replace(/_/g, ' ')}
                             </div>
                             {perm.description && (
                               <p className="text-sm text-muted-foreground">{perm.description}</p>
