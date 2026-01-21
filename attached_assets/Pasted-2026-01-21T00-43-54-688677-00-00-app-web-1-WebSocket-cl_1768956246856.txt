@@ -1,0 +1,21 @@
+2026-01-21T00:43:54.688677+00:00 app[web.1]: WebSocket client disconnected
+2026-01-21T00:43:56.552366+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=346056a5-8783-0a47-75fb-48cf3e84398e fwd="34.172.95.220" dyno=web.1 connect=1ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:56.562677+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=e3b5c1d8-72e0-a2d1-0144-23944f636b34 fwd="34.31.235.178" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:56.565851+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=fbf6a542-8c35-c31c-4f6b-f8b36e373e25 fwd="34.45.160.225" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:56.572216+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=1816bbfb-02a9-e5b5-0c07-6a366bc90f65 fwd="136.119.16.40" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:56.585444+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=e95bcb7a-d803-6103-5273-ec875577cadc fwd="34.10.160.229" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:56.551884+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:56.552471+00:00 app[web.1]: 12:43:56 AM [express] POST /api/shopify/webhooks/products/update 401 in 1ms :: {"error":"Invalid signature"}
+2026-01-21T00:43:56.562241+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:56.562674+00:00 app[web.1]: 12:43:56 AM [express] POST /api/shopify/webhooks/products/update 401 in 0ms :: {"error":"Invalid signature"}
+2026-01-21T00:43:56.565440+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:56.565859+00:00 app[web.1]: 12:43:56 AM [express] POST /api/shopify/webhooks/products/update 401 in 0ms :: {"error":"Invalid signature"}
+2026-01-21T00:43:56.571825+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:56.572274+00:00 app[web.1]: 12:43:56 AM [express] POST /api/shopify/webhooks/products/update 401 in 1ms :: {"error":"Invalid signature"}
+2026-01-21T00:43:56.585049+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:56.585547+00:00 app[web.1]: 12:43:56 AM [express] POST /api/shopify/webhooks/products/update 401 in 1ms :: {"error":"Invalid signature"}
+2026-01-21T00:43:37.951263+00:00 app[api]: Log session created by user owner@cardshellz.com
+2026-01-21T00:43:59.271839+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=abab368b-e0e9-c975-7bfe-f67dcaad6d52 fwd="34.170.249.26" dyno=web.1 connect=0ms service=1ms status=401 bytes=29 protocol=http1.1 tls=true tls_version=unknown
+2026-01-21T00:43:59.271372+00:00 app[web.1]: Invalid Shopify webhook signature
+2026-01-21T00:43:59.271857+00:00 app[web.1]: 12:43:59 AM [express] POST /api/shopify/webhooks/products/update 401 in 0ms :: {"error":"Invalid signature"}
+2026-01-21T00:44:00.535782+00:00 app[web.1]: WebSocket client connected
