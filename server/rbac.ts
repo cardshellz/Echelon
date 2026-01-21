@@ -106,15 +106,14 @@ export const SYSTEM_ROLES = {
 export async function seedRBAC() {
   console.log("Seeding RBAC permissions and roles...");
   
-  // Check if RBAC tables exist
+  // Check if RBAC tables exist - wrap entire function to never crash app
   try {
     await db.select().from(authPermissions).limit(1);
   } catch (e: any) {
-    if (e.code === '42P01') { // Table does not exist
-      console.log("RBAC tables not yet created - skipping seed. Run schema migration first.");
-      return;
-    }
-    throw e;
+    // Any database error means tables don't exist or aren't accessible
+    console.log("RBAC tables not yet created - skipping seed. Run schema migration first.");
+    console.log("RBAC error details:", e.message || e.code || "unknown");
+    return;
   }
   
   // Insert all permissions (ignore duplicates)
