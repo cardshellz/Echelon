@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   ShoppingCart, 
   Search, 
@@ -9,7 +10,10 @@ import {
   Zap,
   ChevronDown,
   Layers,
-  Package
+  Package,
+  Plus,
+  Store,
+  RefreshCw
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
   CardContent,
@@ -35,20 +40,87 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useSettings, PickingMode } from "@/lib/settings";
+import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { format, formatDistanceToNow } from "date-fns";
 
-const orders = [
-  { id: "ORD-2024-001", customer: "Alice Freeman", items: 4, total: "$450.00", status: "Allocated", sla: "2h 15m", progress: 30, date: "Today, 10:23 AM" },
-  { id: "ORD-2024-002", customer: "Bob Smith", items: 12, total: "$1,250.00", status: "Picking", sla: "45m", progress: 55, date: "Today, 09:15 AM" },
-  { id: "ORD-2024-003", customer: "Charlie Davis", items: 1, total: "$85.00", status: "Packing", sla: "1h 30m", progress: 80, date: "Today, 10:45 AM" },
-  { id: "ORD-2024-004", customer: "Diana Prince", items: 6, total: "$620.00", status: "Pending", sla: "4h 00m", progress: 10, date: "Today, 11:00 AM" },
-  { id: "ORD-2024-005", customer: "Evan Wright", items: 2, total: "$120.00", status: "Shipped", sla: "-", progress: 100, date: "Yesterday" },
-];
+interface Channel {
+  id: number;
+  name: string;
+  type: string;
+  provider: string;
+  status: string;
+}
+
+interface OrderItem {
+  id: number;
+  sku: string;
+  name: string;
+  quantity: number;
+  pickedQuantity: number;
+  status: string;
+}
+
+interface Order {
+  id: number;
+  orderNumber: string;
+  customerName: string;
+  customerEmail: string | null;
+  source: string;
+  channelId: number | null;
+  channel: Channel | null;
+  status: string;
+  priority: string;
+  itemCount: number;
+  pickedCount: number;
+  totalAmount: string | null;
+  onHold: number;
+  createdAt: string;
+  orderPlacedAt: string | null;
+  items: OrderItem[];
+}
+
+interface OrdersResponse {
+  orders: Order[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+const sourceIcons: Record<string, string> = {
+  shopify: "https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg",
+  ebay: "https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg",
+  amazon: "https://upload.wikimedia.org/wikipedia/commons/a/a9/Amazon_logo.svg",
+  etsy: "https://upload.wikimedia.org/wikipedia/commons/8/89/Etsy_logo.svg",
+};
+
+const statusColors: Record<string, string> = {
+  ready: "bg-blue-50 text-blue-700 border-blue-200",
+  in_progress: "bg-amber-50 text-amber-700 border-amber-200",
+  completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  exception: "bg-red-50 text-red-700 border-red-200",
+  shipped: "bg-purple-50 text-purple-700 border-purple-200",
+};
+
+const priorityColors: Record<string, string> = {
+  rush: "bg-red-500 text-white",
+  high: "bg-orange-500 text-white",
+  normal: "",
+};
 
 export default function Orders() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const { 
     pickingMode, 
     setPickingMode, 
@@ -58,30 +130,161 @@ export default function Orders() {
     setReleaseDelay 
   } = useSettings();
 
+  const [searchTerm, setSearchTerm] = useState("");
+  const [channelFilter, setChannelFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("active");
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [newOrder, setNewOrder] = useState({
+    orderNumber: "",
+    customerName: "",
+    customerEmail: "",
+    customerPhone: "",
+    priority: "normal",
+    totalAmount: "",
+    shippingAddress: "",
+    shippingCity: "",
+    shippingState: "",
+    shippingPostalCode: "",
+    shippingCountry: "US",
+    notes: "",
+    items: [{ sku: "", name: "", quantity: 1 }],
+  });
+
+  const { data: ordersData, isLoading: ordersLoading, refetch: refetchOrders } = useQuery<OrdersResponse>({
+    queryKey: ["/api/oms/orders", channelFilter, statusFilter],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (channelFilter !== "all") params.append("channelId", channelFilter);
+      if (statusFilter === "active") {
+        params.append("status", "ready");
+        params.append("status", "in_progress");
+      } else if (statusFilter !== "all") {
+        params.append("status", statusFilter);
+      }
+      params.append("limit", "100");
+      const res = await fetch(`/api/oms/orders?${params}`);
+      if (!res.ok) throw new Error("Failed to fetch orders");
+      return res.json();
+    },
+  });
+
+  const { data: channels } = useQuery<Channel[]>({
+    queryKey: ["/api/channels"],
+  });
+
+  const createOrderMutation = useMutation({
+    mutationFn: async (orderData: any) => {
+      const res = await fetch("/api/oms/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(orderData),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to create order");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      setIsCreateOpen(false);
+      setNewOrder({
+        orderNumber: "",
+        customerName: "",
+        customerEmail: "",
+        customerPhone: "",
+        priority: "normal",
+        totalAmount: "",
+        shippingAddress: "",
+        shippingCity: "",
+        shippingState: "",
+        shippingPostalCode: "",
+        shippingCountry: "US",
+        notes: "",
+        items: [{ sku: "", name: "", quantity: 1 }],
+      });
+      toast({ title: "Order created", description: "Manual order has been created successfully." });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const handleCreateOrder = () => {
+    if (!newOrder.orderNumber.trim() || !newOrder.customerName.trim()) {
+      toast({ title: "Error", description: "Order number and customer name are required", variant: "destructive" });
+      return;
+    }
+    const validItems = newOrder.items.filter(i => i.sku.trim() && i.name.trim() && i.quantity > 0);
+    if (validItems.length === 0) {
+      toast({ title: "Error", description: "At least one valid item is required", variant: "destructive" });
+      return;
+    }
+    createOrderMutation.mutate({
+      ...newOrder,
+      source: "manual",
+      items: validItems,
+    });
+  };
+
+  const addOrderItem = () => {
+    setNewOrder(prev => ({
+      ...prev,
+      items: [...prev.items, { sku: "", name: "", quantity: 1 }],
+    }));
+  };
+
+  const updateOrderItem = (index: number, field: string, value: string | number) => {
+    setNewOrder(prev => ({
+      ...prev,
+      items: prev.items.map((item, i) => i === index ? { ...item, [field]: value } : item),
+    }));
+  };
+
+  const removeOrderItem = (index: number) => {
+    if (newOrder.items.length > 1) {
+      setNewOrder(prev => ({
+        ...prev,
+        items: prev.items.filter((_, i) => i !== index),
+      }));
+    }
+  };
+
+  const orders = ordersData?.orders || [];
+  const filteredOrders = orders.filter(order => {
+    if (!searchTerm) return true;
+    const search = searchTerm.toLowerCase();
+    return (
+      order.orderNumber.toLowerCase().includes(search) ||
+      order.customerName.toLowerCase().includes(search) ||
+      (order.customerEmail?.toLowerCase().includes(search))
+    );
+  });
+
+  const activeCount = orders.filter(o => o.status === "ready" || o.status === "in_progress").length;
+  const exceptionCount = orders.filter(o => o.status === "exception").length;
+  const completedCount = orders.filter(o => o.status === "completed" || o.status === "shipped").length;
+
   return (
     <div className="flex flex-col h-full bg-muted/20">
       <div className="p-6 border-b bg-card">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2" data-testid="text-page-title">
               <ShoppingCart className="h-6 w-6 text-primary" />
               Order Management
             </h1>
             <p className="text-muted-foreground mt-1 text-sm">
-              Process, allocate, and fulfill customer orders.
+              Process, allocate, and fulfill customer orders across all channels.
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {/* Picking Mode Toggle - Separate prominent control */}
             <div className="flex items-center rounded-lg border bg-muted/50 p-1" data-testid="picking-mode-toggle">
               <Button
                 variant={pickingMode === "batch" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPickingMode("batch")}
-                className={cn(
-                  "gap-2",
-                  pickingMode === "batch" && "bg-primary shadow-sm"
-                )}
+                className={cn("gap-2", pickingMode === "batch" && "bg-primary shadow-sm")}
                 data-testid="button-batch-mode"
               >
                 <Layers className="h-4 w-4" />
@@ -91,10 +294,7 @@ export default function Orders() {
                 variant={pickingMode === "single" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPickingMode("single")}
-                className={cn(
-                  "gap-2",
-                  pickingMode === "single" && "bg-primary shadow-sm"
-                )}
+                className={cn("gap-2", pickingMode === "single" && "bg-primary shadow-sm")}
                 data-testid="button-single-mode"
               >
                 <Package className="h-4 w-4" />
@@ -132,172 +332,201 @@ export default function Orders() {
                   </div>
                   
                   {autoRelease && (
-                    <>
-                      <div className="border-t pt-4 space-y-3">
-                        <Label className="text-sm font-medium">Release Timing</Label>
-                        <Select value={releaseDelay} onValueChange={setReleaseDelay}>
-                          <SelectTrigger data-testid="select-release-timing">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="immediate">Immediate (as orders arrive)</SelectItem>
-                            <SelectItem value="5min">5 minute batches</SelectItem>
-                            <SelectItem value="15min">15 minute batches</SelectItem>
-                            <SelectItem value="hourly">Hourly batches</SelectItem>
-                            <SelectItem value="cutoff">Daily cutoff (2:00 PM)</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p className="text-xs text-muted-foreground">
-                          {releaseDelay === "immediate" && "Orders are sent to pickers the moment they sync from Shopify."}
-                          {releaseDelay === "5min" && "Orders are grouped every 5 minutes for optimized pick paths."}
-                          {releaseDelay === "15min" && "Orders are grouped every 15 minutes for optimized pick paths."}
-                          {releaseDelay === "hourly" && "Orders are released at the top of each hour."}
-                          {releaseDelay === "cutoff" && "All orders before 2:00 PM ship same-day. Orders after go to next day."}
-                        </p>
-                      </div>
-                      
-                      <div className="border-t pt-4 space-y-2">
-                        <Label className="text-sm font-medium">Release Conditions</Label>
-                        <div className="space-y-2 text-sm">
-                          <div className="flex items-center gap-2">
-                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            <span>Payment confirmed</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            <span className="flex items-center gap-1">All items in stock <span className="text-amber-500 text-[10px]">(warning only)</span></span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                            <span className="flex items-center gap-1">Valid shipping address <span className="text-amber-500 text-[10px]">(warning only)</span></span>
-                          </div>
-                        </div>
-                      </div>
-                    </>
+                    <div className="border-t pt-4 space-y-3">
+                      <Label className="text-sm font-medium">Release Timing</Label>
+                      <Select value={releaseDelay} onValueChange={setReleaseDelay}>
+                        <SelectTrigger data-testid="select-release-timing">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="immediate">Immediate</SelectItem>
+                          <SelectItem value="5min">5 minute batches</SelectItem>
+                          <SelectItem value="15min">15 minute batches</SelectItem>
+                          <SelectItem value="hourly">Hourly batches</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   )}
                 </div>
               </PopoverContent>
             </Popover>
-            <Button variant="outline">Create Manual Order</Button>
+            
+            <Button onClick={() => setIsCreateOpen(true)} data-testid="button-create-order">
+              <Plus className="h-4 w-4 mr-2" />
+              Create Manual Order
+            </Button>
           </div>
         </div>
 
-        <Tabs defaultValue="active" className="w-full">
-          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
-            <TabsTrigger 
-              value="active" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
-            >
-              Active Orders (4)
-            </TabsTrigger>
-            <TabsTrigger 
-              value="pending" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
-            >
-              Pending Allocation (12)
-            </TabsTrigger>
-            <TabsTrigger 
-              value="exception" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2 text-amber-600"
-            >
-              Exceptions (2)
-            </TabsTrigger>
-            <TabsTrigger 
-              value="completed" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
-            >
-              Completed
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+        <div className="flex items-center justify-between">
+          <Tabs value={statusFilter} onValueChange={setStatusFilter} className="w-full">
+            <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
+              <TabsTrigger 
+                value="active" 
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                data-testid="tab-active"
+              >
+                Active Orders ({activeCount})
+              </TabsTrigger>
+              <TabsTrigger 
+                value="exception" 
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2 text-amber-600"
+                data-testid="tab-exceptions"
+              >
+                Exceptions ({exceptionCount})
+              </TabsTrigger>
+              <TabsTrigger 
+                value="completed" 
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                data-testid="tab-completed"
+              >
+                Completed ({completedCount})
+              </TabsTrigger>
+              <TabsTrigger 
+                value="all" 
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                data-testid="tab-all"
+              >
+                All
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
       </div>
 
       <div className="p-6 grid gap-6 md:grid-cols-3">
-        {/* Order List Column */}
         <div className="md:col-span-2 space-y-4">
           <div className="flex items-center gap-2 mb-4">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
-              <Input placeholder="Search orders..." className="pl-9 bg-card" />
+              <Input 
+                placeholder="Search orders..." 
+                className="pl-9 bg-card" 
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                data-testid="input-search-orders"
+              />
             </div>
-            <Button variant="outline" size="icon">
-              <Filter className="h-4 w-4" />
+            <Select value={channelFilter} onValueChange={setChannelFilter}>
+              <SelectTrigger className="w-[180px]" data-testid="select-channel-filter">
+                <Store className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="All Channels" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Channels</SelectItem>
+                {channels?.map((ch) => (
+                  <SelectItem key={ch.id} value={String(ch.id)}>{ch.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="icon" onClick={() => refetchOrders()} data-testid="button-refresh-orders">
+              <RefreshCw className="h-4 w-4" />
             </Button>
           </div>
 
-          <div className="space-y-3">
-            {orders.map((order) => (
-              <Card key={order.id} className="hover:border-primary/50 transition-colors cursor-pointer group">
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4">
-                      <div className="bg-primary/10 p-2 rounded-md group-hover:bg-primary/20 transition-colors">
-                        <ShoppingCart className="h-5 w-5 text-primary" />
-                      </div>
-                      <div>
-                        <div className="font-semibold flex items-center gap-2">
-                          {order.id}
-                          {order.customer.includes("Bob") && <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-4 h-4 object-contain ml-1 opacity-70" title="Shopify Order" />}
-                          {order.customer.includes("Alice") && <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-4 h-4 object-contain ml-1 opacity-70" title="eBay Order" />}
-                          {order.status === "Pending" && <Badge variant="outline" className="text-xs bg-slate-100">Pending</Badge>}
-                          {order.status === "Allocated" && <Badge variant="outline" className="text-xs bg-blue-50 text-blue-700 border-blue-200">Allocated</Badge>}
-                          {order.status === "Picking" && <Badge variant="outline" className="text-xs bg-amber-50 text-amber-700 border-amber-200 animate-pulse">Picking</Badge>}
-                          {order.status === "Packing" && <Badge variant="outline" className="text-xs bg-purple-50 text-purple-700 border-purple-200">Packing</Badge>}
-                          {order.status === "Shipped" && <Badge variant="outline" className="text-xs bg-emerald-50 text-emerald-700 border-emerald-200">Shipped</Badge>}
+          {ordersLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+            </div>
+          ) : filteredOrders.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center text-muted-foreground">
+                <ShoppingCart className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p className="text-lg font-medium">No orders found</p>
+                <p className="text-sm">Orders from your connected channels will appear here.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-3">
+              {filteredOrders.map((order) => (
+                <Card key={order.id} className="hover:border-primary/50 transition-colors cursor-pointer group" data-testid={`card-order-${order.id}`}>
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-start gap-4">
+                        <div className="bg-primary/10 p-2 rounded-md group-hover:bg-primary/20 transition-colors">
+                          <ShoppingCart className="h-5 w-5 text-primary" />
                         </div>
-                        <div className="text-sm text-muted-foreground mt-1">
-                          {order.customer} • {order.items} items • {order.total}
+                        <div>
+                          <div className="font-semibold flex items-center gap-2 flex-wrap">
+                            {order.orderNumber}
+                            {order.source && sourceIcons[order.source] && (
+                              <img 
+                                src={sourceIcons[order.source]} 
+                                className="w-4 h-4 object-contain opacity-70" 
+                                title={`${order.source} order`} 
+                              />
+                            )}
+                            {order.source === "manual" && (
+                              <Badge variant="outline" className="text-xs">Manual</Badge>
+                            )}
+                            {order.channel && (
+                              <Badge variant="outline" className="text-xs">{order.channel.name}</Badge>
+                            )}
+                            {order.priority !== "normal" && (
+                              <Badge className={cn("text-xs", priorityColors[order.priority])}>
+                                {order.priority.toUpperCase()}
+                              </Badge>
+                            )}
+                            <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
+                              {order.status.replace("_", " ")}
+                            </Badge>
+                            {order.onHold === 1 && (
+                              <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
+                            )}
+                          </div>
+                          <div className="text-sm text-muted-foreground mt-1">
+                            {order.customerName} • {order.itemCount} items
+                            {order.totalAmount && ` • ${order.totalAmount}`}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs text-muted-foreground">
+                          {order.orderPlacedAt 
+                            ? formatDistanceToNow(new Date(order.orderPlacedAt), { addSuffix: true })
+                            : formatDistanceToNow(new Date(order.createdAt), { addSuffix: true })
+                          }
                         </div>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div className="text-sm font-medium flex items-center justify-end gap-1 text-muted-foreground">
-                        <Clock className="h-3 w-3" /> SLA: {order.sla}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">{order.date}</div>
-                    </div>
-                  </div>
-                  
-                  {order.status !== "Shipped" && (
-                    <div className="mt-4 flex items-center gap-3">
-                      <div className="flex-1">
-                        <div className="flex justify-between text-xs mb-1.5 text-muted-foreground">
-                          <span>Progress</span>
-                          <span>{order.progress}%</span>
+                    
+                    {order.status !== "completed" && order.status !== "shipped" && order.itemCount > 0 && (
+                      <div className="mt-4 flex items-center gap-3">
+                        <div className="flex-1">
+                          <div className="flex justify-between text-xs mb-1.5 text-muted-foreground">
+                            <span>Pick Progress</span>
+                            <span>{order.pickedCount}/{order.itemCount}</span>
+                          </div>
+                          <Progress value={(order.pickedCount / order.itemCount) * 100} className="h-1.5" />
                         </div>
-                        <Progress value={order.progress} className="h-1.5" />
                       </div>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs ml-2">
-                        View Details
-                      </Button>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* Info/Stats Column */}
         <div className="space-y-6">
           <Card className="bg-primary text-primary-foreground border-none">
             <CardHeader className="pb-2">
-              <CardTitle className="text-lg">Ops Status</CardTitle>
+              <CardTitle className="text-lg">Order Summary</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
                 <div className="flex justify-between items-center">
-                  <span className="text-primary-foreground/80 text-sm">Pick Rate</span>
-                  <span className="font-bold">124 / hr</span>
+                  <span className="text-primary-foreground/80 text-sm">Active Orders</span>
+                  <span className="font-bold">{activeCount}</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-primary-foreground/80 text-sm">Pack Rate</span>
-                  <span className="font-bold">98 / hr</span>
+                  <span className="text-primary-foreground/80 text-sm">Completed Today</span>
+                  <span className="font-bold">{completedCount}</span>
                 </div>
                 <div className="pt-2 border-t border-primary-foreground/20 mt-2">
                   <div className="flex justify-between items-center text-amber-200">
-                    <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> At Risk</span>
-                    <span className="font-bold">3 Orders</span>
+                    <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
+                    <span className="font-bold">{exceptionCount}</span>
                   </div>
                 </div>
               </div>
@@ -306,24 +535,189 @@ export default function Orders() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Recent Activity</CardTitle>
+              <CardTitle className="text-base">Channels</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-              {[1,2,3].map((i) => (
-                <div key={i} className="flex gap-3 text-sm">
-                  <Avatar className="h-8 w-8">
-                    <AvatarFallback>U{i}</AvatarFallback>
-                  </Avatar>
-                  <div>
-                    <p className="font-medium">User {i} picked item NK-292</p>
-                    <p className="text-xs text-muted-foreground">2 mins ago • Batch #492</p>
+            <CardContent className="space-y-2">
+              {channels?.slice(0, 5).map((ch) => (
+                <div key={ch.id} className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2">
+                    {sourceIcons[ch.provider] && (
+                      <img src={sourceIcons[ch.provider]} className="w-4 h-4 object-contain" />
+                    )}
+                    <span>{ch.name}</span>
                   </div>
+                  <Badge variant={ch.status === "active" ? "default" : "outline"} className="text-xs">
+                    {ch.status}
+                  </Badge>
                 </div>
               ))}
+              {(!channels || channels.length === 0) && (
+                <p className="text-sm text-muted-foreground">No channels configured</p>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
+
+      <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Create Manual Order</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="orderNumber">Order Number *</Label>
+                <Input
+                  id="orderNumber"
+                  value={newOrder.orderNumber}
+                  onChange={(e) => setNewOrder({ ...newOrder, orderNumber: e.target.value })}
+                  placeholder="ORD-001"
+                  data-testid="input-order-number"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="priority">Priority</Label>
+                <Select 
+                  value={newOrder.priority} 
+                  onValueChange={(v) => setNewOrder({ ...newOrder, priority: v })}
+                >
+                  <SelectTrigger data-testid="select-priority">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="normal">Normal</SelectItem>
+                    <SelectItem value="high">High</SelectItem>
+                    <SelectItem value="rush">Rush</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="customerName">Customer Name *</Label>
+                <Input
+                  id="customerName"
+                  value={newOrder.customerName}
+                  onChange={(e) => setNewOrder({ ...newOrder, customerName: e.target.value })}
+                  placeholder="John Doe"
+                  data-testid="input-customer-name"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="customerEmail">Email</Label>
+                <Input
+                  id="customerEmail"
+                  type="email"
+                  value={newOrder.customerEmail}
+                  onChange={(e) => setNewOrder({ ...newOrder, customerEmail: e.target.value })}
+                  placeholder="john@example.com"
+                  data-testid="input-customer-email"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="customerPhone">Phone</Label>
+                <Input
+                  id="customerPhone"
+                  value={newOrder.customerPhone}
+                  onChange={(e) => setNewOrder({ ...newOrder, customerPhone: e.target.value })}
+                  placeholder="(555) 123-4567"
+                  data-testid="input-customer-phone"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="totalAmount">Total Amount</Label>
+                <Input
+                  id="totalAmount"
+                  value={newOrder.totalAmount}
+                  onChange={(e) => setNewOrder({ ...newOrder, totalAmount: e.target.value })}
+                  placeholder="$99.99"
+                  data-testid="input-total-amount"
+                />
+              </div>
+            </div>
+
+            <div className="border-t pt-4">
+              <div className="flex items-center justify-between mb-3">
+                <Label className="text-base font-medium">Order Items *</Label>
+                <Button type="button" variant="outline" size="sm" onClick={addOrderItem} data-testid="button-add-item">
+                  <Plus className="h-4 w-4 mr-1" /> Add Item
+                </Button>
+              </div>
+              <div className="space-y-3">
+                {newOrder.items.map((item, index) => (
+                  <div key={index} className="grid gap-2 md:grid-cols-4 items-end">
+                    <div className="space-y-1">
+                      <Label className="text-xs">SKU</Label>
+                      <Input
+                        value={item.sku}
+                        onChange={(e) => updateOrderItem(index, "sku", e.target.value)}
+                        placeholder="SKU-001"
+                        data-testid={`input-item-sku-${index}`}
+                      />
+                    </div>
+                    <div className="space-y-1 md:col-span-2">
+                      <Label className="text-xs">Name</Label>
+                      <Input
+                        value={item.name}
+                        onChange={(e) => updateOrderItem(index, "name", e.target.value)}
+                        placeholder="Product Name"
+                        data-testid={`input-item-name-${index}`}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <div className="space-y-1 flex-1">
+                        <Label className="text-xs">Qty</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          value={item.quantity}
+                          onChange={(e) => updateOrderItem(index, "quantity", parseInt(e.target.value) || 1)}
+                          data-testid={`input-item-qty-${index}`}
+                        />
+                      </div>
+                      {newOrder.items.length > 1 && (
+                        <Button 
+                          type="button" 
+                          variant="ghost" 
+                          size="icon" 
+                          className="mt-5"
+                          onClick={() => removeOrderItem(index)}
+                          data-testid={`button-remove-item-${index}`}
+                        >
+                          ×
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="notes">Notes</Label>
+              <Textarea
+                id="notes"
+                value={newOrder.notes}
+                onChange={(e) => setNewOrder({ ...newOrder, notes: e.target.value })}
+                placeholder="Special instructions or notes..."
+                rows={2}
+                data-testid="input-notes"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsCreateOpen(false)} data-testid="button-cancel-order">Cancel</Button>
+            <Button onClick={handleCreateOrder} disabled={createOrderMutation.isPending} data-testid="button-submit-order">
+              {createOrderMutation.isPending ? "Creating..." : "Create Order"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

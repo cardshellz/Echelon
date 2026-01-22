@@ -74,12 +74,29 @@ export type OrderPriority = typeof orderPriorityEnum[number];
 export const itemStatusEnum = ["pending", "in_progress", "completed", "short"] as const;
 export type ItemStatus = typeof itemStatusEnum[number];
 
+// Order source types for multi-channel support
+export const orderSourceEnum = ["shopify", "ebay", "amazon", "etsy", "manual", "api"] as const;
+export type OrderSource = typeof orderSourceEnum[number];
+
 export const orders = pgTable("orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shopifyOrderId: varchar("shopify_order_id", { length: 50 }).notNull().unique(),
+  // Multi-channel support
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }), // Which channel this order came from
+  externalOrderId: varchar("external_order_id", { length: 100 }), // External system's order ID (Shopify, eBay, etc.)
+  source: varchar("source", { length: 20 }).notNull().default("shopify"), // shopify, ebay, amazon, manual, api
+  // Legacy Shopify field (nullable for backward compatibility)
+  shopifyOrderId: varchar("shopify_order_id", { length: 50 }).unique(), // Kept for backward compatibility, nullable now
   orderNumber: varchar("order_number", { length: 50 }).notNull(),
   customerName: text("customer_name").notNull(),
   customerEmail: text("customer_email"),
+  customerPhone: text("customer_phone"),
+  // Shipping address
+  shippingAddress: text("shipping_address"),
+  shippingCity: text("shipping_city"),
+  shippingState: text("shipping_state"),
+  shippingPostalCode: text("shipping_postal_code"),
+  shippingCountry: text("shipping_country"),
+  // Order details
   priority: varchar("priority", { length: 20 }).notNull().default("normal"),
   status: varchar("status", { length: 20 }).notNull().default("ready"),
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold (hidden from pickers), 0 = available
@@ -88,9 +105,13 @@ export const orders = pgTable("orders", {
   batchId: varchar("batch_id", { length: 50 }),
   itemCount: integer("item_count").notNull().default(0),
   pickedCount: integer("picked_count").notNull().default(0),
+  totalAmount: text("total_amount"), // Order total (stored as text for currency flexibility)
+  currency: varchar("currency", { length: 3 }).default("USD"),
   shortReason: text("short_reason"),
+  notes: text("notes"), // Internal notes about the order
   metadata: jsonb("metadata"),
   shopifyCreatedAt: timestamp("shopify_created_at"), // When the order was placed in Shopify
+  orderPlacedAt: timestamp("order_placed_at"), // When the order was placed (channel-agnostic)
   createdAt: timestamp("created_at").defaultNow().notNull(),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),

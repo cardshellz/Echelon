@@ -96,6 +96,7 @@ export interface IStorage {
   releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   forceReleaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
   updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null>;
+  updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
   setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null>;
@@ -559,6 +560,23 @@ export class DatabaseStorage implements IStorage {
     const result = await db
       .update(orders)
       .set(updates)
+      .where(eq(orders.id, orderId))
+      .returning();
+    
+    return result[0] || null;
+  }
+
+  async updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null> {
+    const { id, createdAt, ...safeUpdates } = updates as any;
+    
+    if (Object.keys(safeUpdates).length === 0) {
+      const existing = await this.getOrderById(orderId);
+      return existing || null;
+    }
+    
+    const result = await db
+      .update(orders)
+      .set(safeUpdates)
       .where(eq(orders.id, orderId))
       .returning();
     

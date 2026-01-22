@@ -3740,6 +3740,224 @@ export async function registerRoutes(
   });
 
   // ============================================
+  // ORDER MANAGEMENT SYSTEM (OMS) API
+  // ============================================
+
+  // Get all orders with channel info (for OMS page)
+  app.get("/api/oms/orders", requirePermission("orders", "view"), async (req, res) => {
+    try {
+      const { status, channelId, source, limit = "50", offset = "0" } = req.query;
+      
+      // Get all orders with items
+      const statusFilter = status ? (Array.isArray(status) ? status : [status]) as string[] : undefined;
+      const allOrders = await storage.getOrdersWithItems(statusFilter as any);
+      
+      // Get all channels for enrichment
+      const allChannels = await storage.getAllChannels();
+      const channelMap = new Map(allChannels.map(c => [c.id, c]));
+      
+      // Enrich orders with channel info and apply filters
+      let enrichedOrders = allOrders.map(order => ({
+        ...order,
+        channel: order.channelId ? channelMap.get(order.channelId) : null
+      }));
+      
+      // Filter by channelId if specified
+      if (channelId) {
+        const cid = parseInt(channelId as string);
+        enrichedOrders = enrichedOrders.filter(o => o.channelId === cid);
+      }
+      
+      // Filter by source if specified
+      if (source) {
+        enrichedOrders = enrichedOrders.filter(o => o.source === source);
+      }
+      
+      // Sort by creation date descending (newest first)
+      enrichedOrders.sort((a, b) => 
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      
+      // Apply pagination
+      const limitNum = parseInt(limit as string);
+      const offsetNum = parseInt(offset as string);
+      const paginatedOrders = enrichedOrders.slice(offsetNum, offsetNum + limitNum);
+      
+      res.json({
+        orders: paginatedOrders,
+        total: enrichedOrders.length,
+        limit: limitNum,
+        offset: offsetNum
+      });
+    } catch (error) {
+      console.error("Error fetching OMS orders:", error);
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
+  });
+
+  // Create a manual order
+  const createOrderSchema = z.object({
+    orderNumber: z.string().min(1, "Order number required"),
+    customerName: z.string().min(1, "Customer name required"),
+    customerEmail: z.string().email().optional().or(z.literal("")),
+    customerPhone: z.string().optional(),
+    channelId: z.number().optional().nullable(),
+    source: z.enum(["shopify", "ebay", "amazon", "etsy", "manual", "api"]).default("manual"),
+    priority: z.enum(["rush", "high", "normal"]).default("normal"),
+    totalAmount: z.string().optional(),
+    currency: z.string().default("USD"),
+    shippingAddress: z.string().optional(),
+    shippingCity: z.string().optional(),
+    shippingState: z.string().optional(),
+    shippingPostalCode: z.string().optional(),
+    shippingCountry: z.string().optional(),
+    notes: z.string().optional(),
+    items: z.array(z.object({
+      sku: z.string().min(1, "SKU required"),
+      name: z.string().min(1, "Item name required"),
+      quantity: z.number().min(1, "Quantity must be at least 1"),
+      location: z.string().optional(),
+      zone: z.string().optional(),
+    })).min(1, "At least one item required"),
+  });
+
+  app.post("/api/oms/orders", requirePermission("orders", "edit"), async (req, res) => {
+    try {
+      const parseResult = createOrderSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          error: "Invalid order data", 
+          details: parseResult.error.errors 
+        });
+      }
+      
+      const data = parseResult.data;
+      
+      // Create order
+      const orderData = {
+        orderNumber: data.orderNumber,
+        customerName: data.customerName,
+        customerEmail: data.customerEmail || null,
+        customerPhone: data.customerPhone || null,
+        channelId: data.channelId || null,
+        source: data.source,
+        priority: data.priority,
+        totalAmount: data.totalAmount || null,
+        currency: data.currency,
+        shippingAddress: data.shippingAddress || null,
+        shippingCity: data.shippingCity || null,
+        shippingState: data.shippingState || null,
+        shippingPostalCode: data.shippingPostalCode || null,
+        shippingCountry: data.shippingCountry || null,
+        notes: data.notes || null,
+        status: "ready" as const,
+        itemCount: data.items.reduce((sum, item) => sum + item.quantity, 0),
+        orderPlacedAt: new Date(),
+        shopifyOrderId: null, // Manual orders don't have Shopify ID
+        externalOrderId: null, // Manual orders don't have external ID
+      };
+      
+      // Create items
+      const itemsData = data.items.map(item => ({
+        sku: item.sku,
+        name: item.name,
+        quantity: item.quantity,
+        location: item.location || "UNASSIGNED",
+        zone: item.zone || "U",
+        status: "pending" as const,
+      }));
+      
+      const order = await storage.createOrderWithItems(orderData as any, itemsData as any);
+      
+      res.status(201).json(order);
+    } catch (error) {
+      console.error("Error creating manual order:", error);
+      res.status(500).json({ error: "Failed to create order" });
+    }
+  });
+
+  // Get single order with channel info
+  app.get("/api/oms/orders/:id", requirePermission("orders", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+      
+      const order = await storage.getOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      const items = await storage.getOrderItems(id);
+      const channel = order.channelId ? await storage.getChannelById(order.channelId) : null;
+      
+      res.json({ ...order, items, channel });
+    } catch (error) {
+      console.error("Error fetching order:", error);
+      res.status(500).json({ error: "Failed to fetch order" });
+    }
+  });
+
+  // Update order (for editing manual orders)
+  app.put("/api/oms/orders/:id", requirePermission("orders", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+      
+      const order = await storage.getOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      const { priority, notes, status, onHold } = req.body;
+      
+      // Only allow updating certain fields
+      const updates: any = {};
+      if (priority !== undefined) updates.priority = priority;
+      if (notes !== undefined) updates.notes = notes;
+      if (status !== undefined) updates.status = status;
+      if (onHold !== undefined) updates.onHold = onHold ? 1 : 0;
+      
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid updates provided" });
+      }
+      
+      // Use existing update methods for special fields that have side effects
+      if (updates.status) {
+        await storage.updateOrderStatus(id, updates.status);
+        delete updates.status;
+      }
+      if (updates.priority) {
+        await storage.setOrderPriority(id, updates.priority);
+        delete updates.priority;
+      }
+      if (updates.onHold !== undefined) {
+        if (updates.onHold) {
+          await storage.holdOrder(id);
+        } else {
+          await storage.releaseHoldOrder(id);
+        }
+        delete updates.onHold;
+      }
+      
+      // Use generic update for remaining fields (notes, etc.)
+      if (Object.keys(updates).length > 0) {
+        await storage.updateOrderFields(id, updates);
+      }
+      
+      // Fetch updated order
+      const updatedOrder = await storage.getOrderById(id);
+      res.json(updatedOrder);
+    } catch (error) {
+      console.error("Error updating order:", error);
+      res.status(500).json({ error: "Failed to update order" });
+    }
+  });
+
+  // ============================================
   // CHANNELS MANAGEMENT API
   // ============================================
   
