@@ -93,7 +93,24 @@ The system uses a scalable 5-level hierarchy for bin locations that adapts from 
 - Zone=null, Aisle=A, Bay=3, Level=null → Shows: **A-03**
 - Zone=BULK, Aisle=A, Bay=2, Level=C → Shows: **BULK-A-02-C**
 
-**Location Types**: forward_pick, bulk_storage, receiving, packing, shipping, staging, pallet
+**Location Types**:
+| Type | Description | Pick Type |
+|------|-------------|-----------|
+| `bin` | Eaches pick from opened case | Pickable |
+| `pallet` | Full case/pallet pick | Pickable |
+| `carton_flow` | Gravity-fed carton rack | Pickable |
+| `bulk_reserve` | Overflow/replenishment stock | Non-pickable |
+| `receiving` | Inbound staging | Non-pickable |
+| `putaway_staging` | Awaiting putaway | Non-pickable |
+| `packing` | Pack stations | Non-pickable |
+| `shipping_lane` | Sorted for carrier pickup | Non-pickable |
+| `staging` | Temporary holding/WIP | Non-pickable |
+| `returns` | RMA processing | Non-pickable |
+| `quarantine` | Hold for inspection | Non-pickable |
+| `crossdock` | Pass-through (no storage) | Non-pickable |
+| `hazmat` | Restricted materials | Non-pickable |
+| `cold_storage` | Temperature controlled | Pickable |
+| `secure` | High-value/controlled | Pickable |
 
 **Database Tables**:
 - `warehouse_zones`: Zone definitions with default location type

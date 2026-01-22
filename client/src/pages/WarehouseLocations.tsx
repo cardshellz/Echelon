@@ -46,21 +46,29 @@ interface WarehouseLocation {
 }
 
 const LOCATION_TYPES = [
-  { value: "forward_pick", label: "Forward Pick" },
-  { value: "bulk_storage", label: "Bulk Storage" },
+  { value: "bin", label: "Bin (Eaches Pick)" },
+  { value: "pallet", label: "Pallet (Case Pick)" },
+  { value: "carton_flow", label: "Carton Flow" },
+  { value: "bulk_reserve", label: "Bulk Reserve" },
   { value: "receiving", label: "Receiving" },
+  { value: "putaway_staging", label: "Putaway Staging" },
   { value: "packing", label: "Packing" },
-  { value: "shipping", label: "Shipping" },
+  { value: "shipping_lane", label: "Shipping Lane" },
   { value: "staging", label: "Staging" },
-  { value: "pallet", label: "Pallet" },
+  { value: "returns", label: "Returns" },
+  { value: "quarantine", label: "Quarantine" },
+  { value: "crossdock", label: "Crossdock" },
+  { value: "hazmat", label: "Hazmat" },
+  { value: "cold_storage", label: "Cold Storage" },
+  { value: "secure", label: "Secure" },
 ];
 
 const DEFAULT_ZONES = [
   { code: "RCV", name: "Receiving Dock", locationType: "receiving" },
-  { code: "BULK", name: "Bulk Storage", locationType: "bulk_storage" },
-  { code: "FWD", name: "Forward Pick", locationType: "forward_pick" },
+  { code: "BULK", name: "Bulk Reserve", locationType: "bulk_reserve" },
+  { code: "FWD", name: "Forward Pick", locationType: "bin" },
   { code: "PACK", name: "Packing Station", locationType: "packing" },
-  { code: "SHIP", name: "Shipping Lane", locationType: "shipping" },
+  { code: "SHIP", name: "Shipping Lane", locationType: "shipping_lane" },
 ];
 
 export default function WarehouseLocations() {
@@ -83,7 +91,7 @@ export default function WarehouseLocations() {
     level: "",
     bin: "",
     name: "",
-    locationType: "forward_pick",
+    locationType: "bin",
     isPickable: 1,
     pickSequence: "",
     minQty: "",
@@ -93,7 +101,7 @@ export default function WarehouseLocations() {
     code: "",
     name: "",
     description: "",
-    locationType: "forward_pick",
+    locationType: "bin",
     isPickable: 1,
   });
 
@@ -275,7 +283,7 @@ export default function WarehouseLocations() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/warehouse/zones"] });
       setIsCreateZoneOpen(false);
-      setNewZone({ code: "", name: "", description: "", locationType: "forward_pick", isPickable: 1 });
+      setNewZone({ code: "", name: "", description: "", locationType: "bin", isPickable: 1 });
       toast({ title: "Zone created successfully" });
     },
     onError: (error: Error) => {
@@ -306,7 +314,7 @@ export default function WarehouseLocations() {
       level: "",
       bin: "",
       name: "",
-      locationType: "forward_pick",
+      locationType: "bin",
       isPickable: 1,
       pickSequence: "",
       minQty: "",
@@ -437,7 +445,7 @@ export default function WarehouseLocations() {
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,forward_pick,1\nBULK,B,02,B,,Bulk B2,bulk_storage,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,bin,1\nBULK,B,02,B,,Bulk B2,pallet,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1029,8 +1037,8 @@ export default function WarehouseLocations() {
               <Textarea
                 className="font-mono text-sm h-64"
                 placeholder="zone,aisle,bay,level,bin,name,location_type,pick_sequence
-FWD,A,01,A,1,Forward Pick A1,forward_pick,1
-BULK,B,02,B,,Bulk B2,bulk_storage,"
+FWD,A,01,A,1,Forward Pick A1,bin,1
+BULK,B,02,B,,Bulk B2,pallet,"
                 value={csvData}
                 onChange={(e) => setCsvData(e.target.value)}
                 data-testid="textarea-csv-data"
@@ -1042,7 +1050,7 @@ BULK,B,02,B,,Bulk B2,bulk_storage,"
               <ul className="list-disc list-inside mt-1">
                 <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy (at least one required)</li>
                 <li><code>name</code> - Friendly name (optional)</li>
-                <li><code>location_type</code> - forward_pick, bulk_storage, receiving, packing, shipping (default: forward_pick)</li>
+                <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, packing, shipping_lane, staging, etc. (default: bin)</li>
                 <li><code>pick_sequence</code> - Picking order number (optional)</li>
               </ul>
             </div>
