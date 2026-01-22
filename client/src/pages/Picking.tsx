@@ -50,6 +50,8 @@ interface OrderWithItems extends Order {
   items: OrderItem[];
   pickerName?: string | null;
   c2pMs?: number | null; // Click to Pick time in milliseconds
+  channelName?: string | null; // Channel display name
+  channelProvider?: string | null; // Provider type (shopify, ebay, amazon, manual)
 }
 
 // API functions
@@ -193,6 +195,24 @@ function formatC2P(c2pMs: number | null | undefined): string | null {
   return `${mins}m`;
 }
 
+// Helper function to get channel badge styling
+function getChannelBadgeStyle(provider: string | null | undefined): { className: string; label: string } {
+  switch (provider?.toLowerCase()) {
+    case "shopify":
+      return { className: "bg-green-100 text-green-700 border-green-300", label: "Shopify" };
+    case "amazon":
+      return { className: "bg-orange-100 text-orange-700 border-orange-300", label: "Amazon" };
+    case "ebay":
+      return { className: "bg-blue-100 text-blue-700 border-blue-300", label: "eBay" };
+    case "etsy":
+      return { className: "bg-orange-50 text-orange-600 border-orange-200", label: "Etsy" };
+    case "manual":
+      return { className: "bg-slate-100 text-slate-600 border-slate-300", label: "Manual" };
+    default:
+      return { className: "bg-gray-100 text-gray-600 border-gray-300", label: provider || "Unknown" };
+  }
+}
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -262,6 +282,8 @@ interface SingleOrder {
   pickerName?: string | null;
   completedAt?: string | null;
   c2p?: string | null; // Click to Pick time formatted (e.g., "2d 3h")
+  channelName?: string | null; // Channel display name
+  channelProvider?: string | null; // Provider type (shopify, ebay, amazon, manual)
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -535,6 +557,8 @@ export default function Picking() {
     pickerName: order.pickerName || null,
     completedAt: order.completedAt ? String(order.completedAt) : null,
     c2p: formatC2P(order.c2pMs), // Click to Pick time
+    channelName: order.channelName || null,
+    channelProvider: order.channelProvider || null,
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -2460,8 +2484,13 @@ export default function Picking() {
                         <span className="text-[9px] leading-none mt-0.5">units</span>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="font-semibold flex items-center gap-1.5 text-sm">
+                        <div className="font-semibold flex items-center gap-1.5 text-sm flex-wrap">
                           {order.orderNumber}
+                          {order.channelProvider && (
+                            <Badge variant="outline" className={cn("text-[9px] px-1 py-0", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                              {getChannelBadgeStyle(order.channelProvider).label}
+                            </Badge>
+                          )}
                           {order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
                           {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1 py-0">RUSH</Badge>}
                           {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
@@ -2819,6 +2848,11 @@ export default function Picking() {
                         <div>
                           <CardTitle className="text-lg flex items-center gap-2">
                             {order.orderNumber}
+                            {order.channelProvider && (
+                              <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-exception-${order.id}`}>
+                                {getChannelBadgeStyle(order.channelProvider).label}
+                              </Badge>
+                            )}
                             <Badge variant="outline" className="bg-orange-100 text-orange-700 border-orange-300">
                               {shortItems.length} short {shortItems.length === 1 ? "item" : "items"}
                             </Badge>

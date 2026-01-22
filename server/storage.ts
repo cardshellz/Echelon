@@ -226,6 +226,7 @@ export interface IStorage {
     pickerId?: string;
     status?: string[];
     priority?: string;
+    channel?: string;
     startDate?: Date;
     endDate?: Date;
     limit?: number;
@@ -238,6 +239,7 @@ export interface IStorage {
     pickerId?: string;
     status?: string[];
     priority?: string;
+    channel?: string;
     startDate?: Date;
     endDate?: Date;
   }): Promise<number>;
@@ -1364,6 +1366,7 @@ export class DatabaseStorage implements IStorage {
     pickerId?: string;
     status?: string[];
     priority?: string;
+    channel?: string;
     startDate?: Date;
     endDate?: Date;
     limit?: number;
@@ -1387,6 +1390,9 @@ export class DatabaseStorage implements IStorage {
     }
     if (filters.priority) {
       conditions.push(eq(orders.priority, filters.priority));
+    }
+    if (filters.channel) {
+      conditions.push(eq(orders.source, filters.channel));
     }
     if (filters.startDate) {
       conditions.push(gte(orders.completedAt, filters.startDate));
@@ -1452,6 +1458,7 @@ export class DatabaseStorage implements IStorage {
     pickerId?: string;
     status?: string[];
     priority?: string;
+    channel?: string;
     startDate?: Date;
     endDate?: Date;
   }): Promise<number> {
@@ -1472,6 +1479,9 @@ export class DatabaseStorage implements IStorage {
     }
     if (filters.priority) {
       conditions.push(eq(orders.priority, filters.priority));
+    }
+    if (filters.channel) {
+      conditions.push(eq(orders.source, filters.channel));
     }
     if (filters.startDate) {
       conditions.push(gte(orders.completedAt, filters.startDate));

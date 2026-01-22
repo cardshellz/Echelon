@@ -53,8 +53,36 @@ import {
 } from "@/components/ui/collapsible";
 import type { Order, OrderItem, PickingLog } from "@shared/schema";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { cn } from "@/lib/utils";
 
-type OrderWithItems = Order & { items: OrderItem[]; pickerName?: string };
+type OrderWithItems = Order & { items: OrderItem[]; pickerName?: string; channelName?: string | null; channelProvider?: string | null };
+
+// Channel badge styling helper
+function getChannelBadgeStyle(provider: string | null | undefined): { className: string; label: string } {
+  switch (provider?.toLowerCase()) {
+    case "shopify":
+      return { className: "bg-green-100 text-green-700 border-green-300", label: "Shopify" };
+    case "amazon":
+      return { className: "bg-orange-100 text-orange-700 border-orange-300", label: "Amazon" };
+    case "ebay":
+      return { className: "bg-blue-100 text-blue-700 border-blue-300", label: "eBay" };
+    case "etsy":
+      return { className: "bg-orange-50 text-orange-600 border-orange-200", label: "Etsy" };
+    case "manual":
+      return { className: "bg-slate-100 text-slate-600 border-slate-300", label: "Manual" };
+    default:
+      return { className: "bg-gray-100 text-gray-600 border-gray-300", label: provider || "Unknown" };
+  }
+}
+
+const CHANNEL_OPTIONS = [
+  { label: "All Channels", value: "" },
+  { label: "Shopify", value: "shopify" },
+  { label: "Amazon", value: "amazon" },
+  { label: "eBay", value: "ebay" },
+  { label: "Etsy", value: "etsy" },
+  { label: "Manual", value: "manual" },
+];
 
 interface OrderDetail {
   order: Order;
@@ -175,6 +203,7 @@ export default function OrderHistory() {
   const [priority, setPriority] = useState("");
   const [pickerId, setPickerId] = useState("");
   const [sku, setSku] = useState("");
+  const [channel, setChannel] = useState("");
   const [page, setPage] = useState(0);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -204,6 +233,7 @@ export default function OrderHistory() {
     if (priority && priority !== "all") params.set("priority", priority);
     if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
     if (sku) params.set("sku", sku);
+    if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
     params.set("limit", pageSize.toString());
@@ -213,7 +243,7 @@ export default function OrderHistory() {
   };
 
   const { data, isLoading, refetch } = useQuery<{ orders: OrderWithItems[]; total: number }>({
-    queryKey: ["orderHistory", search, datePreset, status, priority, pickerId, sku, page],
+    queryKey: ["orderHistory", search, datePreset, status, priority, pickerId, sku, channel, page],
     queryFn: async () => {
       const res = await fetch(`/api/orders/history?${buildQueryParams()}`);
       if (!res.ok) throw new Error("Failed to fetch order history");
@@ -250,6 +280,7 @@ export default function OrderHistory() {
     if (priority && priority !== "all") params.set("priority", priority);
     if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
     if (sku) params.set("sku", sku);
+    if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
     
@@ -263,10 +294,11 @@ export default function OrderHistory() {
     setPriority("");
     setPickerId("");
     setSku("");
+    setChannel("");
     setPage(0);
   };
 
-  const hasActiveFilters = search || status || priority || pickerId || sku || datePreset !== "7days";
+  const hasActiveFilters = search || status || priority || pickerId || sku || channel || datePreset !== "7days";
   const totalPages = data ? Math.ceil(data.total / pageSize) : 0;
 
   return (
@@ -387,6 +419,22 @@ export default function OrderHistory() {
                     />
                   </div>
 
+                  <div>
+                    <label className="text-sm font-medium mb-2 block">Channel</label>
+                    <Select value={channel} onValueChange={(v) => { setChannel(v); setPage(0); }}>
+                      <SelectTrigger data-testid="select-channel">
+                        <SelectValue placeholder="All channels" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CHANNEL_OPTIONS.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value || "all"}>
+                            {opt.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
                   <div className="flex gap-2 pt-4">
                     <Button variant="outline" onClick={clearFilters} className="flex-1" data-testid="button-clear-filters">
                       Clear All
@@ -433,6 +481,12 @@ export default function OrderHistory() {
                 <X className="h-3 w-3 cursor-pointer" onClick={() => setSku("")} />
               </Badge>
             )}
+            {channel && (
+              <Badge variant="secondary" className="gap-1" data-testid="badge-filter-channel">
+                Channel: {CHANNEL_OPTIONS.find(c => c.value === channel)?.label || channel}
+                <X className="h-3 w-3 cursor-pointer" onClick={() => setChannel("")} data-testid="button-remove-channel-filter" />
+              </Badge>
+            )}
             {datePreset !== "7days" && (
               <Badge variant="secondary" className="gap-1">
                 Date: {DATE_PRESETS.find(p => p.value === datePreset)?.label}
@@ -463,6 +517,7 @@ export default function OrderHistory() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Order #</TableHead>
+                    <TableHead>Channel</TableHead>
                     <TableHead>Customer</TableHead>
                     <TableHead>Items</TableHead>
                     <TableHead>Picker</TableHead>
@@ -485,6 +540,15 @@ export default function OrderHistory() {
                           <Badge variant="outline" className={`ml-2 text-xs ${getPriorityColor(order.priority)}`}>
                             {order.priority}
                           </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {order.channelProvider ? (
+                          <Badge variant="outline" className={cn("text-xs", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                            {getChannelBadgeStyle(order.channelProvider).label}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
                         )}
                       </TableCell>
                       <TableCell>{order.customerName}</TableCell>

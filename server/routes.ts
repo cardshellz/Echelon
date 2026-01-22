@@ -642,7 +642,18 @@ export async function registerRoutes(
         }
       }
       
-      // Add picker display name and C2P (Click to Pick) time to orders
+      // Get all unique channel IDs and lookup their names
+      const channelIds = Array.from(new Set(filteredOrders.map(o => o.channelId).filter(Boolean))) as number[];
+      const channelMap = new Map<number, { name: string; provider: string }>();
+      
+      for (const channelId of channelIds) {
+        const channel = await storage.getChannelById(channelId);
+        if (channel) {
+          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
+        }
+      }
+      
+      // Add picker display name, channel info, and C2P (Click to Pick) time to orders
       const ordersWithMetadata = filteredOrders.map(order => {
         // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
         let c2pMs: number | null = null;
@@ -650,10 +661,14 @@ export async function registerRoutes(
           c2pMs = new Date(order.completedAt).getTime() - new Date(order.shopifyCreatedAt).getTime();
         }
         
+        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
+        
         return {
           ...order,
           pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
           c2pMs, // Click to Pick time in milliseconds
+          channelName: channelInfo?.name || null,
+          channelProvider: channelInfo?.provider || order.source || null,
         };
       });
       
@@ -1109,7 +1124,28 @@ export async function registerRoutes(
       }
       
       const exceptions = await storage.getExceptionOrders();
-      res.json(exceptions);
+      
+      // Get channel info for exceptions
+      const channelIds = Array.from(new Set(exceptions.map(o => o.channelId).filter(Boolean))) as number[];
+      const channelMap = new Map<number, { name: string; provider: string }>();
+      
+      for (const channelId of channelIds) {
+        const channel = await storage.getChannelById(channelId);
+        if (channel) {
+          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
+        }
+      }
+      
+      const exceptionsWithChannel = exceptions.map(order => {
+        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
+        return {
+          ...order,
+          channelName: channelInfo?.name || null,
+          channelProvider: channelInfo?.provider || order.source || null,
+        };
+      });
+      
+      res.json(exceptionsWithChannel);
     } catch (error) {
       console.error("Error fetching exceptions:", error);
       res.status(500).json({ error: "Failed to fetch exceptions" });
@@ -3670,6 +3706,7 @@ export async function registerRoutes(
       if (req.query.sku) filters.sku = req.query.sku as string;
       if (req.query.pickerId) filters.pickerId = req.query.pickerId as string;
       if (req.query.priority) filters.priority = req.query.priority as string;
+      if (req.query.channel) filters.channel = req.query.channel as string;
       if (req.query.status) {
         const statusParam = req.query.status as string;
         filters.status = statusParam.split(',');
@@ -3684,7 +3721,27 @@ export async function registerRoutes(
         storage.getOrderHistoryCount(filters)
       ]);
       
-      res.json({ orders, total });
+      // Get channel info for orders
+      const channelIds = Array.from(new Set(orders.map(o => o.channelId).filter(Boolean))) as number[];
+      const channelMap = new Map<number, { name: string; provider: string }>();
+      
+      for (const channelId of channelIds) {
+        const channel = await storage.getChannelById(channelId);
+        if (channel) {
+          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
+        }
+      }
+      
+      const ordersWithChannel = orders.map(order => {
+        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
+        return {
+          ...order,
+          channelName: channelInfo?.name || null,
+          channelProvider: channelInfo?.provider || order.source || null,
+        };
+      });
+      
+      res.json({ orders: ordersWithChannel, total });
     } catch (error) {
       console.error("Error fetching order history:", error);
       res.status(500).json({ error: "Failed to fetch order history" });
@@ -3727,6 +3784,7 @@ export async function registerRoutes(
       if (req.query.sku) filters.sku = req.query.sku as string;
       if (req.query.pickerId) filters.pickerId = req.query.pickerId as string;
       if (req.query.priority) filters.priority = req.query.priority as string;
+      if (req.query.channel) filters.channel = req.query.channel as string;
       if (req.query.status) {
         const statusParam = req.query.status as string;
         filters.status = statusParam.split(',');
