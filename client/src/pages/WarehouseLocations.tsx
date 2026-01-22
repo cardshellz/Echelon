@@ -43,6 +43,13 @@ interface WarehouseLocation {
   widthInches: number | null;
   heightInches: number | null;
   depthInches: number | null;
+  warehouseId: number | null;
+}
+
+interface Warehouse {
+  id: number;
+  name: string;
+  code: string;
 }
 
 const LOCATION_TYPES = [
@@ -104,6 +111,7 @@ export default function WarehouseLocations() {
     locationType: "bin",
     isPickable: 1,
   });
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all");
 
   const canView = hasPermission("inventory", "view");
   const canEdit = hasPermission("inventory", "edit");
@@ -116,6 +124,11 @@ export default function WarehouseLocations() {
 
   const { data: zones = [], isLoading: zonesLoading } = useQuery<WarehouseZone[]>({
     queryKey: ["/api/warehouse/zones"],
+    enabled: canView,
+  });
+
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({
+    queryKey: ["/api/warehouses"],
     enabled: canView,
   });
 
@@ -236,11 +249,11 @@ export default function WarehouseLocations() {
   });
 
   const bulkImportMutation = useMutation({
-    mutationFn: async (locations: any[]) => {
+    mutationFn: async ({ locations, warehouseId }: { locations: any[]; warehouseId: number | null }) => {
       const res = await fetch("/api/warehouse/locations/bulk-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ locations }),
+        body: JSON.stringify({ locations, warehouseId }),
       });
       if (!res.ok) {
         const error = await res.json();
@@ -441,7 +454,8 @@ export default function WarehouseLocations() {
       toast({ title: "No data found", description: "Please check your CSV format", variant: "destructive" });
       return;
     }
-    bulkImportMutation.mutate(locations);
+    const warehouseId = selectedWarehouseId !== "all" ? parseInt(selectedWarehouseId) : null;
+    bulkImportMutation.mutate({ locations, warehouseId });
   };
 
   const downloadTemplate = () => {
@@ -463,6 +477,18 @@ export default function WarehouseLocations() {
     );
   }
 
+  // Filter locations by selected warehouse
+  const filteredLocations = selectedWarehouseId === "all" 
+    ? locations 
+    : locations.filter(loc => loc.warehouseId === parseInt(selectedWarehouseId));
+
+  // Helper to get warehouse name
+  const getWarehouseName = (warehouseId: number | null) => {
+    if (!warehouseId) return "-";
+    const wh = warehouses.find(w => w.id === warehouseId);
+    return wh ? wh.code : "-";
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -481,7 +507,7 @@ export default function WarehouseLocations() {
         <TabsList>
           <TabsTrigger value="locations" data-testid="tab-locations">
             <Box className="h-4 w-4 mr-2" />
-            Locations ({locations.length})
+            Locations ({filteredLocations.length})
           </TabsTrigger>
           <TabsTrigger value="zones" data-testid="tab-zones">
             <Layers className="h-4 w-4 mr-2" />
@@ -491,11 +517,26 @@ export default function WarehouseLocations() {
 
         <TabsContent value="locations" className="space-y-4">
           <div className="flex justify-between items-center">
-            <div className="text-sm text-muted-foreground">
-              Location code format: <code className="bg-muted px-1 rounded">ZONE-AISLE-BAY-LEVEL-BIN</code>
-              {selectedIds.size > 0 && (
-                <span className="ml-4 text-primary font-medium">{selectedIds.size} selected</span>
-              )}
+            <div className="flex items-center gap-4">
+              <Select value={selectedWarehouseId} onValueChange={setSelectedWarehouseId}>
+                <SelectTrigger className="w-48" data-testid="select-warehouse-filter">
+                  <SelectValue placeholder="All Warehouses" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Warehouses</SelectItem>
+                  {warehouses.map((wh) => (
+                    <SelectItem key={wh.id} value={wh.id.toString()}>
+                      {wh.name} ({wh.code})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="text-sm text-muted-foreground">
+                <code className="bg-muted px-1 rounded">ZONE-AISLE-BAY-LEVEL-BIN</code>
+                {selectedIds.size > 0 && (
+                  <span className="ml-4 text-primary font-medium">{selectedIds.size} selected</span>
+                )}
+              </div>
             </div>
             <div className="flex gap-2">
               {selectedIds.size > 0 && canEdit && (
@@ -548,6 +589,7 @@ export default function WarehouseLocations() {
                       />
                     </TableHead>
                   )}
+                  <TableHead>Warehouse</TableHead>
                   <TableHead>Location Code</TableHead>
                   <TableHead>Zone</TableHead>
                   <TableHead>Aisle</TableHead>
@@ -562,16 +604,16 @@ export default function WarehouseLocations() {
               <TableBody>
                 {locationsLoading ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 11 : 9} className="text-center py-8">Loading...</TableCell>
+                    <TableCell colSpan={canEdit ? 12 : 10} className="text-center py-8">Loading...</TableCell>
                   </TableRow>
                 ) : locations.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 11 : 9} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={canEdit ? 12 : 10} className="text-center py-8 text-muted-foreground">
                       No locations defined yet. Add your first location or import from CSV.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  locations.map((loc) => (
+                  filteredLocations.map((loc) => (
                     <TableRow key={loc.id} data-testid={`location-row-${loc.id}`} className={selectedIds.has(loc.id) ? "bg-muted/50" : ""}>
                       {canEdit && (
                         <TableCell>
@@ -582,6 +624,7 @@ export default function WarehouseLocations() {
                           />
                         </TableCell>
                       )}
+                      <TableCell>{getWarehouseName(loc.warehouseId)}</TableCell>
                       <TableCell className="font-mono font-medium">{loc.code}</TableCell>
                       <TableCell>{loc.zone || '-'}</TableCell>
                       <TableCell>{loc.aisle || '-'}</TableCell>

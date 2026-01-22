@@ -2984,7 +2984,7 @@ export async function registerRoutes(
   // Bulk import warehouse locations from CSV
   app.post("/api/warehouse/locations/bulk-import", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const { locations } = req.body;
+      const { locations, warehouseId } = req.body;
       if (!Array.isArray(locations) || locations.length === 0) {
         return res.status(400).json({ error: "No locations provided" });
       }
@@ -3020,6 +3020,7 @@ export async function registerRoutes(
             pickSequence: loc.pickSequence || loc.pick_sequence ? parseInt(loc.pickSequence || loc.pick_sequence) : null,
             minQty: loc.minQty || loc.min_qty ? parseInt(loc.minQty || loc.min_qty) : null,
             maxQty: loc.maxQty || loc.max_qty ? parseInt(loc.maxQty || loc.max_qty) : null,
+            warehouseId: warehouseId || null,
           });
           results.created++;
         } catch (err: any) {
