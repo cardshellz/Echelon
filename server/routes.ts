@@ -2902,11 +2902,7 @@ export async function registerRoutes(
           if (result) deleted++;
         } catch (err: any) {
           console.error(`Error deleting location ${id}:`, err);
-          if (err.code === "23503") {
-            errors.push(`Location ${id} has products assigned`);
-          } else {
-            errors.push(`Location ${id}: ${err.message || 'Unknown error'}`);
-          }
+          errors.push(`Location ${id}: ${err.detail || err.message || err.code || 'Unknown error'}`);
         }
       }
       if (errors.length > 0) {
