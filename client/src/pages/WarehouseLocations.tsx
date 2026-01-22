@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare } from "lucide-react";
+import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, MoveRight } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -74,6 +74,8 @@ export default function WarehouseLocations() {
   const [editingLocation, setEditingLocation] = useState<WarehouseLocation | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [csvData, setCsvData] = useState("");
+  const [isReassignOpen, setIsReassignOpen] = useState(false);
+  const [targetLocationId, setTargetLocationId] = useState<string>("");
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -196,6 +198,32 @@ export default function WarehouseLocations() {
     },
     onError: () => {
       toast({ title: "Error", description: "Failed to delete locations", variant: "destructive" });
+    },
+  });
+
+  const bulkReassignMutation = useMutation({
+    mutationFn: async ({ sourceIds, targetId }: { sourceIds: number[]; targetId: number }) => {
+      const res = await fetch("/api/warehouse/locations/bulk-reassign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceLocationIds: sourceIds, targetLocationId: targetId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to reassign products");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/product-locations"] });
+      setSelectedIds(new Set());
+      setIsReassignOpen(false);
+      setTargetLocationId("");
+      toast({ title: `Moved ${data.reassigned} products to new location` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
 
@@ -463,15 +491,26 @@ export default function WarehouseLocations() {
             </div>
             <div className="flex gap-2">
               {selectedIds.size > 0 && canEdit && (
-                <Button 
-                  variant="destructive" 
-                  onClick={handleBulkDelete}
-                  disabled={bulkDeleteMutation.isPending}
-                  data-testid="btn-bulk-delete"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete Selected ({selectedIds.size})
-                </Button>
+                <>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => setIsReassignOpen(true)}
+                    disabled={bulkReassignMutation.isPending}
+                    data-testid="btn-bulk-reassign"
+                  >
+                    <MoveRight className="h-4 w-4 mr-2" />
+                    Move Products ({selectedIds.size})
+                  </Button>
+                  <Button 
+                    variant="destructive" 
+                    onClick={handleBulkDelete}
+                    disabled={bulkDeleteMutation.isPending}
+                    data-testid="btn-bulk-delete"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete Selected ({selectedIds.size})
+                  </Button>
+                </>
               )}
               {canCreate && (
                 <>
@@ -1017,6 +1056,64 @@ BULK,B,02,B,,Bulk B2,bulk_storage,"
             >
               <Upload className="h-4 w-4 mr-2" />
               {bulkImportMutation.isPending ? "Importing..." : "Import Locations"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Reassign Dialog */}
+      <Dialog open={isReassignOpen} onOpenChange={setIsReassignOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move Products to New Location</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Move all products from the {selectedIds.size} selected location(s) to a new location.
+              This will update the product-location mappings so you can delete the old locations.
+            </p>
+            <div>
+              <Label>Target Location (Holding Bin)</Label>
+              <Select value={targetLocationId} onValueChange={setTargetLocationId}>
+                <SelectTrigger data-testid="select-target-location">
+                  <SelectValue placeholder="Select destination location..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {locations
+                    .filter(loc => !selectedIds.has(loc.id))
+                    .sort((a, b) => {
+                      // Sort staging locations first
+                      if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
+                      if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
+                      return a.code.localeCompare(b.code);
+                    })
+                    .map(loc => (
+                      <SelectItem key={loc.id} value={loc.id.toString()}>
+                        {loc.code} {loc.locationType === 'staging' && '(Staging/Holding)'} - {loc.locationType}
+                      </SelectItem>
+                    ))
+                  }
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground mt-1">
+                Tip: Create a staging location to use as a holding bin for products awaiting reassignment.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); }}>
+              Cancel
+            </Button>
+            <Button 
+              onClick={() => bulkReassignMutation.mutate({ 
+                sourceIds: Array.from(selectedIds), 
+                targetId: parseInt(targetLocationId) 
+              })}
+              disabled={!targetLocationId || bulkReassignMutation.isPending}
+              data-testid="btn-confirm-reassign"
+            >
+              <MoveRight className="h-4 w-4 mr-2" />
+              {bulkReassignMutation.isPending ? "Moving..." : "Move Products"}
             </Button>
           </DialogFooter>
         </DialogContent>

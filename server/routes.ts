@@ -1,5 +1,6 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
+import { z } from "zod";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
@@ -2938,6 +2939,43 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error bulk deleting warehouse locations:", error);
       res.status(500).json({ error: "Failed to delete locations" });
+    }
+  });
+
+  // Bulk reassign products from source locations to target location
+  const bulkReassignSchema = z.object({
+    sourceLocationIds: z.array(z.number()).min(1, "At least one source location required"),
+    targetLocationId: z.number({ required_error: "Target location ID required" }),
+  });
+  
+  app.post("/api/warehouse/locations/bulk-reassign", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const parseResult = bulkReassignSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ error: parseResult.error.errors[0]?.message || "Invalid request" });
+      }
+      const { sourceLocationIds, targetLocationId } = parseResult.data;
+      
+      // Get target location details
+      const targetLocation = await storage.getWarehouseLocation(targetLocationId);
+      if (!targetLocation) {
+        return res.status(404).json({ error: "Target location not found" });
+      }
+      
+      // Update all product_locations from source locations to the target in a single query
+      const result = await db.update(productLocations)
+        .set({ 
+          warehouseLocationId: targetLocationId,
+          location: targetLocation.code,
+          zone: targetLocation.zone || 'STAGING'
+        })
+        .where(inArray(productLocations.warehouseLocationId, sourceLocationIds));
+      
+      const reassigned = result.rowCount || 0;
+      res.json({ success: true, reassigned });
+    } catch (error: any) {
+      console.error("Error bulk reassigning products:", error);
+      res.status(500).json({ error: error.message || "Failed to reassign products" });
     }
   });
 
