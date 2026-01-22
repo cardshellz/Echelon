@@ -1050,7 +1050,7 @@ BULK,B,02,B,,Bulk B2,pallet,"
               <ul className="list-disc list-inside mt-1">
                 <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy (at least one required)</li>
                 <li><code>name</code> - Friendly name (optional)</li>
-                <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, packing, shipping_lane, staging, etc. (default: bin)</li>
+                <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, putaway_staging, packing, shipping_lane, staging, returns, quarantine, crossdock, hazmat, cold_storage, secure (default: bin)</li>
                 <li><code>pick_sequence</code> - Picking order number (optional)</li>
               </ul>
             </div>
