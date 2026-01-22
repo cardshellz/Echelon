@@ -184,7 +184,15 @@ export default function WarehouseLocations() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
       setSelectedIds(new Set());
-      toast({ title: `Deleted ${data.deleted} locations` });
+      if (data.errors?.length > 0) {
+        toast({ 
+          title: `Deleted ${data.deleted} locations`, 
+          description: `${data.errors.length} errors: ${data.errors.slice(0, 3).join(", ")}${data.errors.length > 3 ? "..." : ""}`,
+          variant: "destructive" 
+        });
+      } else {
+        toast({ title: `Deleted ${data.deleted} locations` });
+      }
     },
     onError: () => {
       toast({ title: "Error", description: "Failed to delete locations", variant: "destructive" });
