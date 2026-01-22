@@ -445,7 +445,7 @@ export default function WarehouseLocations() {
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,bin,1\nBULK,B,02,B,,Bulk B2,pallet,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,bin,1,1\nBULK,B,02,B,,Bulk B2,bulk_reserve,0,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1024,7 +1024,7 @@ export default function WarehouseLocations() {
           <div className="space-y-4">
             <div className="flex justify-between items-center">
               <p className="text-sm text-muted-foreground">
-                Upload a CSV file with columns: zone, aisle, bay, level, bin, name, location_type, pick_sequence
+                Upload a CSV file with columns: zone, aisle, bay, level, bin, name, location_type, is_pickable, pick_sequence
               </p>
               <Button variant="outline" size="sm" onClick={downloadTemplate} data-testid="btn-download-template">
                 <Download className="h-4 w-4 mr-2" />
@@ -1036,9 +1036,9 @@ export default function WarehouseLocations() {
               <Label>Paste CSV Data</Label>
               <Textarea
                 className="font-mono text-sm h-64"
-                placeholder="zone,aisle,bay,level,bin,name,location_type,pick_sequence
-FWD,A,01,A,1,Forward Pick A1,bin,1
-BULK,B,02,B,,Bulk B2,pallet,"
+                placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
+FWD,A,01,A,1,Forward Pick A1,bin,1,1
+BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                 value={csvData}
                 onChange={(e) => setCsvData(e.target.value)}
                 data-testid="textarea-csv-data"
@@ -1051,6 +1051,7 @@ BULK,B,02,B,,Bulk B2,pallet,"
                 <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy (at least one required)</li>
                 <li><code>name</code> - Friendly name (optional)</li>
                 <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, putaway_staging, packing, shipping_lane, staging, returns, quarantine, crossdock, hazmat, cold_storage, secure (default: bin)</li>
+                <li><code>is_pickable</code> - 1 for pickable, 0 for non-pickable (default: 1)</li>
                 <li><code>pick_sequence</code> - Picking order number (optional)</li>
               </ul>
             </div>
