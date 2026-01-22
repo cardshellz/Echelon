@@ -1075,17 +1075,48 @@ export default function WarehouseLocations() {
               </Button>
             </div>
             
-            <div>
-              <Label>Paste CSV Data</Label>
-              <Textarea
-                className="font-mono text-sm h-64"
-                placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
+            <div className="space-y-3">
+              <div className="flex items-center gap-4">
+                <Label htmlFor="csv-file-input" className="cursor-pointer">
+                  <div className="flex items-center gap-2 px-4 py-2 border rounded-md hover:bg-accent transition-colors">
+                    <Upload className="h-4 w-4" />
+                    <span>Choose CSV File</span>
+                  </div>
+                  <input
+                    id="csv-file-input"
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          const text = event.target?.result as string;
+                          if (text) setCsvData(text);
+                        };
+                        reader.readAsText(file);
+                      }
+                      e.target.value = "";
+                    }}
+                    data-testid="input-csv-file"
+                  />
+                </Label>
+                <span className="text-sm text-muted-foreground">or paste data below</span>
+              </div>
+              
+              <div>
+                <Label>CSV Data</Label>
+                <Textarea
+                  className="font-mono text-sm h-48"
+                  placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
 FWD,A,01,A,1,Forward Pick A1,bin,1,1
 BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
-                value={csvData}
-                onChange={(e) => setCsvData(e.target.value)}
-                data-testid="textarea-csv-data"
-              />
+                  value={csvData}
+                  onChange={(e) => setCsvData(e.target.value)}
+                  data-testid="textarea-csv-data"
+                />
+              </div>
             </div>
 
             <div className="text-sm text-muted-foreground">
