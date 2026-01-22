@@ -68,6 +68,37 @@ Permissions follow a `resource:action` pattern for easy extension:
 - Frontend: `hasPermission()` and `hasAnyPermission()` helpers in auth context
 - Admin UI: `/roles` page for creating roles, editing permissions, and assigning to users
 
+### Navigation Structure
+
+The application uses a clean navigation structure with operational sections in the left sidebar and admin settings in the top-right gear menu.
+
+**Left Sidebar (Operational):**
+- **Dashboard**: Overview and metrics
+- **Warehouse**: Inventory (WMS), Bin Locations, Product Locations, Warehouses, Purchase Orders
+- **Orders**: Orders (OMS), Order History
+- **Fulfillment**: Picking Queue, Picking Logs, Picking Metrics, Shipping
+- **Sales Channels**: Channels, Channel Reserves, Dropship Network
+
+**Settings Gear Menu (Admin Only):**
+- General Settings
+- Integrations
+- User Management
+- Roles & Permissions
+
+### Application Settings
+
+The system stores configurable settings in the `app_settings` table. Settings are managed through:
+- **UI**: `/settings` page with tabs for Company, Inventory, Picking, and Notifications
+- **API**: `GET /api/settings` and `PUT /api/settings` endpoints
+- **Storage**: Stored as key-value pairs with category grouping
+
+Available settings:
+- Company info (name, address, timezone)
+- Default warehouse
+- Stock thresholds (low stock, critical stock alerts)
+- Picking defaults (batch size, auto-release delay)
+- Notification preferences
+
 ### Inventory Management System (WMS)
 Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Key inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP. The system implements implicit inventory movements based on picker actions and provides a robust Shopify sync strategy for inventory levels.
 
