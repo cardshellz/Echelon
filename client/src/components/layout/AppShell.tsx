@@ -23,7 +23,9 @@ import {
   FileText,
   History,
   Shield,
-  Store
+  Store,
+  Building2,
+  Cog
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -60,28 +62,24 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
 
   const allNavItems: NavItem[] = [
     { type: 'link', label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
-    { type: "separator", label: "Operations", roles: ["admin", "lead"] },
+    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
     { type: 'link', label: "Inventory (WMS)", icon: Package, href: "/inventory", roles: ["admin", "lead"] },
+    { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Product Locations", icon: Package, href: "/locations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },
+    { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing", roles: ["admin", "lead"] },
+    { type: "separator", label: "Orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-    { type: "separator", label: "Picking & Packing" },
+    { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
+    { type: "separator", label: "Fulfillment" },
     { type: 'link', label: "Picking Queue", icon: ClipboardList, href: "/picking" },
     { type: 'link', label: "Picking Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
     { type: 'link', label: "Picking Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
-    { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
-    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
-    { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
-    { type: 'link', label: "Product Locations", icon: Package, href: "/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
-    { type: "separator", label: "Channels & Integrations", roles: ["admin", "lead"] },
-    { type: 'link', label: "Sales Channels", icon: Store, href: "/channels", roles: ["admin", "lead"] },
+    { type: "separator", label: "Sales Channels", roles: ["admin", "lead"] },
+    { type: 'link', label: "Channels", icon: Store, href: "/channels", roles: ["admin", "lead"] },
     { type: 'link', label: "Channel Reserves", icon: Package, href: "/channels/reserves", roles: ["admin", "lead"] },
     { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship", roles: ["admin", "lead"] },
-    { type: 'link', label: "Integrations / Stack", icon: Cable, href: "/integrations", roles: ["admin"] },
-    { type: "separator", label: "Administration", roles: ["admin"] },
-    { type: 'link', label: "User Management", icon: Users, href: "/users", roles: ["admin"] },
-    { type: 'link', label: "Roles & Permissions", icon: Shield, href: "/roles", roles: ["admin"] },
-    { type: "separator", label: "Management", roles: ["admin", "lead"] },
-    { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing", roles: ["admin", "lead"] },
   ];
   
   const navItems = allNavItems.filter(item => {
@@ -206,6 +204,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isMobile = useIsMobile();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
   return (
     <div className="flex h-screen bg-background overflow-hidden font-sans">
@@ -246,10 +246,44 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <Bell size={18} />
               <span className="absolute top-2 right-2.5 w-2 h-2 bg-destructive rounded-full border-2 border-card"></span>
             </Button>
-            {!isMobile && (
-              <Button variant="ghost" size="icon" className="text-muted-foreground">
-                <Settings size={18} />
-              </Button>
+            {!isMobile && isAdmin && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="text-muted-foreground" data-testid="button-settings-menu">
+                    <Settings size={18} />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuLabel>Settings</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem asChild data-testid="link-general-settings">
+                    <Link href="/settings" className="w-full cursor-pointer">
+                      <Cog className="mr-2 h-4 w-4" />
+                      General Settings
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild data-testid="link-integrations">
+                    <Link href="/integrations" className="w-full cursor-pointer">
+                      <Cable className="mr-2 h-4 w-4" />
+                      Integrations
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Administration</DropdownMenuLabel>
+                  <DropdownMenuItem asChild data-testid="link-user-management">
+                    <Link href="/users" className="w-full cursor-pointer">
+                      <Users className="mr-2 h-4 w-4" />
+                      User Management
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild data-testid="link-roles-permissions">
+                    <Link href="/roles" className="w-full cursor-pointer">
+                      <Shield className="mr-2 h-4 w-4" />
+                      Roles & Permissions
+                    </Link>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
             <Separator orientation="vertical" className="h-6 mx-2 hidden md:block" />
             <DropdownMenu>

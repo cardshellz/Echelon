@@ -25,6 +25,7 @@ import Roles from "@/pages/Roles";
 import Channels from "@/pages/Channels";
 import Reserves from "@/pages/Reserves";
 import Login from "@/pages/Login";
+import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ 
@@ -131,6 +132,9 @@ function Router() {
         </Route>
         <Route path="/purchasing">
           <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/settings">
+          <ProtectedRoute component={Settings} allowedRoles={["admin"]} />
         </Route>
         <Route component={NotFound} />
       </Switch>

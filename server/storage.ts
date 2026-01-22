@@ -28,6 +28,8 @@ import {
   type ChannelFeed,
   type InsertChannelFeed,
   type PickingLog,
+  type AppSetting,
+  type InsertAppSetting,
   type InsertPickingLog,
   type AdjustmentReason,
   type InsertAdjustmentReason,
@@ -57,7 +59,8 @@ import {
   channelConnections,
   partnerProfiles,
   channelReservations,
-  generateLocationCode
+  generateLocationCode,
+  appSettings
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -267,6 +270,11 @@ export interface IStorage {
   getChannelReservationByChannelAndItem(channelId: number, inventoryItemId: number): Promise<ChannelReservation | undefined>;
   upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation>;
   deleteChannelReservation(id: number): Promise<boolean>;
+  
+  // App Settings
+  getAllSettings(): Promise<Record<string, string | null>>;
+  getSetting(key: string): Promise<string | null>;
+  upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1630,6 +1638,45 @@ export class DatabaseStorage implements IStorage {
   async deleteChannelReservation(id: number): Promise<boolean> {
     const result = await db.delete(channelReservations).where(eq(channelReservations.id, id)).returning();
     return result.length > 0;
+  }
+  
+  // App Settings
+  async getAllSettings(): Promise<Record<string, string | null>> {
+    const settings = await db.select().from(appSettings);
+    const result: Record<string, string | null> = {};
+    for (const setting of settings) {
+      result[setting.key] = setting.value;
+    }
+    return result;
+  }
+  
+  async getSetting(key: string): Promise<string | null> {
+    const result = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+    return result[0]?.value ?? null;
+  }
+  
+  async upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting> {
+    const existing = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+    
+    if (existing.length > 0) {
+      const updated = await db.update(appSettings)
+        .set({ value, updatedAt: new Date() })
+        .where(eq(appSettings.key, key))
+        .returning();
+      return updated[0];
+    }
+    
+    const inserted = await db.insert(appSettings).values({
+      key,
+      value,
+      type: "string",
+      category: category || (
+        key.startsWith("company_") ? "company" : 
+        key.startsWith("low_stock") || key.startsWith("critical_stock") ? "inventory" :
+        key.startsWith("picking") || key.startsWith("auto_release") ? "picking" : "general"
+      ),
+    }).returning();
+    return inserted[0];
   }
 }
 

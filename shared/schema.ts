@@ -916,3 +916,25 @@ export type UserWithPermissions = SafeUser & {
   roles: AuthRole[];
   permissions: string[]; // Array of "resource:action" strings
 };
+
+// ============================================
+// APPLICATION SETTINGS
+// ============================================
+
+export const appSettings = pgTable("app_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  key: varchar("key", { length: 100 }).notNull().unique(),
+  value: text("value"),
+  type: varchar("type", { length: 20 }).notNull().default("string"), // string, number, boolean, json
+  category: varchar("category", { length: 50 }).notNull().default("general"),
+  description: text("description"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertAppSettingSchema = createInsertSchema(appSettings).omit({
+  id: true,
+  updatedAt: true,
+});
+
+export type InsertAppSetting = z.infer<typeof insertAppSettingSchema>;
+export type AppSetting = typeof appSettings.$inferSelect;

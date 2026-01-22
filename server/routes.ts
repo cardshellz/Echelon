@@ -3950,6 +3950,58 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================
+  // SETTINGS API
+  // ============================================
+
+  // Get all settings as key-value object
+  app.get("/api/settings", requirePermission("settings", "view"), async (req, res) => {
+    try {
+      const result = await storage.getAllSettings();
+      res.json(result);
+    } catch (error) {
+      console.error("Error fetching settings:", error);
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  });
+
+  // Define allowed settings keys for validation
+  const allowedSettingsKeys = [
+    "company_name", "company_address", "company_city", "company_state", 
+    "company_postal_code", "company_country", "default_timezone", 
+    "default_warehouse_id", "low_stock_threshold", "critical_stock_threshold",
+    "enable_low_stock_alerts", "picking_batch_size", "auto_release_delay_minutes"
+  ] as const;
+
+  const settingsUpdateSchema = z.record(
+    z.enum(allowedSettingsKeys),
+    z.string().nullable()
+  );
+
+  // Update settings (upsert multiple key-value pairs)
+  app.put("/api/settings", requirePermission("settings", "edit"), async (req, res) => {
+    try {
+      const parseResult = settingsUpdateSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          error: "Invalid settings data", 
+          details: parseResult.error.errors 
+        });
+      }
+      const updates = parseResult.data;
+      
+      for (const [key, value] of Object.entries(updates)) {
+        if (!key) continue;
+        await storage.upsertSetting(key, value ?? null);
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error updating settings:", error);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
+
   // Migrate existing product_locations to warehouse_locations (one-time sync)
   app.post("/api/inventory/migrate-locations", async (req, res) => {
     try {
