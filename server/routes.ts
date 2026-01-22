@@ -2896,8 +2896,32 @@ export async function registerRoutes(
       }
       let deleted = 0;
       const errors: string[] = [];
+      const blocked: string[] = [];
+      
       for (const id of ids) {
         try {
+          // Check if location has inventory
+          const invLevels = await db.select({ id: inventoryLevels.id })
+            .from(inventoryLevels)
+            .where(eq(inventoryLevels.warehouseLocationId, id))
+            .limit(1);
+          
+          if (invLevels.length > 0) {
+            blocked.push(`Location ${id} has inventory - move or adjust stock first`);
+            continue;
+          }
+          
+          // Check if location has products assigned
+          const productLocs = await db.select({ id: productLocations.id })
+            .from(productLocations)
+            .where(eq(productLocations.warehouseLocationId, id))
+            .limit(1);
+          
+          if (productLocs.length > 0) {
+            blocked.push(`Location ${id} has products assigned - reassign them first`);
+            continue;
+          }
+          
           const result = await storage.deleteWarehouseLocation(id);
           if (result) deleted++;
         } catch (err: any) {
@@ -2905,8 +2929,10 @@ export async function registerRoutes(
           errors.push(`Location ${id}: ${err.detail || err.message || err.code || 'Unknown error'}`);
         }
       }
-      if (errors.length > 0) {
-        return res.json({ success: true, deleted, errors });
+      
+      const allErrors = [...blocked, ...errors];
+      if (allErrors.length > 0) {
+        return res.json({ success: true, deleted, errors: allErrors });
       }
       res.json({ success: true, deleted });
     } catch (error) {
