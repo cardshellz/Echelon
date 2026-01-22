@@ -1,8 +1,10 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
+import { eq, inArray } from "drizzle-orm";
+import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -2957,7 +2959,7 @@ export async function registerRoutes(
       const { sourceLocationIds, targetLocationId } = parseResult.data;
       
       // Get target location details
-      const targetLocation = await storage.getWarehouseLocation(targetLocationId);
+      const targetLocation = await storage.getWarehouseLocationById(targetLocationId);
       if (!targetLocation) {
         return res.status(404).json({ error: "Target location not found" });
       }
