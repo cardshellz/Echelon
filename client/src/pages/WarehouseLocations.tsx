@@ -329,7 +329,7 @@ export default function WarehouseLocations() {
     };
     if (newLocation.zone) data.zone = newLocation.zone.toUpperCase();
     if (newLocation.aisle) data.aisle = newLocation.aisle.toUpperCase();
-    if (newLocation.bay) data.bay = newLocation.bay;
+    if (newLocation.bay) data.bay = newLocation.bay.padStart(2, '0');
     if (newLocation.level) data.level = newLocation.level.toUpperCase();
     if (newLocation.bin) data.bin = newLocation.bin;
     if (newLocation.name) data.name = newLocation.name;
@@ -348,7 +348,7 @@ export default function WarehouseLocations() {
     };
     if (editingLocation.zone) data.zone = editingLocation.zone.toUpperCase();
     if (editingLocation.aisle) data.aisle = editingLocation.aisle.toUpperCase();
-    if (editingLocation.bay) data.bay = editingLocation.bay;
+    if (editingLocation.bay) data.bay = editingLocation.bay.padStart(2, '0');
     if (editingLocation.level) data.level = editingLocation.level?.toUpperCase();
     if (editingLocation.bin) data.bin = editingLocation.bin;
     if (editingLocation.name) data.name = editingLocation.name;

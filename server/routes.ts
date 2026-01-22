@@ -2999,7 +2999,7 @@ export async function registerRoutes(
           // Validate that at least one hierarchy field is present
           const zone = loc.zone?.trim() || null;
           const aisle = loc.aisle?.trim() || null;
-          const bay = loc.bay?.toString().trim() || null;
+          const bay = loc.bay?.toString().trim() ? loc.bay.toString().trim().padStart(2, '0') : null;
           const level = loc.level?.trim() || null;
           const bin = loc.bin?.toString().trim() || null;
           
@@ -3015,7 +3015,7 @@ export async function registerRoutes(
             level,
             bin,
             name: loc.name?.trim() || null,
-            locationType: (loc.locationType || loc.location_type || "forward_pick").trim(),
+            locationType: (loc.locationType || loc.location_type || "bin").trim(),
             isPickable: loc.isPickable !== undefined ? parseInt(loc.isPickable) : 1,
             pickSequence: loc.pickSequence || loc.pick_sequence ? parseInt(loc.pickSequence || loc.pick_sequence) : null,
             minQty: loc.minQty || loc.min_qty ? parseInt(loc.minQty || loc.min_qty) : null,
