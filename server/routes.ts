@@ -12,7 +12,7 @@ import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { inventoryService } from "./inventory";
 import multer from "multer";
-import { seedRBAC, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
+import { seedRBAC, seedDefaultChannels, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -47,6 +47,9 @@ export async function registerRoutes(
   
   // Seed RBAC permissions and roles on startup
   await seedRBAC();
+  
+  // Seed default channels (Shopify, etc.)
+  await seedDefaultChannels();
   
   // Auth API
   app.post("/api/auth/login", async (req, res) => {
@@ -2025,6 +2028,11 @@ export async function registerRoutes(
     try {
       console.log("Starting Shopify orders sync...");
       
+      // Get default Shopify channel for linking orders
+      const allChannels = await storage.getAllChannels();
+      const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
+      const shopifyChannelId = shopifyChannel?.id || null;
+      
       const shopifyOrders = await fetchUnfulfilledOrders();
       console.log(`Fetched ${shopifyOrders.length} unfulfilled orders from Shopify`);
       
@@ -2068,15 +2076,19 @@ export async function registerRoutes(
           });
         }
         
-        // Create new order
+        // Create new order with channel info
         await storage.createOrderWithItems({
           shopifyOrderId: orderData.shopifyOrderId,
+          externalOrderId: orderData.shopifyOrderId,
+          channelId: shopifyChannelId,
+          source: "shopify",
           orderNumber: orderData.orderNumber,
           customerName: orderData.customerName,
           customerEmail: orderData.customerEmail,
           priority: orderData.priority,
           status: "ready",
           shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
+          orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
         }, enrichedItems);
         
         created++;
@@ -2523,6 +2535,11 @@ export async function registerRoutes(
         return res.status(200).json({ received: true });
       }
       
+      // Get default Shopify channel for linking orders
+      const allChannels = await storage.getAllChannels();
+      const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
+      const shopifyChannelId = shopifyChannel?.id || null;
+      
       // Enrich items with location data from product_locations
       const enrichedItems: InsertOrderItem[] = [];
       for (const item of orderData.items) {
@@ -2542,15 +2559,19 @@ export async function registerRoutes(
         });
       }
       
-      // Create order
+      // Create order with channel info
       const createdOrder = await storage.createOrderWithItems({
         shopifyOrderId: orderData.shopifyOrderId,
+        externalOrderId: orderData.shopifyOrderId,
+        channelId: shopifyChannelId,
+        source: "shopify",
         orderNumber: orderData.orderNumber,
         customerName: orderData.customerName,
         customerEmail: orderData.customerEmail,
         priority: orderData.priority,
         status: "ready",
         shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
+        orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
       }, enrichedItems);
       
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);

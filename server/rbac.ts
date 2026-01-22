@@ -1,9 +1,9 @@
 import { db } from "./db";
 import { 
-  authRoles, authPermissions, authRolePermissions, authUserRoles, users,
+  authRoles, authPermissions, authRolePermissions, authUserRoles, users, channels,
   type AuthRole, type AuthPermission, type InsertAuthPermission
 } from "@shared/schema";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 
 // Default permissions for Echelon
 export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
@@ -188,6 +188,33 @@ export async function seedRBAC() {
   }
   
   console.log("RBAC seeding complete!");
+}
+
+// Seed default channels (Shopify, etc.)
+export async function seedDefaultChannels() {
+  console.log("Checking default channels...");
+  
+  try {
+    // Check if a Shopify channel exists using raw SQL to avoid schema mismatch
+    const existingShopify = await db.execute(
+      sql`SELECT id FROM channels WHERE provider = 'shopify' LIMIT 1`
+    );
+    
+    if (existingShopify.rows.length === 0) {
+      // Create default Shopify channel - only use basic columns that should exist
+      await db.execute(
+        sql`INSERT INTO channels (name, type, provider, status) 
+            VALUES ('Shopify Store', 'internal', 'shopify', 'active')
+            ON CONFLICT DO NOTHING`
+      );
+      console.log("Created default Shopify channel");
+    } else {
+      console.log("Shopify channel already exists");
+    }
+  } catch (error) {
+    console.warn("Could not seed default channels:", error);
+    // Non-fatal - continue with app startup
+  }
 }
 
 // Get user's permissions (cached in session)
