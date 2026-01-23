@@ -562,9 +562,9 @@ export async function registerRoutes(
       const errors: string[] = [];
       
       // Fetch warehouse locations once for efficient lookup
-      const warehouseLocations = await storage.getWarehouseLocations();
+      const warehouseLocations = await storage.getAllWarehouseLocations();
       const warehouseLocMap = new Map(
-        warehouseLocations.map(wl => [wl.code.toUpperCase(), wl.id])
+        warehouseLocations.map((wl: { code: string; id: number }) => [wl.code.toUpperCase(), wl.id])
       );
       
       // Process each row
