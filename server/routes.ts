@@ -2909,6 +2909,39 @@ export async function registerRoutes(
     }
   });
 
+  // Export warehouse locations as CSV
+  app.get("/api/warehouse/locations/export/csv", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const locations = await storage.getAllWarehouseLocations();
+      
+      const csvRows = [
+        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence"].join(",")
+      ];
+      
+      for (const loc of locations) {
+        csvRows.push([
+          loc.code || "",
+          loc.zone || "",
+          loc.aisle || "",
+          loc.bay || "",
+          loc.level || "",
+          loc.bin || "",
+          `"${(loc.name || "").replace(/"/g, '""')}"`,
+          loc.locationType || "",
+          loc.isPickable ?? 1,
+          loc.pickSequence ?? ""
+        ].join(","));
+      }
+      
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=bin_locations.csv");
+      res.send(csvRows.join("\n"));
+    } catch (error) {
+      console.error("Error exporting warehouse locations:", error);
+      res.status(500).json({ error: "Failed to export locations" });
+    }
+  });
+
   app.get("/api/warehouse/locations/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);

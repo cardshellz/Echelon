@@ -469,6 +469,10 @@ export default function WarehouseLocations() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportLocations = () => {
+    window.location.href = "/api/warehouse/locations/export/csv";
+  };
+
   if (!canView) {
     return (
       <div className="p-8 text-center text-muted-foreground">
@@ -561,6 +565,10 @@ export default function WarehouseLocations() {
                   </Button>
                 </>
               )}
+              <Button variant="outline" onClick={handleExportLocations} data-testid="btn-export-csv">
+                <Download className="h-4 w-4 mr-2" />
+                Export CSV
+              </Button>
               {canCreate && (
                 <>
                   <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv">
