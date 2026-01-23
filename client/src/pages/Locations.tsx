@@ -64,6 +64,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface WarehouseLocation {
   id: number;
@@ -209,8 +215,24 @@ export default function Locations() {
   };
   
   // Export CSV
-  const handleExport = () => {
-    window.location.href = "/api/locations/export/csv";
+  const handleExport = (exportFiltered: boolean) => {
+    const dataToExport = exportFiltered ? filteredLocations : locations;
+    const csvContent = [
+      "sku,name,location,zone",
+      ...dataToExport.map(loc => 
+        `"${loc.sku}","${loc.name.replace(/"/g, '""')}","${loc.location}","${loc.zone}"`
+      )
+    ].join("\n");
+    
+    const blob = new Blob([csvContent], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = exportFiltered ? "product_locations_filtered.csv" : "product_locations.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
   
   // Import CSV - show dialog first with template
@@ -332,10 +354,22 @@ export default function Locations() {
               <Upload className="h-4 w-4 mr-2" />
               Import CSV
             </Button>
-            <Button variant="outline" size="sm" onClick={handleExport} data-testid="button-export-csv">
-              <Download className="h-4 w-4 mr-2" />
-              Export
-            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" data-testid="button-export-csv">
+                  <Download className="h-4 w-4 mr-2" />
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent>
+                <DropdownMenuItem onClick={() => handleExport(false)} data-testid="export-all">
+                  Export All ({locations.length})
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleExport(true)} data-testid="export-filtered">
+                  Export Filtered ({filteredLocations.length})
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <Button onClick={() => setAddDialogOpen(true)} data-testid="button-add-location">
               <Plus className="h-4 w-4 mr-2" />
               Add Product
