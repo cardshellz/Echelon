@@ -443,24 +443,25 @@ export default function Orders() {
                   <CardContent className="p-4">
                     <div className="flex items-start justify-between">
                       <div className="flex items-start gap-4">
-                        <div className="bg-primary/10 p-2 rounded-md group-hover:bg-primary/20 transition-colors">
-                          <ShoppingCart className="h-5 w-5 text-primary" />
+                        <div className="bg-primary/10 p-2 rounded-md group-hover:bg-primary/20 transition-colors flex items-center justify-center w-10 h-10">
+                          {order.source && sourceIcons[order.source] ? (
+                            <img 
+                              src={sourceIcons[order.source]} 
+                              className="w-5 h-5 object-contain" 
+                              title={`${order.source} order`} 
+                            />
+                          ) : (
+                            <ShoppingCart className="h-5 w-5 text-primary" />
+                          )}
                         </div>
                         <div>
                           <div className="font-semibold flex items-center gap-2 flex-wrap">
                             {order.orderNumber}
-                            {order.source && sourceIcons[order.source] && (
-                              <img 
-                                src={sourceIcons[order.source]} 
-                                className="w-4 h-4 object-contain opacity-70" 
-                                title={`${order.source} order`} 
-                              />
+                            {order.totalAmount && (
+                              <span className="text-muted-foreground font-normal">${order.totalAmount}</span>
                             )}
                             {order.source === "manual" && (
                               <Badge variant="outline" className="text-xs">Manual</Badge>
-                            )}
-                            {order.channel && (
-                              <Badge variant="outline" className="text-xs">{order.channel.name}</Badge>
                             )}
                             {order.priority !== "normal" && (
                               <Badge className={cn("text-xs", priorityColors[order.priority])}>
@@ -476,16 +477,25 @@ export default function Orders() {
                           </div>
                           <div className="text-sm text-muted-foreground mt-1">
                             {order.customerName} • {order.itemCount} items
-                            {order.totalAmount && ` • ${order.totalAmount}`}
                           </div>
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className="text-xs text-muted-foreground">
-                          {order.orderPlacedAt 
-                            ? formatDistanceToNow(new Date(order.orderPlacedAt), { addSuffix: true })
-                            : formatDistanceToNow(new Date(order.createdAt), { addSuffix: true })
-                          }
+                        <div className="text-xs text-muted-foreground flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {(() => {
+                            const date = order.orderPlacedAt ? new Date(order.orderPlacedAt) : new Date(order.createdAt);
+                            const now = new Date();
+                            const diffMs = now.getTime() - date.getTime();
+                            const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+                            const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                            if (diffHours >= 24) {
+                              const days = Math.floor(diffHours / 24);
+                              const hours = diffHours % 24;
+                              return `${days}d ${hours}h`;
+                            }
+                            return `${diffHours}h ${diffMins}m`;
+                          })()}
                         </div>
                       </div>
                     </div>
