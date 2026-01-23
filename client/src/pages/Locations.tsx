@@ -151,6 +151,23 @@ export default function Locations() {
     },
   });
   
+  // Sync locations to pick queue
+  const [syncResult, setSyncResult] = useState<{ updated: number; checked: number; message: string } | null>(null);
+  const syncToQueueMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/locations/sync-to-queue", { 
+        method: "POST",
+        credentials: "include"
+      });
+      if (!res.ok) throw new Error("Failed to sync");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setSyncResult(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/picking/queue"] });
+    },
+  });
+  
   // Toggle sort
   const handleSort = (field: typeof sortField) => {
     if (sortField === field) {
@@ -381,6 +398,10 @@ export default function Locations() {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => syncToQueueMutation.mutate()} disabled={syncToQueueMutation.isPending}>
+                    <RefreshCw className={cn("h-4 w-4 mr-2", syncToQueueMutation.isPending && "animate-spin")} />
+                    {syncToQueueMutation.isPending ? "Syncing..." : "Sync to Pick Queue"}
+                  </DropdownMenuItem>
                   <DropdownMenuItem onClick={handleShopifySync} disabled={isSyncing}>
                     <RefreshCw className={cn("h-4 w-4 mr-2", isSyncing && "animate-spin")} />
                     {isSyncing ? "Syncing..." : "Sync Shopify"}
@@ -416,6 +437,16 @@ export default function Locations() {
           </div>
           
           <div className="flex items-center gap-2">
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={() => syncToQueueMutation.mutate()}
+              disabled={syncToQueueMutation.isPending}
+              data-testid="button-sync-to-queue"
+            >
+              <RefreshCw className={cn("h-4 w-4 mr-2", syncToQueueMutation.isPending && "animate-spin")} />
+              {syncToQueueMutation.isPending ? "Syncing..." : "Sync to Queue"}
+            </Button>
             <Button 
               variant="outline" 
               size="sm" 
@@ -516,6 +547,26 @@ export default function Locations() {
             </Badge>
           ))}
         </div>
+        
+        {/* Sync Result Message */}
+        {syncResult && (
+          <Alert className="mt-4">
+            <Check className="h-4 w-4" />
+            <AlertDescription>
+              {syncResult.updated > 0 
+                ? `Updated ${syncResult.updated} items in the pick queue with new locations.`
+                : "All pick queue items already have the latest locations."}
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="ml-2 h-6"
+                onClick={() => setSyncResult(null)}
+              >
+                Dismiss
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
       </div>
       
       {/* Content - full scroll on mobile, ScrollArea on desktop */}

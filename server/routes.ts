@@ -614,6 +614,68 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to import locations" });
     }
   });
+  
+  // Sync product locations to pick queue (update pending order items)
+  app.post("/api/locations/sync-to-queue", requireAuth, async (req, res) => {
+    try {
+      // Get all active orders (not shipped/cancelled) with their items
+      const allOrders = await storage.getOrdersWithItems();
+      const activeOrders = allOrders.filter(o => 
+        o.status !== "shipped" && 
+        o.status !== "cancelled" &&
+        o.status !== "completed"
+      );
+      
+      let updated = 0;
+      let checked = 0;
+      
+      for (const order of activeOrders) {
+        for (const item of order.items) {
+          checked++;
+          
+          // Only update items that haven't been picked yet
+          if (item.status !== "pending") continue;
+          
+          // Look up current location from product_locations by SKU
+          const productLocation = await storage.getProductLocationBySku(item.sku);
+          
+          if (!productLocation) continue;
+          
+          // Check if location/zone needs updating
+          const needsUpdate = 
+            item.location !== productLocation.location ||
+            item.zone !== productLocation.zone ||
+            item.barcode !== productLocation.barcode ||
+            item.imageUrl !== productLocation.imageUrl;
+          
+          if (needsUpdate) {
+            await storage.updateOrderItemLocation(
+              item.id, 
+              productLocation.location, 
+              productLocation.zone,
+              productLocation.barcode || null,
+              productLocation.imageUrl || null
+            );
+            updated++;
+          }
+        }
+      }
+      
+      if (updated > 0) {
+        broadcastOrdersUpdated();
+      }
+      
+      res.json({ 
+        success: true, 
+        updated, 
+        checked,
+        message: `Updated ${updated} items across ${activeOrders.length} active orders`
+      });
+    } catch (error) {
+      console.error("Error syncing locations to queue:", error);
+      res.status(500).json({ error: "Failed to sync locations" });
+    }
+  });
 
   // ===== PICKING QUEUE API =====
   
