@@ -560,6 +560,12 @@ export async function registerRoutes(
       let notFound = 0;
       const errors: string[] = [];
       
+      // Fetch warehouse locations once for efficient lookup
+      const warehouseLocations = await storage.getWarehouseLocations();
+      const warehouseLocMap = new Map(
+        warehouseLocations.map(wl => [wl.code.toUpperCase(), wl.id])
+      );
+      
       // Process each row
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -572,10 +578,17 @@ export async function registerRoutes(
           continue;
         }
         
+        // Look up the warehouse location by code to get the ID
+        const warehouseLocationId = warehouseLocMap.get(location) || null;
+        
         // Find and update
         const existing = await storage.getProductLocationBySku(sku);
         if (existing) {
-          await storage.updateProductLocation(existing.id, { location, zone });
+          await storage.updateProductLocation(existing.id, { 
+            location, 
+            zone,
+            warehouseLocationId
+          });
           updated++;
         } else {
           notFound++;
