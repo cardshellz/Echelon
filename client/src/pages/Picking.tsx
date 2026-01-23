@@ -2477,8 +2477,8 @@ export default function Picking() {
                 data-testid={`card-order-${order.id}`}
               >
                 <CardContent className="p-3 md:p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center gap-3">
                       <div className={cn(
                         "h-12 w-12 md:h-10 md:w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
                         order.onHold ? "bg-slate-200 text-slate-600" : 
@@ -2491,14 +2491,9 @@ export default function Picking() {
                       <div className="min-w-0 flex-1">
                         <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
                           {order.orderNumber}
-                          {order.channelProvider && (
-                            <Badge variant="outline" className={cn("text-[9px] px-1 py-0", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
-                              {getChannelBadgeStyle(order.channelProvider).label}
-                            </Badge>
-                          )}
-                          {order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
-                          {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1 py-0">RUSH</Badge>}
-                          {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                          <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
+                            <Clock size={10} /> {order.age}
+                          </span>
                         </div>
                         <div className="text-xs text-muted-foreground truncate">
                           {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
@@ -2514,23 +2509,30 @@ export default function Picking() {
                           </div>
                         )}
                       </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {order.channelProvider && (
+                          <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                            {getChannelBadgeStyle(order.channelProvider).label}
+                          </Badge>
+                        )}
+                        {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
+                        {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
+                        {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                        {order.status === "completed" && order.c2p && (
+                          <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
+                        )}
+                        {order.status === "ready" && !order.onHold && !isAdminOrLead && (
+                          <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {order.status === "completed" && order.c2p ? (
-                        <div className="text-xs text-emerald-600 flex items-center gap-0.5 font-medium" title="Click to Pick time">
-                          C2P {order.c2p}
-                        </div>
-                      ) : (
-                        <div className="text-xs text-muted-foreground flex items-center gap-0.5">
-                          <Clock size={12} /> {order.age}
-                        </div>
-                      )}
-                      {/* Admin/Lead: Rush/Unrush buttons */}
-                      {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority !== "rush" && (
+                    {isAdminOrLead && (order.status === "ready" || order.status === "in_progress") && (
+                    <div className="flex items-center gap-1 justify-end border-t pt-2 mt-1 flex-wrap">
+                      {order.status === "ready" && !order.onHold && order.priority !== "rush" && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-11 min-h-[44px] px-3 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          className="h-9 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2543,11 +2545,11 @@ export default function Picking() {
                           Rush
                         </Button>
                       )}
-                      {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority === "rush" && (
+                      {order.status === "ready" && !order.onHold && order.priority === "rush" && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-11 min-h-[44px] px-3 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
+                          className="h-9 px-2 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2560,12 +2562,11 @@ export default function Picking() {
                           Unrush
                         </Button>
                       )}
-                      {/* Admin/Lead: Hold/Release buttons */}
-                      {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                      {order.status === "ready" && !order.onHold && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-11 min-h-[44px] px-3 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
+                          className="h-9 px-2 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2578,11 +2579,11 @@ export default function Picking() {
                           Hold
                         </Button>
                       )}
-                      {isAdminOrLead && order.onHold && (
+                      {order.onHold && (
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-11 min-h-[44px] px-3 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+                          className="h-9 px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2596,46 +2597,43 @@ export default function Picking() {
                         </Button>
                       )}
                       {order.status === "ready" && !order.onHold && (
-                        <ChevronRight className="h-6 w-6 text-muted-foreground" />
+                        <ChevronRight className="h-5 w-5 text-muted-foreground" />
                       )}
                       {order.status === "in_progress" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-11 min-h-[44px] px-3 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleReleaseOrder(parseInt(order.id));
-                          }}
-                          data-testid={`button-release-${order.id}`}
-                        >
-                          <Unlock className="h-4 w-4 mr-1" />
-                          Release
-                        </Button>
-                      )}
-                      {/* Admin: Force release for stuck orders */}
-                      {isAdminOrLead && order.status === "in_progress" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-11 min-h-[44px] px-3 text-red-600 hover:text-red-700 hover:bg-red-50"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm(`Force release order ${order.orderNumber}? This will put it back in the queue.`)) {
-                              forceReleaseMutation.mutate({ orderId: parseInt(order.id), resetProgress: false });
-                            }
-                          }}
-                          data-testid={`button-force-release-${order.id}`}
-                          title="Force release stuck order (admin)"
-                        >
-                          <AlertTriangle className="h-4 w-4 mr-1" />
-                          Force
-                        </Button>
-                      )}
-                      {order.status === "completed" && (
-                        <ChevronRight className="h-6 w-6 text-emerald-600" />
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-9 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleReleaseOrder(parseInt(order.id));
+                            }}
+                            data-testid={`button-release-${order.id}`}
+                          >
+                            <Unlock className="h-4 w-4 mr-1" />
+                            Release
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-9 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (confirm(`Force release order ${order.orderNumber}? This will put it back in the queue.`)) {
+                                forceReleaseMutation.mutate({ orderId: parseInt(order.id), resetProgress: false });
+                              }
+                            }}
+                            data-testid={`button-force-release-${order.id}`}
+                            title="Force release stuck order (admin)"
+                          >
+                            <AlertTriangle className="h-4 w-4 mr-1" />
+                            Force
+                          </Button>
+                        </>
                       )}
                     </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
