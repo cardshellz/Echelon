@@ -18,7 +18,8 @@ import {
   Loader2,
   RefreshCw,
   AlertCircle,
-  ChevronsUpDown
+  ChevronsUpDown,
+  MoreVertical
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -319,10 +320,61 @@ export default function Locations() {
   return (
     <div className="flex flex-col h-full bg-muted/20">
       {/* Header */}
-      <div className="p-4 md:p-6 border-b bg-card">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+      <div className="p-3 md:p-6 border-b bg-card">
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept=".csv"
+          onChange={handleFileSelect}
+          className="hidden"
+          data-testid="input-csv-file"
+        />
+        
+        {/* Mobile Header - Compact */}
+        <div className="md:hidden">
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
+              <MapPin className="h-5 w-5 text-primary" />
+              Product Locations
+            </h1>
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => setAddDialogOpen(true)} data-testid="button-add-location-mobile">
+                <Plus className="h-4 w-4 mr-1" />
+                Add
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon" className="h-9 w-9" data-testid="button-more-options">
+                    <MoreVertical className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={handleShopifySync} disabled={isSyncing}>
+                    <RefreshCw className={cn("h-4 w-4 mr-2", isSyncing && "animate-spin")} />
+                    {isSyncing ? "Syncing..." : "Sync Shopify"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleImportClick}>
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import CSV
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => handleExport(false)}>
+                    <Download className="h-4 w-4 mr-2" />
+                    Export All ({locations.length})
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => handleExport(true)}>
+                    <Download className="h-4 w-4 mr-2" />
+                    Export Filtered ({filteredLocations.length})
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </div>
+        </div>
+        
+        {/* Desktop Header */}
+        <div className="hidden md:flex md:items-center justify-between gap-4 mb-4">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
               <MapPin className="h-6 w-6 text-primary" />
               Product Locations
             </h1>
@@ -331,15 +383,7 @@ export default function Locations() {
             </p>
           </div>
           
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-wrap">
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept=".csv"
-              onChange={handleFileSelect}
-              className="hidden"
-              data-testid="input-csv-file"
-            />
+          <div className="flex items-center gap-2">
             <Button 
               variant="outline" 
               size="sm" 
@@ -378,7 +422,7 @@ export default function Locations() {
         </div>
         
         {/* Search and Filter */}
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
           <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input 
