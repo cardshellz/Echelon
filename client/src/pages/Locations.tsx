@@ -617,20 +617,64 @@ export default function Locations() {
                 <div className="flex-1 min-w-0 space-y-2">
                   <div className="font-mono font-medium text-sm">{loc.sku}</div>
                   <div className="text-muted-foreground text-sm truncate">{loc.name}</div>
-                  <Badge variant="outline" className="font-mono bg-primary/5">
-                    <MapPin className="h-3 w-3 mr-1" />
-                    {loc.location}
-                  </Badge>
+                  {editingId === loc.id ? (
+                    <div className="flex items-center gap-2 mt-2">
+                      <Popover open={true}>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            role="combobox"
+                            className="flex-1 justify-between font-mono text-xs h-9"
+                          >
+                            {editLocation || "Select location..."}
+                            <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-[250px] p-0" align="start">
+                          <Command>
+                            <CommandInput placeholder="Search locations..." className="h-9" />
+                            <CommandList>
+                              <CommandEmpty>No location found.</CommandEmpty>
+                              <CommandGroup>
+                                {warehouseLocations.map((wl) => (
+                                  <CommandItem
+                                    key={wl.id}
+                                    value={wl.code}
+                                    onSelect={(val) => setEditLocation(val.toUpperCase())}
+                                  >
+                                    {wl.code}
+                                  </CommandItem>
+                                ))}
+                              </CommandGroup>
+                            </CommandList>
+                          </Command>
+                        </PopoverContent>
+                      </Popover>
+                      <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => handleSaveEdit(loc.id)}>
+                        <Check className="h-4 w-4 text-green-600" />
+                      </Button>
+                      <Button size="icon" variant="ghost" className="h-9 w-9" onClick={handleCancelEdit}>
+                        <X className="h-4 w-4 text-red-600" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <Badge variant="outline" className="font-mono bg-primary/5">
+                      <MapPin className="h-3 w-3 mr-1" />
+                      {loc.location}
+                    </Badge>
+                  )}
                 </div>
-                <Button 
-                  size="icon" 
-                  variant="ghost" 
-                  className="h-8 w-8 shrink-0"
-                  onClick={() => handleStartEdit(loc.id, loc.location)}
-                  data-testid={`button-edit-mobile2-${loc.sku}`}
-                >
-                  <Edit2 className="h-4 w-4" />
-                </Button>
+                {editingId !== loc.id && (
+                  <Button 
+                    size="icon" 
+                    variant="ghost" 
+                    className="h-8 w-8 shrink-0"
+                    onClick={() => handleStartEdit(loc.id, loc.location)}
+                    data-testid={`button-edit-mobile2-${loc.sku}`}
+                  >
+                    <Edit2 className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             </Card>
           ))}
