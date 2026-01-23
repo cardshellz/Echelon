@@ -17,7 +17,8 @@ import {
   FileText,
   Loader2,
   RefreshCw,
-  AlertCircle
+  AlertCircle,
+  ChevronsUpDown
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -42,8 +43,20 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 
 interface WarehouseLocation {
   id: number;
@@ -77,6 +90,8 @@ export default function Locations() {
   const [newSku, setNewSku] = useState("");
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  const [editPopoverOpen, setEditPopoverOpen] = useState(false);
+  const [newLocationPopoverOpen, setNewLocationPopoverOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Group warehouse locations by zone for easier selection
@@ -343,25 +358,47 @@ export default function Locations() {
                     <TableCell className="text-muted-foreground">{loc.name}</TableCell>
                     <TableCell>
                       {editingId === loc.id ? (
-                        <Select value={editLocation} onValueChange={setEditLocation}>
-                          <SelectTrigger className="h-8 w-36 font-mono">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent className="max-h-64">
-                            {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
-                              <React.Fragment key={zone}>
-                                <div className="px-2 py-1 text-xs font-semibold text-muted-foreground bg-muted">
-                                  {zone}
-                                </div>
-                                {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
-                                  <SelectItem key={wloc.id} value={wloc.code} className="font-mono text-sm">
-                                    {wloc.code}
-                                  </SelectItem>
+                        <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
+                          <PopoverTrigger asChild>
+                            <Button
+                              variant="outline"
+                              role="combobox"
+                              aria-expanded={editPopoverOpen}
+                              className="h-8 w-40 justify-between font-mono text-sm"
+                              data-testid="combobox-edit-location"
+                            >
+                              {editLocation || "Select..."}
+                              <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-48 p-0" align="start">
+                            <Command>
+                              <CommandInput placeholder="Type to search..." className="h-9" data-testid="input-search-edit-location" />
+                              <CommandList>
+                                <CommandEmpty>No location found.</CommandEmpty>
+                                {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                                  <CommandGroup key={zone} heading={zone}>
+                                    {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                                      <CommandItem
+                                        key={wloc.id}
+                                        value={wloc.code}
+                                        onSelect={() => {
+                                          setEditLocation(wloc.code);
+                                          setEditPopoverOpen(false);
+                                        }}
+                                        className="font-mono text-sm"
+                                        data-testid={`option-edit-location-${wloc.code}`}
+                                      >
+                                        <Check className={cn("mr-2 h-4 w-4", editLocation === wloc.code ? "opacity-100" : "opacity-0")} />
+                                        {wloc.code}
+                                      </CommandItem>
+                                    ))}
+                                  </CommandGroup>
                                 ))}
-                              </React.Fragment>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                              </CommandList>
+                            </Command>
+                          </PopoverContent>
+                        </Popover>
                       ) : (
                         <Badge variant="outline" className="font-mono bg-primary/5">
                           <MapPin className="h-3 w-3 mr-1" />
@@ -487,25 +524,47 @@ export default function Locations() {
                   </AlertDescription>
                 </Alert>
               ) : (
-                <Select value={newLocation} onValueChange={setNewLocation} data-testid="select-new-location">
-                  <SelectTrigger className="font-mono">
-                    <SelectValue placeholder="Select a bin location" />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-64">
-                    {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
-                      <React.Fragment key={zone}>
-                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground bg-muted">
-                          Zone: {zone}
-                        </div>
-                        {locs.sort((a, b) => a.code.localeCompare(b.code)).map((loc) => (
-                          <SelectItem key={loc.id} value={loc.code} className="font-mono">
-                            {loc.code}
-                          </SelectItem>
+                <Popover open={newLocationPopoverOpen} onOpenChange={setNewLocationPopoverOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={newLocationPopoverOpen}
+                      className="w-full justify-between font-mono"
+                      data-testid="combobox-new-location"
+                    >
+                      {newLocation || "Select a bin location..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[300px] p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Type to search locations..." className="h-9" data-testid="input-search-new-location" />
+                      <CommandList>
+                        <CommandEmpty>No location found.</CommandEmpty>
+                        {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                          <CommandGroup key={zone} heading={`Zone: ${zone}`}>
+                            {locs.sort((a, b) => a.code.localeCompare(b.code)).map((loc) => (
+                              <CommandItem
+                                key={loc.id}
+                                value={loc.code}
+                                onSelect={() => {
+                                  setNewLocation(loc.code);
+                                  setNewLocationPopoverOpen(false);
+                                }}
+                                className="font-mono"
+                                data-testid={`option-new-location-${loc.code}`}
+                              >
+                                <Check className={cn("mr-2 h-4 w-4", newLocation === loc.code ? "opacity-100" : "opacity-0")} />
+                                {loc.code}
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
                         ))}
-                      </React.Fragment>
-                    ))}
-                  </SelectContent>
-                </Select>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
               )}
             </div>
           </div>
