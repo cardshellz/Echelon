@@ -57,6 +57,13 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface WarehouseLocation {
   id: number;
@@ -80,6 +87,7 @@ export default function Locations() {
   });
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editLocation, setEditLocation] = useState("");
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -132,11 +140,20 @@ export default function Locations() {
   });
   
   // Filter locations
-  const filteredLocations = locations.filter(loc => 
-    loc.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    loc.location.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredLocations = locations.filter(loc => {
+    const matchesSearch = 
+      loc.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      loc.location.toLowerCase().includes(searchQuery.toLowerCase());
+    
+    const isUnassigned = !loc.location || loc.location === "UNASSIGNED";
+    const matchesAssignment = 
+      assignmentFilter === "all" ||
+      (assignmentFilter === "unassigned" && isUnassigned) ||
+      (assignmentFilter === "assigned" && !isUnassigned);
+    
+    return matchesSearch && matchesAssignment;
+  });
   
   // Group by zone
   const zones = Array.from(new Set(locations.map(l => l.zone))).sort();
@@ -326,16 +343,28 @@ export default function Locations() {
           </div>
         </div>
         
-        {/* Search */}
-        <div className="relative max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input 
-            placeholder="Search by SKU, name, or location..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-10"
-            data-testid="input-search-locations"
-          />
+        {/* Search and Filter */}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input 
+              placeholder="Search by SKU, name, or location..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+              data-testid="input-search-locations"
+            />
+          </div>
+          <Select value={assignmentFilter} onValueChange={(val) => setAssignmentFilter(val as "all" | "assigned" | "unassigned")}>
+            <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-assignment-filter">
+              <SelectValue placeholder="Filter" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Products</SelectItem>
+              <SelectItem value="assigned">Assigned</SelectItem>
+              <SelectItem value="unassigned">Unassigned</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         
         {/* Zone Summary */}
