@@ -7,6 +7,7 @@ Echelon is a full-stack operations management system designed for end-to-end con
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
+Database: Uses EXTERNAL database (EXTERNAL_DATABASE_URL), NOT Replit's built-in database. Do not reference Replit Database pane for production issues - provide SQL directly.
 
 ## System Architecture
 
