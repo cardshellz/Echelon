@@ -558,6 +558,7 @@ export async function registerRoutes(
       
       let updated = 0;
       let notFound = 0;
+      let binNotMatched = 0;
       const errors: string[] = [];
       
       // Fetch warehouse locations once for efficient lookup
@@ -590,6 +591,10 @@ export async function registerRoutes(
             warehouseLocationId
           });
           updated++;
+          if (!warehouseLocationId) {
+            binNotMatched++;
+            errors.push(`Row ${i + 2}: Bin "${location}" not found in warehouse - location saved as text only`);
+          }
         } else {
           notFound++;
           errors.push(`Row ${i + 2}: SKU "${sku}" not found`);
@@ -600,7 +605,8 @@ export async function registerRoutes(
         success: true,
         updated,
         notFound,
-        errors: errors.slice(0, 10),
+        binNotMatched,
+        errors: errors.slice(0, 15),
         totalErrors: errors.length
       });
     } catch (error) {

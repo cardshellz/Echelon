@@ -84,7 +84,7 @@ export default function Locations() {
   const [editLocation, setEditLocation] = useState("");
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
-  const [importResult, setImportResult] = useState<{ updated: number; notFound: number; errors: string[] } | null>(null);
+  const [importResult, setImportResult] = useState<{ updated: number; notFound: number; binNotMatched?: number; errors: string[] } | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [newSku, setNewSku] = useState("");
@@ -196,8 +196,24 @@ export default function Locations() {
     window.location.href = "/api/locations/export/csv";
   };
   
-  // Import CSV
+  // Import CSV - show dialog first with template
   const handleImportClick = () => {
+    setImportResult(null);
+    setImportDialogOpen(true);
+  };
+  
+  const handleDownloadTemplate = () => {
+    const template = "sku,location\nSKU-001,E-01-A\nSKU-002,BULK-A-02-C";
+    const blob = new Blob([template], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "product_locations_template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  
+  const handleSelectFile = () => {
     fileInputRef.current?.click();
   };
   
@@ -580,14 +596,17 @@ export default function Locations() {
         </DialogContent>
       </Dialog>
       
-      {/* Import Result Dialog */}
+      {/* Import Dialog */}
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FileText className="h-5 w-5" />
-              CSV Import
+              Import Product Locations
             </DialogTitle>
+            <DialogDescription>
+              Bulk update product bin locations via CSV file
+            </DialogDescription>
           </DialogHeader>
           
           {isImporting ? (
@@ -597,14 +616,18 @@ export default function Locations() {
             </div>
           ) : importResult ? (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-emerald-50 dark:bg-emerald-900/20 p-4 rounded-lg text-center">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-emerald-50 dark:bg-emerald-900/20 p-3 rounded-lg text-center">
                   <div className="text-2xl font-bold text-emerald-600">{importResult.updated}</div>
-                  <div className="text-sm text-muted-foreground">Locations Updated</div>
+                  <div className="text-xs text-muted-foreground">Updated</div>
                 </div>
-                <div className="bg-amber-50 dark:bg-amber-900/20 p-4 rounded-lg text-center">
+                <div className="bg-amber-50 dark:bg-amber-900/20 p-3 rounded-lg text-center">
                   <div className="text-2xl font-bold text-amber-600">{importResult.notFound}</div>
-                  <div className="text-sm text-muted-foreground">SKUs Not Found</div>
+                  <div className="text-xs text-muted-foreground">SKUs Not Found</div>
+                </div>
+                <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg text-center">
+                  <div className="text-2xl font-bold text-blue-600">{importResult.binNotMatched || 0}</div>
+                  <div className="text-xs text-muted-foreground">Bins Unlinked</div>
                 </div>
               </div>
               
@@ -616,14 +639,55 @@ export default function Locations() {
                   ))}
                 </div>
               )}
+              
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setImportResult(null)}>
+                  Import Another
+                </Button>
+                <Button onClick={() => setImportDialogOpen(false)}>
+                  Done
+                </Button>
+              </DialogFooter>
             </div>
-          ) : null}
-          
-          <DialogFooter>
-            <Button onClick={() => setImportDialogOpen(false)}>
-              Close
-            </Button>
-          </DialogFooter>
+          ) : (
+            <div className="space-y-4">
+              <div className="bg-muted/50 p-4 rounded-lg space-y-3">
+                <h4 className="font-medium text-sm">Required CSV Columns:</h4>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <div className="font-mono bg-background px-2 py-1 rounded">sku</div>
+                  <div className="text-muted-foreground">Product SKU (must exist)</div>
+                  <div className="font-mono bg-background px-2 py-1 rounded">location</div>
+                  <div className="text-muted-foreground">Bin code (e.g., E-01-A)</div>
+                </div>
+              </div>
+              
+              <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg space-y-2">
+                <h4 className="font-medium text-sm text-blue-800 dark:text-blue-200">How Matching Works:</h4>
+                <ul className="text-sm text-blue-700 dark:text-blue-300 space-y-1 list-disc list-inside">
+                  <li>Location must match your bin code exactly (e.g., <span className="font-mono">E-01-A</span>, <span className="font-mono">BULK-A-02-C</span>)</li>
+                  <li>If bin code matches, product is linked to that warehouse location</li>
+                  <li>If no match found, location text is saved but not linked to a bin</li>
+                </ul>
+              </div>
+              
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={handleDownloadTemplate} className="flex-1" data-testid="button-download-template">
+                  <Download className="h-4 w-4 mr-2" />
+                  Download Template
+                </Button>
+                <Button onClick={handleSelectFile} className="flex-1" data-testid="button-select-csv">
+                  <Upload className="h-4 w-4 mr-2" />
+                  Select CSV File
+                </Button>
+              </div>
+              
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setImportDialogOpen(false)}>
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
