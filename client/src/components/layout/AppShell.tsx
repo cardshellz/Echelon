@@ -246,7 +246,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <Bell size={18} />
               <span className="absolute top-2 right-2.5 w-2 h-2 bg-destructive rounded-full border-2 border-card"></span>
             </Button>
-            {!isMobile && isAdmin && (
+            {isAdmin && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="text-muted-foreground" data-testid="button-settings-menu">
