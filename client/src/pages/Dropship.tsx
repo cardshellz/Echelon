@@ -70,8 +70,8 @@ export default function Dropship() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="border-b bg-card p-6 pb-4">
-        <div className="flex items-center justify-between mb-4">
+      <div className="border-b bg-card p-4 md:p-6 pb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
           <div>
             <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
               <Globe className="h-6 w-6 text-primary" />
@@ -128,7 +128,7 @@ export default function Dropship() {
                   </div>
                   <div className="grid w-full items-center gap-1.5">
                     <Label htmlFor="api-key">Custom API Key</Label>
-                    <Input id="api-key" placeholder="sk_live_..." />
+                    <Input id="api-key" placeholder="sk_live_..." className="w-full" />
                   </div>
                 </div>
                 <DialogFooter>
@@ -141,7 +141,7 @@ export default function Dropship() {
         </div>
 
         {/* Network Stats */}
-        <div className="grid grid-cols-4 gap-4 mb-2">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Active Channels</div>
             <div className="text-2xl font-bold font-mono text-foreground mt-1">3</div>
@@ -162,7 +162,7 @@ export default function Dropship() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 p-6 overflow-hidden flex flex-col">
+      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
         <Tabs defaultValue="vendors" className="flex-1 flex flex-col">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-6">
             <TabsTrigger 
@@ -186,7 +186,7 @@ export default function Dropship() {
           </TabsList>
 
           <TabsContent value="vendors" className="mt-0">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {vendors.map((vendor) => (
                 <Card key={vendor.id} className="border-l-4 border-l-primary/50 overflow-hidden">
                   <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 bg-muted/20">

@@ -168,21 +168,21 @@ export default function Roles() {
   }
 
   return (
-    <div className="space-y-6" data-testid="page-roles">
-      <div className="flex items-center justify-between">
+    <div className="space-y-4 md:space-y-6" data-testid="page-roles">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Roles & Permissions</h1>
-          <p className="text-muted-foreground">Manage user roles and their access permissions</p>
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Roles & Permissions</h1>
+          <p className="text-sm md:text-base text-muted-foreground">Manage user roles and their access permissions</p>
         </div>
         {canCreateRoles && (
           <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
             <DialogTrigger asChild>
-              <Button data-testid="button-create-role">
+              <Button className="w-full sm:w-auto" data-testid="button-create-role">
                 <Plus className="h-4 w-4 mr-2" />
                 Create Role
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+            <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Create New Role</DialogTitle>
               </DialogHeader>
@@ -194,6 +194,7 @@ export default function Roles() {
                     value={newRoleName}
                     onChange={(e) => setNewRoleName(e.target.value)}
                     placeholder="e.g., Warehouse Manager"
+                    className="w-full"
                     data-testid="input-role-name"
                   />
                 </div>
@@ -204,16 +205,17 @@ export default function Roles() {
                     value={newRoleDescription}
                     onChange={(e) => setNewRoleDescription(e.target.value)}
                     placeholder="e.g., Full access to warehouse operations"
+                    className="w-full"
                     data-testid="input-role-description"
                   />
                 </div>
                 <div className="space-y-2">
                   <Label>Permissions</Label>
-                  <div className="border rounded-lg p-4 max-h-60 overflow-y-auto">
+                  <div className="border rounded-lg p-3 md:p-4 max-h-60 overflow-y-auto">
                     {Object.entries(groupedPermissions).map(([category, perms]) => (
-                      <div key={category} className="mb-4">
-                        <h4 className="font-medium capitalize mb-2">{category}</h4>
-                        <div className="grid grid-cols-2 gap-2">
+                      <div key={category} className="mb-4 last:mb-0">
+                        <h4 className="font-medium capitalize mb-2 text-sm md:text-base">{category}</h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           {perms.map(perm => (
                             <div key={perm.id} className="flex items-center space-x-2">
                               <Checkbox
@@ -221,7 +223,7 @@ export default function Roles() {
                                 checked={selectedPermissions.includes(perm.id)}
                                 onCheckedChange={() => handleCreatePermissionToggle(perm.id)}
                               />
-                              <label htmlFor={`create-perm-${perm.id}`} className="text-sm capitalize">
+                              <label htmlFor={`create-perm-${perm.id}`} className="text-sm capitalize cursor-pointer">
                                 {perm.action.replace(/_/g, ' ')}
                               </label>
                             </div>
@@ -238,6 +240,7 @@ export default function Roles() {
                     permissionIds: selectedPermissions,
                   })}
                   disabled={!newRoleName || createRoleMutation.isPending}
+                  className="w-full sm:w-auto"
                   data-testid="button-submit-role"
                 >
                   Create Role
@@ -248,17 +251,17 @@ export default function Roles() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card className="md:col-span-1">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Shield className="h-5 w-5" />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+        <Card className="lg:col-span-1">
+          <CardHeader className="pb-3 md:pb-6">
+            <CardTitle className="flex items-center gap-2 text-base md:text-lg">
+              <Shield className="h-4 w-4 md:h-5 md:w-5" />
               Roles
             </CardTitle>
           </CardHeader>
           <CardContent>
             {rolesLoading ? (
-              <p className="text-muted-foreground">Loading roles...</p>
+              <p className="text-muted-foreground text-sm md:text-base">Loading roles...</p>
             ) : (
               <div className="space-y-2">
                 {roles.map(role => (
@@ -270,14 +273,14 @@ export default function Roles() {
                     }`}
                     data-testid={`role-item-${role.id}`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{role.name}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium text-sm md:text-base truncate">{role.name}</span>
                       {role.isSystem === 1 && (
-                        <Badge variant="secondary">System</Badge>
+                        <Badge variant="secondary" className="text-xs shrink-0">System</Badge>
                       )}
                     </div>
                     {role.description && (
-                      <p className="text-sm text-muted-foreground mt-1">{role.description}</p>
+                      <p className="text-xs md:text-sm text-muted-foreground mt-1 line-clamp-2">{role.description}</p>
                     )}
                   </div>
                 ))}
@@ -286,10 +289,10 @@ export default function Roles() {
           </CardContent>
         </Card>
 
-        <Card className="md:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <span>
+        <Card className="lg:col-span-2">
+          <CardHeader className="pb-3 md:pb-6">
+            <CardTitle className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span className="text-base md:text-lg truncate">
                 {selectedRole ? `${selectedRole.name} Permissions` : "Select a Role"}
               </span>
               {selectedRole && selectedRole.isSystem === 0 && canDeleteRoles && (
@@ -297,6 +300,7 @@ export default function Roles() {
                   variant="destructive"
                   size="sm"
                   onClick={() => deleteRoleMutation.mutate(selectedRole.id)}
+                  className="w-full sm:w-auto"
                   data-testid="button-delete-role"
                 >
                   <Trash2 className="h-4 w-4 mr-1" />
@@ -307,38 +311,43 @@ export default function Roles() {
           </CardHeader>
           <CardContent>
             {!selectedRole ? (
-              <p className="text-muted-foreground text-center py-8">
+              <p className="text-muted-foreground text-center py-6 md:py-8 text-sm md:text-base">
                 Select a role to view and edit its permissions
               </p>
             ) : (
               <Tabs defaultValue="dashboard">
-                <TabsList className="mb-4 flex-wrap h-auto">
+                <TabsList className="mb-3 md:mb-4 flex-wrap h-auto gap-1 w-full justify-start">
                   {Object.keys(groupedPermissions).map(category => (
-                    <TabsTrigger key={category} value={category} className="capitalize">
+                    <TabsTrigger 
+                      key={category} 
+                      value={category} 
+                      className="capitalize text-xs md:text-sm px-2 md:px-3 py-1 md:py-1.5"
+                    >
                       {category}
                     </TabsTrigger>
                   ))}
                 </TabsList>
                 {Object.entries(groupedPermissions).map(([category, perms]) => (
                   <TabsContent key={category} value={category}>
-                    <div className="grid gap-3">
+                    <div className="grid gap-2 md:gap-3">
                       {perms.map(perm => (
                         <div
                           key={perm.id}
-                          className="flex items-center justify-between p-3 border rounded-lg"
+                          className="flex items-start sm:items-center justify-between gap-3 p-2.5 md:p-3 border rounded-lg"
                         >
-                          <div>
-                            <div className="font-medium capitalize">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-medium capitalize text-sm md:text-base">
                               {perm.action.replace(/_/g, ' ')}
                             </div>
                             {perm.description && (
-                              <p className="text-sm text-muted-foreground">{perm.description}</p>
+                              <p className="text-xs md:text-sm text-muted-foreground line-clamp-2">{perm.description}</p>
                             )}
                           </div>
                           <Checkbox
                             checked={rolePermissionIds.includes(perm.id)}
                             onCheckedChange={() => handlePermissionToggle(perm.id)}
                             disabled={!canEditRoles || updatePermissionsMutation.isPending}
+                            className="shrink-0 mt-0.5 sm:mt-0"
                             data-testid={`checkbox-perm-${perm.id}`}
                           />
                         </div>

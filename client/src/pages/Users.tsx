@@ -265,23 +265,83 @@ export default function Users() {
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>User</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Last Login</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="w-[80px]">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <>
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>User</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Last Login</TableHead>
+                      <TableHead>Created</TableHead>
+                      <TableHead className="w-[80px]">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {users.map((user) => (
+                      <TableRow key={user.id} data-testid={`row-user-${user.id}`}>
+                        <TableCell>
+                          <div className="flex items-center gap-3">
+                            <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
+                              {getRoleIcon(user.role)}
+                            </div>
+                            <div>
+                              <div className="font-medium">{user.displayName || user.username}</div>
+                              <div className="text-xs text-muted-foreground">@{user.username}</div>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>{getRoleBadge(user.role)}</TableCell>
+                        <TableCell>
+                          {user.active ? (
+                            <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              Active
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-red-600 border-red-200 bg-red-50">
+                              <XCircle className="h-3 w-3 mr-1" />
+                              Inactive
+                            </Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {user.lastLoginAt ? (
+                            <span className="text-sm text-muted-foreground flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              {formatDistanceToNow(new Date(user.lastLoginAt), { addSuffix: true })}
+                            </span>
+                          ) : (
+                            <span className="text-sm text-muted-foreground">Never</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm text-muted-foreground">
+                            {formatDistanceToNow(new Date(user.createdAt), { addSuffix: true })}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <Button 
+                            variant="ghost" 
+                            size="sm"
+                            onClick={() => openEditDialog(user)}
+                            data-testid={`button-edit-user-${user.id}`}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="md:hidden space-y-3">
                 {users.map((user) => (
-                  <TableRow key={user.id} data-testid={`row-user-${user.id}`}>
-                    <TableCell>
+                  <div key={user.id} className="border rounded-lg p-4" data-testid={`card-user-${user.id}`}>
+                    <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center">
+                        <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center">
                           {getRoleIcon(user.role)}
                         </div>
                         <div>
@@ -289,9 +349,17 @@ export default function Users() {
                           <div className="text-xs text-muted-foreground">@{user.username}</div>
                         </div>
                       </div>
-                    </TableCell>
-                    <TableCell>{getRoleBadge(user.role)}</TableCell>
-                    <TableCell>
+                      <Button 
+                        variant="ghost" 
+                        size="sm"
+                        onClick={() => openEditDialog(user)}
+                        data-testid={`button-edit-user-mobile-${user.id}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 mt-3">
+                      {getRoleBadge(user.role)}
                       {user.active ? (
                         <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">
                           <CheckCircle className="h-3 w-3 mr-1" />
@@ -303,36 +371,21 @@ export default function Users() {
                           Inactive
                         </Badge>
                       )}
-                    </TableCell>
-                    <TableCell>
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-2">
                       {user.lastLoginAt ? (
-                        <span className="text-sm text-muted-foreground flex items-center gap-1">
+                        <span className="flex items-center gap-1">
                           <Clock className="h-3 w-3" />
-                          {formatDistanceToNow(new Date(user.lastLoginAt), { addSuffix: true })}
+                          Last login {formatDistanceToNow(new Date(user.lastLoginAt), { addSuffix: true })}
                         </span>
                       ) : (
-                        <span className="text-sm text-muted-foreground">Never</span>
+                        <span>Never logged in</span>
                       )}
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm text-muted-foreground">
-                        {formatDistanceToNow(new Date(user.createdAt), { addSuffix: true })}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <Button 
-                        variant="ghost" 
-                        size="sm"
-                        onClick={() => openEditDialog(user)}
-                        data-testid={`button-edit-user-${user.id}`}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+                    </div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

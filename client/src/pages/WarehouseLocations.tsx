@@ -494,7 +494,7 @@ export default function WarehouseLocations() {
   };
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -508,22 +508,24 @@ export default function WarehouseLocations() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
-          <TabsTrigger value="locations" data-testid="tab-locations">
-            <Box className="h-4 w-4 mr-2" />
-            Locations ({filteredLocations.length})
-          </TabsTrigger>
-          <TabsTrigger value="zones" data-testid="tab-zones">
-            <Layers className="h-4 w-4 mr-2" />
-            Zones ({zones.length})
-          </TabsTrigger>
-        </TabsList>
+        <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
+          <TabsList className="w-max min-w-full md:w-auto">
+            <TabsTrigger value="locations" data-testid="tab-locations">
+              <Box className="h-4 w-4 mr-2" />
+              Locations ({filteredLocations.length})
+            </TabsTrigger>
+            <TabsTrigger value="zones" data-testid="tab-zones">
+              <Layers className="h-4 w-4 mr-2" />
+              Zones ({zones.length})
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         <TabsContent value="locations" className="space-y-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full sm:w-auto">
               <Select value={selectedWarehouseId} onValueChange={setSelectedWarehouseId}>
-                <SelectTrigger className="w-48" data-testid="select-warehouse-filter">
+                <SelectTrigger className="w-full sm:w-48" data-testid="select-warehouse-filter">
                   <SelectValue placeholder="All Warehouses" />
                 </SelectTrigger>
                 <SelectContent>
@@ -536,13 +538,13 @@ export default function WarehouseLocations() {
                 </SelectContent>
               </Select>
               <div className="text-sm text-muted-foreground">
-                <code className="bg-muted px-1 rounded">ZONE-AISLE-BAY-LEVEL-BIN</code>
+                <code className="bg-muted px-1 rounded hidden sm:inline">ZONE-AISLE-BAY-LEVEL-BIN</code>
                 {selectedIds.size > 0 && (
-                  <span className="ml-4 text-primary font-medium">{selectedIds.size} selected</span>
+                  <span className="sm:ml-4 text-primary font-medium">{selectedIds.size} selected</span>
                 )}
               </div>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               {selectedIds.size > 0 && canEdit && (
                 <>
                   <Button 
@@ -550,41 +552,109 @@ export default function WarehouseLocations() {
                     onClick={() => setIsReassignOpen(true)}
                     disabled={bulkReassignMutation.isPending}
                     data-testid="btn-bulk-reassign"
+                    className="flex-1 sm:flex-none"
                   >
                     <MoveRight className="h-4 w-4 mr-2" />
-                    Move Products ({selectedIds.size})
+                    <span className="hidden sm:inline">Move Products</span>
+                    <span className="sm:hidden">Move</span> ({selectedIds.size})
                   </Button>
                   <Button 
                     variant="destructive" 
                     onClick={handleBulkDelete}
                     disabled={bulkDeleteMutation.isPending}
                     data-testid="btn-bulk-delete"
+                    className="flex-1 sm:flex-none"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    Delete Selected ({selectedIds.size})
+                    <span className="hidden sm:inline">Delete Selected</span>
+                    <span className="sm:hidden">Delete</span> ({selectedIds.size})
                   </Button>
                 </>
               )}
-              <Button variant="outline" onClick={handleExportLocations} data-testid="btn-export-csv">
-                <Download className="h-4 w-4 mr-2" />
-                Export CSV
+              <Button variant="outline" onClick={handleExportLocations} data-testid="btn-export-csv" className="flex-1 sm:flex-none">
+                <Download className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Export CSV</span>
               </Button>
               {canCreate && (
                 <>
-                  <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv">
-                    <Upload className="h-4 w-4 mr-2" />
-                    Import CSV
+                  <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv" className="flex-1 sm:flex-none">
+                    <Upload className="h-4 w-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Import CSV</span>
                   </Button>
-                  <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location">
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add Location
+                  <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location" className="flex-1 sm:flex-none">
+                    <Plus className="h-4 w-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Add Location</span>
                   </Button>
                 </>
               )}
             </div>
           </div>
 
-          <Card>
+          {/* Mobile card layout */}
+          <div className="md:hidden space-y-3">
+            {locationsLoading ? (
+              <div className="text-center py-8">Loading...</div>
+            ) : filteredLocations.length === 0 ? (
+              <Card>
+                <CardContent className="py-8 text-center text-muted-foreground">
+                  No locations defined yet. Add your first location or import from CSV.
+                </CardContent>
+              </Card>
+            ) : (
+              filteredLocations.map((loc) => (
+                <Card key={loc.id} data-testid={`location-card-${loc.id}`} className={selectedIds.has(loc.id) ? "border-primary" : ""}>
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-start gap-3">
+                        {canEdit && (
+                          <Checkbox
+                            checked={selectedIds.has(loc.id)}
+                            onCheckedChange={() => toggleSelect(loc.id)}
+                            data-testid={`checkbox-location-mobile-${loc.id}`}
+                            className="mt-1"
+                          />
+                        )}
+                        <div className="space-y-1">
+                          <div className="font-mono font-medium text-base">{loc.code}</div>
+                          <div className="flex flex-wrap gap-2">
+                            <Badge variant="outline">{loc.locationType.replace('_', ' ')}</Badge>
+                            {loc.zone && <Badge variant="secondary">{loc.zone}</Badge>}
+                          </div>
+                          <div className="text-sm text-muted-foreground">
+                            {loc.name && <div>{loc.name}</div>}
+                            <div>Warehouse: {getWarehouseName(loc.warehouseId)}</div>
+                          </div>
+                        </div>
+                      </div>
+                      {canEdit && (
+                        <div className="flex gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setEditingLocation(loc)}
+                            data-testid={`btn-edit-location-mobile-${loc.id}`}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => deleteLocationMutation.mutate(loc.id)}
+                            data-testid={`btn-delete-location-mobile-${loc.id}`}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+
+          {/* Desktop table layout */}
+          <Card className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -674,12 +744,12 @@ export default function WarehouseLocations() {
         </TabsContent>
 
         <TabsContent value="zones" className="space-y-4">
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
             <div className="text-sm text-muted-foreground">
               Zones organize your warehouse into logical areas
             </div>
             {canCreate && (
-              <Button onClick={() => setIsCreateZoneOpen(true)} data-testid="btn-create-zone">
+              <Button onClick={() => setIsCreateZoneOpen(true)} data-testid="btn-create-zone" className="w-full sm:w-auto">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Zone
               </Button>

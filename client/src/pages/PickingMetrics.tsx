@@ -124,7 +124,7 @@ export default function PickingMetrics() {
   const data = metrics || defaultMetrics;
 
   return (
-    <div className="space-y-6 p-6" data-testid="picking-metrics-page">
+    <div className="space-y-6 p-4 md:p-6" data-testid="picking-metrics-page">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
@@ -157,7 +157,7 @@ export default function PickingMetrics() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
@@ -285,7 +285,7 @@ export default function PickingMetrics() {
         </TabsContent>
 
         <TabsContent value="productivity" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
@@ -346,9 +346,9 @@ export default function PickingMetrics() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                    <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
                       <Clock className="h-5 w-5 text-blue-600" />
                     </div>
                     <div>
@@ -356,11 +356,11 @@ export default function PickingMetrics() {
                       <div className="text-sm text-muted-foreground">Time from order sync to picker claim</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold">{formatTime(data.productivity.averageQueueWait)}</div>
+                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averageQueueWait)}</div>
                 </div>
-                <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-green-100 flex items-center justify-center">
+                    <div className="h-10 w-10 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
                       <Zap className="h-5 w-5 text-green-600" />
                     </div>
                     <div>
@@ -368,11 +368,11 @@ export default function PickingMetrics() {
                       <div className="text-sm text-muted-foreground">Average time to pick each item</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold">{formatTime(data.productivity.averagePickTime)}</div>
+                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averagePickTime)}</div>
                 </div>
-                <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-purple-100 flex items-center justify-center">
+                    <div className="h-10 w-10 rounded-full bg-purple-100 flex items-center justify-center flex-shrink-0">
                       <CheckCircle2 className="h-5 w-5 text-purple-600" />
                     </div>
                     <div>
@@ -380,7 +380,7 @@ export default function PickingMetrics() {
                       <div className="text-sm text-muted-foreground">Claim to order completion</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold">{formatTime(data.productivity.averageClaimToComplete)}</div>
+                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averageClaimToComplete)}</div>
                 </div>
               </div>
             </CardContent>
@@ -388,7 +388,7 @@ export default function PickingMetrics() {
         </TabsContent>
 
         <TabsContent value="quality" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">

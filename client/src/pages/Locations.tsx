@@ -139,7 +139,7 @@ export default function Locations() {
   );
   
   // Group by zone
-  const zones = [...new Set(locations.map(l => l.zone))].sort();
+  const zones = Array.from(new Set(locations.map(l => l.zone))).sort();
   
   // Start editing
   const handleStartEdit = (id: number, currentLocation: string) => {
@@ -292,7 +292,7 @@ export default function Locations() {
             </p>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-wrap">
             <input
               type="file"
               ref={fileInputRef}
@@ -355,135 +355,171 @@ export default function Locations() {
       {/* Table */}
       <ScrollArea className="flex-1">
         <div className="p-4 md:p-6">
-          <Card>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-[140px]">SKU</TableHead>
-                  <TableHead>Product Name</TableHead>
-                  <TableHead className="w-[140px]">Location</TableHead>
-                  <TableHead className="w-[100px]">Zone</TableHead>
-                  <TableHead className="w-[120px]">Updated</TableHead>
-                  <TableHead className="w-[100px] text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredLocations.map((loc) => (
-                  <TableRow key={loc.id} data-testid={`row-location-${loc.sku}`}>
-                    <TableCell className="font-mono font-medium">{loc.sku}</TableCell>
-                    <TableCell className="text-muted-foreground">{loc.name}</TableCell>
-                    <TableCell>
-                      {editingId === loc.id ? (
-                        <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
-                          <PopoverTrigger asChild>
-                            <Button
-                              variant="outline"
-                              role="combobox"
-                              aria-expanded={editPopoverOpen}
-                              className="h-8 w-40 justify-between font-mono text-sm"
-                              data-testid="combobox-edit-location"
-                            >
-                              {editLocation || "Select..."}
-                              <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-48 p-0" align="start">
-                            <Command>
-                              <CommandInput placeholder="Type to search..." className="h-9" data-testid="input-search-edit-location" />
-                              <CommandList>
-                                <CommandEmpty>No location found.</CommandEmpty>
-                                {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
-                                  <CommandGroup key={zone} heading={zone}>
-                                    {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
-                                      <CommandItem
-                                        key={wloc.id}
-                                        value={wloc.code}
-                                        onSelect={() => {
-                                          setEditLocation(wloc.code);
-                                          setEditPopoverOpen(false);
-                                        }}
-                                        className="font-mono text-sm"
-                                        data-testid={`option-edit-location-${wloc.code}`}
-                                      >
-                                        <Check className={cn("mr-2 h-4 w-4", editLocation === wloc.code ? "opacity-100" : "opacity-0")} />
-                                        {wloc.code}
-                                      </CommandItem>
-                                    ))}
-                                  </CommandGroup>
-                                ))}
-                              </CommandList>
-                            </Command>
-                          </PopoverContent>
-                        </Popover>
-                      ) : (
-                        <Badge variant="outline" className="font-mono bg-primary/5">
-                          <MapPin className="h-3 w-3 mr-1" />
-                          {loc.location}
-                        </Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{loc.zone}</Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">
-                      {formatDistanceToNow(new Date(loc.updatedAt), { addSuffix: true })}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {editingId === loc.id ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <Button 
-                            size="icon" 
-                            variant="ghost" 
-                            className="h-8 w-8 text-emerald-600"
-                            onClick={() => handleSaveEdit(loc.id)}
-                          >
-                            <Check className="h-4 w-4" />
-                          </Button>
-                          <Button 
-                            size="icon" 
-                            variant="ghost" 
-                            className="h-8 w-8"
-                            onClick={handleCancelEdit}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-end gap-1">
-                          <Button 
-                            size="icon" 
-                            variant="ghost" 
-                            className="h-8 w-8"
-                            onClick={() => handleStartEdit(loc.id, loc.location)}
-                            data-testid={`button-edit-${loc.sku}`}
-                          >
-                            <Edit2 className="h-4 w-4" />
-                          </Button>
-                          <Button 
-                            size="icon" 
-                            variant="ghost" 
-                            className="h-8 w-8 text-destructive hover:text-destructive"
-                            onClick={() => handleDelete(loc.id)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-                
-                {filteredLocations.length === 0 && (
+          {/* Mobile Card Layout */}
+          <div className="md:hidden space-y-3">
+            {filteredLocations.map((loc) => (
+              <Card key={loc.id} className="p-4" data-testid={`card-location-${loc.sku}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0 space-y-2">
+                    <div className="font-mono font-medium text-sm">{loc.sku}</div>
+                    <div className="text-muted-foreground text-sm truncate">{loc.name}</div>
+                    <Badge variant="outline" className="font-mono bg-primary/5">
+                      <MapPin className="h-3 w-3 mr-1" />
+                      {loc.location}
+                    </Badge>
+                  </div>
+                  <Button 
+                    size="icon" 
+                    variant="ghost" 
+                    className="h-8 w-8 shrink-0"
+                    onClick={() => handleStartEdit(loc.id, loc.location)}
+                    data-testid={`button-edit-mobile-${loc.sku}`}
+                  >
+                    <Edit2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </Card>
+            ))}
+            {filteredLocations.length === 0 && (
+              <Card className="p-8 text-center text-muted-foreground">
+                <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                No products found
+              </Card>
+            )}
+          </div>
+
+          {/* Desktop Table */}
+          <div className="hidden md:block">
+            <Card className="overflow-x-auto">
+              <Table>
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                      <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      No products found
-                    </TableCell>
+                    <TableHead className="w-[140px]">SKU</TableHead>
+                    <TableHead>Product Name</TableHead>
+                    <TableHead className="w-[140px]">Location</TableHead>
+                    <TableHead className="w-[100px]">Zone</TableHead>
+                    <TableHead className="w-[120px]">Updated</TableHead>
+                    <TableHead className="w-[100px] text-right">Actions</TableHead>
                   </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </Card>
+                </TableHeader>
+                <TableBody>
+                  {filteredLocations.map((loc) => (
+                    <TableRow key={loc.id} data-testid={`row-location-${loc.sku}`}>
+                      <TableCell className="font-mono font-medium">{loc.sku}</TableCell>
+                      <TableCell className="text-muted-foreground">{loc.name}</TableCell>
+                      <TableCell>
+                        {editingId === loc.id ? (
+                          <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="outline"
+                                role="combobox"
+                                aria-expanded={editPopoverOpen}
+                                className="h-8 w-40 justify-between font-mono text-sm"
+                                data-testid="combobox-edit-location"
+                              >
+                                {editLocation || "Select..."}
+                                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-48 p-0" align="start">
+                              <Command>
+                                <CommandInput placeholder="Type to search..." className="h-9" data-testid="input-search-edit-location" />
+                                <CommandList>
+                                  <CommandEmpty>No location found.</CommandEmpty>
+                                  {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                                    <CommandGroup key={zone} heading={zone}>
+                                      {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                                        <CommandItem
+                                          key={wloc.id}
+                                          value={wloc.code}
+                                          onSelect={() => {
+                                            setEditLocation(wloc.code);
+                                            setEditPopoverOpen(false);
+                                          }}
+                                          className="font-mono text-sm"
+                                          data-testid={`option-edit-location-${wloc.code}`}
+                                        >
+                                          <Check className={cn("mr-2 h-4 w-4", editLocation === wloc.code ? "opacity-100" : "opacity-0")} />
+                                          {wloc.code}
+                                        </CommandItem>
+                                      ))}
+                                    </CommandGroup>
+                                  ))}
+                                </CommandList>
+                              </Command>
+                            </PopoverContent>
+                          </Popover>
+                        ) : (
+                          <Badge variant="outline" className="font-mono bg-primary/5">
+                            <MapPin className="h-3 w-3 mr-1" />
+                            {loc.location}
+                          </Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="secondary">{loc.zone}</Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-sm">
+                        {formatDistanceToNow(new Date(loc.updatedAt), { addSuffix: true })}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {editingId === loc.id ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <Button 
+                              size="icon" 
+                              variant="ghost" 
+                              className="h-8 w-8 text-emerald-600"
+                              onClick={() => handleSaveEdit(loc.id)}
+                            >
+                              <Check className="h-4 w-4" />
+                            </Button>
+                            <Button 
+                              size="icon" 
+                              variant="ghost" 
+                              className="h-8 w-8"
+                              onClick={handleCancelEdit}
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end gap-1">
+                            <Button 
+                              size="icon" 
+                              variant="ghost" 
+                              className="h-8 w-8"
+                              onClick={() => handleStartEdit(loc.id, loc.location)}
+                              data-testid={`button-edit-${loc.sku}`}
+                            >
+                              <Edit2 className="h-4 w-4" />
+                            </Button>
+                            <Button 
+                              size="icon" 
+                              variant="ghost" 
+                              className="h-8 w-8 text-destructive hover:text-destructive"
+                              onClick={() => handleDelete(loc.id)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  
+                  {filteredLocations.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                        <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                        No products found
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </Card>
+          </div>
           
           {/* Quick Tips */}
           <Card className="mt-6 bg-muted/30">

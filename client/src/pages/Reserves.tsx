@@ -160,8 +160,8 @@ export default function Reserves() {
   }
 
   return (
-    <div className="space-y-6" data-testid="page-reserves">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 p-4 md:p-6" data-testid="page-reserves">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
             <Package className="h-8 w-8 text-primary" />
@@ -169,9 +169,9 @@ export default function Reserves() {
           </h1>
           <p className="text-muted-foreground">Allocate inventory to specific sales channels</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <Select value={selectedChannelFilter} onValueChange={setSelectedChannelFilter}>
-            <SelectTrigger className="w-[180px]" data-testid="select-channel-filter">
+            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-channel-filter">
               <SelectValue placeholder="Filter by channel" />
             </SelectTrigger>
             <SelectContent>
@@ -186,7 +186,7 @@ export default function Reserves() {
           {canEdit && (
             <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
               <DialogTrigger asChild>
-                <Button data-testid="button-create-reserve">
+                <Button data-testid="button-create-reserve" className="w-full sm:w-auto">
                   <Plus className="h-4 w-4 mr-2" />
                   Add Reserve
                 </Button>
@@ -334,74 +334,118 @@ export default function Reserves() {
               </p>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Channel</TableHead>
-                  <TableHead>SKU</TableHead>
-                  <TableHead>Item Name</TableHead>
-                  <TableHead className="text-right">Reserved</TableHead>
-                  <TableHead className="text-right">Min Stock</TableHead>
-                  <TableHead className="text-right">Max Stock</TableHead>
-                  <TableHead>Notes</TableHead>
-                  {canEdit && <TableHead className="w-[80px]"></TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {reservations.map(reserve => {
-                  const isLowStock = false; // TODO: Add inventory level check
-                  
-                  return (
-                    <TableRow key={reserve.id} data-testid={`reserve-row-${reserve.id}`}>
-                      <TableCell>
-                        <Badge variant="outline">
-                          {reserve.channel?.name || `Channel ${reserve.channelId}`}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-sm">
-                        {reserve.inventoryItem?.baseSku || '-'}
-                      </TableCell>
-                      <TableCell>
-                        {reserve.inventoryItem?.name || '-'}
-                      </TableCell>
-                      <TableCell className="text-right font-medium">
-                        {reserve.reserveBaseQty.toLocaleString()}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          {isLowStock && (
-                            <AlertTriangle className="h-4 w-4 text-amber-500" />
-                          )}
-                          {reserve.minStockBase?.toLocaleString() || '-'}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {reserve.maxStockBase?.toLocaleString() || '-'}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground text-sm max-w-[200px] truncate">
-                        {reserve.notes || '-'}
-                      </TableCell>
+            <>
+              {/* Mobile card layout */}
+              <div className="md:hidden space-y-3">
+                {reservations.map(reserve => (
+                  <div 
+                    key={reserve.id} 
+                    className="border rounded-lg p-4 space-y-3"
+                    data-testid={`reserve-card-${reserve.id}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <Badge variant="outline">
+                        {reserve.channel?.name || `Channel ${reserve.channelId}`}
+                      </Badge>
                       {canEdit && (
-                        <TableCell>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              if (confirm('Delete this reserve?')) {
-                                deleteMutation.mutate(reserve.id);
-                              }
-                            }}
-                            data-testid={`button-delete-reserve-${reserve.id}`}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            if (confirm('Delete this reserve?')) {
+                              deleteMutation.mutate(reserve.id);
+                            }
+                          }}
+                          data-testid={`button-delete-reserve-mobile-${reserve.id}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
                       )}
+                    </div>
+                    <div className="space-y-1">
+                      <p className="font-mono text-sm">{reserve.inventoryItem?.baseSku || '-'}</p>
+                      <p className="text-sm text-muted-foreground">{reserve.inventoryItem?.name || '-'}</p>
+                    </div>
+                    <div className="flex items-center justify-between pt-2 border-t">
+                      <span className="text-sm text-muted-foreground">Reserved Qty</span>
+                      <span className="font-medium">{reserve.reserveBaseQty.toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop table layout */}
+              <div className="hidden md:block overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Channel</TableHead>
+                      <TableHead>SKU</TableHead>
+                      <TableHead>Item Name</TableHead>
+                      <TableHead className="text-right">Reserved</TableHead>
+                      <TableHead className="text-right">Min Stock</TableHead>
+                      <TableHead className="text-right">Max Stock</TableHead>
+                      <TableHead>Notes</TableHead>
+                      {canEdit && <TableHead className="w-[80px]"></TableHead>}
                     </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {reservations.map(reserve => {
+                      const isLowStock = false; // TODO: Add inventory level check
+                      
+                      return (
+                        <TableRow key={reserve.id} data-testid={`reserve-row-${reserve.id}`}>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {reserve.channel?.name || `Channel ${reserve.channelId}`}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-sm">
+                            {reserve.inventoryItem?.baseSku || '-'}
+                          </TableCell>
+                          <TableCell>
+                            {reserve.inventoryItem?.name || '-'}
+                          </TableCell>
+                          <TableCell className="text-right font-medium">
+                            {reserve.reserveBaseQty.toLocaleString()}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              {isLowStock && (
+                                <AlertTriangle className="h-4 w-4 text-amber-500" />
+                              )}
+                              {reserve.minStockBase?.toLocaleString() || '-'}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            {reserve.maxStockBase?.toLocaleString() || '-'}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-sm max-w-[200px] truncate">
+                            {reserve.notes || '-'}
+                          </TableCell>
+                          {canEdit && (
+                            <TableCell>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => {
+                                  if (confirm('Delete this reserve?')) {
+                                    deleteMutation.mutate(reserve.id);
+                                  }
+                                }}
+                                data-testid={`button-delete-reserve-${reserve.id}`}
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

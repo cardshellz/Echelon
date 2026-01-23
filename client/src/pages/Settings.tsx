@@ -92,7 +92,7 @@ export default function Settings() {
 
   if (isLoading) {
     return (
-      <div className="p-6 flex items-center justify-center">
+      <div className="p-4 md:p-6 flex items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
       </div>
     );
@@ -115,14 +115,14 @@ export default function Settings() {
   ];
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 md:p-6 space-y-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold" data-testid="text-page-title">General Settings</h1>
           <p className="text-muted-foreground">Configure your organization and system defaults</p>
         </div>
         {canEdit && (
-          <Button onClick={handleSave} disabled={saveMutation.isPending} data-testid="button-save-settings">
+          <Button onClick={handleSave} disabled={saveMutation.isPending} data-testid="button-save-settings" className="w-full md:w-auto">
             <Save className="h-4 w-4 mr-2" />
             {saveMutation.isPending ? "Saving..." : "Save Changes"}
           </Button>
@@ -130,7 +130,7 @@ export default function Settings() {
       </div>
 
       <Tabs defaultValue="company" className="space-y-6">
-        <TabsList>
+        <TabsList className="w-full overflow-x-auto flex-nowrap justify-start md:justify-center">
           <TabsTrigger value="company" data-testid="tab-company">
             <Building2 className="h-4 w-4 mr-2" />
             Company
@@ -197,7 +197,7 @@ export default function Settings() {
                 />
               </div>
 
-              <div className="grid gap-4 md:grid-cols-4">
+              <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
                 <div className="space-y-2">
                   <Label htmlFor="company_city">City</Label>
                   <Input
@@ -352,7 +352,7 @@ export default function Settings() {
               <CardDescription>Configure which notifications are enabled</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="space-y-0.5">
                   <Label>Low Stock Alerts</Label>
                   <p className="text-sm text-muted-foreground">

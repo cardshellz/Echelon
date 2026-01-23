@@ -279,20 +279,20 @@ export default function Inventory() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b bg-card p-6 pb-4">
-        <div className="flex items-center justify-between mb-4">
+      <div className="border-b bg-card p-4 md:p-6 pb-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-              <Package className="h-6 w-6 text-primary" />
+            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+              <Package className="h-5 w-5 md:h-6 md:w-6 text-primary" />
               Inventory Management
             </h1>
             <p className="text-muted-foreground mt-1 text-sm">
               Manage stock levels, locations, and inventory adjustments.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => refetchInventory()}>
-              <RefreshCw size={16} className="mr-1" /> Refresh
+              <RefreshCw size={16} className="mr-1" /> <span className="hidden sm:inline">Refresh</span>
             </Button>
             <Button 
               variant="outline" 
@@ -302,21 +302,22 @@ export default function Inventory() {
               data-testid="button-sync-locations"
             >
               <MapPin size={16} className="mr-1" /> 
-              {migrateLocationsMutation.isPending ? "Syncing..." : "Sync Locations"}
+              <span className="hidden sm:inline">{migrateLocationsMutation.isPending ? "Syncing..." : "Sync Locations"}</span>
+              <span className="sm:hidden">{migrateLocationsMutation.isPending ? "..." : "Sync"}</span>
             </Button>
-            <Button variant="outline" className="gap-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
-              <Upload size={16} /> Upload CSV
+            <Button variant="outline" size="sm" className="gap-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
+              <Upload size={16} /> <span className="hidden sm:inline">Upload CSV</span>
             </Button>
-            <Button variant="outline" className="gap-2">
-              <Download size={16} /> Export
+            <Button variant="outline" size="sm" className="gap-2">
+              <Download size={16} /> <span className="hidden sm:inline">Export</span>
             </Button>
-            <Button className="gap-2" onClick={() => setAddItemDialogOpen(true)}>
-              <Plus size={16} /> Add Item
+            <Button size="sm" className="gap-2" onClick={() => setAddItemDialogOpen(true)}>
+              <Plus size={16} /> <span className="hidden sm:inline">Add Item</span>
             </Button>
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-4 mb-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-4">
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
               <Boxes size={12} /> Total SKUs
@@ -343,27 +344,27 @@ export default function Inventory() {
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-4 mt-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mt-6">
           <div className="flex items-center gap-2 flex-1 max-w-lg">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
                 placeholder="Search by SKU or Name..." 
-                className="pl-9 h-9"
+                className="pl-9 h-9 w-full"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
             <Button variant="outline" size="sm" className="h-9 gap-2">
-              <Filter size={16} /> Filters
+              <Filter size={16} /> <span className="hidden sm:inline">Filters</span>
             </Button>
           </div>
           
-          <div className="flex items-center bg-muted/50 p-1 rounded-md">
+          <div className="flex items-center bg-muted/50 p-1 rounded-md overflow-x-auto">
             <Button 
               variant={activeTab === "items" ? "default" : "ghost"} 
               size="sm" 
-              className="h-7 text-xs"
+              className="h-7 text-xs whitespace-nowrap"
               onClick={() => setActiveTab("items")}
             >
               All Items
@@ -371,7 +372,7 @@ export default function Inventory() {
             <Button 
               variant={activeTab === "variants" ? "default" : "ghost"} 
               size="sm" 
-              className="h-7 text-xs"
+              className="h-7 text-xs whitespace-nowrap"
               onClick={() => setActiveTab("variants")}
             >
               Variants
@@ -379,7 +380,7 @@ export default function Inventory() {
             <Button 
               variant={activeTab === "locations" ? "default" : "ghost"} 
               size="sm" 
-              className="h-7 text-xs"
+              className="h-7 text-xs whitespace-nowrap"
               onClick={() => setActiveTab("locations")}
             >
               Locations
@@ -388,7 +389,7 @@ export default function Inventory() {
         </div>
       </div>
 
-      <div className="flex-1 p-6 overflow-hidden flex flex-col">
+      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
         {loadingInventory || loadingLocations ? (
           <div className="flex-1 flex items-center justify-center">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -409,149 +410,263 @@ export default function Inventory() {
                 </Button>
               </div>
             ) : (
-              <div className="rounded-md border bg-card flex-1 overflow-auto">
-                <Table>
-                  <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                    <TableRow>
-                      <TableHead className="w-[180px]">Base SKU</TableHead>
-                      <TableHead>Name</TableHead>
-                      <TableHead className="text-right w-[120px]">On Hand</TableHead>
-                      <TableHead className="text-right w-[120px]">Reserved</TableHead>
-                      <TableHead className="text-right w-[120px]">ATP</TableHead>
-                      <TableHead className="w-[120px]">Status</TableHead>
-                      <TableHead className="w-[120px]">Variants</TableHead>
-                      <TableHead className="w-[50px]"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredItems.map((item) => (
-                      <TableRow key={item.inventoryItemId} className="hover:bg-muted/5">
-                        <TableCell className="font-mono font-medium text-primary">
-                          {item.baseSku}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-col">
-                            <span className="font-medium">{item.name}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right font-mono">{item.totalOnHandBase.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground">{item.totalReservedBase.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono font-bold">
-                          {item.totalAtpBase.toLocaleString()}
-                        </TableCell>
-                        <TableCell>
-                          {getStatusBadge(item.totalAtpBase)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            {item.variants.slice(0, 3).map((v, i) => (
-                              <Badge key={i} variant="outline" className="text-[10px]">
-                                {v.sku.split("-").pop()} ({v.variantQty || 0})
-                              </Badge>
-                            ))}
-                            {item.variants.length > 3 && (
-                              <Badge variant="outline" className="text-[10px]">+{item.variants.length - 3}</Badge>
-                            )}
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8">
-                                <MoreHorizontal className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                              <DropdownMenuItem className="gap-2" onClick={() => handleAdjustClick(item)}>
-                                <Edit size={14} /> Adjust Stock
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem className="gap-2">
-                                <History size={14} /> View History
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </TableCell>
+              <>
+                {/* Mobile card layout */}
+                <div className="md:hidden space-y-3 flex-1 overflow-auto">
+                  {filteredItems.map((item) => (
+                    <div key={item.inventoryItemId} className="rounded-md border bg-card p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="font-mono font-medium text-primary text-sm">{item.baseSku}</div>
+                          <div className="font-medium text-sm mt-1">{item.name}</div>
+                        </div>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8">
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                            <DropdownMenuItem className="gap-2" onClick={() => handleAdjustClick(item)}>
+                              <Edit size={14} /> Adjust Stock
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem className="gap-2">
+                              <History size={14} /> View History
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                      <div className="flex items-center gap-2 mb-3">
+                        {getStatusBadge(item.totalAtpBase)}
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">On Hand</div>
+                          <div className="font-mono font-bold">{item.totalOnHandBase.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Reserved</div>
+                          <div className="font-mono">{item.totalReservedBase.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">ATP</div>
+                          <div className="font-mono font-bold">{item.totalAtpBase.toLocaleString()}</div>
+                        </div>
+                      </div>
+                      {item.variants.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-3">
+                          {item.variants.slice(0, 3).map((v, i) => (
+                            <Badge key={i} variant="outline" className="text-[10px]">
+                              {v.sku.split("-").pop()} ({v.variantQty || 0})
+                            </Badge>
+                          ))}
+                          {item.variants.length > 3 && (
+                            <Badge variant="outline" className="text-[10px]">+{item.variants.length - 3}</Badge>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Desktop table layout */}
+                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+                  <Table>
+                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
+                      <TableRow>
+                        <TableHead className="w-[180px]">Base SKU</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead className="text-right w-[120px]">On Hand</TableHead>
+                        <TableHead className="text-right w-[120px]">Reserved</TableHead>
+                        <TableHead className="text-right w-[120px]">ATP</TableHead>
+                        <TableHead className="w-[120px]">Status</TableHead>
+                        <TableHead className="w-[120px]">Variants</TableHead>
+                        <TableHead className="w-[50px]"></TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredItems.map((item) => (
+                        <TableRow key={item.inventoryItemId} className="hover:bg-muted/5">
+                          <TableCell className="font-mono font-medium text-primary">
+                            {item.baseSku}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col">
+                              <span className="font-medium">{item.name}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right font-mono">{item.totalOnHandBase.toLocaleString()}</TableCell>
+                          <TableCell className="text-right font-mono text-muted-foreground">{item.totalReservedBase.toLocaleString()}</TableCell>
+                          <TableCell className="text-right font-mono font-bold">
+                            {item.totalAtpBase.toLocaleString()}
+                          </TableCell>
+                          <TableCell>
+                            {getStatusBadge(item.totalAtpBase)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {item.variants.slice(0, 3).map((v, i) => (
+                                <Badge key={i} variant="outline" className="text-[10px]">
+                                  {v.sku.split("-").pop()} ({v.variantQty || 0})
+                                </Badge>
+                              ))}
+                              {item.variants.length > 3 && (
+                                <Badge variant="outline" className="text-[10px]">+{item.variants.length - 3}</Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                                <DropdownMenuItem className="gap-2" onClick={() => handleAdjustClick(item)}>
+                                  <Edit size={14} /> Adjust Stock
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem className="gap-2">
+                                  <History size={14} /> View History
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
             )}
           </>
         ) : activeTab === "variants" ? (
-          <div className="rounded-md border bg-card flex-1 overflow-auto">
-            <Table>
-              <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                <TableRow>
-                  <TableHead className="w-[200px]">SKU</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="text-right w-[120px]">Units Per</TableHead>
-                  <TableHead className="w-[100px]">Level</TableHead>
-                  <TableHead className="w-[150px]">Barcode</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {variants.map((variant) => (
-                  <TableRow key={variant.id}>
-                    <TableCell className="font-mono font-medium text-primary">{variant.sku}</TableCell>
-                    <TableCell>{variant.name}</TableCell>
-                    <TableCell className="text-right font-mono">{variant.unitsPerVariant}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">Level {variant.hierarchyLevel}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {variant.barcode || "-"}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        ) : (
-          <div className="rounded-md border bg-card flex-1 overflow-auto">
-            <Table>
-              <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                <TableRow>
-                  <TableHead className="w-[150px]">Code</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead className="w-[120px]">Type</TableHead>
-                  <TableHead className="w-[80px]">Zone</TableHead>
-                  <TableHead className="w-[100px]">Pickable</TableHead>
-                  <TableHead className="w-[120px]">Policy</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {locations.length === 0 ? (
+          <>
+            {/* Mobile card layout for variants */}
+            <div className="md:hidden space-y-3 flex-1 overflow-auto">
+              {variants.map((variant) => (
+                <div key={variant.id} className="rounded-md border bg-card p-4">
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="font-mono font-medium text-primary text-sm">{variant.sku}</div>
+                    <Badge variant="outline">Level {variant.hierarchyLevel}</Badge>
+                  </div>
+                  <div className="text-sm font-medium mb-2">{variant.name}</div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Units Per: <span className="font-mono font-medium text-foreground">{variant.unitsPerVariant}</span></span>
+                    <span>Barcode: <span className="font-mono">{variant.barcode || "-"}</span></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Desktop table layout for variants */}
+            <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+              <Table>
+                <TableHeader className="bg-muted/40 sticky top-0 z-10">
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                      No warehouse locations defined yet
-                    </TableCell>
+                    <TableHead className="w-[200px]">SKU</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead className="text-right w-[120px]">Units Per</TableHead>
+                    <TableHead className="w-[100px]">Level</TableHead>
+                    <TableHead className="w-[150px]">Barcode</TableHead>
                   </TableRow>
-                ) : (
-                  locations.map((loc) => (
-                    <TableRow key={loc.id}>
-                      <TableCell className="font-mono font-medium">{loc.code}</TableCell>
-                      <TableCell>{loc.name || "-"}</TableCell>
+                </TableHeader>
+                <TableBody>
+                  {variants.map((variant) => (
+                    <TableRow key={variant.id}>
+                      <TableCell className="font-mono font-medium text-primary">{variant.sku}</TableCell>
+                      <TableCell>{variant.name}</TableCell>
+                      <TableCell className="text-right font-mono">{variant.unitsPerVariant}</TableCell>
                       <TableCell>
-                        <Badge variant="outline">{loc.locationType}</Badge>
+                        <Badge variant="outline">Level {variant.hierarchyLevel}</Badge>
                       </TableCell>
-                      <TableCell className="font-mono">{loc.zone}</TableCell>
-                      <TableCell>
-                        {loc.isPickable ? (
-                          <Badge className="bg-emerald-100 text-emerald-700">Yes</Badge>
-                        ) : (
-                          <Badge variant="secondary">No</Badge>
-                        )}
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {variant.barcode || "-"}
                       </TableCell>
-                      <TableCell className="text-xs">{loc.movementPolicy}</TableCell>
                     </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Mobile card layout for locations */}
+            <div className="md:hidden space-y-3 flex-1 overflow-auto">
+              {locations.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  No warehouse locations defined yet
+                </div>
+              ) : (
+                locations.map((loc) => (
+                  <div key={loc.id} className="rounded-md border bg-card p-4">
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="font-mono font-medium">{loc.code}</div>
+                      {loc.isPickable ? (
+                        <Badge className="bg-emerald-100 text-emerald-700">Pickable</Badge>
+                      ) : (
+                        <Badge variant="secondary">Not Pickable</Badge>
+                      )}
+                    </div>
+                    <div className="text-sm mb-2">{loc.name || "-"}</div>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      <Badge variant="outline">{loc.locationType}</Badge>
+                      <span className="text-muted-foreground">Zone: <span className="font-mono">{loc.zone}</span></span>
+                      <span className="text-muted-foreground">Policy: {loc.movementPolicy}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Desktop table layout for locations */}
+            <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+              <Table>
+                <TableHeader className="bg-muted/40 sticky top-0 z-10">
+                  <TableRow>
+                    <TableHead className="w-[150px]">Code</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead className="w-[120px]">Type</TableHead>
+                    <TableHead className="w-[80px]">Zone</TableHead>
+                    <TableHead className="w-[100px]">Pickable</TableHead>
+                    <TableHead className="w-[120px]">Policy</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {locations.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
+                        No warehouse locations defined yet
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    locations.map((loc) => (
+                      <TableRow key={loc.id}>
+                        <TableCell className="font-mono font-medium">{loc.code}</TableCell>
+                        <TableCell>{loc.name || "-"}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline">{loc.locationType}</Badge>
+                        </TableCell>
+                        <TableCell className="font-mono">{loc.zone}</TableCell>
+                        <TableCell>
+                          {loc.isPickable ? (
+                            <Badge className="bg-emerald-100 text-emerald-700">Yes</Badge>
+                          ) : (
+                            <Badge variant="secondary">No</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-xs">{loc.movementPolicy}</TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </>
         )}
         
         {activeTab === "items" && filteredItems.length > 0 && (
@@ -562,7 +677,7 @@ export default function Inventory() {
       </div>
 
       <Dialog open={adjustDialogOpen} onOpenChange={setAdjustDialogOpen}>
-        <DialogContent>
+        <DialogContent className="w-[95vw] max-w-lg mx-auto">
           <DialogHeader>
             <DialogTitle>Adjust Inventory</DialogTitle>
             <DialogDescription>
@@ -581,6 +696,7 @@ export default function Inventory() {
                 placeholder="e.g., 100 or -50"
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(e.target.value)}
+                className="w-full"
               />
             </div>
             <div className="space-y-2">
@@ -590,14 +706,16 @@ export default function Inventory() {
                 placeholder="e.g., Cycle count correction, damaged goods, etc."
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value)}
+                className="w-full min-h-[100px]"
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAdjustDialogOpen(false)}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setAdjustDialogOpen(false)} className="w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={handleAdjustSubmit}
               disabled={!adjustmentQty || !adjustmentReason || adjustInventoryMutation.isPending}
+              className="w-full sm:w-auto"
             >
               {adjustInventoryMutation.isPending ? "Adjusting..." : "Apply Adjustment"}
             </Button>
@@ -606,7 +724,7 @@ export default function Inventory() {
       </Dialog>
 
       <Dialog open={addItemDialogOpen} onOpenChange={setAddItemDialogOpen}>
-        <DialogContent>
+        <DialogContent className="w-[95vw] max-w-lg mx-auto">
           <DialogHeader>
             <DialogTitle>Add Inventory Item</DialogTitle>
             <DialogDescription>
@@ -621,6 +739,7 @@ export default function Inventory() {
                 placeholder="e.g., EG-STD-SLV"
                 value={newItemForm.baseSku}
                 onChange={(e) => setNewItemForm({ ...newItemForm, baseSku: e.target.value })}
+                className="w-full"
               />
             </div>
             <div className="space-y-2">
@@ -630,6 +749,7 @@ export default function Inventory() {
                 placeholder="e.g., Easy Glide Standard Sleeve"
                 value={newItemForm.name}
                 onChange={(e) => setNewItemForm({ ...newItemForm, name: e.target.value })}
+                className="w-full"
               />
             </div>
             <div className="space-y-2">
@@ -639,14 +759,16 @@ export default function Inventory() {
                 placeholder="Product description..."
                 value={newItemForm.description}
                 onChange={(e) => setNewItemForm({ ...newItemForm, description: e.target.value })}
+                className="w-full min-h-[100px]"
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddItemDialogOpen(false)}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setAddItemDialogOpen(false)} className="w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={() => createItemMutation.mutate(newItemForm)}
               disabled={!newItemForm.baseSku || !newItemForm.name || createItemMutation.isPending}
+              className="w-full sm:w-auto"
             >
               {createItemMutation.isPending ? "Creating..." : "Create Item"}
             </Button>
@@ -661,13 +783,13 @@ export default function Inventory() {
           setCsvResults(null);
         }
       }}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="w-[95vw] max-w-2xl mx-auto max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FileSpreadsheet className="h-5 w-5" />
               Upload Inventory CSV
             </DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-sm">
               Upload a CSV file to update inventory levels in bulk. The CSV should have columns: location_code, sku, quantity
             </DialogDescription>
           </DialogHeader>
@@ -684,6 +806,7 @@ export default function Inventory() {
                 id="csvFile"
                 type="file"
                 accept=".csv"
+                className="w-full"
                 onChange={(e) => {
                   setCsvFile(e.target.files?.[0] || null);
                   setCsvResults(null);
@@ -699,7 +822,25 @@ export default function Inventory() {
             {csvResults && (
               <div className="space-y-2">
                 <Label>Results</Label>
-                <div className="rounded-md border max-h-60 overflow-auto">
+                {/* Mobile card layout for CSV results */}
+                <div className="md:hidden space-y-2 max-h-60 overflow-auto">
+                  {csvResults.map((result, idx) => (
+                    <div key={idx} className={`p-3 rounded-md border ${result.status === "error" ? "bg-red-50 border-red-200" : "bg-green-50 border-green-200"}`}>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-mono text-xs">Row {result.row}</span>
+                        {result.status === "success" ? (
+                          <CheckCircle className="h-4 w-4 text-green-600" />
+                        ) : (
+                          <XCircle className="h-4 w-4 text-red-600" />
+                        )}
+                      </div>
+                      <div className="text-xs font-mono mb-1">{result.sku} @ {result.location}</div>
+                      <div className="text-xs text-muted-foreground">{result.message}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Desktop table layout for CSV results */}
+                <div className="hidden md:block rounded-md border max-h-60 overflow-x-auto">
                   <Table>
                     <TableHeader className="sticky top-0 bg-muted">
                       <TableRow>
@@ -732,14 +873,15 @@ export default function Inventory() {
               </div>
             )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCsvUploadOpen(false)}>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setCsvUploadOpen(false)} className="w-full sm:w-auto">
               {csvResults ? "Close" : "Cancel"}
             </Button>
             {!csvResults && (
               <Button 
                 onClick={handleCsvUpload}
                 disabled={!csvFile || csvUploading}
+                className="w-full sm:w-auto"
               >
                 {csvUploading ? "Uploading..." : "Upload & Process"}
               </Button>

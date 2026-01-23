@@ -154,8 +154,8 @@ export default function PickingLogs() {
   const totalPages = data ? Math.ceil(data.count / pageSize) : 0;
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 p-4 md:p-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold" data-testid="page-title">Picking Logs</h1>
           <p className="text-muted-foreground">Audit trail of all picking operations</p>
@@ -239,7 +239,7 @@ export default function PickingLogs() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <CardTitle className="flex items-center gap-2">
               <FileText className="h-5 w-5" />
               Logs ({data?.count || 0} records)
@@ -281,113 +281,166 @@ export default function PickingLogs() {
               No logs found matching your filters
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left py-2 px-3">Timestamp</th>
-                    <th className="text-left py-2 px-3">Action</th>
-                    <th className="text-left py-2 px-3">Method</th>
-                    <th className="text-left py-2 px-3">Picker</th>
-                    <th className="text-left py-2 px-3">Order</th>
-                    <th className="text-left py-2 px-3">SKU</th>
-                    <th className="text-left py-2 px-3">Qty</th>
-                    <th className="text-left py-2 px-3">Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data?.logs.map((log) => {
-                    const config = actionTypeConfig[log.actionType] || {
-                      label: log.actionType,
-                      icon: FileText,
-                      color: "bg-gray-500",
-                    };
-                    const Icon = config.icon;
-                    
-                    return (
-                      <tr 
-                        key={log.id} 
-                        className="border-b hover:bg-muted/50 cursor-pointer"
-                        onClick={() => log.orderId && setSelectedOrderId(log.orderId)}
-                        data-testid={`row-log-${log.id}`}
-                      >
-                        <td className="py-2 px-3 whitespace-nowrap">
-                          <div className="flex items-center gap-2">
-                            <Clock className="h-3 w-3 text-muted-foreground" />
-                            {format(new Date(log.timestamp), "MMM d, HH:mm:ss")}
+            <>
+              {/* Mobile card layout */}
+              <div className="md:hidden space-y-3">
+                {data?.logs.map((log) => {
+                  const config = actionTypeConfig[log.actionType] || {
+                    label: log.actionType,
+                    icon: FileText,
+                    color: "bg-gray-500",
+                  };
+                  const Icon = config.icon;
+                  
+                  return (
+                    <div
+                      key={log.id}
+                      className="border rounded-lg p-3 hover:bg-muted/50 cursor-pointer"
+                      onClick={() => log.orderId && setSelectedOrderId(log.orderId)}
+                      data-testid={`card-log-${log.id}`}
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2">
+                          <div className={cn("p-1 rounded", config.color)}>
+                            <Icon className="h-3 w-3 text-white" />
                           </div>
-                        </td>
-                        <td className="py-2 px-3">
-                          <div className="flex items-center gap-2">
-                            <div className={cn("p-1 rounded", config.color)}>
-                              <Icon className="h-3 w-3 text-white" />
+                          <span className="font-medium text-sm">{config.label}</span>
+                        </div>
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <Clock className="h-3 w-3" />
+                          {format(new Date(log.timestamp), "MMM d, HH:mm")}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>
+                          <span className="text-muted-foreground text-xs">Picker:</span>
+                          <div className="truncate">{log.pickerName || log.pickerId || "—"}</div>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground text-xs">Order:</span>
+                          <div>
+                            {log.orderNumber ? (
+                              <Badge variant="outline" className="font-mono text-xs">
+                                {log.orderNumber}
+                              </Badge>
+                            ) : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop table layout */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-2 px-3">Timestamp</th>
+                      <th className="text-left py-2 px-3">Action</th>
+                      <th className="text-left py-2 px-3">Method</th>
+                      <th className="text-left py-2 px-3">Picker</th>
+                      <th className="text-left py-2 px-3">Order</th>
+                      <th className="text-left py-2 px-3">SKU</th>
+                      <th className="text-left py-2 px-3">Qty</th>
+                      <th className="text-left py-2 px-3">Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data?.logs.map((log) => {
+                      const config = actionTypeConfig[log.actionType] || {
+                        label: log.actionType,
+                        icon: FileText,
+                        color: "bg-gray-500",
+                      };
+                      const Icon = config.icon;
+                      
+                      return (
+                        <tr 
+                          key={log.id} 
+                          className="border-b hover:bg-muted/50 cursor-pointer"
+                          onClick={() => log.orderId && setSelectedOrderId(log.orderId)}
+                          data-testid={`row-log-${log.id}`}
+                        >
+                          <td className="py-2 px-3 whitespace-nowrap">
+                            <div className="flex items-center gap-2">
+                              <Clock className="h-3 w-3 text-muted-foreground" />
+                              {format(new Date(log.timestamp), "MMM d, HH:mm:ss")}
                             </div>
-                            <span className="font-medium">{config.label}</span>
-                          </div>
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.pickMethod ? (
-                            <Badge 
-                              variant="outline" 
-                              className={cn(
-                                "text-xs",
-                                log.pickMethod === "scan" && "bg-green-50 text-green-700 border-green-200",
-                                log.pickMethod === "pick_all" && "bg-amber-50 text-amber-700 border-amber-200",
-                                log.pickMethod === "short" && "bg-red-50 text-red-700 border-red-200",
-                                log.pickMethod === "button" && "bg-blue-50 text-blue-700 border-blue-200",
-                                log.pickMethod === "manual" && "bg-gray-50 text-gray-700 border-gray-200"
-                              )}
-                            >
-                              {log.pickMethod === "pick_all" ? "Pick All" : 
-                               log.pickMethod === "short" ? "Short" :
-                               log.pickMethod === "scan" ? "Scan" : 
-                               log.pickMethod}
-                            </Badge>
-                          ) : "—"}
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.pickerName || log.pickerId || "—"}
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.orderNumber ? (
-                            <Badge variant="outline" className="font-mono">
-                              {log.orderNumber}
-                            </Badge>
-                          ) : "—"}
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.sku ? (
-                            <span className="font-mono text-xs">{log.sku}</span>
-                          ) : "—"}
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.qtyDelta !== null ? (
-                            <span className={cn(
-                              "font-mono",
-                              log.qtyDelta > 0 ? "text-green-600" : log.qtyDelta < 0 ? "text-red-600" : ""
-                            )}>
-                              {log.qtyDelta > 0 ? "+" : ""}{log.qtyDelta}
-                            </span>
-                          ) : "—"}
-                        </td>
-                        <td className="py-2 px-3">
-                          {log.reason && (
-                            <span className="text-muted-foreground text-xs truncate max-w-[200px] block">
-                              {log.reason}
-                            </span>
-                          )}
-                          {log.locationCode && !log.reason && (
-                            <span className="text-muted-foreground text-xs">
-                              @ {log.locationCode}
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          </td>
+                          <td className="py-2 px-3">
+                            <div className="flex items-center gap-2">
+                              <div className={cn("p-1 rounded", config.color)}>
+                                <Icon className="h-3 w-3 text-white" />
+                              </div>
+                              <span className="font-medium">{config.label}</span>
+                            </div>
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.pickMethod ? (
+                              <Badge 
+                                variant="outline" 
+                                className={cn(
+                                  "text-xs",
+                                  log.pickMethod === "scan" && "bg-green-50 text-green-700 border-green-200",
+                                  log.pickMethod === "pick_all" && "bg-amber-50 text-amber-700 border-amber-200",
+                                  log.pickMethod === "short" && "bg-red-50 text-red-700 border-red-200",
+                                  log.pickMethod === "button" && "bg-blue-50 text-blue-700 border-blue-200",
+                                  log.pickMethod === "manual" && "bg-gray-50 text-gray-700 border-gray-200"
+                                )}
+                              >
+                                {log.pickMethod === "pick_all" ? "Pick All" : 
+                                 log.pickMethod === "short" ? "Short" :
+                                 log.pickMethod === "scan" ? "Scan" : 
+                                 log.pickMethod}
+                              </Badge>
+                            ) : "—"}
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.pickerName || log.pickerId || "—"}
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.orderNumber ? (
+                              <Badge variant="outline" className="font-mono">
+                                {log.orderNumber}
+                              </Badge>
+                            ) : "—"}
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.sku ? (
+                              <span className="font-mono text-xs">{log.sku}</span>
+                            ) : "—"}
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.qtyDelta !== null ? (
+                              <span className={cn(
+                                "font-mono",
+                                log.qtyDelta > 0 ? "text-green-600" : log.qtyDelta < 0 ? "text-red-600" : ""
+                              )}>
+                                {log.qtyDelta > 0 ? "+" : ""}{log.qtyDelta}
+                              </span>
+                            ) : "—"}
+                          </td>
+                          <td className="py-2 px-3">
+                            {log.reason && (
+                              <span className="text-muted-foreground text-xs truncate max-w-[200px] block">
+                                {log.reason}
+                              </span>
+                            )}
+                            {log.locationCode && !log.reason && (
+                              <span className="text-muted-foreground text-xs">
+                                @ {log.locationCode}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>

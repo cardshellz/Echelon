@@ -2214,13 +2214,13 @@ export default function Picking() {
               <Button 
                 variant="outline" 
                 size="icon"
-                className="h-8 w-8"
+                className="h-10 w-10 min-h-[40px] min-w-[40px]"
                 onClick={handleSyncOrders}
                 disabled={isSyncing}
                 title="Sync Shopify"
                 data-testid="button-sync-orders"
               >
-                <CloudDownload className={cn("h-4 w-4", isSyncing && "animate-bounce")} />
+                <CloudDownload className={cn("h-5 w-5", isSyncing && "animate-bounce")} />
               </Button>
               
               {/* Exceptions - Admin/Lead Only */}
@@ -2228,14 +2228,14 @@ export default function Picking() {
                 <Button
                   variant="outline"
                   size="icon"
-                  className="h-8 w-8 relative"
+                  className="h-10 w-10 min-h-[40px] min-w-[40px] relative"
                   onClick={() => setView("exceptions")}
                   title="Exceptions"
                   data-testid="button-exceptions"
                 >
-                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTriangle className="h-5 w-5" />
                   {exceptionOrders.length > 0 && (
-                    <Badge variant="destructive" className="absolute -top-1.5 -right-1.5 h-4 w-4 p-0 flex items-center justify-center text-[10px]">
+                    <Badge variant="destructive" className="absolute -top-1.5 -right-1.5 h-5 w-5 p-0 flex items-center justify-center text-[10px]">
                       {exceptionOrders.length}
                     </Badge>
                   )}
@@ -2245,12 +2245,13 @@ export default function Picking() {
               {/* Grab Next - Primary Action */}
               <Button 
                 onClick={handleGrabNext}
-                className="bg-emerald-600 hover:bg-emerald-700 h-9 px-3 text-sm font-medium"
+                className="bg-emerald-600 hover:bg-emerald-700 h-11 min-h-[44px] px-4 text-base font-medium"
                 disabled={readyItems.length === 0}
                 data-testid="button-grab-next"
               >
-                <Zap className="h-4 w-4 mr-1" />
-                Grab Next
+                <Zap className="h-5 w-5 mr-1.5" />
+                <span className="hidden sm:inline">Grab Next</span>
+                <span className="sm:hidden">Next</span>
               </Button>
             </div>
           </div>
@@ -2271,11 +2272,11 @@ export default function Picking() {
             </div>
           )}
 
-          {/* Row 2: Filter Tabs - Horizontal Scroll */}
-          <div className="flex items-center gap-1.5 mt-2 overflow-x-auto pb-1 -mx-1 px-1">
+          {/* Row 2: Filter Tabs - Horizontal Scroll, touch-friendly */}
+          <div className="flex items-center gap-2 mt-3 overflow-x-auto pb-1 -mx-1 px-1">
             <button 
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                 activeFilter === "ready" 
                   ? "bg-primary text-primary-foreground" 
                   : "bg-muted/60 text-muted-foreground hover:bg-muted"
@@ -2287,7 +2288,7 @@ export default function Picking() {
             </button>
             <button 
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                 activeFilter === "active" 
                   ? "bg-amber-500 text-white" 
                   : "bg-muted/60 text-muted-foreground hover:bg-muted"
@@ -2299,7 +2300,7 @@ export default function Picking() {
             </button>
             <button 
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                 activeFilter === "rush" 
                   ? "bg-red-500 text-white" 
                   : "bg-muted/60 text-muted-foreground hover:bg-muted"
@@ -2312,7 +2313,7 @@ export default function Picking() {
             {isAdminOrLead && holdItems.length > 0 && (
               <button 
                 className={cn(
-                  "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                  "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                   activeFilter === "hold" 
                     ? "bg-slate-500 text-white" 
                     : "bg-muted/60 text-muted-foreground hover:bg-muted"
@@ -2325,7 +2326,7 @@ export default function Picking() {
             )}
             <button 
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors",
+                "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                 activeFilter === "done" 
                   ? "bg-emerald-500 text-white" 
                   : "bg-muted/60 text-muted-foreground hover:bg-muted"
@@ -2338,67 +2339,71 @@ export default function Picking() {
           </div>
         </div>
 
-        {/* Search and Sort - Compact Row */}
-        <div className="px-3 py-2 bg-muted/30 border-b flex items-center gap-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-8 pl-8 pr-8 text-sm"
-              data-testid="input-search-queue"
-            />
-            {searchQuery && (
+        {/* Search and Sort - Mobile responsive */}
+        <div className="px-3 py-2 bg-muted/30 border-b">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search orders, SKUs..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-11 min-h-[44px] pl-10 pr-10 text-base"
+                data-testid="input-search-queue"
+              />
+              {searchQuery && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-9 w-9"
+                  onClick={() => setSearchQuery("")}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+                <SelectTrigger className="flex-1 sm:w-[120px] h-11 min-h-[44px] text-sm" data-testid="select-sort">
+                  <SelectValue placeholder="Sort..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="priority">Priority</SelectItem>
+                  <SelectItem value="items">Items</SelectItem>
+                  <SelectItem value="order">Order #</SelectItem>
+                  <SelectItem value="age">Age</SelectItem>
+                </SelectContent>
+              </Select>
               <Button
-                variant="ghost"
+                variant="outline"
                 size="icon"
-                className="absolute right-0.5 top-1/2 -translate-y-1/2 h-6 w-6"
-                onClick={() => setSearchQuery("")}
+                onClick={() => setSortDirection(sortDirection === "asc" ? "desc" : "asc")}
+                className="h-11 w-11 min-h-[44px] min-w-[44px] shrink-0"
+                title={sortDirection === "desc" ? "Oldest first" : "Newest first"}
+                data-testid="button-sort-direction"
               >
-                <X className="h-3.5 w-3.5" />
+                {sortDirection === "desc" ? (
+                  <ArrowDown className="h-4 w-4" />
+                ) : (
+                  <ArrowUp className="h-4 w-4" />
+                )}
               </Button>
-            )}
+              {(searchQuery || activeFilter !== "all") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-11 min-h-[44px] px-3 text-sm shrink-0"
+                  onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
           </div>
-          <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-            <SelectTrigger className="w-[110px] h-8 text-xs" data-testid="select-sort">
-              <SelectValue placeholder="Sort..." />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="priority">Priority</SelectItem>
-              <SelectItem value="items">Items</SelectItem>
-              <SelectItem value="order">Order #</SelectItem>
-              <SelectItem value="age">Age</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => setSortDirection(sortDirection === "asc" ? "desc" : "asc")}
-            className="h-8 w-8 shrink-0"
-            title={sortDirection === "desc" ? "Oldest first" : "Newest first"}
-            data-testid="button-sort-direction"
-          >
-            {sortDirection === "desc" ? (
-              <ArrowDown className="h-3.5 w-3.5" />
-            ) : (
-              <ArrowUp className="h-3.5 w-3.5" />
-            )}
-          </Button>
-          {(searchQuery || activeFilter !== "all") && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-xs shrink-0"
-              onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
-            >
-              Clear
-            </Button>
-          )}
         </div>
 
         {/* Queue List */}
-        <div className="p-3 md:p-6 space-y-2 md:space-y-3">
+        <div className="p-3 md:p-6 space-y-3">
           {pickingMode === "batch" ? (
             (sortedQueue as PickBatch[]).map((batch) => (
               <Card 
@@ -2471,20 +2476,20 @@ export default function Picking() {
                 }}
                 data-testid={`card-order-${order.id}`}
               >
-                <CardContent className="p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                <CardContent className="p-3 md:p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
                       <div className={cn(
-                        "h-10 w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
+                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
                         order.onHold ? "bg-slate-200 text-slate-600" : 
                         order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
                         order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                       )}>
-                        <span className="text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
+                        <span className="text-base md:text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
                         <span className="text-[9px] leading-none mt-0.5">units</span>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="font-semibold flex items-center gap-1.5 text-sm flex-wrap">
+                        <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
                           {order.orderNumber}
                           {order.channelProvider && (
                             <Badge variant="outline" className={cn("text-[9px] px-1 py-0", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
@@ -2525,7 +2530,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          className="h-11 min-h-[44px] px-3 text-red-600 hover:text-red-700 hover:bg-red-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2542,7 +2547,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
+                          className="h-11 min-h-[44px] px-3 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2560,7 +2565,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
+                          className="h-11 min-h-[44px] px-3 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2577,7 +2582,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
+                          className="h-11 min-h-[44px] px-3 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             setFlashingOrderId(order.id);
@@ -2597,7 +2602,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
+                          className="h-11 min-h-[44px] px-3 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleReleaseOrder(parseInt(order.id));
@@ -2613,7 +2618,7 @@ export default function Picking() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-8 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                          className="h-11 min-h-[44px] px-3 text-red-600 hover:text-red-700 hover:bg-red-50"
                           onClick={(e) => {
                             e.stopPropagation();
                             if (confirm(`Force release order ${order.orderNumber}? This will put it back in the queue.`)) {
@@ -3242,23 +3247,23 @@ export default function Picking() {
                   )}
                   
                   {/* Action Buttons - Large touch targets */}
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 gap-3">
                     <Button 
                       variant="outline"
-                      className="h-12 text-sm font-medium"
+                      className="h-14 min-h-[44px] text-base font-medium"
                       onClick={() => currentItem.qty > 1 ? setMultiQtyOpen(true) : confirmPick(1)}
                       data-testid="button-manual-confirm"
                     >
-                      <CheckCircle2 className="h-4 w-4 mr-2" />
+                      <CheckCircle2 className="h-5 w-5 mr-2" />
                       Manual OK
                     </Button>
                     <Button 
                       variant="outline"
-                      className="h-12 text-sm font-medium text-amber-600 border-amber-300 hover:bg-amber-50"
+                      className="h-14 min-h-[44px] text-base font-medium text-amber-600 border-amber-300 hover:bg-amber-50"
                       onClick={() => setShortPickOpen(true)}
                       data-testid="button-short-pick"
                     >
-                      <AlertTriangle className="h-4 w-4 mr-2" />
+                      <AlertTriangle className="h-5 w-5 mr-2" />
                       Short Pick
                     </Button>
                   </div>
@@ -3342,13 +3347,13 @@ export default function Picking() {
                     {/* Info - takes remaining space, text wraps/truncates */}
                     <div className="flex-1 min-w-0 overflow-hidden">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={cn("text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
+                        <span className={cn("text-xl md:text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                           {item.location}
                         </span>
                         <button
                           onClick={() => openEditQtyDialog(idx)}
                           className={cn(
-                            "text-base font-bold px-2 py-0.5 rounded flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all",
+                            "text-base font-bold px-2.5 py-1 rounded flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all min-h-[32px]",
                             isCompleted 
                               ? "bg-emerald-100 text-emerald-700" 
                               : "bg-amber-100 text-amber-800"
@@ -3358,60 +3363,60 @@ export default function Picking() {
                           {item.picked}/{item.qty}
                         </button>
                       </div>
-                      <div className="text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
-                      <div className="text-[10px] font-mono text-slate-400 truncate">{item.sku}</div>
+                      <div className="text-sm md:text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
+                      <div className="text-xs md:text-[10px] font-mono font-semibold text-slate-500 truncate">{item.sku}</div>
                       {item.barcode && <div className="text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
                     </div>
                     
-                    {/* Buttons - fixed width, always visible */}
-                    <div className="flex-shrink-0 flex gap-1 justify-end">
+                    {/* Buttons - fixed width, always visible, touch-friendly */}
+                    <div className="flex-shrink-0 flex gap-1.5 justify-end">
                       {!isCompleted ? (
-                        <div className="flex gap-1">
+                        <div className="flex gap-1.5">
                           {/* -1 Button */}
                           <Button 
                             size="icon" 
                             variant="outline"
-                            className="h-9 w-9 border-slate-300 text-slate-600 flex-shrink-0"
+                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-slate-300 text-slate-600 flex-shrink-0"
                             onClick={() => handleListItemDecrement(idx)}
                             disabled={item.picked <= 0}
                             data-testid={`button-minus-${item.id}`}
                           >
-                            <Minus className="h-4 w-4" />
+                            <Minus className="h-5 w-5" />
                           </Button>
                           {/* +1 Button */}
                           <Button 
                             size="icon" 
                             variant="outline"
-                            className="h-9 w-9 border-blue-400 text-blue-600 flex-shrink-0"
+                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-blue-400 text-blue-600 flex-shrink-0"
                             onClick={() => handleListItemManualPickOne(idx)}
                             disabled={item.picked >= item.qty}
                             data-testid={`button-plus-${item.id}`}
                           >
-                            <Plus className="h-4 w-4" />
+                            <Plus className="h-5 w-5" />
                           </Button>
                           {/* Pick All Button */}
                           <Button 
                             size="icon" 
-                            className="h-9 w-9 bg-emerald-500 text-white flex-shrink-0" 
+                            className="h-11 w-11 min-h-[44px] min-w-[44px] bg-emerald-500 text-white flex-shrink-0" 
                             onClick={() => handleListItemPick(idx)} 
                             data-testid={`button-pick-${item.id}`}
                           >
-                            <CheckCircle2 className="h-4 w-4" />
+                            <CheckCircle2 className="h-5 w-5" />
                           </Button>
                           {/* Short Button */}
                           <Button 
                             size="icon" 
                             variant="outline" 
-                            className="h-9 w-9 border-amber-400 text-amber-600 flex-shrink-0" 
+                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-amber-400 text-amber-600 flex-shrink-0" 
                             onClick={() => handleListItemShort(idx)} 
                             data-testid={`button-short-${item.id}`}
                           >
-                            <AlertTriangle className="h-4 w-4" />
+                            <AlertTriangle className="h-5 w-5" />
                           </Button>
                         </div>
                       ) : (
-                        <div className="h-9 w-9 flex items-center justify-center">
-                          {item.status === "completed" ? <CheckCircle2 className="h-5 w-5 text-emerald-500" /> : <AlertTriangle className="h-5 w-5 text-amber-500" />}
+                        <div className="h-11 w-11 flex items-center justify-center">
+                          {item.status === "completed" ? <CheckCircle2 className="h-6 w-6 text-emerald-500" /> : <AlertTriangle className="h-6 w-6 text-amber-500" />}
                         </div>
                       )}
                     </div>
@@ -3453,7 +3458,7 @@ export default function Picking() {
       
       {/* Multi-Qty Confirm Dialog */}
       <Dialog open={multiQtyOpen} onOpenChange={setMultiQtyOpen}>
-        <DialogContent className="max-w-xs">
+        <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="text-center text-xl">Confirm Quantity</DialogTitle>
             <DialogDescription className="text-center">
@@ -3462,11 +3467,11 @@ export default function Picking() {
           </DialogHeader>
           
           <div className="py-6 space-y-4">
-            <div className="flex items-center justify-center gap-6">
+            <div className="flex items-center justify-center gap-4">
               <Button 
                 variant="outline" 
                 size="icon"
-                className="h-14 w-14 text-2xl"
+                className="h-16 w-16 min-h-[44px] min-w-[44px] text-2xl"
                 onClick={() => setPickQty(Math.max(1, pickQty - 1))}
               >
                 -
@@ -3475,7 +3480,7 @@ export default function Picking() {
               <Button 
                 variant="outline" 
                 size="icon"
-                className="h-14 w-14 text-2xl"
+                className="h-16 w-16 min-h-[44px] min-w-[44px] text-2xl"
                 onClick={() => setPickQty(Math.min(currentItem?.qty || 1, pickQty + 1))}
               >
                 +
@@ -3488,14 +3493,14 @@ export default function Picking() {
           
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button 
-              className="w-full h-14 text-lg bg-emerald-600 hover:bg-emerald-700"
+              className="w-full h-14 min-h-[44px] text-lg bg-emerald-600 hover:bg-emerald-700"
               onClick={() => confirmPick(pickQty)}
             >
               Confirm {pickQty}
             </Button>
             <Button 
               variant="ghost" 
-              className="w-full h-12"
+              className="w-full h-12 min-h-[44px]"
               onClick={() => { setMultiQtyOpen(false); setPickQty(1); }}
             >
               Cancel
@@ -3506,7 +3511,7 @@ export default function Picking() {
       
       {/* Edit Quantity Dialog */}
       <Dialog open={editQtyOpen} onOpenChange={setEditQtyOpen}>
-        <DialogContent className="max-w-xs">
+        <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="text-center text-xl">Edit Picked Qty</DialogTitle>
             <DialogDescription className="text-center">
@@ -3515,11 +3520,11 @@ export default function Picking() {
           </DialogHeader>
           
           <div className="py-6 space-y-4">
-            <div className="flex items-center justify-center gap-4">
+            <div className="flex items-center justify-center gap-3">
               <Button 
                 variant="outline" 
                 size="icon"
-                className="h-14 w-14 text-2xl"
+                className="h-16 w-16 min-h-[44px] min-w-[44px] text-2xl"
                 onClick={() => setEditQtyValue(Math.max(0, editQtyValue - 1))}
               >
                 -
@@ -3534,13 +3539,13 @@ export default function Picking() {
                   const maxQty = editQtyIdx !== null && activeWork ? activeWork.items[editQtyIdx]?.qty || 0 : 0;
                   setEditQtyValue(Math.max(0, Math.min(maxQty, val)));
                 }}
-                className="w-24 h-16 text-4xl font-bold text-center border-2 border-primary/50"
+                className="w-full max-w-[100px] h-16 text-4xl font-bold text-center border-2 border-primary/50"
                 data-testid="input-edit-qty"
               />
               <Button 
                 variant="outline" 
                 size="icon"
-                className="h-14 w-14 text-2xl"
+                className="h-16 w-16 min-h-[44px] min-w-[44px] text-2xl"
                 onClick={() => {
                   const maxQty = editQtyIdx !== null && activeWork ? activeWork.items[editQtyIdx]?.qty || 0 : 0;
                   setEditQtyValue(Math.min(maxQty, editQtyValue + 1));
@@ -3556,14 +3561,14 @@ export default function Picking() {
           
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button 
-              className="w-full h-14 text-lg bg-primary hover:bg-primary/90"
+              className="w-full h-14 min-h-[44px] text-lg bg-primary hover:bg-primary/90"
               onClick={handleEditQtyConfirm}
             >
               Set to {editQtyValue}
             </Button>
             <Button 
               variant="ghost" 
-              className="w-full h-12"
+              className="w-full h-12 min-h-[44px]"
               onClick={() => { setEditQtyOpen(false); setEditQtyIdx(null); }}
             >
               Cancel
@@ -3574,7 +3579,7 @@ export default function Picking() {
       
       {/* Sound & Haptic Settings Dialog */}
       <Dialog open={soundSettingsOpen} onOpenChange={setSoundSettingsOpen}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2">
               <Volume2 className="h-5 w-5" />
@@ -3661,7 +3666,7 @@ export default function Picking() {
       
       {/* Release Order Dialog */}
       <Dialog open={releaseDialogOpen} onOpenChange={setReleaseDialogOpen}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2">
               <Unlock className="h-5 w-5" />
@@ -3674,7 +3679,7 @@ export default function Picking() {
           
           <DialogFooter className="flex-col gap-2 sm:flex-col pt-4">
             <Button 
-              className="w-full h-12 bg-emerald-600 hover:bg-emerald-700"
+              className="w-full h-14 min-h-[44px] text-base bg-emerald-600 hover:bg-emerald-700"
               onClick={() => confirmRelease(false)}
             >
               Keep Progress
@@ -3682,7 +3687,7 @@ export default function Picking() {
             </Button>
             <Button 
               variant="outline"
-              className="w-full h-12"
+              className="w-full h-14 min-h-[44px] text-base"
               onClick={() => confirmRelease(true)}
             >
               Reset Progress
@@ -3690,7 +3695,7 @@ export default function Picking() {
             </Button>
             <Button 
               variant="ghost" 
-              className="w-full h-10"
+              className="w-full h-12 min-h-[44px]"
               onClick={() => setReleaseDialogOpen(false)}
             >
               Cancel
@@ -3701,7 +3706,7 @@ export default function Picking() {
       
       {/* Short Pick Dialog */}
       <Dialog open={shortPickOpen} onOpenChange={(open) => { if (!open) { setShortPickOpen(false); setShortPickListIndex(null); } }}>
-        <DialogContent className="max-w-xs">
+        <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2 text-amber-600">
               <AlertTriangle className="h-5 w-5" />
@@ -3750,11 +3755,12 @@ export default function Picking() {
                 <Label>Available quantity:</Label>
                 <Input 
                   type="number" 
+                  inputMode="numeric"
                   value={shortPickQty} 
                   onChange={(e) => setShortPickQty(e.target.value)}
                   max={(shortPickListIndex !== null ? activeWork?.items[shortPickListIndex]?.qty : currentItem?.qty) || 0}
                   min={0}
-                  className="h-12 text-lg text-center"
+                  className="w-full h-14 text-xl text-center font-bold"
                 />
               </div>
             )}
@@ -3762,7 +3768,7 @@ export default function Picking() {
           
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button 
-              className="w-full h-12 bg-amber-600 hover:bg-amber-700"
+              className="w-full h-14 min-h-[44px] text-lg bg-amber-600 hover:bg-amber-700"
               onClick={handleShortPick}
               disabled={!shortPickReason}
             >
@@ -3770,7 +3776,7 @@ export default function Picking() {
             </Button>
             <Button 
               variant="ghost" 
-              className="w-full h-10"
+              className="w-full h-12 min-h-[44px]"
               onClick={() => setShortPickOpen(false)}
             >
               Cancel

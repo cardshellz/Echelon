@@ -54,7 +54,7 @@ const inventoryData = [
 
 export default function Dashboard() {
   return (
-    <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
+    <div className="p-4 md:p-6 space-y-6 max-w-[1600px] mx-auto">
       {/* Header Section */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -68,7 +68,7 @@ export default function Dashboard() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card className="border-l-4 border-l-primary shadow-sm hover:shadow-md transition-shadow">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Total Revenue</CardTitle>
@@ -208,6 +208,7 @@ export default function Dashboard() {
                 <TabsTrigger value="moving_fast">Fast Moving</TabsTrigger>
               </TabsList>
               <TabsContent value="low_stock" className="mt-0">
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
@@ -237,6 +238,7 @@ export default function Dashboard() {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               </TabsContent>
               <TabsContent value="moving_fast" className="mt-0">
                 <div className="flex flex-col items-center justify-center h-48 text-muted-foreground text-sm">

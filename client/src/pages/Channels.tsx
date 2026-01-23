@@ -180,8 +180,8 @@ export default function Channels() {
   }
 
   return (
-    <div className="space-y-6" data-testid="page-channels">
-      <div className="flex items-center justify-between">
+    <div className="p-4 md:p-6 space-y-6" data-testid="page-channels">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
             <Store className="h-8 w-8 text-primary" />
@@ -206,6 +206,7 @@ export default function Channels() {
                   <Label htmlFor="channel-name">Channel Name</Label>
                   <Input
                     id="channel-name"
+                    className="w-full"
                     value={newChannel.name}
                     onChange={(e) => setNewChannel(prev => ({ ...prev, name: e.target.value }))}
                     placeholder="e.g., Shopify Main Store"
@@ -218,7 +219,7 @@ export default function Channels() {
                     value={newChannel.type}
                     onValueChange={(value) => setNewChannel(prev => ({ ...prev, type: value }))}
                   >
-                    <SelectTrigger data-testid="select-channel-type">
+                    <SelectTrigger className="w-full" data-testid="select-channel-type">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -233,7 +234,7 @@ export default function Channels() {
                     value={newChannel.provider}
                     onValueChange={(value) => setNewChannel(prev => ({ ...prev, provider: value }))}
                   >
-                    <SelectTrigger data-testid="select-channel-provider">
+                    <SelectTrigger className="w-full" data-testid="select-channel-provider">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -365,7 +366,7 @@ export default function Channels() {
                 </TabsList>
                 
                 <TabsContent value="settings" className="space-y-4 mt-4">
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label>Status</Label>
                       <Select
@@ -389,6 +390,7 @@ export default function Channels() {
                     <div className="space-y-2">
                       <Label>Priority</Label>
                       <Input
+                        className="w-full"
                         type="number"
                         value={selectedChannel.priority}
                         onChange={(e) => {
@@ -439,7 +441,7 @@ export default function Channels() {
                         <div className="space-y-2">
                           <Label>Shop Domain</Label>
                           <div className="flex items-center gap-2">
-                            <Input value={selectedChannel.connection.shopDomain} readOnly />
+                            <Input className="w-full" value={selectedChannel.connection.shopDomain} readOnly />
                             <Button variant="outline" size="icon" asChild>
                               <a href={`https://${selectedChannel.connection.shopDomain}`} target="_blank" rel="noopener noreferrer">
                                 <ExternalLink className="h-4 w-4" />
@@ -471,7 +473,7 @@ export default function Channels() {
                   <TabsContent value="partner" className="space-y-4 mt-4">
                     {selectedChannel.partnerProfile ? (
                       <div className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div>
                             <Label className="text-muted-foreground">Company</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.companyName}</p>

@@ -304,7 +304,7 @@ export default function OrderHistory() {
   return (
     <div className="flex flex-col h-full">
       <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="flex items-center justify-between p-4">
+        <div className="flex items-center justify-between p-4 md:p-6">
           <div>
             <h1 className="text-2xl font-bold">Order History</h1>
             <p className="text-sm text-muted-foreground">
@@ -313,11 +313,12 @@ export default function OrderHistory() {
           </div>
           <Button variant="outline" onClick={handleExport} data-testid="button-export">
             <Download className="h-4 w-4 mr-2" />
-            Export CSV
+            <span className="hidden sm:inline">Export CSV</span>
+            <span className="sm:hidden">Export</span>
           </Button>
         </div>
 
-        <div className="px-4 pb-4 flex flex-col sm:flex-row gap-2">
+        <div className="px-4 md:px-6 pb-4 flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -450,7 +451,7 @@ export default function OrderHistory() {
         </div>
 
         {hasActiveFilters && (
-          <div className="px-4 pb-3 flex flex-wrap gap-2">
+          <div className="px-4 md:px-6 pb-3 flex flex-wrap gap-2">
             {search && (
               <Badge variant="secondary" className="gap-1">
                 Order: {search}
@@ -513,67 +514,118 @@ export default function OrderHistory() {
             </div>
           ) : (
             <>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Order #</TableHead>
-                    <TableHead>Channel</TableHead>
-                    <TableHead>Customer</TableHead>
-                    <TableHead>Items</TableHead>
-                    <TableHead>Picker</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Completed</TableHead>
-                    <TableHead></TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data?.orders.map((order) => (
-                    <TableRow
-                      key={order.id}
-                      className={`cursor-pointer hover:bg-muted/50 ${selectedOrderId === order.id ? 'bg-muted' : ''}`}
-                      onClick={() => setSelectedOrderId(order.id)}
-                      data-testid={`row-order-${order.id}`}
-                    >
-                      <TableCell className="font-medium">
-                        #{order.orderNumber}
-                        {order.priority !== "normal" && (
-                          <Badge variant="outline" className={`ml-2 text-xs ${getPriorityColor(order.priority)}`}>
-                            {order.priority}
-                          </Badge>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {order.channelProvider ? (
-                          <Badge variant="outline" className={cn("text-xs", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
-                            {getChannelBadgeStyle(order.channelProvider).label}
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell>{order.customerName}</TableCell>
-                      <TableCell>
-                        <span className="text-muted-foreground">
-                          {order.pickedCount}/{order.itemCount}
-                        </span>
-                      </TableCell>
-                      <TableCell>{order.pickerName || "—"}</TableCell>
-                      <TableCell>
+              {/* Mobile card layout */}
+              <div className="md:hidden p-4 space-y-3">
+                {data?.orders.map((order) => (
+                  <Card
+                    key={order.id}
+                    className={cn(
+                      "cursor-pointer transition-colors hover:bg-muted/50",
+                      selectedOrderId === order.id && "bg-muted"
+                    )}
+                    onClick={() => setSelectedOrderId(order.id)}
+                    data-testid={`card-order-${order.id}`}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="font-medium flex items-center gap-2">
+                            #{order.orderNumber}
+                            {order.priority !== "normal" && (
+                              <Badge variant="outline" className={`text-xs ${getPriorityColor(order.priority)}`}>
+                                {order.priority}
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="text-sm text-muted-foreground">{order.customerName}</p>
+                        </div>
                         <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>
                           {getStatusIcon(order.status)}
                           {order.status}
                         </Badge>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {order.completedAt ? format(new Date(order.completedAt), "MMM d, h:mm a") : "—"}
-                      </TableCell>
-                      <TableCell>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-3 text-muted-foreground">
+                          <span className="flex items-center gap-1">
+                            <Calendar className="h-3.5 w-3.5" />
+                            {order.completedAt ? format(new Date(order.completedAt), "MMM d") : "—"}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Package className="h-3.5 w-3.5" />
+                            {order.pickedCount}/{order.itemCount}
+                          </span>
+                        </div>
                         <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                      </TableCell>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+
+              {/* Desktop table layout */}
+              <div className="hidden md:block overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Order #</TableHead>
+                      <TableHead>Channel</TableHead>
+                      <TableHead>Customer</TableHead>
+                      <TableHead>Items</TableHead>
+                      <TableHead>Picker</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Completed</TableHead>
+                      <TableHead></TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {data?.orders.map((order) => (
+                      <TableRow
+                        key={order.id}
+                        className={`cursor-pointer hover:bg-muted/50 ${selectedOrderId === order.id ? 'bg-muted' : ''}`}
+                        onClick={() => setSelectedOrderId(order.id)}
+                        data-testid={`row-order-${order.id}`}
+                      >
+                        <TableCell className="font-medium">
+                          #{order.orderNumber}
+                          {order.priority !== "normal" && (
+                            <Badge variant="outline" className={`ml-2 text-xs ${getPriorityColor(order.priority)}`}>
+                              {order.priority}
+                            </Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {order.channelProvider ? (
+                            <Badge variant="outline" className={cn("text-xs", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                              {getChannelBadgeStyle(order.channelProvider).label}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell>{order.customerName}</TableCell>
+                        <TableCell>
+                          <span className="text-muted-foreground">
+                            {order.pickedCount}/{order.itemCount}
+                          </span>
+                        </TableCell>
+                        <TableCell>{order.pickerName || "—"}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>
+                            {getStatusIcon(order.status)}
+                            {order.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {order.completedAt ? format(new Date(order.completedAt), "MMM d, h:mm a") : "—"}
+                        </TableCell>
+                        <TableCell>
+                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
 
               {totalPages > 1 && (
                 <div className="flex items-center justify-between p-4 border-t">

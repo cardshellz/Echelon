@@ -20,10 +20,10 @@ import { Switch } from "@/components/ui/switch";
 export default function Integrations() {
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b bg-card p-6 pb-4">
+      <div className="border-b bg-card p-4 md:p-6 pb-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Cable className="h-6 w-6 text-primary" />
+          <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
+            <Cable className="h-5 w-5 md:h-6 md:w-6 text-primary" />
             System Architecture
           </h1>
           <p className="text-muted-foreground mt-1 text-sm max-w-2xl">
@@ -33,8 +33,8 @@ export default function Integrations() {
         </div>
       </div>
 
-      <div className="flex-1 p-6 overflow-auto bg-muted/20">
-        <div className="grid gap-8 max-w-5xl mx-auto">
+      <div className="flex-1 p-4 md:p-6 overflow-auto bg-muted/20">
+        <div className="grid gap-6 md:gap-8 max-w-5xl mx-auto">
           
           {/* SECTION 1: INBOUND (OMS) */}
           <div className="space-y-4">
@@ -42,10 +42,10 @@ export default function Integrations() {
               <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">Inbound</Badge>
               <h2 className="text-lg font-semibold">Order Sources (OMS)</h2>
             </div>
-            <div className="grid md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Active Adapter */}
               <Card className="border-l-4 border-l-emerald-500 shadow-sm relative overflow-hidden">
-                <div className="absolute top-3 right-3">
+                <div className="absolute top-2 right-2 md:top-3 md:right-3">
                   <Switch checked={true} />
                 </div>
                 <CardHeader className="pb-2">
@@ -106,17 +106,17 @@ export default function Integrations() {
             </div>
             <Card className="border-2 border-primary shadow-md bg-card">
               <CardHeader className="pb-2">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 bg-primary/10 rounded-md flex items-center justify-center text-primary">
-                       <Settings2 size={24} />
+                    <div className="h-10 w-10 md:h-12 md:w-12 bg-primary/10 rounded-md flex items-center justify-center text-primary">
+                       <Settings2 className="h-5 w-5 md:h-6 md:w-6" />
                     </div>
                     <div>
-                      <CardTitle className="text-lg">Echelon Core</CardTitle>
+                      <CardTitle className="text-base md:text-lg">Echelon Core</CardTitle>
                       <CardDescription>Inventory Ledger & Logic Engine</CardDescription>
                     </div>
                   </div>
-                  <Badge className="bg-primary text-primary-foreground">Active Hub</Badge>
+                  <Badge className="bg-primary text-primary-foreground w-fit">Active Hub</Badge>
                 </div>
               </CardHeader>
               <CardContent>
@@ -124,17 +124,17 @@ export default function Integrations() {
                   The central source of truth. It standardizes data from any OMS (Shopify or Custom) 
                   into a unified format for Picking/Packing, then routes it to the active Shipping Engine.
                 </p>
-                <div className="grid grid-cols-3 gap-4 mt-6">
-                   <div className="bg-muted p-3 rounded text-center">
-                      <div className="text-2xl font-bold">1,240</div>
+                <div className="grid grid-cols-3 gap-2 md:gap-4 mt-4 md:mt-6">
+                   <div className="bg-muted p-2 md:p-3 rounded text-center">
+                      <div className="text-xl md:text-2xl font-bold">1,240</div>
                       <div className="text-xs uppercase text-muted-foreground font-semibold">SKUs</div>
                    </div>
-                   <div className="bg-muted p-3 rounded text-center">
-                      <div className="text-2xl font-bold">48</div>
+                   <div className="bg-muted p-2 md:p-3 rounded text-center">
+                      <div className="text-xl md:text-2xl font-bold">48</div>
                       <div className="text-xs uppercase text-muted-foreground font-semibold">Locations</div>
                    </div>
-                   <div className="bg-muted p-3 rounded text-center">
-                      <div className="text-2xl font-bold">12</div>
+                   <div className="bg-muted p-2 md:p-3 rounded text-center">
+                      <div className="text-xl md:text-2xl font-bold">12</div>
                       <div className="text-xs uppercase text-muted-foreground font-semibold">Batches</div>
                    </div>
                 </div>
@@ -152,10 +152,10 @@ export default function Integrations() {
               <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">Outbound</Badge>
               <h2 className="text-lg font-semibold">Shipping Engine</h2>
             </div>
-            <div className="grid md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Active Adapter */}
               <Card className="border-l-4 border-l-emerald-500 shadow-sm relative overflow-hidden">
-                <div className="absolute top-3 right-3">
+                <div className="absolute top-2 right-2 md:top-3 md:right-3">
                   <Switch checked={true} />
                 </div>
                 <CardHeader className="pb-2">
@@ -181,8 +181,8 @@ export default function Integrations() {
               </Card>
 
               {/* Future Adapter */}
-              <Card className="border-l-4 border-l-slate-200 opacity-60 hover:opacity-100 transition-opacity border-dashed">
-                 <div className="absolute top-3 right-3">
+              <Card className="border-l-4 border-l-slate-200 opacity-60 hover:opacity-100 transition-opacity border-dashed relative">
+                 <div className="absolute top-2 right-2 md:top-3 md:right-3">
                   <Switch checked={false} />
                 </div>
                 <CardHeader className="pb-2">
