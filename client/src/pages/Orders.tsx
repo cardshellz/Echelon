@@ -267,38 +267,38 @@ export default function Orders() {
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
-      <div className="p-6 border-b bg-card">
-        <div className="flex items-center justify-between mb-4">
+      <div className="p-4 md:p-6 border-b bg-card">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2" data-testid="text-page-title">
-              <ShoppingCart className="h-6 w-6 text-primary" />
+            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2" data-testid="text-page-title">
+              <ShoppingCart className="h-5 w-5 md:h-6 md:w-6 text-primary" />
               Order Management
             </h1>
-            <p className="text-muted-foreground mt-1 text-sm">
+            <p className="text-muted-foreground mt-1 text-sm hidden sm:block">
               Process, allocate, and fulfill customer orders across all channels.
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 md:gap-3 flex-wrap">
             <div className="flex items-center rounded-lg border bg-muted/50 p-1" data-testid="picking-mode-toggle">
               <Button
                 variant={pickingMode === "batch" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPickingMode("batch")}
-                className={cn("gap-2", pickingMode === "batch" && "bg-primary shadow-sm")}
+                className={cn("gap-1 md:gap-2 px-2 md:px-3", pickingMode === "batch" && "bg-primary shadow-sm")}
                 data-testid="button-batch-mode"
               >
                 <Layers className="h-4 w-4" />
-                Batch
+                <span className="hidden sm:inline">Batch</span>
               </Button>
               <Button
                 variant={pickingMode === "single" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPickingMode("single")}
-                className={cn("gap-2", pickingMode === "single" && "bg-primary shadow-sm")}
+                className={cn("gap-1 md:gap-2 px-2 md:px-3", pickingMode === "single" && "bg-primary shadow-sm")}
                 data-testid="button-single-mode"
               >
                 <Package className="h-4 w-4" />
-                Single
+                <span className="hidden sm:inline">Single</span>
               </Button>
             </div>
 
@@ -306,12 +306,13 @@ export default function Orders() {
               <PopoverTrigger asChild>
                 <Button 
                   variant={autoRelease ? "default" : "outline"} 
-                  className={autoRelease ? "bg-emerald-600 hover:bg-emerald-700" : ""}
+                  size="sm"
+                  className={cn("gap-1 md:gap-2", autoRelease ? "bg-emerald-600 hover:bg-emerald-700" : "")}
                   data-testid="button-auto-release-settings"
                 >
-                  <Zap className="h-4 w-4 mr-2" />
-                  Auto-Release {autoRelease ? "ON" : "OFF"}
-                  <ChevronDown className="h-4 w-4 ml-2" />
+                  <Zap className="h-4 w-4" />
+                  <span className="hidden sm:inline">Auto-Release</span> {autoRelease ? "ON" : "OFF"}
+                  <ChevronDown className="h-4 w-4" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-80" align="end">
@@ -351,40 +352,43 @@ export default function Orders() {
               </PopoverContent>
             </Popover>
             
-            <Button onClick={() => setIsCreateOpen(true)} data-testid="button-create-order">
+            <Button size="sm" onClick={() => setIsCreateOpen(true)} data-testid="button-create-order" className="hidden sm:flex">
               <Plus className="h-4 w-4 mr-2" />
-              Create Manual Order
+              Create Order
+            </Button>
+            <Button size="icon" onClick={() => setIsCreateOpen(true)} data-testid="button-create-order-mobile" className="sm:hidden h-9 w-9">
+              <Plus className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
-        <div className="flex items-center justify-between">
+        <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
           <Tabs value={statusFilter} onValueChange={setStatusFilter} className="w-full">
-            <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
+            <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent whitespace-nowrap">
               <TabsTrigger 
                 value="active" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
                 data-testid="tab-active"
               >
-                Active Orders ({activeCount})
+                Active ({activeCount})
               </TabsTrigger>
               <TabsTrigger 
                 value="exception" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2 text-amber-600"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm text-amber-600"
                 data-testid="tab-exceptions"
               >
                 Exceptions ({exceptionCount})
               </TabsTrigger>
               <TabsTrigger 
                 value="completed" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
                 data-testid="tab-completed"
               >
                 Completed ({completedCount})
               </TabsTrigger>
               <TabsTrigger 
                 value="all" 
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
                 data-testid="tab-all"
               >
                 All
@@ -394,9 +398,9 @@ export default function Orders() {
         </div>
       </div>
 
-      <div className="p-6 grid gap-6 md:grid-cols-3">
+      <div className="p-4 md:p-6 grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-3">
         <div className="md:col-span-2 space-y-4">
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-4">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
@@ -407,21 +411,23 @@ export default function Orders() {
                 data-testid="input-search-orders"
               />
             </div>
-            <Select value={channelFilter} onValueChange={setChannelFilter}>
-              <SelectTrigger className="w-[180px]" data-testid="select-channel-filter">
-                <Store className="h-4 w-4 mr-2" />
-                <SelectValue placeholder="All Channels" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Channels</SelectItem>
-                {channels?.map((ch) => (
-                  <SelectItem key={ch.id} value={String(ch.id)}>{ch.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button variant="outline" size="icon" onClick={() => refetchOrders()} data-testid="button-refresh-orders">
-              <RefreshCw className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-2">
+              <Select value={channelFilter} onValueChange={setChannelFilter}>
+                <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-channel-filter">
+                  <Store className="h-4 w-4 mr-2" />
+                  <SelectValue placeholder="All Channels" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Channels</SelectItem>
+                  {channels?.map((ch) => (
+                    <SelectItem key={ch.id} value={String(ch.id)}>{ch.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="icon" onClick={() => refetchOrders()} data-testid="button-refresh-orders">
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
 
           {ordersLoading ? (
@@ -518,7 +524,7 @@ export default function Orders() {
           )}
         </div>
 
-        <div className="space-y-6">
+        <div className="hidden md:block space-y-6">
           <Card className="bg-primary text-primary-foreground border-none">
             <CardHeader className="pb-2">
               <CardTitle className="text-lg">Order Summary</CardTitle>
