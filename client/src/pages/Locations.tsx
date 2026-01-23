@@ -19,7 +19,10 @@ import {
   RefreshCw,
   AlertCircle,
   ChevronsUpDown,
-  MoreVertical
+  MoreVertical,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -95,6 +98,8 @@ export default function Locations() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
+  const [sortField, setSortField] = useState<"sku" | "name" | "location" | "zone" | "updatedAt">("sku");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editLocation, setEditLocation] = useState("");
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -146,21 +151,48 @@ export default function Locations() {
     },
   });
   
-  // Filter locations
-  const filteredLocations = locations.filter(loc => {
-    const matchesSearch = 
-      loc.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      loc.location.toLowerCase().includes(searchQuery.toLowerCase());
-    
-    const isUnassigned = !loc.location || loc.location === "UNASSIGNED";
-    const matchesAssignment = 
-      assignmentFilter === "all" ||
-      (assignmentFilter === "unassigned" && isUnassigned) ||
-      (assignmentFilter === "assigned" && !isUnassigned);
-    
-    return matchesSearch && matchesAssignment;
-  });
+  // Toggle sort
+  const handleSort = (field: typeof sortField) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  // Filter and sort locations
+  const filteredLocations = locations
+    .filter(loc => {
+      const matchesSearch = 
+        loc.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        loc.location.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      const isUnassigned = !loc.location || loc.location === "UNASSIGNED";
+      const matchesAssignment = 
+        assignmentFilter === "all" ||
+        (assignmentFilter === "unassigned" && isUnassigned) ||
+        (assignmentFilter === "assigned" && !isUnassigned);
+      
+      return matchesSearch && matchesAssignment;
+    })
+    .sort((a, b) => {
+      let aVal: string | Date = "";
+      let bVal: string | Date = "";
+      
+      if (sortField === "updatedAt") {
+        aVal = a.updatedAt ? new Date(a.updatedAt) : new Date(0);
+        bVal = b.updatedAt ? new Date(b.updatedAt) : new Date(0);
+        const diff = (aVal as Date).getTime() - (bVal as Date).getTime();
+        return sortDirection === "asc" ? diff : -diff;
+      } else {
+        aVal = (a[sortField] || "").toLowerCase();
+        bVal = (b[sortField] || "").toLowerCase();
+        const cmp = aVal.localeCompare(bVal);
+        return sortDirection === "asc" ? cmp : -cmp;
+      }
+    });
   
   // Group by zone
   const zones = Array.from(new Set(locations.map(l => l.zone))).sort();
@@ -433,16 +465,43 @@ export default function Locations() {
               data-testid="input-search-locations"
             />
           </div>
-          <Select value={assignmentFilter} onValueChange={(val) => setAssignmentFilter(val as "all" | "assigned" | "unassigned")}>
-            <SelectTrigger className="w-full sm:w-[160px]" data-testid="select-assignment-filter">
-              <SelectValue placeholder="Filter" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Products</SelectItem>
-              <SelectItem value="assigned">Assigned</SelectItem>
-              <SelectItem value="unassigned">Unassigned</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="flex gap-2">
+            <Select value={assignmentFilter} onValueChange={(val) => setAssignmentFilter(val as "all" | "assigned" | "unassigned")}>
+              <SelectTrigger className="flex-1 sm:w-[140px]" data-testid="select-assignment-filter">
+                <SelectValue placeholder="Filter" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Products</SelectItem>
+                <SelectItem value="assigned">Assigned</SelectItem>
+                <SelectItem value="unassigned">Unassigned</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select 
+              value={`${sortField}-${sortDirection}`} 
+              onValueChange={(val) => {
+                const [field, dir] = val.split("-") as [typeof sortField, typeof sortDirection];
+                setSortField(field);
+                setSortDirection(dir);
+              }}
+            >
+              <SelectTrigger className="flex-1 sm:w-[140px]" data-testid="select-sort">
+                <ArrowUpDown className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="Sort" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="sku-asc">SKU (A-Z)</SelectItem>
+                <SelectItem value="sku-desc">SKU (Z-A)</SelectItem>
+                <SelectItem value="name-asc">Name (A-Z)</SelectItem>
+                <SelectItem value="name-desc">Name (Z-A)</SelectItem>
+                <SelectItem value="location-asc">Location (A-Z)</SelectItem>
+                <SelectItem value="location-desc">Location (Z-A)</SelectItem>
+                <SelectItem value="zone-asc">Zone (A-Z)</SelectItem>
+                <SelectItem value="zone-desc">Zone (Z-A)</SelectItem>
+                <SelectItem value="updatedAt-asc">Updated (Oldest)</SelectItem>
+                <SelectItem value="updatedAt-desc">Updated (Newest)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         
         {/* Zone Summary - hidden on mobile, scrollable on larger screens */}
@@ -469,11 +528,36 @@ export default function Locations() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[140px]">SKU</TableHead>
-                    <TableHead>Product Name</TableHead>
-                    <TableHead className="w-[140px]">Location</TableHead>
-                    <TableHead className="w-[100px]">Zone</TableHead>
-                    <TableHead className="w-[120px]">Updated</TableHead>
+                    <TableHead className="w-[140px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("sku")}>
+                      <div className="flex items-center gap-1">
+                        SKU
+                        {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer hover:bg-muted/50" onClick={() => handleSort("name")}>
+                      <div className="flex items-center gap-1">
+                        Product Name
+                        {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="w-[140px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("location")}>
+                      <div className="flex items-center gap-1">
+                        Location
+                        {sortField === "location" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="w-[100px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("zone")}>
+                      <div className="flex items-center gap-1">
+                        Zone
+                        {sortField === "zone" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="w-[120px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("updatedAt")}>
+                      <div className="flex items-center gap-1">
+                        Updated
+                        {sortField === "updatedAt" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
                     <TableHead className="w-[100px] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
