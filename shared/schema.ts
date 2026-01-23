@@ -285,20 +285,20 @@ export function generateLocationCode(parts: {
     return trimmed === '' ? null : trimmed;
   };
   
-  // Pad bay to 2 digits if numeric
-  const padBay = (bay: string | null): string | null => {
-    if (bay == null) return null;
-    const num = parseInt(bay, 10);
+  // Pad numeric values to 2 digits (industry standard for proper sorting)
+  const padNumeric = (val: string | null): string | null => {
+    if (val == null) return null;
+    const num = parseInt(val, 10);
     if (!isNaN(num)) return num.toString().padStart(2, '0');
-    return bay; // Keep as-is if not numeric
+    return val; // Keep as-is if not numeric
   };
   
   const segments = [
     cleanSegment(parts.zone),
     cleanSegment(parts.aisle),
-    padBay(cleanSegment(parts.bay)),
+    padNumeric(cleanSegment(parts.bay)),
     cleanSegment(parts.level),
-    cleanSegment(parts.bin),
+    padNumeric(cleanSegment(parts.bin)),
   ].filter((s): s is string => s != null);
   
   if (segments.length === 0) {
