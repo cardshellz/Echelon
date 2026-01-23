@@ -401,8 +401,8 @@ export default function Locations() {
           </Select>
         </div>
         
-        {/* Zone Summary */}
-        <div className="flex items-center gap-2 mt-4 flex-wrap">
+        {/* Zone Summary - hidden on mobile, scrollable on larger screens */}
+        <div className="hidden md:flex items-center gap-2 mt-4 flex-wrap">
           {zones.map(zone => (
             <Badge 
               key={zone} 
@@ -415,44 +415,12 @@ export default function Locations() {
         </div>
       </div>
       
-      {/* Table */}
-      <ScrollArea className="flex-1">
-        <div className="p-4 md:p-6">
-          {/* Mobile Card Layout */}
-          <div className="md:hidden space-y-3">
-            {filteredLocations.map((loc) => (
-              <Card key={loc.id} className="p-4" data-testid={`card-location-${loc.sku}`}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0 space-y-2">
-                    <div className="font-mono font-medium text-sm">{loc.sku}</div>
-                    <div className="text-muted-foreground text-sm truncate">{loc.name}</div>
-                    <Badge variant="outline" className="font-mono bg-primary/5">
-                      <MapPin className="h-3 w-3 mr-1" />
-                      {loc.location}
-                    </Badge>
-                  </div>
-                  <Button 
-                    size="icon" 
-                    variant="ghost" 
-                    className="h-8 w-8 shrink-0"
-                    onClick={() => handleStartEdit(loc.id, loc.location)}
-                    data-testid={`button-edit-mobile-${loc.sku}`}
-                  >
-                    <Edit2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </Card>
-            ))}
-            {filteredLocations.length === 0 && (
-              <Card className="p-8 text-center text-muted-foreground">
-                <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                No products found
-              </Card>
-            )}
-          </div>
-
+      {/* Content - full scroll on mobile, ScrollArea on desktop */}
+      <div className="flex-1 overflow-auto md:overflow-hidden">
+        <ScrollArea className="h-full hidden md:block">
+        <div className="p-6">
           {/* Desktop Table */}
-          <div className="hidden md:block">
+          <div>
             <Card className="overflow-x-auto">
               <Table>
                 <TableHeader>
@@ -595,7 +563,41 @@ export default function Locations() {
             </CardContent>
           </Card>
         </div>
-      </ScrollArea>
+        </ScrollArea>
+        
+        {/* Mobile content - direct scroll */}
+        <div className="md:hidden p-4 space-y-3">
+          {filteredLocations.map((loc) => (
+            <Card key={loc.id} className="p-4" data-testid={`card-location-mobile-${loc.sku}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="font-mono font-medium text-sm">{loc.sku}</div>
+                  <div className="text-muted-foreground text-sm truncate">{loc.name}</div>
+                  <Badge variant="outline" className="font-mono bg-primary/5">
+                    <MapPin className="h-3 w-3 mr-1" />
+                    {loc.location}
+                  </Badge>
+                </div>
+                <Button 
+                  size="icon" 
+                  variant="ghost" 
+                  className="h-8 w-8 shrink-0"
+                  onClick={() => handleStartEdit(loc.id, loc.location)}
+                  data-testid={`button-edit-mobile2-${loc.sku}`}
+                >
+                  <Edit2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </Card>
+          ))}
+          {filteredLocations.length === 0 && (
+            <Card className="p-8 text-center text-muted-foreground">
+              <Package className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              No products found
+            </Card>
+          )}
+        </div>
+      </div>
       
       {/* Add Dialog */}
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
