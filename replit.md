@@ -9,6 +9,16 @@ Echelon is a full-stack operations management system designed for end-to-end con
 Preferred communication style: Simple, everyday language.
 Database: Uses EXTERNAL database (EXTERNAL_DATABASE_URL), NOT Replit's built-in database. Do not reference Replit Database pane for production issues - provide SQL directly.
 
+### Production Database Context
+The production database contains additional tables beyond what Echelon manages directly. Key external systems sharing the database:
+- **Loyalty/Membership**: members, member_stats, member_referrals, member_medal_achievements, member_subscriptions, etc.
+- **Subscription Plans**: plans, plan_earning_rules, plan_redemption_rules, plan_medal_benefits, subscription_contracts, subscription_ledger
+- **Rewards System**: reward_ledger, reward_medals, reward_redemptions, redemption_options
+- **Shopify Sync**: shopify_orders, shopify_order_items, shopify_products, shopify_variants, shopify_collections
+- **Other**: discounts, pricing_rules, blockchain_config, social_accounts, notification_templates, portal_config
+
+Echelon tables are a subset focused on WMS/OMS operations.
+
 ## System Architecture
 
 ### Frontend
