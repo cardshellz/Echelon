@@ -2345,36 +2345,70 @@ export async function registerRoutes(
           }
         }
         
-        // Process all orders in this page
-        for (const shopifyOrder of shopifyOrders) {
-          const orderId = `gid://shopify/Order/${shopifyOrder.id}`;
-          
+        // Build batch update values
+        const updateValues = shopifyOrders.map((shopifyOrder: any) => {
           const customerName = shopifyOrder.customer 
             ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
             : shopifyOrder.shipping_address?.name || null;
-          
           const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
           const shipping = shopifyOrder.shipping_address || {};
           
+          return {
+            id: `gid://shopify/Order/${shopifyOrder.id}`,
+            customer_name: customerName || 'Unknown',
+            customer_email: customerEmail,
+            shipping_name: shipping.name || null,
+            shipping_address1: shipping.address1 || null,
+            shipping_address2: shipping.address2 || null,
+            shipping_city: shipping.city || null,
+            shipping_state: shipping.province || null,
+            shipping_postal_code: shipping.zip || null,
+            shipping_country: shipping.country || null,
+          };
+        });
+        
+        // Batch update using a single query with unnest
+        if (updateValues.length > 0) {
+          const ids = updateValues.map(v => v.id);
+          const names = updateValues.map(v => v.customer_name);
+          const emails = updateValues.map(v => v.customer_email);
+          const shipNames = updateValues.map(v => v.shipping_name);
+          const addr1s = updateValues.map(v => v.shipping_address1);
+          const addr2s = updateValues.map(v => v.shipping_address2);
+          const cities = updateValues.map(v => v.shipping_city);
+          const states = updateValues.map(v => v.shipping_state);
+          const zips = updateValues.map(v => v.shipping_postal_code);
+          const countries = updateValues.map(v => v.shipping_country);
+          
           const result = await db.execute(sql`
-            UPDATE shopify_orders SET
-              customer_name = ${customerName || 'Unknown'},
-              customer_email = ${customerEmail},
-              shipping_name = ${shipping.name || null},
-              shipping_address1 = ${shipping.address1 || null},
-              shipping_address2 = ${shipping.address2 || null},
-              shipping_city = ${shipping.city || null},
-              shipping_state = ${shipping.province || null},
-              shipping_postal_code = ${shipping.zip || null},
-              shipping_country = ${shipping.country || null}
-            WHERE id = ${orderId}
+            UPDATE shopify_orders AS s SET
+              customer_name = v.customer_name,
+              customer_email = v.customer_email,
+              shipping_name = v.shipping_name,
+              shipping_address1 = v.shipping_address1,
+              shipping_address2 = v.shipping_address2,
+              shipping_city = v.shipping_city,
+              shipping_state = v.shipping_state,
+              shipping_postal_code = v.shipping_postal_code,
+              shipping_country = v.shipping_country
+            FROM (
+              SELECT 
+                unnest(${ids}::text[]) AS id,
+                unnest(${names}::text[]) AS customer_name,
+                unnest(${emails}::text[]) AS customer_email,
+                unnest(${shipNames}::text[]) AS shipping_name,
+                unnest(${addr1s}::text[]) AS shipping_address1,
+                unnest(${addr2s}::text[]) AS shipping_address2,
+                unnest(${cities}::text[]) AS shipping_city,
+                unnest(${states}::text[]) AS shipping_state,
+                unnest(${zips}::text[]) AS shipping_postal_code,
+                unnest(${countries}::text[]) AS shipping_country
+            ) AS v
+            WHERE s.id = v.id
           `);
           
-          if (result.rowCount && result.rowCount > 0) {
-            totalUpdated++;
-          } else {
-            totalSkipped++;
-          }
+          totalUpdated += result.rowCount || 0;
+          totalSkipped += updateValues.length - (result.rowCount || 0);
         }
         
         pagesProcessed++;
