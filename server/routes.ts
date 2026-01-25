@@ -2280,6 +2280,126 @@ export async function registerRoutes(
     }
   });
 
+  // Backfill operational orders table with customer data from shopify_orders
+  // Updates existing orders that are missing customer names/addresses
+  app.post("/api/shopify/backfill-orders-from-raw", async (req, res) => {
+    try {
+      console.log("Starting backfill of operational orders from shopify_orders...");
+      const startTime = Date.now();
+      const MAX_TIME_MS = 25000;
+      
+      let totalUpdated = 0;
+      let totalSkipped = 0;
+      let batchCount = 0;
+      
+      // Loop through batches until timeout or done
+      while (Date.now() - startTime < MAX_TIME_MS) {
+        // Get orders missing customer data (customer_name is null or 'Unknown')
+        const ordersToUpdate = await db.execute<{
+          id: number;
+          source_table_id: string;
+        }>(sql`
+          SELECT o.id, o.source_table_id
+          FROM orders o
+          WHERE o.source = 'shopify'
+            AND o.source_table_id IS NOT NULL
+            AND (o.customer_name IS NULL OR o.customer_name = '' OR o.customer_name LIKE '#%')
+          LIMIT 500
+        `);
+        
+        if (ordersToUpdate.rows.length === 0) {
+          console.log("No more orders to backfill");
+          break;
+        }
+        
+        console.log(`Processing batch ${batchCount + 1}: ${ordersToUpdate.rows.length} orders...`);
+        
+        // Update each order with data from shopify_orders
+        const updatePromises = ordersToUpdate.rows.map(async (order) => {
+          const rawOrder = await db.execute<{
+            customer_name: string | null;
+            customer_email: string | null;
+            shipping_name: string | null;
+            shipping_address1: string | null;
+            shipping_city: string | null;
+            shipping_state: string | null;
+            shipping_postal_code: string | null;
+            shipping_country: string | null;
+          }>(sql`
+            SELECT customer_name, customer_email, shipping_name, shipping_address1,
+                   shipping_city, shipping_state, shipping_postal_code, shipping_country
+            FROM shopify_orders
+            WHERE id = ${order.source_table_id}
+          `);
+          
+          if (rawOrder.rows.length === 0) {
+            return 0;
+          }
+          
+          const raw = rawOrder.rows[0];
+          const customerName = raw.customer_name || raw.shipping_name || 'Unknown';
+          
+          const result = await db.execute(sql`
+            UPDATE orders SET
+              customer_name = ${customerName},
+              customer_email = ${raw.customer_email},
+              shipping_address = ${raw.shipping_address1},
+              shipping_city = ${raw.shipping_city},
+              shipping_state = ${raw.shipping_state},
+              shipping_postal_code = ${raw.shipping_postal_code},
+              shipping_country = ${raw.shipping_country}
+            WHERE id = ${order.id}
+          `);
+          
+          return result.rowCount || 0;
+        });
+        
+        const results = await Promise.all(updatePromises);
+        const batchUpdated = results.reduce((sum, count) => sum + count, 0);
+        totalUpdated += batchUpdated;
+        totalSkipped += ordersToUpdate.rows.length - batchUpdated;
+        batchCount++;
+      }
+      
+      // Count remaining
+      const remainingCount = await db.execute<{ count: string }>(sql`
+        SELECT COUNT(*) as count FROM orders 
+        WHERE source = 'shopify' 
+          AND source_table_id IS NOT NULL
+          AND (customer_name IS NULL OR customer_name = '' OR customer_name LIKE '#%')
+      `);
+      const remaining = parseInt(remainingCount.rows[0]?.count || '0', 10);
+      
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const finished = remaining === 0;
+      
+      console.log(`Backfill: ${batchCount} batches, ${totalUpdated} updated, ${remaining} remaining, ${elapsed}s`);
+      
+      // Auto-continue if not finished
+      if (!finished) {
+        const protocol = req.protocol;
+        const host = req.get('host');
+        fetch(`${protocol}://${host}/api/shopify/backfill-orders-from-raw`, { method: 'POST' }).catch(err => {
+          console.error('Auto-continue failed:', err);
+        });
+        console.log(`Auto-continuing to next batch...`);
+      }
+      
+      res.json({ 
+        success: true, 
+        batchesProcessed: batchCount,
+        updated: totalUpdated,
+        remaining,
+        elapsed: `${elapsed}s`,
+        finished,
+        message: finished ? 'All operational orders backfilled!' : 'Auto-continuing in background...'
+      });
+    } catch (error) {
+      console.error("Error backfilling orders:", error);
+      res.status(500).json({ error: "Failed to backfill orders" });
+    }
+  });
+
   // Backfill customer names from Shopify API into shopify_orders table
   // Processes ALL orders automatically by looping through all pages
   app.post("/api/shopify/backfill-customer-names", async (req, res) => {
