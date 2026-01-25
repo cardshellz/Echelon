@@ -213,50 +213,6 @@ function getChannelBadgeStyle(provider: string | null | undefined): { className:
   }
 }
 
-// Channel icon component - renders provider-specific icons
-function ChannelIcon({ provider, size = 24 }: { provider: string | null | undefined; size?: number }) {
-  switch (provider?.toLowerCase()) {
-    case "shopify":
-      // Shopify green bag with white S
-      return (
-        <svg width={size} height={size} viewBox="0 0 109.5 124.5" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M95.865 24.211c-.107-.637-.637-1.008-1.062-1.062-.425-.054-9.546-.955-9.546-.955s-6.32-6.32-7.01-7.01c-.69-.69-2.017-.478-2.549-.318-.054 0-1.381.424-3.611 1.116a29.124 29.124 0 0 0-1.754-4.356C67.415 5.227 62.848 2.16 57.22 2.16h-.266c-1.062-1.381-2.336-1.967-3.504-1.967-8.697 0-12.838 10.892-14.125 16.416-3.344 1.062-5.735 1.807-6.053 1.914-1.86.584-1.914.637-2.176 2.39-.159 1.328-5.098 39.377-5.098 39.377l37.836 7.116 20.445-4.463s-8.697-57.6-8.804-58.13zM70.707 16.352c-1.754.531-3.717 1.169-5.788 1.807 0-3.026-.425-7.276-1.754-10.892 4.356.797 6.48 5.734 7.542 9.085zM61.627 19.11c-3.93 1.222-8.22 2.55-12.571 3.877 1.222-4.622 3.504-9.191 7.913-10.838.796-.318 1.86-.744 3.026-.903.743 2.123 1.685 5.096 1.632 7.864zM57.38 5.175c.69 0 1.275.106 1.807.372-.69.372-1.328.903-1.913 1.54-5.204 5.523-9.191 14.18-10.413 22.45-3.557 1.115-7.01 2.176-10.2 3.184 2.068-9.244 9.877-27.546 20.72-27.546z" fill="#95BF47"/>
-          <path d="M94.803 23.149c-.425-.053-9.546-.955-9.546-.955s-6.32-6.32-7.01-7.01c-.265-.265-.584-.372-.903-.425l-2.868 58.661 20.445-4.463s-8.697-57.6-8.804-58.13c-.106-.584-.637-.955-1.062-1.008l-.252.33z" fill="#5E8E3E"/>
-          <path d="M57.22 42.14l-4.516 13.388s-3.983-2.123-8.75-2.123c-7.064 0-7.382 4.409-7.382 5.523 0 6.053 15.875 8.38 15.875 22.557 0 11.157-7.117 18.327-16.682 18.327-11.528 0-17.42-7.17-17.42-7.17l3.078-10.2s6.053 5.203 11.157 5.203c3.344 0 4.729-2.656 4.729-4.569 0-7.913-13.017-8.273-13.017-21.237 0-10.945 7.807-21.503 23.575-21.503 6.16 0 9.191 1.754 9.191 1.754l.161.05z" fill="#FFF"/>
-        </svg>
-      );
-    case "amazon":
-      return (
-        <div className="flex items-center justify-center rounded bg-orange-500 text-white font-bold" style={{ width: size, height: size, fontSize: size * 0.5 }}>
-          A
-        </div>
-      );
-    case "ebay":
-      return (
-        <div className="flex items-center justify-center rounded font-bold" style={{ width: size, height: size, fontSize: size * 0.4 }}>
-          <span className="text-red-500">e</span>
-          <span className="text-blue-500">B</span>
-          <span className="text-yellow-500">a</span>
-          <span className="text-green-500">y</span>
-        </div>
-      );
-    case "etsy":
-      return (
-        <div className="flex items-center justify-center rounded bg-orange-600 text-white font-bold" style={{ width: size, height: size, fontSize: size * 0.5 }}>
-          E
-        </div>
-      );
-    case "manual":
-      return (
-        <div className="flex items-center justify-center rounded bg-slate-500 text-white font-bold" style={{ width: size, height: size, fontSize: size * 0.4 }}>
-          M
-        </div>
-      );
-    default:
-      return null;
-  }
-}
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -2523,47 +2479,49 @@ export default function Picking() {
                 <CardContent className="p-3 md:p-4">
                   <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-3">
-                      {/* Channel Icon - left side */}
-                      {order.channelProvider && (
-                        <div className="shrink-0" data-testid={`icon-channel-${order.id}`}>
-                          <ChannelIcon provider={order.channelProvider} size={32} />
-                        </div>
-                      )}
+                      <div className={cn(
+                        "h-12 w-12 md:h-10 md:w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
+                        order.onHold ? "bg-slate-200 text-slate-600" : 
+                        order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
+                        order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                      )}>
+                        <span className="text-base md:text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
+                        <span className="text-[9px] leading-none mt-0.5">units</span>
+                      </div>
                       <div className="min-w-0 flex-1">
                         <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
                           {order.orderNumber}
-                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
-                            {order.status === "ready" ? "ready" : order.status === "in_progress" ? "picking" : order.status}
-                          </Badge>
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {order.customer}
-                        </div>
-                        <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5">
-                          <span className="font-medium">{order.items.length} {order.items.length === 1 ? "line" : "lines"}</span>
-                          <span>•</span>
-                          <span className="font-medium">{order.items.reduce((sum, i) => sum + i.qty, 0)} units</span>
-                          <span>•</span>
-                          <span className="flex items-center gap-0.5">
+                          <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
                             <Clock size={10} /> {order.age}
                           </span>
                         </div>
+                        <div className="text-xs text-muted-foreground truncate">
+                          {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
+                        </div>
+                        {order.orderDate && (
+                          <div className="text-[10px] text-muted-foreground/70">
+                            {order.orderDate}
+                          </div>
+                        )}
                         {order.status === "completed" && order.pickerName && (
                           <div className="text-[10px] text-muted-foreground">
                             Picked by {order.pickerName}
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <div className="flex items-center gap-1">
-                          {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
-                          {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
-                          {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
-                        </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {order.channelProvider && (
+                          <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                            {getChannelBadgeStyle(order.channelProvider).label}
+                          </Badge>
+                        )}
+                        {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
+                        {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
+                        {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
-                        {(order.status === "ready" || order.status === "in_progress") && !order.onHold && (
+                        {order.status === "ready" && !order.onHold && !isAdminOrLead && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
                       </div>
