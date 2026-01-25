@@ -1,7 +1,7 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
@@ -2140,7 +2140,138 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Orders Sync - fetch all unfulfilled orders
+  // Sync from shopify_orders/shopify_order_items tables to operational orders/order_items
+  // This reads from the raw Shopify tables and extracts operational subset
+  app.post("/api/shopify/sync-from-raw-tables", async (req, res) => {
+    try {
+      console.log("Starting sync from shopify_orders to operational orders...");
+      
+      // Get default Shopify channel for linking orders
+      const allChannels = await storage.getAllChannels();
+      const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
+      const shopifyChannelId = shopifyChannel?.id || null;
+      
+      // Fetch unfulfilled orders from shopify_orders table
+      const rawOrders = await db.execute<{
+        id: string;
+        order_number: string;
+        legacy_order_id: string | null;
+        member_id: string | null;
+        shopify_customer_id: string | null;
+        order_date: Date | null;
+        financial_status: string | null;
+        fulfillment_status: string | null;
+        total_price_cents: number | null;
+        currency: string | null;
+        note: string | null;
+        tags: string[] | null;
+        discount_codes: any | null;
+        created_at: Date | null;
+      }>(sql`
+        SELECT * FROM shopify_orders 
+        WHERE fulfillment_status IS NULL 
+           OR fulfillment_status = 'unfulfilled'
+           OR fulfillment_status = 'partial'
+        ORDER BY order_date DESC
+      `);
+      
+      let created = 0;
+      let skipped = 0;
+      
+      for (const rawOrder of rawOrders.rows) {
+        // Check if order already exists in operational table
+        const existingOrder = await storage.getOrderByShopifyId(rawOrder.id);
+        if (existingOrder) {
+          skipped++;
+          continue;
+        }
+        
+        // Fetch line items for this order from shopify_order_items
+        const rawItems = await db.execute<{
+          id: string;
+          shopify_line_item_id: string;
+          sku: string | null;
+          name: string | null;
+          title: string | null;
+          quantity: number;
+          fulfillable_quantity: number | null;
+          fulfillment_status: string | null;
+        }>(sql`
+          SELECT * FROM shopify_order_items 
+          WHERE order_id = ${rawOrder.id}
+        `);
+        
+        // Skip if no items or all fulfilled
+        const unfulfilledItems = rawItems.rows.filter(item => 
+          !item.fulfillment_status || item.fulfillment_status !== 'fulfilled'
+        );
+        
+        if (unfulfilledItems.length === 0) {
+          skipped++;
+          continue;
+        }
+        
+        // Calculate total units
+        const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
+        
+        // Enrich items with location data
+        const enrichedItems: InsertOrderItem[] = [];
+        for (const item of unfulfilledItems) {
+          const productLocation = await storage.getProductLocationBySku(item.sku || '');
+          enrichedItems.push({
+            orderId: 0,
+            shopifyLineItemId: item.shopify_line_item_id,
+            sourceItemId: item.id, // Links to shopify_order_items.id
+            sku: item.sku || 'UNKNOWN',
+            name: item.name || item.title || 'Unknown Item',
+            quantity: item.fulfillable_quantity || item.quantity,
+            pickedQuantity: 0,
+            fulfilledQuantity: 0,
+            status: "pending",
+            location: productLocation?.location || "UNASSIGNED",
+            zone: productLocation?.zone || "U",
+            imageUrl: productLocation?.imageUrl || null,
+            barcode: productLocation?.barcode || null,
+          });
+        }
+        
+        // Create operational order
+        await storage.createOrderWithItems({
+          shopifyOrderId: rawOrder.id,
+          externalOrderId: rawOrder.id,
+          sourceTableId: rawOrder.id, // Links to shopify_orders.id for JOINs
+          channelId: shopifyChannelId,
+          source: "shopify",
+          orderNumber: rawOrder.order_number,
+          customerName: null, // Would need to join with customer table
+          customerEmail: null,
+          shippingAddress: null, // Shipping address would need separate table/column
+          shippingCity: null,
+          shippingState: null,
+          shippingPostalCode: null,
+          shippingCountry: null,
+          priority: "normal",
+          status: "ready",
+          itemCount: enrichedItems.length,
+          unitCount: totalUnits,
+          totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
+          currency: rawOrder.currency,
+          shopifyCreatedAt: rawOrder.order_date || rawOrder.created_at || undefined,
+          orderPlacedAt: rawOrder.order_date || rawOrder.created_at || undefined,
+        }, enrichedItems);
+        
+        created++;
+      }
+      
+      console.log(`Sync complete: ${created} created, ${skipped} skipped`);
+      res.json({ success: true, created, skipped });
+    } catch (error) {
+      console.error("Error syncing from raw tables:", error);
+      res.status(500).json({ error: "Failed to sync from raw tables" });
+    }
+  });
+
+  // Shopify Orders Sync - fetch all unfulfilled orders from Shopify API (legacy)
   app.post("/api/shopify/sync-orders", async (req, res) => {
     try {
       console.log("Starting Shopify orders sync...");
