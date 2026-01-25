@@ -2281,9 +2281,10 @@ export async function registerRoutes(
   });
 
   // Backfill customer names from Shopify API into shopify_orders table
+  // BULK FETCH: Gets 250 orders per Shopify API call (vs 1 order per call before)
   app.post("/api/shopify/backfill-customer-names", async (req, res) => {
     try {
-      console.log("Starting customer name backfill from Shopify API...");
+      console.log("Starting BULK customer name backfill from Shopify API...");
       
       const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
       const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -2294,79 +2295,76 @@ export async function registerRoutes(
       
       const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
       
-      // Get orders missing customer_name from shopify_orders
-      // Process 50 orders per request (~15 seconds with 250ms delay)
-      const ordersToUpdate = await db.execute<{
-        id: string;
-        order_number: string;
-      }>(sql`
-        SELECT id, order_number FROM shopify_orders 
-        WHERE customer_name IS NULL
-        ORDER BY created_at DESC
-        LIMIT 50
-      `);
+      // Get page_info cursor from query params for pagination
+      const pageInfo = req.query.page_info as string | undefined;
       
-      console.log(`Found ${ordersToUpdate.rows.length} orders to backfill`);
+      // Fetch 250 orders from Shopify in one API call
+      let url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any`;
+      if (pageInfo) {
+        url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`;
+      }
+      
+      console.log(`Fetching orders from Shopify...`);
+      const response = await fetch(url, {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (!response.ok) {
+        console.error(`Shopify API error: ${response.status}`);
+        return res.status(500).json({ error: `Shopify API error: ${response.status}` });
+      }
+      
+      const data = await response.json();
+      const shopifyOrders = data.orders || [];
+      console.log(`Fetched ${shopifyOrders.length} orders from Shopify`);
+      
+      // Extract next page cursor from Link header
+      const linkHeader = response.headers.get('Link');
+      let nextPageInfo: string | null = null;
+      if (linkHeader) {
+        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&>]+)[^>]*>;\s*rel="next"/);
+        if (nextMatch) {
+          nextPageInfo = nextMatch[1];
+        }
+      }
       
       let updated = 0;
-      let errors = 0;
+      let skipped = 0;
       
-      for (const order of ordersToUpdate.rows) {
-        try {
-          // Extract numeric order ID from GID format
-          const numericId = order.id.replace('gid://shopify/Order/', '');
-          
-          // Fetch order from Shopify API
-          const response = await fetch(
-            `https://${store}.myshopify.com/admin/api/2024-01/orders/${numericId}.json`,
-            {
-              headers: {
-                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-                "Content-Type": "application/json",
-              },
-            }
-          );
-          
-          if (!response.ok) {
-            console.error(`Failed to fetch order ${order.order_number}: ${response.status}`);
-            errors++;
-            continue;
-          }
-          
-          const data = await response.json();
-          const shopifyOrder = data.order;
-          
-          // Extract customer name and shipping address
-          const customerName = shopifyOrder.customer 
-            ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
-            : shopifyOrder.shipping_address?.name || null;
-          
-          const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
-          const shipping = shopifyOrder.shipping_address || {};
-          
-          // Update shopify_orders with customer data
-          await db.execute(sql`
-            UPDATE shopify_orders SET
-              customer_name = ${customerName},
-              customer_email = ${customerEmail},
-              shipping_name = ${shipping.name || null},
-              shipping_address1 = ${shipping.address1 || null},
-              shipping_address2 = ${shipping.address2 || null},
-              shipping_city = ${shipping.city || null},
-              shipping_state = ${shipping.province || null},
-              shipping_postal_code = ${shipping.zip || null},
-              shipping_country = ${shipping.country || null}
-            WHERE id = ${order.id}
-          `);
-          
+      // Batch update: build all updates and execute
+      for (const shopifyOrder of shopifyOrders) {
+        const orderId = `gid://shopify/Order/${shopifyOrder.id}`;
+        
+        // Extract customer name and shipping address
+        const customerName = shopifyOrder.customer 
+          ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
+          : shopifyOrder.shipping_address?.name || null;
+        
+        const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
+        const shipping = shopifyOrder.shipping_address || {};
+        
+        // Update shopify_orders with customer data (only if exists)
+        const result = await db.execute(sql`
+          UPDATE shopify_orders SET
+            customer_name = ${customerName || 'Unknown'},
+            customer_email = ${customerEmail},
+            shipping_name = ${shipping.name || null},
+            shipping_address1 = ${shipping.address1 || null},
+            shipping_address2 = ${shipping.address2 || null},
+            shipping_city = ${shipping.city || null},
+            shipping_state = ${shipping.province || null},
+            shipping_postal_code = ${shipping.zip || null},
+            shipping_country = ${shipping.country || null}
+          WHERE id = ${orderId}
+        `);
+        
+        if (result.rowCount && result.rowCount > 0) {
           updated++;
-          
-          // Rate limit: Shopify allows ~4 requests/second for most stores
-          await new Promise(resolve => setTimeout(resolve, 250));
-          
-        } catch (err) {
-          console.error(`Error processing order ${order.order_number}:`, err);
-          errors++;
+        } else {
+          skipped++;
         }
       }
       
@@ -2376,13 +2374,16 @@ export async function registerRoutes(
       `);
       const remaining = parseInt(remainingCount.rows[0]?.count || '0', 10);
       
-      console.log(`Backfill complete: ${updated} updated, ${errors} errors, ${remaining} remaining`);
+      console.log(`Backfill complete: ${updated} updated, ${skipped} not in DB, ${remaining} remaining`);
       res.json({ 
         success: true, 
-        updated, 
-        errors,
+        updated,
+        skipped,
         remaining,
-        message: remaining > 0 ? `Run again to process more (${remaining} remaining)` : 'All orders backfilled!'
+        nextPageInfo,
+        message: nextPageInfo ? `More pages available. Run again with ?page_info=${nextPageInfo}` : 
+                 remaining > 0 ? `Processed all Shopify pages. ${remaining} orders still missing customer names.` : 
+                 'All orders backfilled!'
       });
     } catch (error) {
       console.error("Error backfilling customer names:", error);
