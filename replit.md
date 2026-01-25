@@ -2,22 +2,12 @@
 
 ## Overview
 
-Echelon is a full-stack operations management system designed for end-to-end control from product purchase to fulfillment, including inventory tracking, order processing, and warehouse operations. It covers the standard warehouse lifecycle: order ingestion, wave/batch planning, picking, packing, and shipping. The application is built as a modern web application with a React frontend, an Express backend, and uses PostgreSQL for data persistence. Echelon aims to be the central hub for all warehouse operations, improving efficiency and accuracy from receiving to shipping. The system also supports Progressive Web App features for enhanced usability on warehouse floor devices.
+Echelon is a full-stack operations management system designed to provide end-to-end control for warehouse operations, from product purchase to fulfillment. It covers order ingestion, wave/batch planning, picking, packing, and shipping, aiming to be a central hub for efficiency and accuracy. The system supports Progressive Web App features and is built as a modern web application. Echelon manages inventory tracking, order processing, and warehouse operations, functioning as the source of truth for inventory and facilitating multi-channel sales and dropship partner integrations.
 
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
 Database: Uses EXTERNAL database (EXTERNAL_DATABASE_URL), NOT Replit's built-in database. Do not reference Replit Database pane for production issues - provide SQL directly.
-
-### Production Database Context
-The production database contains additional tables beyond what Echelon manages directly. Key external systems sharing the database:
-- **Loyalty/Membership**: members, member_stats, member_referrals, member_medal_achievements, member_subscriptions, etc.
-- **Subscription Plans**: plans, plan_earning_rules, plan_redemption_rules, plan_medal_benefits, subscription_contracts, subscription_ledger
-- **Rewards System**: reward_ledger, reward_medals, reward_redemptions, redemption_options
-- **Shopify Sync**: shopify_orders, shopify_order_items, shopify_products, shopify_variants, shopify_collections
-- **Other**: discounts, pricing_rules, blockchain_config, social_accounts, notification_templates, portal_config
-
-Echelon tables are a subset focused on WMS/OMS operations.
 
 ## System Architecture
 
@@ -37,143 +27,34 @@ Echelon tables are a subset focused on WMS/OMS operations.
 - **Session Storage**: PostgreSQL-backed sessions
 
 ### Shared Layer
-- **Schema & Validation**: Drizzle schema definitions and Zod validation schemas shared between frontend and backend.
+- **Schema & Validation**: Drizzle schema definitions and Zod validation schemas.
 
 ### Database Schema
-Key tables include `users` (authentication with role-based access), `product_locations` (SKU to warehouse location mapping), `orders` (tracking picking workflow status), and `order_items` (line items with picking progress).
+Key tables include `users` for authentication, `product_locations` for SKU mapping, `orders` for unified OMS, and `order_items` for line items with picking progress. The `orders` table is a multi-channel OMS table, storing comprehensive information including channel linkage, customer details, shipping/billing addresses, financial data, channel status, shipping methods, warehouse operational fields, item/unit counts, notes, timestamps, and exception handling. The `order_items` table enhances line-item details with product info, quantities, pricing, flags, warehouse operational fields, product specifics, picking status, and metadata.
 
 ### Authentication & Authorization
 - Session-based authentication using `express-session`.
-- Default users: admin/admin123 and picker1/picker123.
-
-#### Role-Based Access Control (RBAC)
-The system implements a flexible, database-driven RBAC system with the following components:
-
-**Database Tables:**
-- `auth_roles`: Custom roles created by admin (e.g., "Warehouse Manager", "Inventory Clerk")
-- `auth_permissions`: Individual permissions as `resource:action` pairs
-- `auth_role_permissions`: Links roles to their allowed permissions
-- `auth_user_roles`: Assigns roles to users (supports multiple roles per user)
-
-**Permission Model:**
-Permissions follow a `resource:action` pattern for easy extension:
-| Resource | Actions | Description |
-|----------|---------|-------------|
-| dashboard | view | Dashboard access |
-| inventory | view, create, edit, adjust, upload, receive | Inventory management |
-| orders | view, claim, edit, cancel, hold, priority, resolve_exception | Order management |
-| picking | view, perform, complete | Picking operations |
-| channels | view, create, edit, sync, delete | Multi-channel management |
-| reports | view, export | Reporting access |
-| users | view, create, edit, delete, manage_roles | User administration |
-| roles | view, create, edit, delete | Role management |
-| settings | view, edit | System settings |
-
-**System Roles (built-in, cannot be deleted):**
-- Administrator: Full system access
-- Team Lead: Manage picking operations and resolve exceptions
-- Picker: Perform picking operations only
-
-**Implementation:**
-- Backend: `requirePermission(resource, action)` middleware on API routes
-- Frontend: `hasPermission()` and `hasAnyPermission()` helpers in auth context
-- Admin UI: `/roles` page for creating roles, editing permissions, and assigning to users
+- Role-Based Access Control (RBAC) with `auth_roles`, `auth_permissions`, `auth_role_permissions`, and `auth_user_roles` tables. Permissions follow a `resource:action` pattern. System roles include Administrator, Team Lead, and Picker.
 
 ### Navigation Structure
-
-The application uses a clean navigation structure with operational sections in the left sidebar and admin settings in the top-right gear menu.
-
-**Left Sidebar (Operational):**
-- **Dashboard**: Overview and metrics
-- **Warehouse**: Inventory (WMS), Bin Locations, Product Locations, Warehouses, Purchase Orders
-- **Orders**: Orders (OMS), Order History
-- **Fulfillment**: Picking Queue, Picking Logs, Picking Metrics, Shipping
-- **Sales Channels**: Channels, Channel Reserves, Dropship Network
-
-**Settings Gear Menu (Admin Only):**
-- General Settings
-- Integrations
-- User Management
-- Roles & Permissions
+The application features a left sidebar for operational sections (Dashboard, Warehouse, Orders, Fulfillment, Sales Channels) and a top-right gear menu for admin settings (General Settings, Integrations, User Management, Roles & Permissions).
 
 ### Application Settings
-
-The system stores configurable settings in the `app_settings` table. Settings are managed through:
-- **UI**: `/settings` page with tabs for Company, Inventory, Picking, and Notifications
-- **API**: `GET /api/settings` and `PUT /api/settings` endpoints
-- **Storage**: Stored as key-value pairs with category grouping
-
-Available settings:
-- Company info (name, address, timezone)
-- Default warehouse
-- Stock thresholds (low stock, critical stock alerts)
-- Picking defaults (batch size, auto-release delay)
-- Notification preferences
+Configurable settings are stored in the `app_settings` table and managed via a UI (`/settings` page) and API. Settings cover company info, default warehouse, stock thresholds, picking defaults, and notification preferences.
 
 ### Inventory Management System (WMS)
-Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Key inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP. The system implements implicit inventory movements based on picker actions and provides a robust Shopify sync strategy for inventory levels.
-
-#### Dual-Level Inventory Tracking
-The system tracks inventory at two levels simultaneously:
-- **Variant Quantity (variantQty)**: Physical count of variant units (e.g., "5 boxes") for receiving, cycle counts, and warehouse operations
-- **Base Units (onHandBase)**: Derived count in smallest unit (e.g., "2,500 pieces") for purchasing, ATP calculations, and order fulfillment
-- Receiving flow accepts variant-level quantities and automatically calculates base units: `baseUnits = variantQty × unitsPerVariant`
-- Example: Receiving 5 boxes of SKU-B500 (500 pieces per box) → variantQty=5, onHandBase=2500
-
-#### Hierarchical Warehouse Locations
-The system uses a scalable 5-level hierarchy for bin locations that adapts from small warehouses to enterprise scale:
-
-| Level | Field | Example | Description |
-|-------|-------|---------|-------------|
-| 1 | Zone | `BULK` | Area of warehouse (RCV, BULK, FWD, PACK, SHIP) |
-| 2 | Aisle | `A` | Row/corridor |
-| 3 | Bay | `02` | Position along the aisle (2-digit padded) |
-| 4 | Level | `C` | Vertical position (A=floor, B=1st shelf...) |
-| 5 | Bin | `1` | Subdivision within that shelf spot |
-
-**Smart Display Logic**: Only populated fields are shown in the location code:
-- Zone=null, Aisle=A, Bay=3, Level=null → Shows: **A-03**
-- Zone=BULK, Aisle=A, Bay=2, Level=C → Shows: **BULK-A-02-C**
-
-**Location Types**:
-| Type | Description | Pick Type |
-|------|-------------|-----------|
-| `bin` | Eaches pick from opened case | Pickable |
-| `pallet` | Full case/pallet pick | Pickable |
-| `carton_flow` | Gravity-fed carton rack | Pickable |
-| `bulk_reserve` | Overflow/replenishment stock | Non-pickable |
-| `receiving` | Inbound staging | Non-pickable |
-| `putaway_staging` | Awaiting putaway | Non-pickable |
-| `packing` | Pack stations | Non-pickable |
-| `shipping_lane` | Sorted for carrier pickup | Non-pickable |
-| `staging` | Temporary holding/WIP | Non-pickable |
-| `returns` | RMA processing | Non-pickable |
-| `quarantine` | Hold for inspection | Non-pickable |
-| `crossdock` | Pass-through (no storage) | Non-pickable |
-| `hazmat` | Restricted materials | Non-pickable |
-| `cold_storage` | Temperature controlled | Pickable |
-| `secure` | High-value/controlled | Pickable |
-
-**Database Tables**:
-- `warehouse_zones`: Zone definitions with default location type
-- `warehouse_locations`: Full hierarchy with pickSequence, capacity constraints, replenishment chains
-
-**UI**: `/warehouse/locations` page with Locations and Zones tabs for managing the hierarchy.
-
-Core WMS functionalities:
-- Extended database schema for inventory management (inventory_items, uom_variants, inventory_levels, inventory_transactions, locations, channel_feeds).
-- Inventory service for allocation, ATP calculation, variant cascading, replenishment, and backorder handling.
-- Shopify sync with sibling variant updates.
-- WMS UI for stock dashboard, adjustments, item/variant/location views.
-- Integration of picking process with inventory decrementing (UOM-aware conversions, location priority).
+Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP.
+- **Dual-Level Inventory Tracking**: Tracks `variantQty` (physical count) and `onHandBase` (derived smallest unit count).
+- **Hierarchical Warehouse Locations**: Uses a 5-level hierarchy (Zone, Aisle, Bay, Level, Bin) with smart display logic. Supports various location types (bin, pallet, carton_flow, bulk_reserve, receiving, etc.) with associated pick types.
+- **Core WMS functionalities**: Extended database schema for inventory, allocation service, ATP calculation, variant cascading, replenishment, backorder handling, and a robust Shopify sync.
 
 ### Picking Logs (Audit Trail)
-A comprehensive, append-only `picking_logs` database table captures all picking actions. This includes timestamps, action types (e.g., order_claimed, item_picked), picker information, order context, item details, quantities, and status snapshots. An API provides querying capabilities for logs and generates order timelines with metrics like Queue Wait Time and Pick Time.
+A comprehensive, append-only `picking_logs` table captures all picking actions for auditing. It includes timestamps, action types, picker info, order context, item details, quantities, and status snapshots, allowing for querying and generation of order timelines.
 
 ## External Dependencies
 
 ### Database
-- **PostgreSQL**: Primary database. Drizzle Kit is used for schema migrations.
+- **PostgreSQL**: Primary database. Drizzle Kit for schema migrations.
 
 ### Third-Party Libraries
 - **@tanstack/react-query**: Server state management.
@@ -183,57 +64,13 @@ A comprehensive, append-only `picking_logs` database table captures all picking 
 - **Radix UI**: Accessible UI component primitives.
 
 ### Shopify Integration
-Echelon integrates with Shopify for product and order synchronization.
-- **Sync Endpoints**: For fetching products, unfulfilled orders, and fulfillment statuses.
-- **Webhook Endpoints**: Handles real-time updates for product creation/update/deletion, order creation/cancellation, and fulfillment creation/update.
-- **Environment Variables**: Requires `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, and `SHOPIFY_API_SECRET`.
-- **Fulfillment Flow**: Supports split shipments and tracks fulfilled quantities per item, marking an order shipped only when all physical items are fulfilled.
+Echelon integrates with Shopify for product and order synchronization. It uses sync and webhook endpoints for real-time updates and supports split shipments, tracking fulfilled quantities. Requires `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_ACCESS_TOKEN`, and `SHOPIFY_API_SECRET`.
 
 ### Multi-Channel Infrastructure
-The system includes full UI and API support for multi-channel sales and dropship partner management:
-
-#### Channel Management UI (`/channels`)
-- **Sales Channels Page**: Grid view of connected channels with status indicators
-- **Channel Cards**: Show provider icon, name, status, sync status, last sync time
-- **Quick Actions**: Toggle active/paused, view connection details, delete
-- **Channel Detail Modal**: Tabs for Settings, Connection, and Partner Info
-- **Create Channel**: Add new internal stores or partner/dropship channels
-
-#### Channel Reserves UI (`/channels/reserves`)
-- **Reserves Table**: View all inventory allocations across channels
-- **Channel Filter**: Filter reserves by specific channel
-- **Create Reserve**: Allocate inventory items to channels with min/max stock thresholds
-- **Summary Cards**: Active channels count, total reserves, total reserved units
-
-#### Channel Management API
-- **channels**: Core entity for all sales channels (internal stores and partner stores)
-  - `type`: "internal" (your stores) or "partner" (dropship partners)
-  - `provider`: shopify, ebay, amazon, etsy, manual
-  - `status`: active, paused, pending_setup, error
-- **channel_connections**: API credentials and sync status per channel
-- **partner_profiles**: Extra info for dropship partners (company, contact, SLA, discounts)
-
-#### Inventory Allocation
-- **channel_reservations**: Priority stock allocation per channel per inventory item
-  - `reserve_base_qty`: Base units reserved exclusively for this channel
-  - `min_stock_base`: Alert threshold
-  - `max_stock_base`: Cap availability
-
-#### Catalog Management
-- **catalog_products**: Master listing content (title, description, bullets, SEO)
-- **catalog_assets**: Master media library (images, videos)
-- **channel_product_overrides**: Per-channel product content customization (NULL = use master)
-- **channel_variant_overrides**: Per-channel variant customization (name, SKU, barcode)
-- **channel_asset_overrides**: Per-channel media customization (hide/show, reorder)
-- **channel_pricing**: Per-channel, per-variant pricing
-- **channel_listings**: External IDs after pushing to marketplace
-
-All override and allocation tables enforce uniqueness constraints (one row per channel+entity) to ensure correct ATP calculations and sync operations.
-
-#### ATP Calculation with Reserves
-```
-Global ATP = On Hand Base - Reserved Base - Sum(Channel Reserves)
-Channel ATP = floor((Global ATP + Channel Reserve) / units_per_variant)
-```
-
-This architecture supports internal multi-channel sales and future dropship partner integrations without schema rework.
+Supports multi-channel sales and dropship partner management through dedicated UI and API.
+- **Channel Management UI (`/channels`)**: Grid view of connected channels, quick actions, and detail modals for settings, connection, and partner info.
+- **Channel Reserves UI (`/channels/reserves`)**: View and manage inventory allocations across channels with filtering and threshold settings.
+- **Channel Management API**: Manages `channels` (internal/partner, provider, status), `channel_connections`, and `partner_profiles`.
+- **Inventory Allocation**: `channel_reservations` for priority stock allocation with `reserve_base_qty`, `min_stock_base`, and `max_stock_base`.
+- **Catalog Management**: `catalog_products`, `catalog_assets`, `channel_product_overrides`, `channel_variant_overrides`, `channel_asset_overrides`, `channel_pricing`, and `channel_listings` for managing product content and pricing per channel.
+- **ATP Calculation with Reserves**: Calculates Global ATP and Channel ATP based on on-hand inventory and channel-specific reserves.

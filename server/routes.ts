@@ -2224,6 +2224,7 @@ export async function registerRoutes(
           // Channel linkage
           shopifyOrderId: orderData.shopifyOrderId,
           externalOrderId: orderData.shopifyOrderId,
+          sourceTableId: orderData.shopifyOrderId, // For hub-and-spoke: links to shopify_orders.shopify_order_id
           channelId: shopifyChannelId,
           source: "shopify",
           // Order ID
@@ -2775,6 +2776,7 @@ export async function registerRoutes(
         // Channel linkage
         shopifyOrderId: orderData.shopifyOrderId,
         externalOrderId: orderData.shopifyOrderId,
+        sourceTableId: orderData.shopifyOrderId, // For hub-and-spoke: links to shopify_orders.shopify_order_id
         channelId: shopifyChannelId,
         source: "shopify",
         // Order ID
