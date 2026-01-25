@@ -2281,10 +2281,10 @@ export async function registerRoutes(
   });
 
   // Backfill customer names from Shopify API into shopify_orders table
-  // BULK FETCH: Gets 250 orders per Shopify API call (vs 1 order per call before)
+  // Processes ALL orders automatically by looping through all pages
   app.post("/api/shopify/backfill-customer-names", async (req, res) => {
     try {
-      console.log("Starting BULK customer name backfill from Shopify API...");
+      console.log("Starting FULL customer name backfill from Shopify API...");
       
       const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
       const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -2294,79 +2294,103 @@ export async function registerRoutes(
       }
       
       const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
+      const startTime = Date.now();
+      const MAX_TIME_MS = 25000; // Stay under Heroku's 30s timeout
       
-      // Get page_info cursor from query params for pagination
-      const pageInfo = req.query.page_info as string | undefined;
+      // Get starting page_info cursor from query params (for resuming)
+      let pageInfo = req.query.page_info as string | undefined;
       
-      // Fetch 250 orders from Shopify in one API call
-      let url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any`;
-      if (pageInfo) {
-        url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`;
-      }
+      let totalUpdated = 0;
+      let totalSkipped = 0;
+      let pagesProcessed = 0;
       
-      console.log(`Fetching orders from Shopify...`);
-      const response = await fetch(url, {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
-      });
-      
-      if (!response.ok) {
-        console.error(`Shopify API error: ${response.status}`);
-        return res.status(500).json({ error: `Shopify API error: ${response.status}` });
-      }
-      
-      const data = await response.json();
-      const shopifyOrders = data.orders || [];
-      console.log(`Fetched ${shopifyOrders.length} orders from Shopify`);
-      
-      // Extract next page cursor from Link header
-      const linkHeader = response.headers.get('Link');
-      let nextPageInfo: string | null = null;
-      if (linkHeader) {
-        const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&>]+)[^>]*>;\s*rel="next"/);
-        if (nextMatch) {
-          nextPageInfo = nextMatch[1];
+      // Loop through pages until timeout or done
+      while (Date.now() - startTime < MAX_TIME_MS) {
+        // Build URL for this page
+        let url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&status=any`;
+        if (pageInfo) {
+          url = `https://${store}.myshopify.com/admin/api/2024-01/orders.json?limit=250&page_info=${pageInfo}`;
         }
-      }
-      
-      let updated = 0;
-      let skipped = 0;
-      
-      // Batch update: build all updates and execute
-      for (const shopifyOrder of shopifyOrders) {
-        const orderId = `gid://shopify/Order/${shopifyOrder.id}`;
         
-        // Extract customer name and shipping address
-        const customerName = shopifyOrder.customer 
-          ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
-          : shopifyOrder.shipping_address?.name || null;
+        console.log(`Fetching page ${pagesProcessed + 1}...`);
+        const response = await fetch(url, {
+          headers: {
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+            "Content-Type": "application/json",
+          },
+        });
         
-        const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
-        const shipping = shopifyOrder.shipping_address || {};
-        
-        // Update shopify_orders with customer data (only if exists)
-        const result = await db.execute(sql`
-          UPDATE shopify_orders SET
-            customer_name = ${customerName || 'Unknown'},
-            customer_email = ${customerEmail},
-            shipping_name = ${shipping.name || null},
-            shipping_address1 = ${shipping.address1 || null},
-            shipping_address2 = ${shipping.address2 || null},
-            shipping_city = ${shipping.city || null},
-            shipping_state = ${shipping.province || null},
-            shipping_postal_code = ${shipping.zip || null},
-            shipping_country = ${shipping.country || null}
-          WHERE id = ${orderId}
-        `);
-        
-        if (result.rowCount && result.rowCount > 0) {
-          updated++;
-        } else {
-          skipped++;
+        if (!response.ok) {
+          console.error(`Shopify API error: ${response.status}`);
+          return res.status(500).json({ error: `Shopify API error: ${response.status}` });
         }
+        
+        const data = await response.json();
+        const shopifyOrders = data.orders || [];
+        
+        if (shopifyOrders.length === 0) {
+          console.log("No more orders to process");
+          break;
+        }
+        
+        console.log(`Processing ${shopifyOrders.length} orders...`);
+        
+        // Extract next page cursor from Link header
+        const linkHeader = response.headers.get('Link');
+        let nextPageInfo: string | null = null;
+        if (linkHeader) {
+          const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&>]+)[^>]*>;\s*rel="next"/);
+          if (nextMatch) {
+            nextPageInfo = nextMatch[1];
+          }
+        }
+        
+        // Process all orders in this page
+        for (const shopifyOrder of shopifyOrders) {
+          const orderId = `gid://shopify/Order/${shopifyOrder.id}`;
+          
+          const customerName = shopifyOrder.customer 
+            ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
+            : shopifyOrder.shipping_address?.name || null;
+          
+          const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
+          const shipping = shopifyOrder.shipping_address || {};
+          
+          const result = await db.execute(sql`
+            UPDATE shopify_orders SET
+              customer_name = ${customerName || 'Unknown'},
+              customer_email = ${customerEmail},
+              shipping_name = ${shipping.name || null},
+              shipping_address1 = ${shipping.address1 || null},
+              shipping_address2 = ${shipping.address2 || null},
+              shipping_city = ${shipping.city || null},
+              shipping_state = ${shipping.province || null},
+              shipping_postal_code = ${shipping.zip || null},
+              shipping_country = ${shipping.country || null}
+            WHERE id = ${orderId}
+          `);
+          
+          if (result.rowCount && result.rowCount > 0) {
+            totalUpdated++;
+          } else {
+            totalSkipped++;
+          }
+        }
+        
+        pagesProcessed++;
+        pageInfo = nextPageInfo || undefined;
+        
+        // No more pages
+        if (!nextPageInfo) {
+          console.log("Reached end of Shopify orders");
+          break;
+        }
+        
+        // Small delay for rate limiting
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
+      
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
       
       // Count remaining orders
       const remainingCount = await db.execute<{ count: string }>(sql`
@@ -2374,16 +2398,22 @@ export async function registerRoutes(
       `);
       const remaining = parseInt(remainingCount.rows[0]?.count || '0', 10);
       
-      console.log(`Backfill complete: ${updated} updated, ${skipped} not in DB, ${remaining} remaining`);
+      const finished = !pageInfo;
+      console.log(`Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s`);
+      
       res.json({ 
         success: true, 
-        updated,
-        skipped,
+        pagesProcessed,
+        ordersProcessed: totalUpdated + totalSkipped,
+        updated: totalUpdated,
+        skipped: totalSkipped,
         remaining,
-        nextPageInfo,
-        message: nextPageInfo ? `More pages available. Run again with ?page_info=${nextPageInfo}` : 
-                 remaining > 0 ? `Processed all Shopify pages. ${remaining} orders still missing customer names.` : 
-                 'All orders backfilled!'
+        elapsed: `${elapsed}s`,
+        finished,
+        nextPageInfo: pageInfo || null,
+        message: finished ? 
+          (remaining > 0 ? `Done! ${remaining} orders not found in Shopify (may be deleted).` : 'All orders backfilled!') :
+          `Processed ${pagesProcessed} pages. Run again with ?page_info=${pageInfo} to continue.`
       });
     } catch (error) {
       console.error("Error backfilling customer names:", error);
