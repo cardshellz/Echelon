@@ -1,0 +1,25 @@
+2026-01-25T14:51:51.725772+00:00 heroku[router]: at=info method=POST path="/api/shopify/backfill-customer-names" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=3c5e5783-a5be-78c1-2db1-6eddd092768b fwd="34.148.84.123" dyno=web.1 connect=0ms service=590ms status=500 bytes=45 protocol=http1.1 tls=true tls_version=unknown
+2026-01-25T14:51:51.702297+00:00 app[web.1]: Processing 250 orders...
+2026-01-25T14:51:51.725355+00:00 app[web.1]: Error backfilling customer names: error: cannot cast type record to text[]
+2026-01-25T14:51:51.725356+00:00 app[web.1]:     at /app/dist/index.cjs:70:13326
+2026-01-25T14:51:51.725357+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-25T14:51:51.725357+00:00 app[web.1]:     at async /app/dist/index.cjs:97:3438 {
+2026-01-25T14:51:51.725358+00:00 app[web.1]:   length: 106,
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   code: '42846',
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   detail: undefined,
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   hint: undefined,
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   position: '1963',
+2026-01-25T14:51:51.725359+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   where: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   schema: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   table: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   column: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   dataType: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   constraint: undefined,
+2026-01-25T14:51:51.725360+00:00 app[web.1]:   file: 'parse_expr.c',
+2026-01-25T14:51:51.725361+00:00 app[web.1]:   line: '2927',
+2026-01-25T14:51:51.725361+00:00 app[web.1]:   routine: 'transformTypeCast'
+2026-01-25T14:51:51.725361+00:00 app[web.1]: }
+2026-01-25T14:51:51.725876+00:00 app[web.1]: 2:51:51 PM [express] POST /api/shopify/backfill-customer-names 500 in 590ms :: {"error":"Failed to backfill customer names"}
