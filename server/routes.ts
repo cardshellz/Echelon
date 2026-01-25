@@ -2177,104 +2177,51 @@ export async function registerRoutes(
         // Calculate total units
         const totalUnits = orderData.items.reduce((sum, item) => sum + item.quantity, 0);
         
-        // Enrich items with location and image data from product_locations
+        // Enrich items with location data from product_locations
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of orderData.items) {
           const productLocation = await storage.getProductLocationBySku(item.sku);
           enrichedItems.push({
             orderId: 0, // Will be set by createOrder
-            // Channel linkage
-            externalLineItemId: item.shopifyLineItemId,
             shopifyLineItemId: item.shopifyLineItemId,
-            // Product info
+            sourceItemId: item.shopifyLineItemId, // Link to shopify_order_items
             sku: item.sku,
             name: item.name,
-            variantTitle: item.variantTitle || null,
-            variantId: item.variantId || null,
-            productId: item.productId || null,
-            vendor: item.vendor || null,
-            // Quantities
             quantity: item.quantity,
             pickedQuantity: 0,
             fulfilledQuantity: 0,
-            refundedQuantity: 0,
-            // Pricing
-            unitPriceCents: item.unitPriceCents ?? null,
-            totalPriceCents: item.totalPriceCents ?? null,
-            discountCents: item.discountCents ?? 0,
-            taxCents: item.taxCents ?? 0,
-            // Flags
-            requiresShipping: item.requiresShipping ? 1 : 0,
-            giftCard: item.giftCard ? 1 : 0,
-            // Warehouse ops
             status: "pending",
             location: productLocation?.location || "UNASSIGNED",
             zone: productLocation?.zone || "U",
-            // Product info
-            imageUrl: productLocation?.imageUrl || null,
+            imageUrl: productLocation?.imageUrl || item.imageUrl || null,
             barcode: productLocation?.barcode || null,
-            weight: item.weight ?? null,
-            // Metadata
-            properties: item.properties ? JSON.stringify(item.properties) : null,
           });
         }
         
-        // Create new order with channel info and enhanced fields
+        // Create order - operational subset only
+        // Full order data stays in shopify_orders table
         await storage.createOrderWithItems({
-          // Channel linkage
           shopifyOrderId: orderData.shopifyOrderId,
           externalOrderId: orderData.shopifyOrderId,
-          sourceTableId: orderData.shopifyOrderId, // For hub-and-spoke: links to shopify_orders.shopify_order_id
+          sourceTableId: orderData.shopifyOrderId, // Links to shopify_orders for JOIN lookups
           channelId: shopifyChannelId,
           source: "shopify",
-          // Order ID
           orderNumber: orderData.orderNumber,
-          // Customer info
-          customerId: orderData.customerId,
           customerName: orderData.customerName,
           customerEmail: orderData.customerEmail,
-          customerPhone: orderData.customerPhone,
-          // Shipping address
-          shippingName: orderData.shippingName,
-          shippingCompany: orderData.shippingCompany,
-          shippingAddress1: orderData.shippingAddress1,
-          shippingAddress2: orderData.shippingAddress2,
+          shippingAddress: orderData.shippingAddress,
           shippingCity: orderData.shippingCity,
           shippingState: orderData.shippingState,
           shippingPostalCode: orderData.shippingPostalCode,
           shippingCountry: orderData.shippingCountry,
-          shippingCountryCode: orderData.shippingCountryCode,
-          // Billing address
-          billingName: orderData.billingName,
-          billingAddress1: orderData.billingAddress1,
-          billingCity: orderData.billingCity,
-          billingState: orderData.billingState,
-          billingPostalCode: orderData.billingPostalCode,
-          billingCountry: orderData.billingCountry,
-          // Financial
-          currency: orderData.currency,
-          totalPriceCents: orderData.totalPriceCents,
-          subtotalPriceCents: orderData.subtotalPriceCents,
-          totalTaxCents: orderData.totalTaxCents,
-          totalShippingCents: orderData.totalShippingCents,
-          totalDiscountsCents: orderData.totalDiscountsCents,
-          financialStatus: orderData.financialStatus,
-          fulfillmentStatus: orderData.fulfillmentStatus,
-          // Shipping method
-          shippingMethod: orderData.shippingMethod,
-          // Warehouse ops
           priority: orderData.priority,
           status: "ready",
           itemCount: orderData.items.length,
           unitCount: totalUnits,
-          // Notes and tags
-          customerNote: orderData.customerNote,
-          tags: orderData.tags,
-          discountCodes: orderData.discountCodes,
-          // Timestamps
+          totalAmount: orderData.totalAmount,
+          currency: orderData.currency,
           shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
           orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-          importedAt: new Date(),
         }, enrichedItems);
         
         created++;
@@ -2735,98 +2682,45 @@ export async function registerRoutes(
         const productLocation = await storage.getProductLocationBySku(item.sku);
         enrichedItems.push({
           orderId: 0, // Will be set by createOrderWithItems
-          // Channel linkage
-          externalLineItemId: item.shopifyLineItemId,
           shopifyLineItemId: item.shopifyLineItemId,
-          // Product info
+          sourceItemId: item.shopifyLineItemId, // Link to shopify_order_items
           sku: item.sku,
           name: item.name,
-          variantTitle: item.variantTitle || null,
-          variantId: item.variantId || null,
-          productId: item.productId || null,
-          vendor: item.vendor || null,
-          // Quantities
           quantity: item.quantity,
           pickedQuantity: 0,
           fulfilledQuantity: 0,
-          refundedQuantity: 0,
-          // Pricing
-          unitPriceCents: item.unitPriceCents ?? null,
-          totalPriceCents: item.totalPriceCents ?? null,
-          discountCents: item.discountCents ?? 0,
-          taxCents: item.taxCents ?? 0,
-          // Flags
-          requiresShipping: item.requiresShipping ? 1 : 0,
-          giftCard: item.giftCard ? 1 : 0,
-          // Warehouse ops
           status: "pending",
           location: productLocation?.location || "UNASSIGNED",
           zone: productLocation?.zone || "U",
-          // Product info
-          imageUrl: item.imageUrl,
+          imageUrl: productLocation?.imageUrl || item.imageUrl || null,
           barcode: productLocation?.barcode || null,
-          weight: item.weight ?? null,
-          // Metadata
-          properties: item.properties ? JSON.stringify(item.properties) : null,
         });
       }
       
-      // Create order with channel info and enhanced fields
+      // Create order - operational subset only
+      // Full order data stays in shopify_orders table
       const createdOrder = await storage.createOrderWithItems({
-        // Channel linkage
         shopifyOrderId: orderData.shopifyOrderId,
         externalOrderId: orderData.shopifyOrderId,
-        sourceTableId: orderData.shopifyOrderId, // For hub-and-spoke: links to shopify_orders.shopify_order_id
+        sourceTableId: orderData.shopifyOrderId, // Links to shopify_orders for JOIN lookups
         channelId: shopifyChannelId,
         source: "shopify",
-        // Order ID
         orderNumber: orderData.orderNumber,
-        // Customer info
-        customerId: orderData.customerId,
         customerName: orderData.customerName,
         customerEmail: orderData.customerEmail,
-        customerPhone: orderData.customerPhone,
-        // Shipping address
-        shippingName: orderData.shippingName,
-        shippingCompany: orderData.shippingCompany,
-        shippingAddress1: orderData.shippingAddress1,
-        shippingAddress2: orderData.shippingAddress2,
+        shippingAddress: orderData.shippingAddress,
         shippingCity: orderData.shippingCity,
         shippingState: orderData.shippingState,
         shippingPostalCode: orderData.shippingPostalCode,
         shippingCountry: orderData.shippingCountry,
-        shippingCountryCode: orderData.shippingCountryCode,
-        // Billing address
-        billingName: orderData.billingName,
-        billingAddress1: orderData.billingAddress1,
-        billingCity: orderData.billingCity,
-        billingState: orderData.billingState,
-        billingPostalCode: orderData.billingPostalCode,
-        billingCountry: orderData.billingCountry,
-        // Financial
-        currency: orderData.currency,
-        totalPriceCents: orderData.totalPriceCents,
-        subtotalPriceCents: orderData.subtotalPriceCents,
-        totalTaxCents: orderData.totalTaxCents,
-        totalShippingCents: orderData.totalShippingCents,
-        totalDiscountsCents: orderData.totalDiscountsCents,
-        financialStatus: orderData.financialStatus,
-        fulfillmentStatus: orderData.fulfillmentStatus,
-        // Shipping method
-        shippingMethod: orderData.shippingMethod,
-        // Warehouse ops
         priority: orderData.priority,
         status: "ready",
         itemCount: orderData.items.length,
         unitCount: totalUnits,
-        // Notes and tags
-        customerNote: orderData.customerNote,
-        tags: orderData.tags,
-        discountCodes: orderData.discountCodes,
-        // Timestamps
+        totalAmount: orderData.totalAmount,
+        currency: orderData.currency,
         shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
         orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-        importedAt: new Date(),
       }, enrichedItems);
       
       console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);

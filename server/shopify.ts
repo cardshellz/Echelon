@@ -240,25 +240,14 @@ export interface ShopifyOrder {
   discount_codes: ShopifyDiscountCode[];
 }
 
+// Operational subset extracted from Shopify for warehouse operations
+// Full order data stays in shopify_orders table
 export interface ExtractedOrderItem {
   shopifyLineItemId: string;
   sku: string;
   name: string;
   quantity: number;
   imageUrl?: string;
-  // Enhanced fields for multi-channel support
-  variantTitle?: string;
-  variantId?: string;
-  productId?: string;
-  vendor?: string;
-  unitPriceCents?: number;
-  totalPriceCents?: number;
-  discountCents?: number;
-  taxCents?: number;
-  giftCard?: boolean;
-  requiresShipping?: boolean;
-  weight?: number;
-  properties?: Record<string, unknown>[];
 }
 
 export interface ExtractedOrder {
@@ -266,43 +255,18 @@ export interface ExtractedOrder {
   orderNumber: string;
   customerName: string;
   customerEmail: string | null;
-  customerPhone: string | null;
-  customerId: string | null;
   priority: "rush" | "high" | "normal";
   shopifyCreatedAt: string;
   items: ExtractedOrderItem[];
-  // Financial fields (in cents)
-  currency: string;
-  totalPriceCents: number;
-  subtotalPriceCents: number;
-  totalTaxCents: number;
-  totalShippingCents: number;
-  totalDiscountsCents: number;
-  financialStatus: string | null;
-  fulfillmentStatus: string | null;
-  // Shipping address
-  shippingName: string | null;
-  shippingCompany: string | null;
-  shippingAddress1: string | null;
-  shippingAddress2: string | null;
+  // Shipping address (for labels)
+  shippingAddress: string | null; // Formatted single line
   shippingCity: string | null;
   shippingState: string | null;
   shippingPostalCode: string | null;
   shippingCountry: string | null;
-  shippingCountryCode: string | null;
-  // Billing address
-  billingName: string | null;
-  billingAddress1: string | null;
-  billingCity: string | null;
-  billingState: string | null;
-  billingPostalCode: string | null;
-  billingCountry: string | null;
-  // Shipping method
-  shippingMethod: string | null;
-  // Customer notes and tags
-  customerNote: string | null;
-  tags: string[];
-  discountCodes: string[];
+  // Display only
+  totalAmount: string | null;
+  currency: string;
 }
 
 export interface ShopifyOrdersResponse {
@@ -377,58 +341,28 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
   return allOrders;
 }
 
-// Helper to convert dollar amount to cents
-function dollarsToCents(value: string | number | undefined | null): number {
-  if (value === undefined || value === null) return 0;
-  const numValue = typeof value === 'string' ? parseFloat(value) : value;
-  if (isNaN(numValue)) return 0;
-  return Math.round(numValue * 100);
-}
-
 export function extractOrderFromWebhookPayload(payload: ShopifyOrder): ExtractedOrder {
   const customerName = payload.customer 
     ? `${payload.customer.first_name} ${payload.customer.last_name}`.trim()
     : "Guest Customer";
   
   // Priority from tags
-  const tagsRaw = payload.tags || "";
-  const tagsLower = tagsRaw.toLowerCase();
+  const tags = (payload.tags || "").toLowerCase();
   let priority: "rush" | "high" | "normal" = "normal";
-  if (tagsLower.includes("rush") || tagsLower.includes("express")) {
+  if (tags.includes("rush") || tags.includes("express")) {
     priority = "rush";
-  } else if (tagsLower.includes("priority") || tagsLower.includes("high")) {
+  } else if (tags.includes("priority") || tags.includes("high")) {
     priority = "high";
   }
   
-  // Parse tags array
-  const tags = tagsRaw ? tagsRaw.split(",").map(t => t.trim()).filter(t => t) : [];
-  
-  // Extract discount codes
-  const discountCodes = payload.discount_codes?.map(dc => dc.code) || [];
-  
-  // Extract line items with enhanced data
+  // Extract line items - only what's needed for picking
   const items: ExtractedOrderItem[] = [];
   for (const lineItem of payload.line_items) {
-    // Include all items that require shipping OR are gift cards
-    const isGiftCard = lineItem.gift_card === true;
-    const requiresShipping = lineItem.requires_shipping === true;
-    
-    if (requiresShipping || isGiftCard) {
+    // Only include items that require shipping (skip digital, gift cards)
+    if (lineItem.requires_shipping === true) {
       const sku = lineItem.sku && lineItem.sku.trim() 
         ? lineItem.sku.trim().toUpperCase() 
         : `NO-SKU-${lineItem.id}`;
-      
-      // Calculate total line discount from discount_allocations
-      const lineDiscountCents = lineItem.discount_allocations?.reduce(
-        (sum: number, da: any) => sum + dollarsToCents(da.amount), 
-        0
-      ) || 0;
-      
-      // Calculate tax for this line item from tax_lines
-      const lineTaxCents = lineItem.tax_lines?.reduce(
-        (sum: number, tl: any) => sum + dollarsToCents(tl.price), 
-        0
-      ) || 0;
       
       items.push({
         shopifyLineItemId: String(lineItem.id),
@@ -436,94 +370,38 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
         name: lineItem.name || lineItem.title,
         quantity: lineItem.quantity,
         imageUrl: lineItem.image?.src || undefined,
-        // Enhanced fields
-        variantTitle: lineItem.variant_title || undefined,
-        variantId: lineItem.variant_id ? String(lineItem.variant_id) : undefined,
-        productId: lineItem.product_id ? String(lineItem.product_id) : undefined,
-        vendor: lineItem.vendor || undefined,
-        unitPriceCents: dollarsToCents(lineItem.price),
-        totalPriceCents: dollarsToCents(lineItem.price) * lineItem.quantity,
-        discountCents: lineDiscountCents,
-        taxCents: lineTaxCents,
-        giftCard: isGiftCard,
-        requiresShipping: requiresShipping,
-        weight: lineItem.grams || undefined,
-        properties: lineItem.properties || undefined,
       });
     }
   }
   
-  // Use payload.name (e.g., "#1234") if available, otherwise format order_number
+  // Format order number
   const orderNumber = payload.name 
     ? payload.name 
     : `#${payload.order_number}`;
   
-  // Extract shipping address
+  // Format shipping address as single line for display
   const shipping = payload.shipping_address;
-  const shippingName = shipping 
-    ? `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim() || null
+  const shippingAddress = shipping?.address1 
+    ? [shipping.address1, shipping.address2].filter(Boolean).join(", ")
     : null;
-  
-  // Extract billing address
-  const billing = payload.billing_address;
-  const billingName = billing 
-    ? `${billing.first_name || ''} ${billing.last_name || ''}`.trim() || null
-    : null;
-  
-  // Extract shipping method from shipping_lines
-  const shippingMethod = payload.shipping_lines?.[0]?.title || null;
-  
-  // Calculate total shipping cost
-  const totalShippingCents = payload.shipping_lines?.reduce(
-    (sum: number, sl: any) => sum + dollarsToCents(sl.price), 
-    0
-  ) || 0;
-  
-  // Calculate total discounts
-  const totalDiscountsCents = dollarsToCents(payload.total_discounts);
   
   return {
     shopifyOrderId: String(payload.id),
     orderNumber,
     customerName,
     customerEmail: payload.email || payload.customer?.email || null,
-    customerPhone: shipping?.phone || payload.customer?.phone || null,
-    customerId: payload.customer?.id ? String(payload.customer.id) : null,
     priority,
     shopifyCreatedAt: payload.created_at,
     items,
-    // Financial fields
-    currency: payload.currency || "USD",
-    totalPriceCents: dollarsToCents(payload.total_price),
-    subtotalPriceCents: dollarsToCents(payload.subtotal_price),
-    totalTaxCents: dollarsToCents(payload.total_tax),
-    totalShippingCents,
-    totalDiscountsCents,
-    financialStatus: payload.financial_status || null,
-    fulfillmentStatus: payload.fulfillment_status || null,
-    // Shipping address
-    shippingName,
-    shippingCompany: shipping?.company || null,
-    shippingAddress1: shipping?.address1 || null,
-    shippingAddress2: shipping?.address2 || null,
+    // Shipping address for labels
+    shippingAddress,
     shippingCity: shipping?.city || null,
     shippingState: shipping?.province || null,
     shippingPostalCode: shipping?.zip || null,
     shippingCountry: shipping?.country || null,
-    shippingCountryCode: shipping?.country_code || null,
-    // Billing address
-    billingName,
-    billingAddress1: billing?.address1 || null,
-    billingCity: billing?.city || null,
-    billingState: billing?.province || null,
-    billingPostalCode: billing?.zip || null,
-    billingCountry: billing?.country || null,
-    // Shipping method
-    shippingMethod,
-    // Notes and tags
-    customerNote: payload.note || null,
-    tags,
-    discountCodes,
+    // Display only
+    totalAmount: payload.total_price || null,
+    currency: payload.currency || "USD",
   };
 }
 

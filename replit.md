@@ -29,8 +29,18 @@ Database: Uses EXTERNAL database (EXTERNAL_DATABASE_URL), NOT Replit's built-in 
 ### Shared Layer
 - **Schema & Validation**: Drizzle schema definitions and Zod validation schemas.
 
-### Database Schema
-Key tables include `users` for authentication, `product_locations` for SKU mapping, `orders` for unified OMS, and `order_items` for line items with picking progress. The `orders` table is a multi-channel OMS table, storing comprehensive information including channel linkage, customer details, shipping/billing addresses, financial data, channel status, shipping methods, warehouse operational fields, item/unit counts, notes, timestamps, and exception handling. The `order_items` table enhances line-item details with product info, quantities, pricing, flags, warehouse operational fields, product specifics, picking status, and metadata.
+### Database Schema (Hub-and-Spoke Architecture)
+Echelon uses a hub-and-spoke pattern for multi-channel orders:
+- **Raw tables** (`shopify_orders`, `ebay_orders`): Store FULL order data from each channel
+- **Operational table** (`orders`): Contains ONLY fields needed for warehouse operations
+- **Linkage**: `orders.sourceTableId` links to raw tables for JOIN lookups when full data is needed
+
+Key tables:
+- `users`: Authentication with role-based access
+- `product_locations`: SKU to warehouse location mapping
+- `orders`: Operational WMS fields only (sourceTableId, customerName, shipping address, priority, status, itemCount, unitCount)
+- `order_items`: Picking-only fields (sourceItemId, sku, name, imageUrl, barcode, quantity, pickedQuantity, status, location, zone)
+- `shopify_orders`, `shopify_order_items`: Full Shopify data (billing address, financials, notes, tags, variant info, pricing, properties)
 
 ### Authentication & Authorization
 - Session-based authentication using `express-session`.
