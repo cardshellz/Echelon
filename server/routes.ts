@@ -2399,6 +2399,20 @@ export async function registerRoutes(
       const finished = !pageInfo;
       console.log(`Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s`);
       
+      // Auto-continue: trigger next batch in background before responding
+      if (!finished && pageInfo) {
+        const protocol = req.protocol;
+        const host = req.get('host');
+        const continueUrl = `${protocol}://${host}/api/shopify/backfill-customer-names?page_info=${pageInfo}`;
+        
+        // Fire and forget - don't await
+        fetch(continueUrl, { method: 'POST' }).catch(err => {
+          console.error('Auto-continue failed:', err);
+        });
+        
+        console.log(`Auto-continuing to next batch...`);
+      }
+      
       res.json({ 
         success: true, 
         pagesProcessed,
@@ -2408,10 +2422,10 @@ export async function registerRoutes(
         remaining,
         elapsed: `${elapsed}s`,
         finished,
-        nextPageInfo: pageInfo || null,
+        autoContinuing: !finished,
         message: finished ? 
           (remaining > 0 ? `Done! ${remaining} orders not found in Shopify (may be deleted).` : 'All orders backfilled!') :
-          `Processed ${pagesProcessed} pages. Run again with ?page_info=${pageInfo} to continue.`
+          `Processed ${pagesProcessed} pages. Auto-continuing in background...`
       });
     } catch (error) {
       console.error("Error backfilling customer names:", error);
