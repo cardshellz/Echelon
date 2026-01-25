@@ -80,47 +80,109 @@ export type OrderSource = typeof orderSourceEnum[number];
 
 export const orders = pgTable("orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  // Multi-channel support
+  
+  // ===== MULTI-CHANNEL LINKAGE =====
   channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }), // Which channel this order came from
-  externalOrderId: varchar("external_order_id", { length: 100 }), // External system's order ID (Shopify, eBay, etc.)
-  source: varchar("source", { length: 20 }).notNull().default("shopify"), // shopify, ebay, amazon, manual, api
+  source: varchar("source", { length: 20 }).notNull().default("shopify"), // shopify, ebay, amazon, etsy, manual, api
+  externalOrderId: varchar("external_order_id", { length: 100 }), // External system's order ID (channel-specific)
+  sourceTableId: varchar("source_table_id", { length: 100 }), // ID in source table (shopify_orders.id, ebay_orders.id, etc.)
   // Legacy Shopify field (nullable for backward compatibility)
   shopifyOrderId: varchar("shopify_order_id", { length: 50 }).unique(), // Kept for backward compatibility, nullable now
+  
+  // ===== ORDER IDENTIFICATION =====
   orderNumber: varchar("order_number", { length: 50 }).notNull(),
+  legacyOrderId: varchar("legacy_order_id", { length: 100 }), // For migration from other systems
+  
+  // ===== CUSTOMER INFO =====
+  customerId: varchar("customer_id", { length: 100 }), // External customer ID (channel-specific)
   customerName: text("customer_name").notNull(),
   customerEmail: text("customer_email"),
   customerPhone: text("customer_phone"),
-  // Shipping address
-  shippingAddress: text("shipping_address"),
+  
+  // ===== SHIPPING ADDRESS =====
+  shippingName: text("shipping_name"), // Recipient name if different from customer
+  shippingCompany: text("shipping_company"),
+  shippingAddress1: text("shipping_address_1"),
+  shippingAddress2: text("shipping_address_2"),
   shippingCity: text("shipping_city"),
   shippingState: text("shipping_state"),
   shippingPostalCode: text("shipping_postal_code"),
   shippingCountry: text("shipping_country"),
-  // Order details
-  priority: varchar("priority", { length: 20 }).notNull().default("normal"),
-  status: varchar("status", { length: 20 }).notNull().default("ready"),
+  shippingCountryCode: varchar("shipping_country_code", { length: 2 }),
+  // Legacy field (keep for compatibility)
+  shippingAddress: text("shipping_address"),
+  
+  // ===== BILLING ADDRESS =====
+  billingName: text("billing_name"),
+  billingAddress1: text("billing_address_1"),
+  billingCity: text("billing_city"),
+  billingState: text("billing_state"),
+  billingPostalCode: text("billing_postal_code"),
+  billingCountry: text("billing_country"),
+  
+  // ===== FINANCIAL =====
+  currency: varchar("currency", { length: 3 }).default("USD"),
+  totalPriceCents: integer("total_price_cents"), // Total order value in cents
+  subtotalPriceCents: integer("subtotal_price_cents"), // Before tax/shipping
+  totalTaxCents: integer("total_tax_cents"),
+  totalShippingCents: integer("total_shipping_cents"),
+  totalDiscountsCents: integer("total_discounts_cents"),
+  // Legacy text field (keep for compatibility)
+  totalAmount: text("total_amount"),
+  
+  // ===== CHANNEL STATUS =====
+  financialStatus: varchar("financial_status", { length: 30 }), // paid, pending, refunded, partially_refunded
+  fulfillmentStatus: varchar("fulfillment_status", { length: 30 }), // unfulfilled, partial, fulfilled
+  
+  // ===== SHIPPING METHOD =====
+  shippingMethod: varchar("shipping_method", { length: 100 }), // e.g., "Standard Shipping", "Express"
+  shippingCarrier: varchar("shipping_carrier", { length: 50 }), // e.g., "USPS", "FedEx"
+  requestedShipDate: timestamp("requested_ship_date"),
+  
+  // ===== WAREHOUSE OPERATIONS =====
+  warehouseId: integer("warehouse_id"), // Which warehouse will fulfill
+  priority: varchar("priority", { length: 20 }).notNull().default("normal"), // rush, high, normal
+  status: varchar("status", { length: 20 }).notNull().default("ready"), // ready, in_progress, completed, exception, shipped, cancelled
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold (hidden from pickers), 0 = available
-  heldAt: timestamp("held_at"), // When the order was put on hold
+  holdReason: varchar("hold_reason", { length: 100 }), // Why the order is on hold
+  heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
   batchId: varchar("batch_id", { length: 50 }),
-  itemCount: integer("item_count").notNull().default(0),
-  pickedCount: integer("picked_count").notNull().default(0),
-  totalAmount: text("total_amount"), // Order total (stored as text for currency flexibility)
-  currency: varchar("currency", { length: 3 }).default("USD"),
-  shortReason: text("short_reason"),
-  notes: text("notes"), // Internal notes about the order
+  waveId: varchar("wave_id", { length: 50 }), // Wave planning support
+  
+  // ===== ITEM COUNTS =====
+  itemCount: integer("item_count").notNull().default(0), // Total line items
+  unitCount: integer("unit_count").notNull().default(0), // Total units (sum of quantities)
+  pickedCount: integer("picked_count").notNull().default(0), // Units picked so far
+  
+  // ===== NOTES & METADATA =====
+  customerNote: text("customer_note"), // Note from customer at checkout
+  internalNote: text("internal_note"), // Internal staff notes
+  giftMessage: text("gift_message"),
+  tags: text("tags").array(), // Order tags for filtering/routing
+  discountCodes: text("discount_codes").array(),
   metadata: jsonb("metadata"),
-  shopifyCreatedAt: timestamp("shopify_created_at"), // When the order was placed in Shopify
+  // Legacy notes field
+  notes: text("notes"),
+  shortReason: text("short_reason"),
+  
+  // ===== TIMESTAMPS =====
   orderPlacedAt: timestamp("order_placed_at"), // When the order was placed (channel-agnostic)
+  shopifyCreatedAt: timestamp("shopify_created_at"), // Legacy: When the order was placed in Shopify
+  importedAt: timestamp("imported_at"), // When we imported from source table
   createdAt: timestamp("created_at").defaultNow().notNull(),
-  startedAt: timestamp("started_at"),
-  completedAt: timestamp("completed_at"),
-  // Exception tracking fields
-  exceptionAt: timestamp("exception_at"), // When the order entered exception status
+  startedAt: timestamp("started_at"), // When picking started
+  completedAt: timestamp("completed_at"), // When picking completed
+  shippedAt: timestamp("shipped_at"), // When order shipped
+  cancelledAt: timestamp("cancelled_at"),
+  refundedAt: timestamp("refunded_at"),
+  
+  // ===== EXCEPTION TRACKING =====
+  exceptionAt: timestamp("exception_at"),
   exceptionResolution: varchar("exception_resolution", { length: 20 }), // ship_partial, hold, resolved, cancelled
   exceptionResolvedAt: timestamp("exception_resolved_at"),
-  exceptionResolvedBy: varchar("exception_resolved_by", { length: 100 }), // User ID who resolved
-  exceptionNotes: text("exception_notes"), // Lead notes on resolution
+  exceptionResolvedBy: varchar("exception_resolved_by", { length: 100 }),
+  exceptionNotes: text("exception_notes"),
 });
 
 export const insertOrderSchema = createInsertSchema(orders).omit({
@@ -134,19 +196,60 @@ export type Order = typeof orders.$inferSelect;
 export const orderItems = pgTable("order_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
-  shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }),
+  
+  // ===== CHANNEL LINKAGE =====
+  externalLineItemId: varchar("external_line_item_id", { length: 100 }), // Channel-agnostic external ID
+  shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy: Shopify line item ID
+  sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table (shopify_order_items.id, etc.)
+  
+  // ===== PRODUCT IDENTIFICATION =====
   sku: varchar("sku", { length: 100 }).notNull(),
   name: text("name").notNull(),
+  variantTitle: text("variant_title"), // e.g., "Red / Large"
+  variantId: varchar("variant_id", { length: 100 }), // External variant ID
+  productId: varchar("product_id", { length: 100 }), // External product ID
+  vendor: varchar("vendor", { length: 100 }), // Product vendor/brand
+  
+  // ===== QUANTITIES =====
   quantity: integer("quantity").notNull(),
   pickedQuantity: integer("picked_quantity").notNull().default(0),
-  fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0), // Quantity fulfilled in Shopify (shipped by Shipstation)
-  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0), // Shipped quantity
+  refundedQuantity: integer("refunded_quantity").notNull().default(0),
+  
+  // ===== PRICING (in cents) =====
+  unitPriceCents: integer("unit_price_cents"), // Price per unit
+  totalPriceCents: integer("total_price_cents"), // quantity * unitPrice
+  discountCents: integer("discount_cents").default(0), // Line item discount
+  taxCents: integer("tax_cents").default(0),
+  
+  // ===== ITEM FLAGS =====
+  requiresShipping: integer("requires_shipping").default(1), // 1 = physical item, 0 = digital
+  giftCard: integer("gift_card").default(0), // 1 = gift card (skip in picking)
+  taxable: integer("taxable").default(1),
+  
+  // ===== WAREHOUSE OPERATIONS =====
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, picked, shorted, cancelled
   location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
   zone: varchar("zone", { length: 10 }).notNull().default("U"),
+  warehouseLocationId: integer("warehouse_location_id"), // Link to warehouse_locations
+  lotNumber: varchar("lot_number", { length: 50 }), // For lot tracking
+  serialNumber: varchar("serial_number", { length: 100 }), // For serial tracking
+  
+  // ===== PRODUCT INFO =====
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // Product barcode for scanner matching
+  weight: integer("weight_grams"), // Item weight in grams
+  
+  // ===== PICKING/FULFILLMENT =====
   shortReason: text("short_reason"),
-  pickedAt: timestamp("picked_at"), // When this item was picked
+  pickedAt: timestamp("picked_at"),
+  pickedBy: varchar("picked_by", { length: 100 }), // Who picked this item
+  fulfilledAt: timestamp("fulfilled_at"),
+  fulfillmentService: varchar("fulfillment_service", { length: 50 }), // manual, shipstation, etc.
+  
+  // ===== METADATA =====
+  properties: jsonb("properties"), // Custom line item properties from channel
+  metadata: jsonb("metadata"),
 });
 
 export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
