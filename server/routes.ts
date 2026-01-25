@@ -2294,16 +2294,16 @@ export async function registerRoutes(
       
       // Loop through batches until timeout or done
       while (Date.now() - startTime < MAX_TIME_MS) {
-        // Get orders missing customer data (customer_name is null or 'Unknown')
+        // Get orders that need customer data updated (join with shopify_orders to find mismatches)
         const ordersToUpdate = await db.execute<{
           id: number;
-          source_table_id: string;
+          shopify_order_id: string;
         }>(sql`
-          SELECT o.id, o.source_table_id
+          SELECT o.id, o.shopify_order_id
           FROM orders o
           WHERE o.source = 'shopify'
-            AND o.source_table_id IS NOT NULL
-            AND (o.customer_name IS NULL OR o.customer_name = '' OR o.customer_name LIKE '#%')
+            AND o.shopify_order_id IS NOT NULL
+            AND (o.shipping_address IS NULL OR o.shipping_city IS NULL)
           LIMIT 500
         `);
         
@@ -2316,6 +2316,11 @@ export async function registerRoutes(
         
         // Update each order with data from shopify_orders
         const updatePromises = ordersToUpdate.rows.map(async (order) => {
+          // Handle both GID format and numeric ID format
+          const shopifyId = order.shopify_order_id.startsWith('gid://') 
+            ? order.shopify_order_id 
+            : `gid://shopify/Order/${order.shopify_order_id}`;
+          
           const rawOrder = await db.execute<{
             customer_name: string | null;
             customer_email: string | null;
@@ -2329,7 +2334,7 @@ export async function registerRoutes(
             SELECT customer_name, customer_email, shipping_name, shipping_address1,
                    shipping_city, shipping_state, shipping_postal_code, shipping_country
             FROM shopify_orders
-            WHERE id = ${order.source_table_id}
+            WHERE id = ${shopifyId}
           `);
           
           if (rawOrder.rows.length === 0) {
@@ -2365,8 +2370,8 @@ export async function registerRoutes(
       const remainingCount = await db.execute<{ count: string }>(sql`
         SELECT COUNT(*) as count FROM orders 
         WHERE source = 'shopify' 
-          AND source_table_id IS NOT NULL
-          AND (customer_name IS NULL OR customer_name = '' OR customer_name LIKE '#%')
+          AND shopify_order_id IS NOT NULL
+          AND (shipping_address IS NULL OR shipping_city IS NULL)
       `);
       const remaining = parseInt(remainingCount.rows[0]?.count || '0', 10);
       
