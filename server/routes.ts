@@ -2295,7 +2295,7 @@ export async function registerRoutes(
       const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
       
       // Get orders missing customer_name from shopify_orders
-      // Limit to 25 per request to stay under Heroku's 30-second timeout
+      // Process 50 orders per request (~15 seconds with 250ms delay)
       const ordersToUpdate = await db.execute<{
         id: string;
         order_number: string;
@@ -2303,7 +2303,7 @@ export async function registerRoutes(
         SELECT id, order_number FROM shopify_orders 
         WHERE customer_name IS NULL
         ORDER BY created_at DESC
-        LIMIT 25
+        LIMIT 50
       `);
       
       console.log(`Found ${ordersToUpdate.rows.length} orders to backfill`);
@@ -2361,8 +2361,8 @@ export async function registerRoutes(
           
           updated++;
           
-          // Rate limit: Shopify allows 2 requests/second
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Rate limit: Shopify allows ~4 requests/second for most stores
+          await new Promise(resolve => setTimeout(resolve, 250));
           
         } catch (err) {
           console.error(`Error processing order ${order.order_number}:`, err);
