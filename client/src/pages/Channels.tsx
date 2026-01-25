@@ -462,9 +462,41 @@ export default function Channels() {
                     <div className="text-center py-8">
                       <Settings className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
                       <p className="text-muted-foreground">No connection configured yet.</p>
-                      <Button className="mt-4" variant="outline">
-                        Configure Connection
-                      </Button>
+                      {selectedChannel.provider === 'shopify' ? (
+                        <Button 
+                          className="mt-4" 
+                          onClick={async () => {
+                            try {
+                              const res = await fetch(`/api/channels/${selectedChannel.id}/setup-shopify`, {
+                                method: 'POST',
+                                credentials: 'include',
+                              });
+                              const data = await res.json();
+                              if (!res.ok) {
+                                toast({ 
+                                  title: "Connection failed", 
+                                  description: data.message || data.error,
+                                  variant: "destructive"
+                                });
+                                return;
+                              }
+                              toast({ title: "Connected to Shopify!", description: `Shop: ${data.shop?.name}` });
+                              queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+                              setSelectedChannel(null);
+                            } catch (err) {
+                              toast({ title: "Error", description: "Failed to connect", variant: "destructive" });
+                            }
+                          }}
+                          data-testid="button-setup-shopify"
+                        >
+                          <Store className="h-4 w-4 mr-2" />
+                          Connect to Shopify
+                        </Button>
+                      ) : (
+                        <Button className="mt-4" variant="outline">
+                          Configure Connection
+                        </Button>
+                      )}
                     </div>
                   )}
                 </TabsContent>

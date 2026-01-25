@@ -4611,6 +4611,77 @@ export async function registerRoutes(
     }
   });
   
+  // Auto-setup Shopify connection using configured secrets
+  app.post("/api/channels/:id/setup-shopify", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      
+      if (!channel) {
+        return res.status(404).json({ error: "Channel not found" });
+      }
+      
+      if (channel.provider !== 'shopify') {
+        return res.status(400).json({ error: "This channel is not a Shopify channel" });
+      }
+      
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      
+      if (!shopDomain || !accessToken) {
+        return res.status(400).json({ 
+          error: "Shopify credentials not configured",
+          message: "Please set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN in your environment" 
+        });
+      }
+      
+      // Test the connection by fetching shop info
+      const store = shopDomain.replace(/\.myshopify\.com$/, "");
+      const testResponse = await fetch(
+        `https://${store}.myshopify.com/admin/api/2024-01/shop.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": accessToken,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      
+      if (!testResponse.ok) {
+        return res.status(400).json({ 
+          error: "Failed to connect to Shopify",
+          message: `Shopify API returned ${testResponse.status}` 
+        });
+      }
+      
+      const shopData = await testResponse.json();
+      
+      // Create/update the connection
+      const connection = await storage.upsertChannelConnection({
+        channelId,
+        shopDomain: shopDomain,
+        syncStatus: 'connected',
+        lastSyncAt: new Date().toISOString(),
+      });
+      
+      // Update channel status to active
+      await storage.updateChannel(channelId, { status: 'active' });
+      
+      res.json({ 
+        success: true, 
+        connection,
+        shop: {
+          name: shopData.shop?.name,
+          domain: shopData.shop?.domain,
+          email: shopData.shop?.email,
+        }
+      });
+    } catch (error) {
+      console.error("Error setting up Shopify connection:", error);
+      res.status(500).json({ error: "Failed to setup Shopify connection" });
+    }
+  });
+  
   // Update partner profile
   app.put("/api/channels/:id/partner-profile", requirePermission("channels", "edit"), async (req, res) => {
     try {
