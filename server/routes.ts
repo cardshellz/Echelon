@@ -2167,6 +2167,15 @@ export async function registerRoutes(
         tags: string[] | null;
         discount_codes: any | null;
         created_at: Date | null;
+        customer_name: string | null;
+        customer_email: string | null;
+        shipping_name: string | null;
+        shipping_address1: string | null;
+        shipping_address2: string | null;
+        shipping_city: string | null;
+        shipping_state: string | null;
+        shipping_postal_code: string | null;
+        shipping_country: string | null;
       }>(sql`
         SELECT * FROM shopify_orders 
         WHERE fulfillment_status IS NULL 
@@ -2235,7 +2244,7 @@ export async function registerRoutes(
           });
         }
         
-        // Create operational order
+        // Create operational order using customer/shipping data from shopify_orders
         await storage.createOrderWithItems({
           shopifyOrderId: rawOrder.id,
           externalOrderId: rawOrder.id,
@@ -2243,13 +2252,13 @@ export async function registerRoutes(
           channelId: shopifyChannelId,
           source: "shopify",
           orderNumber: rawOrder.order_number,
-          customerName: null, // Would need to join with customer table
-          customerEmail: null,
-          shippingAddress: null, // Shipping address would need separate table/column
-          shippingCity: null,
-          shippingState: null,
-          shippingPostalCode: null,
-          shippingCountry: null,
+          customerName: rawOrder.customer_name || rawOrder.shipping_name || rawOrder.order_number,
+          customerEmail: rawOrder.customer_email,
+          shippingAddress: rawOrder.shipping_address1,
+          shippingCity: rawOrder.shipping_city,
+          shippingState: rawOrder.shipping_state,
+          shippingPostalCode: rawOrder.shipping_postal_code,
+          shippingCountry: rawOrder.shipping_country,
           priority: "normal",
           status: "ready",
           itemCount: enrichedItems.length,
@@ -2268,6 +2277,108 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error syncing from raw tables:", error);
       res.status(500).json({ error: "Failed to sync from raw tables" });
+    }
+  });
+
+  // Backfill customer names from Shopify API into shopify_orders table
+  app.post("/api/shopify/backfill-customer-names", async (req, res) => {
+    try {
+      console.log("Starting customer name backfill from Shopify API...");
+      
+      const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
+      const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+      
+      if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ACCESS_TOKEN) {
+        return res.status(400).json({ error: "Shopify credentials not configured" });
+      }
+      
+      const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
+      
+      // Get orders missing customer_name from shopify_orders
+      const ordersToUpdate = await db.execute<{
+        id: string;
+        order_number: string;
+      }>(sql`
+        SELECT id, order_number FROM shopify_orders 
+        WHERE customer_name IS NULL
+        ORDER BY created_at DESC
+        LIMIT 250
+      `);
+      
+      console.log(`Found ${ordersToUpdate.rows.length} orders to backfill`);
+      
+      let updated = 0;
+      let errors = 0;
+      
+      for (const order of ordersToUpdate.rows) {
+        try {
+          // Extract numeric order ID from GID format
+          const numericId = order.id.replace('gid://shopify/Order/', '');
+          
+          // Fetch order from Shopify API
+          const response = await fetch(
+            `https://${store}.myshopify.com/admin/api/2024-01/orders/${numericId}.json`,
+            {
+              headers: {
+                "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+                "Content-Type": "application/json",
+              },
+            }
+          );
+          
+          if (!response.ok) {
+            console.error(`Failed to fetch order ${order.order_number}: ${response.status}`);
+            errors++;
+            continue;
+          }
+          
+          const data = await response.json();
+          const shopifyOrder = data.order;
+          
+          // Extract customer name and shipping address
+          const customerName = shopifyOrder.customer 
+            ? `${shopifyOrder.customer.first_name || ''} ${shopifyOrder.customer.last_name || ''}`.trim()
+            : shopifyOrder.shipping_address?.name || null;
+          
+          const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
+          const shipping = shopifyOrder.shipping_address || {};
+          
+          // Update shopify_orders with customer data
+          await db.execute(sql`
+            UPDATE shopify_orders SET
+              customer_name = ${customerName},
+              customer_email = ${customerEmail},
+              shipping_name = ${shipping.name || null},
+              shipping_address1 = ${shipping.address1 || null},
+              shipping_address2 = ${shipping.address2 || null},
+              shipping_city = ${shipping.city || null},
+              shipping_state = ${shipping.province || null},
+              shipping_postal_code = ${shipping.zip || null},
+              shipping_country = ${shipping.country || null}
+            WHERE id = ${order.id}
+          `);
+          
+          updated++;
+          
+          // Rate limit: Shopify allows 2 requests/second
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+        } catch (err) {
+          console.error(`Error processing order ${order.order_number}:`, err);
+          errors++;
+        }
+      }
+      
+      console.log(`Backfill complete: ${updated} updated, ${errors} errors`);
+      res.json({ 
+        success: true, 
+        updated, 
+        errors,
+        remaining: ordersToUpdate.rows.length - updated - errors
+      });
+    } catch (error) {
+      console.error("Error backfilling customer names:", error);
+      res.status(500).json({ error: "Failed to backfill customer names" });
     }
   });
 
