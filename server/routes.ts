@@ -2295,6 +2295,7 @@ export async function registerRoutes(
       const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
       
       // Get orders missing customer_name from shopify_orders
+      // Limit to 25 per request to stay under Heroku's 30-second timeout
       const ordersToUpdate = await db.execute<{
         id: string;
         order_number: string;
@@ -2302,7 +2303,7 @@ export async function registerRoutes(
         SELECT id, order_number FROM shopify_orders 
         WHERE customer_name IS NULL
         ORDER BY created_at DESC
-        LIMIT 250
+        LIMIT 25
       `);
       
       console.log(`Found ${ordersToUpdate.rows.length} orders to backfill`);
@@ -2369,12 +2370,19 @@ export async function registerRoutes(
         }
       }
       
-      console.log(`Backfill complete: ${updated} updated, ${errors} errors`);
+      // Count remaining orders
+      const remainingCount = await db.execute<{ count: string }>(sql`
+        SELECT COUNT(*) as count FROM shopify_orders WHERE customer_name IS NULL
+      `);
+      const remaining = parseInt(remainingCount.rows[0]?.count || '0', 10);
+      
+      console.log(`Backfill complete: ${updated} updated, ${errors} errors, ${remaining} remaining`);
       res.json({ 
         success: true, 
         updated, 
         errors,
-        remaining: ordersToUpdate.rows.length - updated - errors
+        remaining,
+        message: remaining > 0 ? `Run again to process more (${remaining} remaining)` : 'All orders backfilled!'
       });
     } catch (error) {
       console.error("Error backfilling customer names:", error);
