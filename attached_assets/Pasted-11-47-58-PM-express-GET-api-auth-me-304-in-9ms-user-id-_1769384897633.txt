@@ -1,0 +1,28 @@
+11:47:58 PM [express] GET /api/auth/me 304 in 9ms :: {"user":{"id":"cbd2f877-3a96-4499-8be1-ff75ce466f0e","username":"admin","role":"admin","displayName":"Administrator","active":1,"createdAt":"2026-01-11T14:33:54.109Z","lastLoginAt":"2026-01-20T21:52:25.319Z"},"permissions":["dashboard:view","inventory:view","inventory:create","inventory:edit","inventory:adjust","inventory:upload","inventory:receive","orders:view","orders:claim","orders:edit","orders:cancel","orders:hold","orders:priority","orders:resolve_exception","picking:view","picking:perform","picking:complete","channels:view","channels:create","channels:edit","channels:sync","channels:delete","reports:view","reports:export","users:view","users:create","users:edit","users:delete","users:manage_roles","roles:view","roles:create","roles:edit","roles:delete","settings:view","settings:edit","locations:view","locations:create","locations:edit","shopify:sync","shopify:view"],"roles":["Administrator"]}
+2026-01-25T23:47:58.104996+00:00 app[web.1]: Error fetching channels: error: column "access_token" does not exist
+2026-01-25T23:47:58.104998+00:00 app[web.1]:     at /app/dist/index.cjs:70:13326
+2026-01-25T23:47:58.105001+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-25T23:47:58.105001+00:00 app[web.1]:     at async /app/dist/index.cjs:86:32466
+2026-01-25T23:47:58.105001+00:00 app[web.1]:     at async Yg.getChannelConnection (/app/dist/index.cjs:86:81490)
+2026-01-25T23:47:58.105001+00:00 app[web.1]:     at async /app/dist/index.cjs:142:11033
+2026-01-25T23:47:58.105001+00:00 app[web.1]:     at async Promise.all (index 0)
+2026-01-25T23:47:58.105002+00:00 app[web.1]:     at async /app/dist/index.cjs:142:10993 {
+2026-01-25T23:47:58.105002+00:00 app[web.1]:   length: 112,
+2026-01-25T23:47:58.105003+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-25T23:47:58.105010+00:00 app[web.1]:   code: '42703',
+2026-01-25T23:47:58.105010+00:00 app[web.1]:   detail: undefined,
+2026-01-25T23:47:58.105010+00:00 app[web.1]:   hint: undefined,
+2026-01-25T23:47:58.105011+00:00 app[web.1]:   position: '43',
+2026-01-25T23:47:58.105011+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-25T23:47:58.105011+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-25T23:47:58.105011+00:00 app[web.1]:   where: undefined,
+2026-01-25T23:47:58.105012+00:00 app[web.1]:   schema: undefined,
+2026-01-25T23:47:58.105012+00:00 app[web.1]:   table: undefined,
+2026-01-25T23:47:58.105012+00:00 app[web.1]:   column: undefined,
+2026-01-25T23:47:58.105012+00:00 app[web.1]:   dataType: undefined,
+2026-01-25T23:47:58.105012+00:00 app[web.1]:   constraint: undefined,
+2026-01-25T23:47:58.105013+00:00 app[web.1]:   file: 'parse_relation.c',
+2026-01-25T23:47:58.105013+00:00 app[web.1]:   line: '3781',
+2026-01-25T23:47:58.105013+00:00 app[web.1]:   routine: 'errorMissingColumn'
+2026-01-25T23:47:58.105013+00:00 app[web.1]: }
+2026-01-25T23:47:58.109320+00:00 app[web.1]: 11:47:58 PM [express] GET /api/channels 500 in 11ms :: {"error":"Failed to fetch channels"}
