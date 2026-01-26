@@ -499,26 +499,31 @@ export class DatabaseStorage implements IStorage {
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
     // Optimized: Only fetch orders that need to be in pick queue
+    // - EXCLUDE orders already fulfilled in Shopify (source of truth)
     // - ready and in_progress orders (always)
     // - completed orders from last 24 hours only
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
-    const orderList = await db.select().from(orders).where(
-      or(
-        inArray(orders.status, ["ready", "in_progress"]),
-        and(
-          eq(orders.status, "completed"),
-          gte(orders.completedAt, twentyFourHoursAgo)
-        )
+    // Use raw SQL to JOIN with shopify_orders and exclude fulfilled
+    const orderList = await db.execute<Order>(sql`
+      SELECT o.* FROM orders o
+      LEFT JOIN shopify_orders s ON o.source_table_id = s.id
+      WHERE (
+        o.status IN ('ready', 'in_progress')
+        OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
       )
-    ).orderBy(desc(orders.createdAt));
+      AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
+      ORDER BY o.created_at DESC
+    `);
     
-    if (orderList.length === 0) {
+    const orderRows = orderList.rows as Order[];
+    
+    if (orderRows.length === 0) {
       return [];
     }
     
     // Fetch all items for these orders in ONE query
-    const orderIds = orderList.map(o => o.id);
+    const orderIds = orderRows.map(o => o.id);
     const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
     
     // Group items by orderId
@@ -530,7 +535,7 @@ export class DatabaseStorage implements IStorage {
     }
     
     // Combine orders with their items
-    return orderList.map(order => ({
+    return orderRows.map(order => ({
       ...order,
       items: itemsByOrderId.get(order.id) || [],
     }));
