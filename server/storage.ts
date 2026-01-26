@@ -513,6 +513,7 @@ export class DatabaseStorage implements IStorage {
         OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
       )
       AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
+      AND s.cancelled_at IS NULL
       ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
