@@ -679,6 +679,30 @@ export async function registerRoutes(
 
   // ===== PICKING QUEUE API =====
   
+  // DEBUG: Test endpoint to see raw data
+  app.get("/api/picking/debug", async (req, res) => {
+    try {
+      const orders = await storage.getOrdersWithItems(["ready", "in_progress"]);
+      const firstOrder = orders[0];
+      const firstItem = firstOrder?.items?.[0];
+      res.json({
+        totalOrders: orders.length,
+        firstOrderId: firstOrder?.id,
+        firstOrderStatus: firstOrder?.status,
+        firstOrderItemCount: firstOrder?.items?.length,
+        firstItem: firstItem ? {
+          id: firstItem.id,
+          sku: firstItem.sku,
+          requiresShipping: firstItem.requiresShipping,
+          requiresShippingType: typeof firstItem.requiresShipping,
+        } : null,
+        sampleItemKeys: firstItem ? Object.keys(firstItem) : [],
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message, stack: error.stack });
+    }
+  });
+  
   // Get orders for picking queue (including completed for Done count)
   app.get("/api/picking/queue", async (req, res) => {
     try {
