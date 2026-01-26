@@ -2811,18 +2811,29 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Invalid signature" });
       }
       
+      // Respond immediately to prevent webhook timeout and memory pileup
+      res.status(200).json({ received: true });
+      
+      // Process in background (fire-and-forget)
       const payload = req.body;
       const skus = extractSkusFromWebhookPayload(payload);
       
-      for (const { sku, name, status } of skus) {
-        await storage.upsertProductLocationBySku(sku, name, status);
-      }
-      
-      console.log(`Webhook: Updated ${skus.length} SKUs from product update`);
-      res.status(200).json({ received: true });
+      // Process SKUs with a small delay to avoid DB connection storms
+      setImmediate(async () => {
+        try {
+          for (const { sku, name, status } of skus) {
+            await storage.upsertProductLocationBySku(sku, name, status);
+          }
+          console.log(`Webhook: Updated ${skus.length} SKUs from product update`);
+        } catch (err) {
+          console.error("Background product update failed:", err);
+        }
+      });
     } catch (error) {
       console.error("Product update webhook error:", error);
-      res.status(500).json({ error: "Webhook processing failed" });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Webhook processing failed" });
+      }
     }
   });
 

@@ -1,0 +1,98 @@
+2026-01-26T15:28:57.055645+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:28:57.056186+00:00 app[web.1]: 3:28:57 PM [express] POST /api/shopify/webhooks/products/update 200 in 6ms :: {"received":true}
+2026-01-26T15:28:57.105794+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:28:57.106354+00:00 app[web.1]: 3:28:57 PM [express] POST /api/shopify/webhooks/products/update 200 in 7ms :: {"received":true}
+2026-01-26T15:28:57.121542+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:28:57.122085+00:00 app[web.1]: 3:28:57 PM [express] POST /api/shopify/webhooks/products/update 200 in 6ms :: {"received":true}
+2026-01-26T15:28:57.133489+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:28:57.133915+00:00 app[web.1]: 3:28:57 PM [express] POST /api/shopify/webhooks/products/update 200 in 5ms :: {"received":true}
+2026-01-26T15:28:57.265949+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:28:57.266375+00:00 app[web.1]: 3:28:57 PM [express] POST /api/shopify/webhooks/products/update 200 in 6ms :: {"received":true}
+2026-01-26T15:29:03.728529+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=d65faced-d8de-abf1-6925-9e45116dd812 fwd="136.115.255.64" dyno=web.1 connect=1ms service=9ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:03.814220+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=2461c258-849e-89a6-6afa-714cdc7de5c9 fwd="35.238.132.46" dyno=web.1 connect=0ms service=11ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:03.727869+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:03.728520+00:00 app[web.1]: 3:29:03 PM [express] POST /api/shopify/webhooks/products/update 200 in 9ms :: {"received":true}
+2026-01-26T15:29:03.813808+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:03.814507+00:00 app[web.1]: 3:29:03 PM [express] POST /api/shopify/webhooks/products/update 200 in 10ms :: {"received":true}
+2026-01-26T15:29:07.885867+00:00 heroku[web.1]: Process running mem=636M(124.4%)
+2026-01-26T15:29:07.887639+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:29:12.802423+00:00 heroku[router]: sock=backend at=error code=H18 desc="Server Request Interrupted" method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=1278eef5-983c-c938-f770-51bf23b6f17b fwd="34.28.228.222" dyno=web.1 connect=0ms service=480ms status=503 bytes=567 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:13.426872+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=906645e8-717b-f8e7-7738-af835d92281f fwd="35.223.95.81" dyno=web.1 connect=0ms service=8073ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:13.578239+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=0d99ca9c-317b-3e04-0c33-1d0d971f5e2f fwd="34.171.209.4" dyno=web.1 connect=0ms service=8212ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:13.425280+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:13.464181+00:00 app[web.1]: 3:29:13 PM [express] POST /api/shopify/webhooks/products/update 200 in 522ms :: {"received":true}
+2026-01-26T15:29:13.577024+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:13.580345+00:00 app[web.1]: 3:29:13 PM [express] POST /api/shopify/webhooks/products/update 200 in 464ms :: {"received":true}
+2026-01-26T15:29:14.035941+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=1d747568-db78-fa97-23a4-04984625d200 fwd="136.112.34.86" dyno=web.1 connect=0ms service=5148ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:14.166719+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=d21b3eff-5c30-e90b-c1aa-e1a7b2d4ca62 fwd="34.29.64.36" dyno=web.1 connect=0ms service=4708ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:14.035177+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:14.038031+00:00 app[web.1]: 3:29:14 PM [express] POST /api/shopify/webhooks/products/update 200 in 514ms :: {"received":true}
+2026-01-26T15:29:14.157002+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:14.169034+00:00 app[web.1]: 3:29:14 PM [express] POST /api/shopify/webhooks/products/update 200 in 559ms :: {"received":true}
+2026-01-26T15:29:14.913750+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=cd4098c4-1c11-5ea2-b4c2-baee3e4e59c2 fwd="136.119.63.114" dyno=web.1 connect=0ms service=4602ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:15.005498+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=9dbf446a-0b71-e9f3-9754-42fef2d08390 fwd="35.223.95.81" dyno=web.1 connect=0ms service=3651ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:14.907480+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:14.917799+00:00 app[web.1]: 3:29:14 PM [express] POST /api/shopify/webhooks/products/update 200 in 805ms :: {"received":true}
+2026-01-26T15:29:15.004256+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:15.013325+00:00 app[web.1]: 3:29:15 PM [express] POST /api/shopify/webhooks/products/update 200 in 754ms :: {"received":true}
+2026-01-26T15:29:15.886747+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=f111a779-712a-c9b4-2ebc-50157bc91c8b fwd="104.198.73.102" dyno=web.1 connect=0ms service=10020ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:15.995584+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=1e9ac7b8-bccd-888d-414f-3c88a998361c fwd="34.29.64.36" dyno=web.1 connect=0ms service=7774ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:15.886148+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:15.888224+00:00 app[web.1]: 3:29:15 PM [express] POST /api/shopify/webhooks/products/update 200 in 2669ms :: {"received":true}
+2026-01-26T15:29:15.993453+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:15.995756+00:00 app[web.1]: 3:29:15 PM [express] POST /api/shopify/webhooks/products/update 200 in 2623ms :: {"received":true}
+2026-01-26T15:29:16.152128+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=4a7f5413-b6c7-308f-8a4a-38c3908104b9 fwd="35.192.139.188" dyno=web.1 connect=0ms service=828ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.223335+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=45e0b37d-ed8c-ca87-a224-c33c1db0b62f fwd="34.123.206.148" dyno=web.1 connect=0ms service=6668ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.150276+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.153164+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 576ms :: {"received":true}
+2026-01-26T15:29:16.214352+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.223798+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 2503ms :: {"received":true}
+2026-01-26T15:29:16.447248+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=3bf2e892-2c80-4b34-f6ea-029f55287a7b fwd="34.45.61.10" dyno=web.1 connect=0ms service=6551ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.490548+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=5a40c1d4-e1a5-bbe5-d288-9f82f350e34a fwd="34.70.89.121" dyno=web.1 connect=0ms service=6244ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.655962+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=8562df93-687f-a6a6-b5c5-5ac7826b7178 fwd="35.238.132.46" dyno=web.1 connect=0ms service=4183ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.665463+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=bac8fb41-96c1-a4e8-ad0e-90d8e7bc77b5 fwd="136.111.206.63" dyno=web.1 connect=0ms service=3707ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.444456+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.447275+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 2597ms :: {"received":true}
+2026-01-26T15:29:16.478486+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.492119+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 2489ms :: {"received":true}
+2026-01-26T15:29:16.646507+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.656898+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 2270ms :: {"received":true}
+2026-01-26T15:29:16.665033+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.666712+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 1976ms :: {"received":true}
+2026-01-26T15:29:16.785250+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=322ab551-6107-760b-3801-c29b9b6756c3 fwd="136.119.249.13" dyno=web.1 connect=0ms service=127ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:16.780909+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:16.787005+00:00 app[web.1]: 3:29:16 PM [express] POST /api/shopify/webhooks/products/update 200 in 85ms :: {"received":true}
+2026-01-26T15:29:17.543079+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=eaf7c827-da0b-90c3-7427-1d483afaf4ae fwd="136.112.87.116" dyno=web.1 connect=0ms service=547ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:17.562758+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=0d07b667-5fa3-f909-0253-e632661e3142 fwd="136.111.71.5" dyno=web.1 connect=0ms service=554ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:17.546374+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:17.546401+00:00 app[web.1]: 3:29:17 PM [express] POST /api/shopify/webhooks/products/update 200 in 499ms :: {"received":true}
+2026-01-26T15:29:17.561660+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:17.562850+00:00 app[web.1]: 3:29:17 PM [express] POST /api/shopify/webhooks/products/update 200 in 434ms :: {"received":true}
+2026-01-26T15:29:29.589893+00:00 heroku[web.1]: Process running mem=657M(128.4%)
+2026-01-26T15:29:29.593617+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:29:37.302223+00:00 heroku[router]: at=error code=H15 desc="Idle connection" method=GET path="/ws" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=6d979e2f-a366-1a03-4b24-9aa2491cff00 fwd="67.20.233.54" dyno=web.1 connect=0ms service=55001ms status=101 bytes=0 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:37.303787+00:00 app[web.1]: WebSocket client disconnected
+2026-01-26T15:29:43.299168+00:00 app[web.1]: WebSocket client connected
+2026-01-26T15:29:44.753741+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=2db49815-06d5-a08d-cc7a-f67916e6f620 fwd="136.119.63.114" dyno=web.1 connect=0ms service=50ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:29:44.751783+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:29:44.754045+00:00 app[web.1]: 3:29:44 PM [express] POST /api/shopify/webhooks/products/update 200 in 45ms :: {"received":true}
+2026-01-26T15:29:50.619005+00:00 heroku[web.1]: Process running mem=657M(128.4%)
+2026-01-26T15:29:50.620796+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:30:11.498608+00:00 heroku[web.1]: Process running mem=657M(128.4%)
+2026-01-26T15:30:11.500989+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:30:13.485438+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/products/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=82d6cc75-754d-eda5-bcf6-2b2b15e506de fwd="34.136.248.144" dyno=web.1 connect=0ms service=50ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:30:13.484082+00:00 app[web.1]: Webhook: Updated 2 SKUs from product update
+2026-01-26T15:30:13.486003+00:00 app[web.1]: 3:30:13 PM [express] POST /api/shopify/webhooks/products/update 200 in 46ms :: {"received":true}
+2026-01-26T15:30:31.307368+00:00 heroku[web.1]: Process running mem=657M(128.4%)
+2026-01-26T15:30:31.309278+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:30:38.300562+00:00 heroku[router]: at=error code=H15 desc="Idle connection" method=GET path="/ws" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=049ac8b5-5f17-bdb6-8aff-3b177e7c8f8d fwd="67.20.233.54" dyno=web.1 connect=0ms service=55005ms status=101 bytes=0 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:30:38.301257+00:00 app[web.1]: WebSocket client disconnected
+2026-01-26T15:30:44.294752+00:00 app[web.1]: WebSocket client connected
+2026-01-26T15:30:45.220477+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/fulfillments/update" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=a96c994a-fcff-d60b-fd15-8c76efa63b7e fwd="34.69.191.25" dyno=web.1 connect=0ms service=4ms status=200 bytes=17 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:30:45.219922+00:00 app[web.1]: Fulfillment update webhook: order 11906293727391, status: success (metadata update only, not processing line items)
+2026-01-26T15:30:45.220602+00:00 app[web.1]: 3:30:45 PM [express] POST /api/shopify/webhooks/fulfillments/update 200 in 1ms :: {"received":true}
+2026-01-26T15:30:52.842999+00:00 heroku[web.1]: Process running mem=657M(128.4%)
+2026-01-26T15:30:52.845174+00:00 heroku[web.1]: Error R14 (Memory quota exceeded)
+2026-01-26T15:31:39.295154+00:00 heroku[router]: at=error code=H15 desc="Idle connection" method=GET path="/ws" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=ffabab4c-8667-d7c6-4bd7-b19adf7ba454 fwd="67.20.233.54" dyno=web.1 connect=0ms service=55001ms status=101 bytes=0 protocol=http1.1 tls=true tls_version=unknown
+2026-01-26T15:31:39.296092+00:00 app[web.1]: WebSocket client disconnected
+2026-01-26T15:31:45.291784+00:00 app[web.1]: WebSocket client connected
