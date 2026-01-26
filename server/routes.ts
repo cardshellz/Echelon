@@ -4741,6 +4741,31 @@ export async function registerRoutes(
     }
   });
 
+  // Debug endpoint to check order dates
+  app.get("/api/debug/order-dates/:orderNumber", async (req, res) => {
+    try {
+      const orderNumber = req.params.orderNumber;
+      const order = await db.execute(sql`
+        SELECT id, order_number, order_placed_at, shopify_created_at, created_at 
+        FROM orders WHERE order_number LIKE ${'%' + orderNumber}
+        LIMIT 1
+      `);
+      if (order.rows.length === 0) {
+        return res.json({ error: "Order not found" });
+      }
+      const row = order.rows[0] as any;
+      res.json({
+        orderNumber: row.order_number,
+        orderPlacedAt: row.order_placed_at,
+        shopifyCreatedAt: row.shopify_created_at,
+        createdAt: row.created_at,
+        serverNow: new Date().toISOString()
+      });
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
   // Debug endpoint to check sync status
   app.get("/api/debug/sync-status", async (req, res) => {
     try {

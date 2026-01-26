@@ -164,11 +164,18 @@ async function resolveException(orderId: number, resolution: string, notes?: str
   return res.json();
 }
 
-// Helper to calculate order age from createdAt
-function getOrderAge(createdAt: Date | string): string {
+// Helper to calculate order age from order date
+function getOrderAge(orderDate: Date | string | null | undefined): string {
+  if (!orderDate) return "0m";
   const now = new Date();
-  const created = new Date(createdAt);
-  const diffMs = now.getTime() - created.getTime();
+  // Handle date strings without timezone - assume UTC
+  let dateStr = String(orderDate);
+  // If no timezone indicator, append Z to treat as UTC
+  if (!dateStr.includes('Z') && !dateStr.includes('+') && !dateStr.includes('T')) {
+    dateStr = dateStr.replace(' ', 'T') + 'Z';
+  }
+  const created = new Date(dateStr);
+  const diffMs = Math.max(0, now.getTime() - created.getTime()); // Never negative
   const diffMins = Math.floor(diffMs / 60000);
   if (diffMins < 60) return `${diffMins}m`;
   const hours = Math.floor(diffMins / 60);
