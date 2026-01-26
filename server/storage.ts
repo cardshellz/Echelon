@@ -505,7 +505,7 @@ export class DatabaseStorage implements IStorage {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     // Use raw SQL to JOIN with shopify_orders and exclude fulfilled
-    const orderList = await db.execute<Order>(sql`
+    const orderList = await db.execute(sql`
       SELECT o.* FROM orders o
       LEFT JOIN shopify_orders s ON o.source_table_id = s.id
       WHERE (
@@ -516,7 +516,47 @@ export class DatabaseStorage implements IStorage {
       ORDER BY o.created_at DESC
     `);
     
-    const orderRows = orderList.rows as Order[];
+    // Map snake_case columns to camelCase for Order type
+    const orderRows: Order[] = (orderList.rows as any[]).map(row => ({
+      id: row.id,
+      channelId: row.channel_id,
+      source: row.source,
+      externalOrderId: row.external_order_id,
+      sourceTableId: row.source_table_id,
+      shopifyOrderId: row.shopify_order_id,
+      orderNumber: row.order_number,
+      customerName: row.customer_name,
+      customerEmail: row.customer_email,
+      shippingAddress: row.shipping_address,
+      shippingCity: row.shipping_city,
+      shippingState: row.shipping_state,
+      shippingPostalCode: row.shipping_postal_code,
+      shippingCountry: row.shipping_country,
+      priority: row.priority,
+      status: row.status,
+      onHold: row.on_hold,
+      heldAt: row.held_at,
+      heldBy: row.held_by,
+      assignedPickerId: row.assigned_picker_id,
+      claimedAt: row.claimed_at,
+      completedAt: row.completed_at,
+      exceptionAt: row.exception_at,
+      exceptionType: row.exception_type,
+      exceptionNotes: row.exception_notes,
+      resolvedAt: row.resolved_at,
+      resolvedBy: row.resolved_by,
+      resolutionNotes: row.resolution_notes,
+      itemCount: row.item_count,
+      unitCount: row.unit_count,
+      totalAmount: row.total_amount,
+      currency: row.currency,
+      shopifyCreatedAt: row.shopify_created_at,
+      orderPlacedAt: row.order_placed_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      metadata: row.metadata,
+      legacyOrderId: row.legacy_order_id,
+    }));
     
     if (orderRows.length === 0) {
       return [];
