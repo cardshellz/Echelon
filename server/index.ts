@@ -6,6 +6,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
+import { setupOrderSyncListener } from "./orderSyncListener";
 import type { SafeUser } from "@shared/schema";
 
 declare module "express-session" {
@@ -139,6 +140,9 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      
+      // Start listening for new orders in shopify_orders table
+      setupOrderSyncListener();
     },
   );
 })();
