@@ -119,10 +119,12 @@ export const orders = pgTable("orders", {
   // ===== NOTES =====
   notes: text("notes"), // Internal notes
   shortReason: text("short_reason"),
+  metadata: jsonb("metadata"), // Extra data from external sources
   
   // ===== DISPLAY (legacy, for order cards) =====
   totalAmount: text("total_amount"),
   currency: varchar("currency", { length: 3 }).default("USD"),
+  legacyOrderId: varchar("legacy_order_id", { length: 100 }), // Legacy order ID from external systems
   
   // ===== TIMESTAMPS =====
   orderPlacedAt: timestamp("order_placed_at"), // When placed in channel

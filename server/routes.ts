@@ -679,27 +679,21 @@ export async function registerRoutes(
 
   // ===== PICKING QUEUE API =====
   
-  // DEBUG: Test endpoint to see raw data
+  // DEBUG: Raw SQL test to pinpoint column issues
   app.get("/api/picking/debug", async (req, res) => {
     try {
-      const orders = await storage.getOrdersWithItems(["ready", "in_progress"]);
-      const firstOrder = orders[0];
-      const firstItem = firstOrder?.items?.[0];
-      res.json({
-        totalOrders: orders.length,
-        firstOrderId: firstOrder?.id,
-        firstOrderStatus: firstOrder?.status,
-        firstOrderItemCount: firstOrder?.items?.length,
-        firstItem: firstItem ? {
-          id: firstItem.id,
-          sku: firstItem.sku,
-          requiresShipping: firstItem.requiresShipping,
-          requiresShippingType: typeof firstItem.requiresShipping,
-        } : null,
-        sampleItemKeys: firstItem ? Object.keys(firstItem) : [],
-      });
+      // Raw SQL to bypass Drizzle type mapping
+      const result = await db.execute(`
+        SELECT o.id as order_id, o.status, o.order_number,
+               oi.id as item_id, oi.sku, oi.requires_shipping
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.status IN ('ready', 'in_progress')
+        LIMIT 5
+      `);
+      res.json({ rows: result.rows, count: result.rows?.length || 0 });
     } catch (error: any) {
-      res.status(500).json({ error: error.message, stack: error.stack });
+      res.status(500).json({ error: error.message, code: error.code, detail: error.detail });
     }
   });
   
