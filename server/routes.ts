@@ -692,8 +692,9 @@ export async function registerRoutes(
       const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       
       const filteredOrders = orders.filter(order => {
-        // Only show orders that require shipping in picking queue
-        if (order.requiresShipping !== 1) {
+        // Only show orders that have at least one item requiring shipping
+        const hasShippableItems = order.items.some(item => item.requiresShipping === 1);
+        if (!hasShippableItems) {
           return false;
         }
         
@@ -2200,7 +2201,7 @@ export async function registerRoutes(
           continue;
         }
         
-        // Fetch line items for this order from shopify_order_items
+        // Fetch ALL line items for this order from shopify_order_items (including requires_shipping flag)
         const rawItems = await db.execute<{
           id: string;
           shopify_line_item_id: string;
@@ -2210,25 +2211,36 @@ export async function registerRoutes(
           quantity: number;
           fulfillable_quantity: number | null;
           fulfillment_status: string | null;
+          requires_shipping: boolean | null;
         }>(sql`
           SELECT * FROM shopify_order_items 
           WHERE order_id = ${rawOrder.id}
         `);
         
-        // Skip if no items or all fulfilled
+        // Skip if no items at all
+        if (rawItems.rows.length === 0) {
+          skipped++;
+          continue;
+        }
+        
+        // Filter to unfulfilled items only (for pick queue relevance)
         const unfulfilledItems = rawItems.rows.filter(item => 
           !item.fulfillment_status || item.fulfillment_status !== 'fulfilled'
         );
         
+        // Skip if all items are fulfilled
         if (unfulfilledItems.length === 0) {
           skipped++;
           continue;
         }
         
-        // Calculate total units
+        // Calculate total units from ALL unfulfilled items
         const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
         
-        // Enrich items with location data
+        // Check if any item requires shipping
+        const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
+        
+        // Enrich ALL unfulfilled items with location data and requiresShipping per item
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of unfulfilledItems) {
           const productLocation = await storage.getProductLocationBySku(item.sku || '');
@@ -2246,11 +2258,9 @@ export async function registerRoutes(
             zone: productLocation?.zone || "U",
             imageUrl: productLocation?.imageUrl || null,
             barcode: productLocation?.barcode || null,
+            requiresShipping: item.requires_shipping ? 1 : 0,
           });
         }
-        
-        // Determine if order requires shipping (has shippable items)
-        const requiresShipping = enrichedItems.length > 0 ? 1 : 0;
         
         // Create operational order using customer/shipping data from shopify_orders
         await storage.createOrderWithItems({
@@ -2268,8 +2278,7 @@ export async function registerRoutes(
           shippingPostalCode: rawOrder.shipping_postal_code,
           shippingCountry: rawOrder.shipping_country,
           priority: "normal",
-          requiresShipping,
-          status: requiresShipping ? "ready" : "completed",
+          status: hasShippableItems ? "ready" : "completed",
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
           totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
@@ -3025,12 +3034,12 @@ export async function registerRoutes(
       const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
       const shopifyChannelId = shopifyChannel?.id || null;
       
-      // Calculate total units from shippable items only
-      const totalUnits = orderData.items.reduce((sum, item) => sum + item.quantity, 0);
+      // Calculate total units from ALL items
+      const totalUnits = orderData.allItems.reduce((sum, item) => sum + item.quantity, 0);
       
-      // Enrich shippable items with location data from product_locations
+      // Enrich ALL items with location data and requiresShipping flag per item
       const enrichedItems: InsertOrderItem[] = [];
-      for (const item of orderData.items) {
+      for (const item of orderData.allItems) {
         const productLocation = await storage.getProductLocationBySku(item.sku);
         enrichedItems.push({
           orderId: 0, // Will be set by createOrderWithItems
@@ -3046,11 +3055,12 @@ export async function registerRoutes(
           zone: productLocation?.zone || "U",
           imageUrl: productLocation?.imageUrl || item.imageUrl || null,
           barcode: productLocation?.barcode || null,
+          requiresShipping: item.requiresShipping ? 1 : 0,
         });
       }
       
-      // Create order - ALL orders go to orders table, pick queue filters by requiresShipping
-      // Non-shipping orders (memberships, digital) are visible in OMS but not in pick queue
+      // Create order - ALL orders go to orders table
+      // Pick queue filters by order_items.requiresShipping
       const createdOrder = await storage.createOrderWithItems({
         shopifyOrderId: orderData.shopifyOrderId,
         externalOrderId: orderData.shopifyOrderId,
@@ -3066,9 +3076,8 @@ export async function registerRoutes(
         shippingPostalCode: orderData.shippingPostalCode,
         shippingCountry: orderData.shippingCountry,
         priority: orderData.priority,
-        requiresShipping: orderData.requiresShipping ? 1 : 0,
         status: orderData.requiresShipping ? "ready" : "completed", // Non-shipping orders auto-complete
-        itemCount: orderData.items.length,
+        itemCount: orderData.allItems.length,
         unitCount: totalUnits,
         totalAmount: orderData.totalAmount,
         currency: orderData.currency,
@@ -3076,7 +3085,7 @@ export async function registerRoutes(
         orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
       }, enrichedItems);
       
-      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} shippable items, requiresShipping: ${orderData.requiresShipping}`);
+      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items (${orderData.items.length} shippable)`);
       
       // Reserve inventory for each line item (async - don't block response)
       const itemsToReserve: InsertOrderItem[] = [...enrichedItems]; // Copy for async context

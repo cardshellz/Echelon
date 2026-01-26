@@ -248,6 +248,7 @@ export interface ExtractedOrderItem {
   name: string;
   quantity: number;
   imageUrl?: string;
+  requiresShipping: boolean;
 }
 
 export interface ExtractedOrder {
@@ -367,17 +368,20 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
       ? lineItem.sku.trim().toUpperCase() 
       : `NO-SKU-${lineItem.id}`;
     
+    const itemRequiresShipping = lineItem.requires_shipping === true;
+    
     const extractedItem: ExtractedOrderItem = {
       shopifyLineItemId: String(lineItem.id),
       sku,
       name: lineItem.name || lineItem.title,
       quantity: lineItem.quantity,
       imageUrl: lineItem.image?.src || undefined,
+      requiresShipping: itemRequiresShipping,
     };
     
     allItems.push(extractedItem);
     
-    if (lineItem.requires_shipping === true) {
+    if (itemRequiresShipping) {
       items.push(extractedItem);
       requiresShipping = true;
     }

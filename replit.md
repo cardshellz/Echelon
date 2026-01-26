@@ -38,14 +38,15 @@ Echelon uses a hub-and-spoke pattern for multi-channel orders:
 Key tables:
 - `users`: Authentication with role-based access
 - `product_locations`: SKU to warehouse location mapping
-- `orders`: ALL orders from all channels with operational fields (sourceTableId, customerName, shipping address, priority, status, itemCount, unitCount, **requiresShipping**)
-- `order_items`: Picking-only fields for shippable items (sourceItemId, sku, name, imageUrl, barcode, quantity, pickedQuantity, status, location, zone)
-- `shopify_orders`, `shopify_order_items`: Full Shopify data (billing address, financials, notes, tags, variant info, pricing, properties) - populated by external shellz_club app
+- `orders`: ALL orders from all channels with operational fields (sourceTableId, customerName, shipping address, priority, status, itemCount, unitCount)
+- `order_items`: ALL items with **requiresShipping** flag per item (sourceItemId, sku, name, imageUrl, barcode, quantity, pickedQuantity, status, location, zone, requiresShipping)
+- `shopify_orders`, `shopify_order_items`: Full Shopify data (billing address, financials, notes, tags, variant info, pricing, properties, **requires_shipping**) - populated by external shellz_club app
 
 **Order Routing:**
 - ALL orders go into `orders` table (shipping + non-shipping like memberships)
-- `requiresShipping` flag (1 = needs fulfillment, 0 = digital/membership)
-- Pick queue filters by `requiresShipping = 1` - only shows orders needing picking
+- `order_items.requiresShipping` flag per item (1 = needs fulfillment, 0 = digital/membership)
+- Source of truth: `shopify_order_items.requires_shipping`
+- Pick queue filters by items with `requiresShipping = 1` - only shows orders needing picking
 - Non-shipping orders auto-complete with status "completed"
 
 ### Authentication & Authorization
