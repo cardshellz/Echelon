@@ -4729,5 +4729,70 @@ export async function registerRoutes(
     }
   });
 
+  // Manually trigger order sync from shopify_orders to orders
+  app.post("/api/debug/trigger-sync", async (req, res) => {
+    try {
+      const { syncNewOrders } = await import("./orderSyncListener");
+      await syncNewOrders();
+      res.json({ success: true, message: "Sync triggered - check logs" });
+    } catch (error) {
+      console.error("Debug trigger sync error:", error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
+  // Debug endpoint to check sync status
+  app.get("/api/debug/sync-status", async (req, res) => {
+    try {
+      // Check shopify_orders not in orders
+      const missing = await db.execute<{ count: string }>(sql`
+        SELECT COUNT(*) as count FROM shopify_orders 
+        WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+      `);
+      
+      // Get a sample of missing orders
+      const sample = await db.execute<{ 
+        id: string;
+        order_number: string | null;
+        created_at: Date | null;
+      }>(sql`
+        SELECT id, order_number, created_at FROM shopify_orders 
+        WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+        ORDER BY created_at DESC
+        LIMIT 5
+      `);
+      
+      // Check if sample orders have items and their fulfillment status
+      const sampleWithItems = [];
+      for (const order of sample.rows) {
+        const items = await db.execute<{ 
+          id: string;
+          fulfillment_status: string | null;
+          fulfillable_quantity: number | null;
+          quantity: number;
+        }>(sql`
+          SELECT id, fulfillment_status, fulfillable_quantity, quantity FROM shopify_order_items WHERE order_id = ${order.id}
+        `);
+        sampleWithItems.push({
+          ...order,
+          items: items.rows.map(i => ({
+            id: i.id,
+            fulfillmentStatus: i.fulfillment_status,
+            fulfillableQty: i.fulfillable_quantity,
+            qty: i.quantity
+          }))
+        });
+      }
+      
+      res.json({
+        missingOrdersCount: parseInt(missing.rows[0].count),
+        sampleMissingOrders: sampleWithItems
+      });
+    } catch (error) {
+      console.error("Debug sync error:", error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
   return httpServer;
 }

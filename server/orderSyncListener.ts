@@ -10,7 +10,7 @@ const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "pr
 let listenerClient: Client | null = null;
 let isProcessing = false;
 
-async function syncNewOrders() {
+export async function syncNewOrders() {
   if (isProcessing) {
     console.log("[ORDER SYNC] Already processing, skipping");
     return;
@@ -48,6 +48,9 @@ async function syncNewOrders() {
     `);
     
     let created = 0;
+    let skipped = 0;
+    
+    console.log(`[ORDER SYNC] Found ${rawOrders.rows.length} orders to process`);
     
     for (const rawOrder of rawOrders.rows) {
       const rawItems = await db.execute<{
@@ -65,13 +68,21 @@ async function syncNewOrders() {
         WHERE order_id = ${rawOrder.id}
       `);
       
-      if (rawItems.rows.length === 0) continue;
+      if (rawItems.rows.length === 0) {
+        console.log(`[ORDER SYNC] Skipping order ${rawOrder.order_number}: no items in shopify_order_items`);
+        skipped++;
+        continue;
+      }
       
       const unfulfilledItems = rawItems.rows.filter(item => 
         !item.fulfillment_status || item.fulfillment_status !== 'fulfilled'
       );
       
-      if (unfulfilledItems.length === 0) continue;
+      if (unfulfilledItems.length === 0) {
+        console.log(`[ORDER SYNC] Skipping order ${rawOrder.order_number}: all ${rawItems.rows.length} items already fulfilled`);
+        skipped++;
+        continue;
+      }
       
       const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
       const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
