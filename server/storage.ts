@@ -513,7 +513,7 @@ export class DatabaseStorage implements IStorage {
         OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
       )
       AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
-      ORDER BY o.created_at DESC
+      ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
     // Map snake_case columns to camelCase for Order type
