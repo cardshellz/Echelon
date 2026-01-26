@@ -700,14 +700,10 @@ export async function registerRoutes(
   // Get orders for picking queue (including completed for Done count)
   app.get("/api/picking/queue", async (req, res) => {
     try {
-      const orders = await storage.getOrdersWithItems(["ready", "in_progress", "completed"]);
-      // Filter out held orders unless user is admin/lead
+      // Only fetch orders that need to be in pick queue (ready/in_progress, plus recent completed)
+      const orders = await storage.getPickQueueOrders();
       const user = req.session.user;
       const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
-      
-      // Filter out completed orders older than 24 hours (only for pickers, admins can see all)
-      const now = new Date();
-      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       
       const filteredOrders = orders.filter(order => {
         // Only show orders that have at least one item requiring shipping
@@ -721,18 +717,6 @@ export async function registerRoutes(
           return false;
         }
         
-        // Always include non-completed orders
-        if (order.status !== "completed") {
-          return true;
-        }
-        
-        // For completed orders: admins/leads can see all, pickers only see last 24 hours
-        if (order.completedAt) {
-          const completedDate = new Date(order.completedAt);
-          if (completedDate < twentyFourHoursAgo && !isAdminOrLead) {
-            return false; // Exclude old completed orders for pickers
-          }
-        }
         return true;
       });
       

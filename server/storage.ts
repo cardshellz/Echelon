@@ -63,7 +63,7 @@ import {
   appSettings
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, inArray, notInArray, and, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
+import { eq, inArray, notInArray, and, or, isNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -91,6 +91,7 @@ export interface IStorage {
   getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined>;
   getOrderById(id: number): Promise<Order | undefined>;
   getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
+  getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
   releaseOrder(orderId: number, resetProgress?: boolean): Promise<Order | null>;
@@ -452,6 +453,45 @@ export class DatabaseStorage implements IStorage {
     }
     
     // Fetch all items for these orders in ONE query (avoid N+1)
+    const orderIds = orderList.map(o => o.id);
+    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    
+    // Group items by orderId
+    const itemsByOrderId = new Map<number, OrderItem[]>();
+    for (const item of allItems) {
+      const existing = itemsByOrderId.get(item.orderId) || [];
+      existing.push(item);
+      itemsByOrderId.set(item.orderId, existing);
+    }
+    
+    // Combine orders with their items
+    return orderList.map(order => ({
+      ...order,
+      items: itemsByOrderId.get(order.id) || [],
+    }));
+  }
+
+  async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
+    // Optimized: Only fetch orders that need to be in pick queue
+    // - ready and in_progress orders (always)
+    // - completed orders from last 24 hours only
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    
+    const orderList = await db.select().from(orders).where(
+      or(
+        inArray(orders.status, ["ready", "in_progress"]),
+        and(
+          eq(orders.status, "completed"),
+          gte(orders.completedAt, twentyFourHoursAgo)
+        )
+      )
+    ).orderBy(desc(orders.createdAt));
+    
+    if (orderList.length === 0) {
+      return [];
+    }
+    
+    // Fetch all items for these orders in ONE query
     const orderIds = orderList.map(o => o.id);
     const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
     
