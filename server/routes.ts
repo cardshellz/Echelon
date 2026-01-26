@@ -1919,16 +1919,22 @@ export async function registerRoutes(
           startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       }
 
-      // Get completed orders in date range
-      const allOrders = await storage.getOrdersWithItems(["completed"]);
-      const completedOrders = allOrders.filter(o => 
-        o.completedAt && 
-        new Date(o.completedAt) >= startDate
-      );
+      // Get completed orders in date range (filtered at SQL level)
+      const completedOrders = await storage.getOrderHistory({
+        status: ["completed"],
+        startDate: startDate,
+        endDate: now,
+        limit: 10000,
+        offset: 0
+      });
 
-      // Get picking logs in date range - fetch more logs for accurate metrics
-      const allLogs = await storage.getPickingLogs(10000, 0, {});
-      const logsInRange = allLogs.logs.filter(l => new Date(l.timestamp) >= startDate);
+      // Get picking logs in date range (filtered at SQL level)
+      const logsInRange = await storage.getPickingLogs({
+        startDate: startDate,
+        endDate: now,
+        limit: 50000,
+        offset: 0
+      });
 
       // Calculate throughput metrics
       const hoursInRange = Math.max(1, (now.getTime() - startDate.getTime()) / (1000 * 60 * 60));
@@ -1936,7 +1942,7 @@ export async function registerRoutes(
       const totalLinesPicked = logsInRange.filter(l => l.actionType === "item_picked" || l.actionType === "item_shorted").length;
       const totalItemsPicked = logsInRange
         .filter(l => l.actionType === "item_picked" || l.actionType === "item_quantity_adjusted")
-        .reduce((sum, l) => sum + (l.quantityAfter || 1), 0);
+        .reduce((sum, l) => sum + (l.qtyAfter || 1), 0);
 
       // Calculate productivity metrics
       const claimLogs = logsInRange.filter(l => l.actionType === "order_claimed");
@@ -1978,7 +1984,7 @@ export async function registerRoutes(
       // Short pick reasons breakdown
       const shortReasonCounts: Record<string, number> = {};
       for (const log of shortLogs) {
-        const reason = log.shortReason || "unknown";
+        const reason = log.reason || "unknown";
         shortReasonCounts[reason] = (shortReasonCounts[reason] || 0) + 1;
       }
       const shortReasons = Object.entries(shortReasonCounts).map(([reason, count]) => ({
@@ -2043,7 +2049,7 @@ export async function registerRoutes(
           pickerStats[log.pickerId].ordersCompleted++;
         }
         if (log.actionType === "item_picked" || log.actionType === "item_quantity_adjusted") {
-          pickerStats[log.pickerId].itemsPicked += log.quantityAfter || 1;
+          pickerStats[log.pickerId].itemsPicked += log.qtyAfter || 1;
           pickerStats[log.pickerId].totalPicks++;
           if (log.pickMethod === "scan") {
             pickerStats[log.pickerId].scanPicks++;
