@@ -2163,6 +2163,75 @@ export async function registerRoutes(
     }
   });
 
+  // Sync order statuses FROM Shopify fulfillment data
+  // Updates orders and order_items based on shopify_orders.fulfillment_status
+  app.post("/api/shopify/sync-statuses-from-shopify", async (req, res) => {
+    try {
+      console.log("Syncing order statuses from Shopify fulfillment data...");
+      const startTime = Date.now();
+      
+      // 1. Update ORDERS status to 'completed' where Shopify shows fulfilled
+      const ordersResult = await db.execute(sql`
+        UPDATE orders o SET
+          status = 'completed',
+          completed_at = COALESCE(o.completed_at, NOW())
+        FROM shopify_orders s
+        WHERE o.source_table_id = s.id
+          AND s.fulfillment_status = 'fulfilled'
+          AND o.status != 'completed'
+      `);
+      
+      // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where Shopify item is fulfilled
+      const itemsResult = await db.execute(sql`
+        UPDATE order_items oi SET
+          status = 'completed',
+          picked_quantity = oi.quantity,
+          fulfilled_quantity = oi.quantity
+        FROM shopify_order_items soi
+        WHERE oi.source_item_id = soi.id
+          AND soi.fulfillment_status = 'fulfilled'
+          AND oi.status != 'completed'
+      `);
+      
+      // 3. Also update items where the parent ORDER is fulfilled (catches items without individual fulfillment status)
+      const itemsByOrderResult = await db.execute(sql`
+        UPDATE order_items oi SET
+          status = 'completed',
+          picked_quantity = oi.quantity,
+          fulfilled_quantity = oi.quantity
+        FROM orders o
+        INNER JOIN shopify_orders s ON o.source_table_id = s.id
+        WHERE oi.order_id = o.id
+          AND s.fulfillment_status = 'fulfilled'
+          AND oi.status != 'completed'
+      `);
+      
+      // 4. Handle partial fulfillments - update items individually
+      const partialResult = await db.execute(sql`
+        UPDATE order_items oi SET
+          status = 'completed',
+          picked_quantity = oi.quantity,
+          fulfilled_quantity = oi.quantity
+        FROM shopify_order_items soi
+        WHERE oi.source_item_id = soi.id
+          AND soi.fulfillment_status = 'fulfilled'
+          AND oi.status = 'pending'
+      `);
+      
+      const elapsed = Date.now() - startTime;
+      console.log(`Status sync complete in ${elapsed}ms`);
+      
+      res.json({ 
+        success: true, 
+        message: "Order statuses synced from Shopify fulfillment data",
+        elapsed: `${elapsed}ms`
+      });
+    } catch (error) {
+      console.error("Error syncing statuses from Shopify:", error);
+      res.status(500).json({ error: "Failed to sync statuses from Shopify" });
+    }
+  });
+
   // Backfill operational orders table with customer data from shopify_orders
   // Uses efficient UPDATE FROM JOIN to process thousands of orders at once
   app.post("/api/shopify/backfill-orders-from-raw", async (req, res) => {
