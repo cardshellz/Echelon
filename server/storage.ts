@@ -447,13 +447,27 @@ export class DatabaseStorage implements IStorage {
     
     const orderList = await query.orderBy(desc(orders.createdAt));
     
-    const result: (Order & { items: OrderItem[] })[] = [];
-    for (const order of orderList) {
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
-      result.push({ ...order, items });
+    if (orderList.length === 0) {
+      return [];
     }
     
-    return result;
+    // Fetch all items for these orders in ONE query (avoid N+1)
+    const orderIds = orderList.map(o => o.id);
+    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    
+    // Group items by orderId
+    const itemsByOrderId = new Map<number, OrderItem[]>();
+    for (const item of allItems) {
+      const existing = itemsByOrderId.get(item.orderId) || [];
+      existing.push(item);
+      itemsByOrderId.set(item.orderId, existing);
+    }
+    
+    // Combine orders with their items
+    return orderList.map(order => ({
+      ...order,
+      items: itemsByOrderId.get(order.id) || [],
+    }));
   }
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
