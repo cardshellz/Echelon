@@ -2996,218 +2996,68 @@ export async function registerRoutes(
   // ===== ORDER WEBHOOKS =====
   
   // Order created - add to picking queue
+  // Order create webhook - DISABLED: Orders sync from shopify_orders/shopify_order_items tables instead
+  // Keeping endpoint in place for future use if needed
   app.post("/api/shopify/webhooks/orders/create", async (req: Request, res: Response) => {
-    console.log("[ORDER WEBHOOK] Received orders/create webhook");
+    console.log("[ORDER WEBHOOK] Received orders/create webhook - DISABLED, use sync-from-raw-tables instead");
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
       const rawBody = (req as any).rawBody as Buffer | undefined;
       
-      console.log("[ORDER WEBHOOK] HMAC present:", !!hmac, "Raw body present:", !!rawBody);
-      
       if (!rawBody) {
-        console.error("[ORDER WEBHOOK] Missing raw body for webhook verification");
         return res.status(400).json({ error: "Missing request body" });
       }
       
       if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("[ORDER WEBHOOK] Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
       
-      console.log("[ORDER WEBHOOK] Signature verified successfully");
-      
-      const payload = req.body as ShopifyOrder;
-      console.log("[ORDER WEBHOOK] Processing order:", payload.order_number, "Shopify ID:", payload.id);
-      
-      // Skip if order already exists
-      const existing = await storage.getOrderByShopifyId(String(payload.id));
-      if (existing) {
-        console.log(`Order ${payload.id} already exists, skipping`);
-        return res.status(200).json({ received: true });
-      }
-      
-      // Extract order data
-      const orderData = extractOrderFromWebhookPayload(payload);
-      
-      // Get default Shopify channel for linking orders
-      const allChannels = await storage.getAllChannels();
-      const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
-      const shopifyChannelId = shopifyChannel?.id || null;
-      
-      // Calculate total units from ALL items
-      const totalUnits = orderData.allItems.reduce((sum, item) => sum + item.quantity, 0);
-      
-      // Enrich ALL items with location data and requiresShipping flag per item
-      const enrichedItems: InsertOrderItem[] = [];
-      for (const item of orderData.allItems) {
-        const productLocation = await storage.getProductLocationBySku(item.sku);
-        enrichedItems.push({
-          orderId: 0, // Will be set by createOrderWithItems
-          shopifyLineItemId: item.shopifyLineItemId,
-          sourceItemId: item.shopifyLineItemId, // Link to shopify_order_items
-          sku: item.sku,
-          name: item.name,
-          quantity: item.quantity,
-          pickedQuantity: 0,
-          fulfilledQuantity: 0,
-          status: "pending",
-          location: productLocation?.location || "UNASSIGNED",
-          zone: productLocation?.zone || "U",
-          imageUrl: productLocation?.imageUrl || item.imageUrl || null,
-          barcode: productLocation?.barcode || null,
-          requiresShipping: item.requiresShipping ? 1 : 0,
-        });
-      }
-      
-      // Create order - ALL orders go to orders table
-      // Pick queue filters by order_items.requiresShipping
-      const createdOrder = await storage.createOrderWithItems({
-        shopifyOrderId: orderData.shopifyOrderId,
-        externalOrderId: orderData.shopifyOrderId,
-        sourceTableId: orderData.shopifyOrderId, // Links to shopify_orders for JOIN lookups
-        channelId: shopifyChannelId,
-        source: "shopify",
-        orderNumber: orderData.orderNumber,
-        customerName: orderData.customerName,
-        customerEmail: orderData.customerEmail,
-        shippingAddress: orderData.shippingAddress,
-        shippingCity: orderData.shippingCity,
-        shippingState: orderData.shippingState,
-        shippingPostalCode: orderData.shippingPostalCode,
-        shippingCountry: orderData.shippingCountry,
-        priority: orderData.priority,
-        status: orderData.requiresShipping ? "ready" : "completed", // Non-shipping orders auto-complete
-        itemCount: orderData.allItems.length,
-        unitCount: totalUnits,
-        totalAmount: orderData.totalAmount,
-        currency: orderData.currency,
-        shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-        orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-      }, enrichedItems);
-      
-      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items (${orderData.items.length} shippable)`);
-      
-      // Reserve inventory for each line item (async - don't block response)
-      const itemsToReserve: InsertOrderItem[] = [...enrichedItems]; // Copy for async context
-      (async () => {
-        const inventoryItemsToSync = new Set<number>();
-        
-        // Get the created order items to get their IDs
-        const createdOrderItems = await storage.getOrderItems(createdOrder.id);
-        
-        for (const enrichedItem of itemsToReserve) {
-          try {
-            // Find the corresponding order item by shopifyLineItemId (most reliable)
-            // Fall back to SKU matching if line item ID is not available
-            const orderItem = createdOrderItems.find(oi => 
-              (enrichedItem.shopifyLineItemId && oi.shopifyLineItemId === enrichedItem.shopifyLineItemId) ||
-              oi.sku === enrichedItem.sku
-            );
-            const orderItemId = orderItem?.id || 0;
-            
-            // Look up UOM variant to get unitsPerVariant
-            const uomVariant = await storage.getUomVariantBySku(enrichedItem.sku);
-            
-            if (uomVariant) {
-              const baseUnits = enrichedItem.quantity * uomVariant.unitsPerVariant;
-              
-              // Find a location with stock to reserve from
-              const levels = await storage.getInventoryLevelsByItemId(uomVariant.inventoryItemId);
-              const levelWithStock = levels.find((l: any) => l.onHandBase >= baseUnits);
-              
-              if (levelWithStock) {
-                await inventoryService.reserveForOrder(
-                  uomVariant.inventoryItemId,
-                  levelWithStock.warehouseLocationId,
-                  baseUnits,
-                  createdOrder.id,
-                  orderItemId,
-                  undefined
-                );
-                inventoryItemsToSync.add(uomVariant.inventoryItemId);
-                console.log(`[ORDER WEBHOOK] Reserved ${baseUnits} base units for ${enrichedItem.sku} (orderItemId: ${orderItemId})`);
-              }
-            }
-          } catch (err) {
-            console.warn(`[ORDER WEBHOOK] Failed to reserve inventory for ${enrichedItem.sku}:`, err);
-          }
-        }
-        
-        // Sync affected inventory items to Shopify (push sibling variant updates)
-        for (const inventoryItemId of Array.from(inventoryItemsToSync)) {
-          try {
-            await syncInventoryItemToShopify(inventoryItemId, storage);
-          } catch (err) {
-            console.warn(`[ORDER WEBHOOK] Failed to sync item ${inventoryItemId} to Shopify:`, err);
-          }
-        }
-      })();
-      
-      broadcastOrdersUpdated();
-      
-      res.status(200).json({ received: true });
+      // Webhook disabled - orders come from shopify_orders table via sync-from-raw-tables
+      res.status(200).json({ received: true, note: "Webhook disabled, use sync-from-raw-tables" });
     } catch (error) {
       console.error("Order create webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });
 
-  // Order fulfilled - mark as shipped
+  // Order fulfilled webhook - DISABLED: Status updates sync from shopify_orders table instead
   app.post("/api/shopify/webhooks/orders/fulfilled", async (req: Request, res: Response) => {
+    console.log("[ORDER WEBHOOK] Received orders/fulfilled webhook - DISABLED");
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
       const rawBody = (req as any).rawBody as Buffer | undefined;
       
       if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
         return res.status(400).json({ error: "Missing request body" });
       }
       
       if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
       
-      const payload = req.body as ShopifyOrder;
-      const order = await storage.getOrderByShopifyId(String(payload.id));
-      
-      if (order) {
-        await storage.updateOrderStatus(order.id, "shipped");
-        console.log(`Webhook: Order ${order.orderNumber} marked as shipped`);
-      }
-      
-      res.status(200).json({ received: true });
+      res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
       console.error("Order fulfilled webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });
     }
   });
 
-  // Order cancelled - mark as cancelled
+  // Order cancelled webhook - DISABLED: Status updates sync from shopify_orders table instead
   app.post("/api/shopify/webhooks/orders/cancelled", async (req: Request, res: Response) => {
+    console.log("[ORDER WEBHOOK] Received orders/cancelled webhook - DISABLED");
     try {
       const hmac = req.headers["x-shopify-hmac-sha256"] as string;
       const rawBody = (req as any).rawBody as Buffer | undefined;
       
       if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
         return res.status(400).json({ error: "Missing request body" });
       }
       
       if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
         return res.status(401).json({ error: "Invalid signature" });
       }
       
-      const payload = req.body as ShopifyOrder;
-      const order = await storage.getOrderByShopifyId(String(payload.id));
-      
-      if (order) {
-        await storage.updateOrderStatus(order.id, "cancelled");
-        console.log(`Webhook: Order ${order.orderNumber} marked as cancelled`);
-      }
-      
-      res.status(200).json({ received: true });
+      res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
       console.error("Order cancelled webhook error:", error);
       res.status(500).json({ error: "Webhook processing failed" });
