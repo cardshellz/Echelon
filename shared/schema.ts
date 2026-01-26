@@ -103,6 +103,9 @@ export const orders = pgTable("orders", {
   shippingPostalCode: text("shipping_postal_code"),
   shippingCountry: text("shipping_country"),
   
+  // ===== ORDER TYPE =====
+  requiresShipping: integer("requires_shipping").notNull().default(1), // 1 = needs fulfillment, 0 = digital/membership
+  
   // ===== WAREHOUSE OPERATIONS =====
   priority: varchar("priority", { length: 20 }).notNull().default("normal"), // rush, high, normal
   status: varchar("status", { length: 20 }).notNull().default("ready"), // ready, in_progress, completed, exception, shipped, cancelled

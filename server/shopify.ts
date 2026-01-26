@@ -257,7 +257,9 @@ export interface ExtractedOrder {
   customerEmail: string | null;
   priority: "rush" | "high" | "normal";
   shopifyCreatedAt: string;
-  items: ExtractedOrderItem[];
+  items: ExtractedOrderItem[]; // Only shippable items (for picking)
+  allItems: ExtractedOrderItem[]; // All items including non-shipping
+  requiresShipping: boolean; // true if any item needs shipping
   // Shipping address (for labels)
   shippingAddress: string | null; // Formatted single line
   shippingCity: string | null;
@@ -355,22 +357,29 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
     priority = "high";
   }
   
-  // Extract line items - only what's needed for picking
-  const items: ExtractedOrderItem[] = [];
+  // Extract ALL line items and track which need shipping
+  const items: ExtractedOrderItem[] = []; // Shippable items only (for picking)
+  const allItems: ExtractedOrderItem[] = []; // All items (for full order record)
+  let requiresShipping = false;
+  
   for (const lineItem of payload.line_items) {
-    // Only include items that require shipping (skip digital, gift cards)
+    const sku = lineItem.sku && lineItem.sku.trim() 
+      ? lineItem.sku.trim().toUpperCase() 
+      : `NO-SKU-${lineItem.id}`;
+    
+    const extractedItem: ExtractedOrderItem = {
+      shopifyLineItemId: String(lineItem.id),
+      sku,
+      name: lineItem.name || lineItem.title,
+      quantity: lineItem.quantity,
+      imageUrl: lineItem.image?.src || undefined,
+    };
+    
+    allItems.push(extractedItem);
+    
     if (lineItem.requires_shipping === true) {
-      const sku = lineItem.sku && lineItem.sku.trim() 
-        ? lineItem.sku.trim().toUpperCase() 
-        : `NO-SKU-${lineItem.id}`;
-      
-      items.push({
-        shopifyLineItemId: String(lineItem.id),
-        sku,
-        name: lineItem.name || lineItem.title,
-        quantity: lineItem.quantity,
-        imageUrl: lineItem.image?.src || undefined,
-      });
+      items.push(extractedItem);
+      requiresShipping = true;
     }
   }
   
@@ -393,6 +402,8 @@ export function extractOrderFromWebhookPayload(payload: ShopifyOrder): Extracted
     priority,
     shopifyCreatedAt: payload.created_at,
     items,
+    allItems,
+    requiresShipping,
     // Shipping address for labels
     shippingAddress,
     shippingCity: shipping?.city || null,

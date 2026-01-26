@@ -692,6 +692,11 @@ export async function registerRoutes(
       const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
       
       const filteredOrders = orders.filter(order => {
+        // Only show orders that require shipping in picking queue
+        if (order.requiresShipping !== 1) {
+          return false;
+        }
+        
         // Filter on-hold orders for non-admins
         if (order.onHold === 1 && !isAdminOrLead) {
           return false;
@@ -2244,6 +2249,9 @@ export async function registerRoutes(
           });
         }
         
+        // Determine if order requires shipping (has shippable items)
+        const requiresShipping = enrichedItems.length > 0 ? 1 : 0;
+        
         // Create operational order using customer/shipping data from shopify_orders
         await storage.createOrderWithItems({
           shopifyOrderId: rawOrder.id,
@@ -2260,7 +2268,8 @@ export async function registerRoutes(
           shippingPostalCode: rawOrder.shipping_postal_code,
           shippingCountry: rawOrder.shipping_country,
           priority: "normal",
-          status: "ready",
+          requiresShipping,
+          status: requiresShipping ? "ready" : "completed",
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
           totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
@@ -3011,21 +3020,15 @@ export async function registerRoutes(
       // Extract order data
       const orderData = extractOrderFromWebhookPayload(payload);
       
-      // Skip if no items with SKUs
-      if (orderData.items.length === 0) {
-        console.log(`Order ${orderData.orderNumber} has no items with SKUs, skipping`);
-        return res.status(200).json({ received: true });
-      }
-      
       // Get default Shopify channel for linking orders
       const allChannels = await storage.getAllChannels();
       const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
       const shopifyChannelId = shopifyChannel?.id || null;
       
-      // Calculate total units
+      // Calculate total units from shippable items only
       const totalUnits = orderData.items.reduce((sum, item) => sum + item.quantity, 0);
       
-      // Enrich items with location data from product_locations
+      // Enrich shippable items with location data from product_locations
       const enrichedItems: InsertOrderItem[] = [];
       for (const item of orderData.items) {
         const productLocation = await storage.getProductLocationBySku(item.sku);
@@ -3046,8 +3049,8 @@ export async function registerRoutes(
         });
       }
       
-      // Create order - operational subset only
-      // Full order data stays in shopify_orders table
+      // Create order - ALL orders go to orders table, pick queue filters by requiresShipping
+      // Non-shipping orders (memberships, digital) are visible in OMS but not in pick queue
       const createdOrder = await storage.createOrderWithItems({
         shopifyOrderId: orderData.shopifyOrderId,
         externalOrderId: orderData.shopifyOrderId,
@@ -3063,7 +3066,8 @@ export async function registerRoutes(
         shippingPostalCode: orderData.shippingPostalCode,
         shippingCountry: orderData.shippingCountry,
         priority: orderData.priority,
-        status: "ready",
+        requiresShipping: orderData.requiresShipping ? 1 : 0,
+        status: orderData.requiresShipping ? "ready" : "completed", // Non-shipping orders auto-complete
         itemCount: orderData.items.length,
         unitCount: totalUnits,
         totalAmount: orderData.totalAmount,
@@ -3072,7 +3076,7 @@ export async function registerRoutes(
         orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
       }, enrichedItems);
       
-      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} items`);
+      console.log(`Webhook: Created order ${orderData.orderNumber} with ${enrichedItems.length} shippable items, requiresShipping: ${orderData.requiresShipping}`);
       
       // Reserve inventory for each line item (async - don't block response)
       const itemsToReserve: InsertOrderItem[] = [...enrichedItems]; // Copy for async context
