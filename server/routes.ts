@@ -1919,164 +1919,21 @@ export async function registerRoutes(
           startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       }
 
-      // Get completed orders in date range (filtered at SQL level)
-      const completedOrders = await storage.getOrderHistory({
-        status: ["completed"],
-        startDate: startDate,
-        endDate: now,
-        limit: 10000,
-        offset: 0
-      });
-
-      // Get picking logs in date range (filtered at SQL level)
-      const logsInRange = await storage.getPickingLogs({
-        startDate: startDate,
-        endDate: now,
-        limit: 50000,
-        offset: 0
-      });
-
-      // Calculate throughput metrics
       const hoursInRange = Math.max(1, (now.getTime() - startDate.getTime()) / (1000 * 60 * 60));
-      const totalOrdersCompleted = completedOrders.length;
-      const totalLinesPicked = logsInRange.filter(l => l.actionType === "item_picked" || l.actionType === "item_shorted").length;
-      const totalItemsPicked = logsInRange
-        .filter(l => l.actionType === "item_picked" || l.actionType === "item_quantity_adjusted")
-        .reduce((sum, l) => sum + (l.qtyAfter || 1), 0);
 
-      // Calculate productivity metrics
-      const claimLogs = logsInRange.filter(l => l.actionType === "order_claimed");
-      const completeLogs = logsInRange.filter(l => l.actionType === "order_completed");
-      const pickLogs = logsInRange.filter(l => l.actionType === "item_picked" || l.actionType === "item_quantity_adjusted");
-      
-      let totalClaimToComplete = 0;
-      let claimToCompleteCount = 0;
-      for (const order of completedOrders) {
-        const claim = claimLogs.find(l => l.orderId === order.id);
-        const complete = completeLogs.find(l => l.orderId === order.id);
-        if (claim && complete) {
-          totalClaimToComplete += new Date(complete.timestamp).getTime() - new Date(claim.timestamp).getTime();
-          claimToCompleteCount++;
-        }
-      }
+      // Use SQL aggregation instead of loading all records into memory
+      const metricsData = await storage.getPickingMetricsAggregated(startDate, now);
 
-      let totalQueueWait = 0;
-      let queueWaitCount = 0;
-      for (const order of completedOrders) {
-        const claim = claimLogs.find(l => l.orderId === order.id);
-        if (claim && order.createdAt) {
-          totalQueueWait += new Date(claim.timestamp).getTime() - new Date(order.createdAt).getTime();
-          queueWaitCount++;
-        }
-      }
-
-      // Unique pickers active
-      const uniquePickers = new Set(logsInRange.map(l => l.pickerId).filter(Boolean));
-
-      // Calculate quality metrics
-      const shortLogs = logsInRange.filter(l => l.actionType === "item_shorted");
-      const scanPicks = pickLogs.filter(l => l.pickMethod === "scan").length;
-      const manualPicks = pickLogs.filter(l => l.pickMethod === "manual").length;
-      const totalPicks = pickLogs.length;
-      
-      const exceptionOrders = completedOrders.filter(o => o.exceptionAt).length;
-
-      // Short pick reasons breakdown
-      const shortReasonCounts: Record<string, number> = {};
-      for (const log of shortLogs) {
-        const reason = log.reason || "unknown";
-        shortReasonCounts[reason] = (shortReasonCounts[reason] || 0) + 1;
-      }
-      const shortReasons = Object.entries(shortReasonCounts).map(([reason, count]) => ({
-        reason: reason.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
-        count
-      }));
-
-      // Hourly trend (last 24 hours or for today)
-      const hourlyTrend: Array<{ hour: string; orders: number; items: number }> = [];
-      const hoursToShow = range === "today" ? 24 : Math.min(24, Math.ceil(hoursInRange));
-      for (let i = 0; i < hoursToShow; i++) {
-        const hourStart = new Date(startDate.getTime() + i * 60 * 60 * 1000);
-        const hourEnd = new Date(hourStart.getTime() + 60 * 60 * 1000);
-        
-        const ordersInHour = completedOrders.filter(o => {
-          const completed = o.completedAt ? new Date(o.completedAt) : null;
-          return completed && completed >= hourStart && completed < hourEnd;
-        }).length;
-        
-        const itemsInHour = pickLogs.filter(l => {
-          const ts = new Date(l.timestamp);
-          return ts >= hourStart && ts < hourEnd;
-        }).length;
-        
-        hourlyTrend.push({
-          hour: hourStart.toLocaleTimeString("en-US", { hour: "numeric", hour12: true }),
-          orders: ordersInHour,
-          items: itemsInHour
-        });
-      }
-
-      // Picker performance
-      const pickerStats: Record<string, { 
-        pickerId: string;
-        pickerName: string;
-        ordersCompleted: number;
-        itemsPicked: number;
-        totalPickTime: number;
-        pickCount: number;
-        shortPicks: number;
-        scanPicks: number;
-        totalPicks: number;
-      }> = {};
-
-      for (const log of logsInRange) {
-        if (!log.pickerId) continue;
-        if (!pickerStats[log.pickerId]) {
-          pickerStats[log.pickerId] = {
-            pickerId: log.pickerId,
-            pickerName: log.pickerName || "Unknown",
-            ordersCompleted: 0,
-            itemsPicked: 0,
-            totalPickTime: 0,
-            pickCount: 0,
-            shortPicks: 0,
-            scanPicks: 0,
-            totalPicks: 0
-          };
-        }
-        
-        if (log.actionType === "order_completed") {
-          pickerStats[log.pickerId].ordersCompleted++;
-        }
-        if (log.actionType === "item_picked" || log.actionType === "item_quantity_adjusted") {
-          pickerStats[log.pickerId].itemsPicked += log.qtyAfter || 1;
-          pickerStats[log.pickerId].totalPicks++;
-          if (log.pickMethod === "scan") {
-            pickerStats[log.pickerId].scanPicks++;
-          }
-        }
-        if (log.actionType === "item_shorted") {
-          pickerStats[log.pickerId].shortPicks++;
-        }
-      }
-
-      const pickerPerformance = Object.values(pickerStats).map(p => ({
-        pickerId: p.pickerId,
-        pickerName: p.pickerName,
-        ordersCompleted: p.ordersCompleted,
-        itemsPicked: p.itemsPicked,
-        avgPickTime: p.pickCount > 0 ? p.totalPickTime / p.pickCount : 0,
-        shortPicks: p.shortPicks,
-        scanRate: p.totalPicks > 0 ? p.scanPicks / p.totalPicks : 0
-      })).sort((a, b) => b.itemsPicked - a.itemsPicked);
-
-      // Calculate average pick time safely - divide total pick time by number of items
-      // Use claim-to-complete time divided by items for per-item average
-      const avgClaimToCompleteMs = claimToCompleteCount > 0 ? totalClaimToComplete / claimToCompleteCount : 0;
-      const avgItemsPerOrder = totalOrdersCompleted > 0 ? totalItemsPicked / totalOrdersCompleted : 1;
-      const avgPickTimePerItem = avgClaimToCompleteMs > 0 && avgItemsPerOrder > 0 
-        ? (avgClaimToCompleteMs / avgItemsPerOrder) / 1000 
-        : 0;
+      // Format response with aggregated data
+      const totalOrdersCompleted = metricsData.totalOrdersCompleted || 0;
+      const totalLinesPicked = metricsData.totalLinesPicked || 0;
+      const totalItemsPicked = metricsData.totalItemsPicked || 0;
+      const totalShortPicks = metricsData.totalShortPicks || 0;
+      const scanPicks = metricsData.scanPicks || 0;
+      const manualPicks = metricsData.manualPicks || 0;
+      const totalPicks = metricsData.totalPicks || 0;
+      const pickersActive = metricsData.uniquePickers || 0;
+      const exceptionOrders = metricsData.exceptionOrders || 0;
 
       res.json({
         throughput: {
@@ -2088,23 +1945,23 @@ export async function registerRoutes(
           totalItemsPicked
         },
         productivity: {
-          averagePickTime: avgPickTimePerItem,
-          averageClaimToComplete: claimToCompleteCount > 0 ? (totalClaimToComplete / claimToCompleteCount) / 1000 : 0,
-          averageQueueWait: queueWaitCount > 0 ? (totalQueueWait / queueWaitCount) / 1000 : 0,
-          pickersActive: uniquePickers.size,
-          utilizationRate: 0.85 // Placeholder - would need shift data to calculate properly
+          averagePickTime: metricsData.avgPickTimeSeconds || 0,
+          averageClaimToComplete: metricsData.avgClaimToCompleteSeconds || 0,
+          averageQueueWait: metricsData.avgQueueWaitSeconds || 0,
+          pickersActive,
+          utilizationRate: 0.85
         },
         quality: {
-          shortPickRate: totalLinesPicked > 0 ? shortLogs.length / totalLinesPicked : 0,
-          totalShortPicks: shortLogs.length,
+          shortPickRate: totalLinesPicked > 0 ? totalShortPicks / totalLinesPicked : 0,
+          totalShortPicks,
           scanPickRate: totalPicks > 0 ? scanPicks / totalPicks : 0,
           manualPickRate: totalPicks > 0 ? manualPicks / totalPicks : 0,
           exceptionRate: totalOrdersCompleted > 0 ? exceptionOrders / totalOrdersCompleted : 0,
           totalExceptions: exceptionOrders
         },
-        pickerPerformance,
-        hourlyTrend,
-        shortReasons
+        pickerPerformance: metricsData.pickerPerformance || [],
+        hourlyTrend: metricsData.hourlyTrend || [],
+        shortReasons: metricsData.shortReasons || []
       });
     } catch (error) {
       console.error("Error fetching picking metrics:", error);
