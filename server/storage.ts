@@ -408,7 +408,7 @@ export class DatabaseStorage implements IStorage {
   async createProductLocation(location: InsertProductLocation): Promise<ProductLocation> {
     const result = await db.insert(productLocations).values({
       ...location,
-      sku: location.sku.toUpperCase(),
+      sku: location.sku?.toUpperCase() || null,
       location: location.location.toUpperCase(),
       zone: location.zone.toUpperCase(),
     }).returning();
