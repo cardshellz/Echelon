@@ -705,7 +705,7 @@ export default function Locations() {
                       <TableCell className="font-mono text-muted-foreground">{loc.sku || "-"}</TableCell>
                       <TableCell>
                         {editingId === loc.id ? (
-                          <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
+                          <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen} modal={true}>
                             <PopoverTrigger asChild>
                               <Button
                                 variant="outline"
@@ -719,7 +719,7 @@ export default function Locations() {
                               </Button>
                             </PopoverTrigger>
                             <PopoverContent className="w-48 p-0" align="start">
-                              <Command>
+                              <Command shouldFilter={false}>
                                 <CommandInput placeholder="Type to search..." className="h-9" data-testid="input-search-edit-location" />
                                 <CommandList>
                                   <CommandEmpty>No location found.</CommandEmpty>
