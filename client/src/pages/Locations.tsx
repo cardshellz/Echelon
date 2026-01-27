@@ -644,15 +644,9 @@ export default function Locations() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[140px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("sku")}>
-                      <div className="flex items-center gap-1">
-                        SKU
-                        {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
-                      </div>
-                    </TableHead>
                     <TableHead className="cursor-pointer hover:bg-muted/50" onClick={() => handleSort("name")}>
                       <div className="flex items-center gap-1">
-                        Product Name
+                        Product
                         {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
                       </div>
                     </TableHead>
@@ -679,9 +673,11 @@ export default function Locations() {
                 </TableHeader>
                 <TableBody>
                   {filteredLocations.map((loc) => (
-                    <TableRow key={loc.id} data-testid={`row-location-${loc.sku}`}>
-                      <TableCell className="font-mono font-medium">{loc.sku}</TableCell>
-                      <TableCell className="text-muted-foreground">{loc.name}</TableCell>
+                    <TableRow key={loc.id} data-testid={`row-location-${loc.id}`}>
+                      <TableCell>
+                        <div className="font-medium">{loc.name}</div>
+                        <div className="text-xs text-muted-foreground font-mono">{loc.sku || `ID: ${loc.catalogProductId || loc.id}`}</div>
+                      </TableCell>
                       <TableCell>
                         {editingId === loc.id ? (
                           <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
@@ -812,11 +808,11 @@ export default function Locations() {
         {/* Mobile content - direct scroll */}
         <div className="md:hidden p-4 space-y-3">
           {filteredLocations.map((loc) => (
-            <Card key={loc.id} className="p-4" data-testid={`card-location-mobile-${loc.sku}`}>
+            <Card key={loc.id} className="p-4" data-testid={`card-location-mobile-${loc.id}`}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0 space-y-2">
-                  <div className="font-mono font-medium text-sm">{loc.sku}</div>
-                  <div className="text-muted-foreground text-sm truncate">{loc.name}</div>
+                  <div className="font-medium text-sm">{loc.name}</div>
+                  <div className="text-muted-foreground text-xs font-mono">{loc.sku || `ID: ${loc.catalogProductId || loc.id}`}</div>
                   {editingId === loc.id ? (
                     <div className="flex items-center gap-2 mt-2">
                       <Popover open={true}>
