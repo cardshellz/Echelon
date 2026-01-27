@@ -98,10 +98,10 @@ export default function Products() {
     return matchesSearch && matchesStatus && matchesCategory;
   });
 
-  const categories = [...new Set(products
+  const categories = Array.from(new Set(products
     .map(p => p.catalogProduct?.category)
-    .filter(Boolean)
-  )];
+    .filter((c): c is string => Boolean(c))
+  ));
 
   const stats = {
     total: products.length,
@@ -164,13 +164,13 @@ export default function Products() {
 
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div className="flex flex-wrap gap-2 items-center w-full sm:w-auto">
-          <div className="relative flex-1 sm:flex-none sm:w-64">
+          <div className="relative w-full sm:w-80">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search products..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9"
+              className="pl-9 w-full"
               data-testid="input-search-products"
             />
           </div>
