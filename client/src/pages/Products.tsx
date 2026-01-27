@@ -82,8 +82,8 @@ export default function Products() {
 
   const filteredProducts = products.filter(product => {
     const matchesSearch = searchQuery === "" || 
-      product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      product.baseSku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.baseSku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       product.catalogProduct?.title?.toLowerCase().includes(searchQuery.toLowerCase());
     
     const matchesStatus = statusFilter === "all" || 
