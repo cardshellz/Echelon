@@ -72,7 +72,7 @@ export default function Products() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ 
         title: "Sync Complete", 
-        description: `Created: ${data.created}, Updated: ${data.updated}` 
+        description: `Synced ${data.total} products (${data.inventory?.created || 0} new, ${data.inventory?.updated || 0} updated)` 
       });
     },
     onError: () => {
