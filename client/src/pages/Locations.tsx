@@ -840,37 +840,23 @@ export default function Locations() {
                   </div>
                   {editingId === loc.id ? (
                     <div className="flex items-center gap-2 mt-2">
-                      <Popover open={true}>
-                        <PopoverTrigger asChild>
-                          <Button
-                            variant="outline"
-                            role="combobox"
-                            className="flex-1 justify-between font-mono text-xs h-9"
-                          >
-                            {editLocation || "Select location..."}
-                            <ChevronsUpDown className="ml-2 h-3 w-3 shrink-0 opacity-50" />
-                          </Button>
-                        </PopoverTrigger>
-                        <PopoverContent className="w-[250px] p-0" align="start">
-                          <Command>
-                            <CommandInput placeholder="Search locations..." className="h-9" />
-                            <CommandList>
-                              <CommandEmpty>No location found.</CommandEmpty>
-                              <CommandGroup>
-                                {warehouseLocations.map((wl) => (
-                                  <CommandItem
-                                    key={wl.id}
-                                    value={wl.code}
-                                    onSelect={(val) => setEditLocation(val.toUpperCase())}
-                                  >
-                                    {wl.code}
-                                  </CommandItem>
-                                ))}
-                              </CommandGroup>
-                            </CommandList>
-                          </Command>
-                        </PopoverContent>
-                      </Popover>
+                      <Select value={editLocation} onValueChange={(value) => setEditLocation(value)}>
+                        <SelectTrigger className="flex-1 font-mono text-xs h-9">
+                          <SelectValue placeholder="Select location..." />
+                        </SelectTrigger>
+                        <SelectContent className="max-h-60">
+                          {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                            <React.Fragment key={zone}>
+                              <div className="px-2 py-1 text-xs font-semibold text-muted-foreground">{zone}</div>
+                              {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                                <SelectItem key={wloc.id} value={wloc.code} className="font-mono text-xs">
+                                  {wloc.code}
+                                </SelectItem>
+                              ))}
+                            </React.Fragment>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => handleSaveEdit(loc.id)}>
                         <Check className="h-4 w-4 text-green-600" />
                       </Button>
@@ -878,11 +864,13 @@ export default function Locations() {
                         <X className="h-4 w-4 text-red-600" />
                       </Button>
                     </div>
-                  ) : (
+                  ) : loc.location ? (
                     <Badge variant="outline" className="font-mono bg-primary/5">
                       <MapPin className="h-3 w-3 mr-1" />
                       {loc.location}
                     </Badge>
+                  ) : (
+                    <span className="text-muted-foreground text-xs">Unassigned</span>
                   )}
                 </div>
                 {editingId !== loc.id && (
