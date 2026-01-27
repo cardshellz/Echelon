@@ -1160,6 +1160,41 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
   }
 
+  async getAllCatalogProductsWithLocations(): Promise<{
+    id: number;
+    catalogProductId: number;
+    shopifyVariantId: number | null;
+    sku: string | null;
+    name: string;
+    location: string | null;
+    zone: string | null;
+    warehouseLocationId: number | null;
+    status: string;
+    imageUrl: string | null;
+    updatedAt: Date | null;
+  }[]> {
+    // Get ALL catalog products with their locations (if assigned)
+    const result = await db
+      .select({
+        id: catalogProducts.id,
+        catalogProductId: catalogProducts.id,
+        shopifyVariantId: catalogProducts.shopifyVariantId,
+        sku: catalogProducts.sku,
+        name: catalogProducts.title,
+        location: productLocations.location,
+        zone: productLocations.zone,
+        warehouseLocationId: productLocations.warehouseLocationId,
+        status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
+        imageUrl: inventoryItems.imageUrl,
+        updatedAt: productLocations.updatedAt,
+      })
+      .from(catalogProducts)
+      .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
+      .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
+      .orderBy(asc(catalogProducts.title));
+    return result;
+  }
+
   async getCatalogProductsWithoutLocations(): Promise<{
     id: number;
     shopifyVariantId: number | null;

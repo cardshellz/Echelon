@@ -650,6 +650,12 @@ export default function Locations() {
                         {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
                       </div>
                     </TableHead>
+                    <TableHead className="w-[140px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("sku")}>
+                      <div className="flex items-center gap-1">
+                        SKU
+                        {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 opacity-30" />}
+                      </div>
+                    </TableHead>
                     <TableHead className="w-[140px] cursor-pointer hover:bg-muted/50" onClick={() => handleSort("location")}>
                       <div className="flex items-center gap-1">
                         Location
@@ -674,10 +680,8 @@ export default function Locations() {
                 <TableBody>
                   {filteredLocations.map((loc) => (
                     <TableRow key={loc.id} data-testid={`row-location-${loc.id}`}>
-                      <TableCell>
-                        <div className="font-medium">{loc.name}</div>
-                        <div className="text-xs text-muted-foreground font-mono">{loc.sku || `ID: ${loc.catalogProductId || loc.id}`}</div>
-                      </TableCell>
+                      <TableCell className="font-medium">{loc.name}</TableCell>
+                      <TableCell className="font-mono text-muted-foreground">{loc.sku || "-"}</TableCell>
                       <TableCell>
                         {editingId === loc.id ? (
                           <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
@@ -812,7 +816,10 @@ export default function Locations() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0 space-y-2">
                   <div className="font-medium text-sm">{loc.name}</div>
-                  <div className="text-muted-foreground text-xs font-mono">{loc.sku || `ID: ${loc.catalogProductId || loc.id}`}</div>
+                  <div className="flex gap-4 text-xs text-muted-foreground">
+                    <span className="font-mono">SKU: {loc.sku || "-"}</span>
+                    <span>Location: {loc.location || "Unassigned"}</span>
+                  </div>
                   {editingId === loc.id ? (
                     <div className="flex items-center gap-2 mt-2">
                       <Popover open={true}>

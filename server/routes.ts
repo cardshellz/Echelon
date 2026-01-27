@@ -330,7 +330,8 @@ export async function registerRoutes(
   // Get all locations
   app.get("/api/locations", async (req, res) => {
     try {
-      const locations = await storage.getAllProductLocations();
+      // Return ALL catalog products with their locations (if assigned)
+      const locations = await storage.getAllCatalogProductsWithLocations();
       res.json(locations);
     } catch (error) {
       console.error("Error fetching locations:", error);
