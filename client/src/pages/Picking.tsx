@@ -3329,7 +3329,7 @@ export default function Picking() {
                       else itemRefs.current.delete(item.id);
                     }}
                     className={cn(
-                      "flex items-center gap-2 p-2 rounded-lg border w-full max-w-full",
+                      "flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 rounded-lg border w-full",
                       item.status === "completed" && "bg-emerald-50 border-emerald-200",
                       item.status === "short" && "bg-amber-50 border-amber-200",
                       !isCompleted && "bg-white border-slate-200",
@@ -3338,27 +3338,27 @@ export default function Picking() {
                     style={{ overflow: 'hidden' }}
                     data-testid={`list-item-${item.id}`}
                   >
-                    {/* Image - fixed size */}
-                    <div className="w-12 h-12 flex-shrink-0">
+                    {/* Image - fixed size, smaller on mobile */}
+                    <div className="w-10 h-10 md:w-12 md:h-12 flex-shrink-0">
                       {item.image ? (
-                        <img src={item.image} alt="" className="w-12 h-12 rounded object-cover" />
+                        <img src={item.image} alt="" className="w-10 h-10 md:w-12 md:h-12 rounded object-cover" />
                       ) : (
-                        <div className="w-12 h-12 rounded bg-slate-100 flex items-center justify-center">
-                          <Package className="h-5 w-5 text-slate-400" />
+                        <div className="w-10 h-10 md:w-12 md:h-12 rounded bg-slate-100 flex items-center justify-center">
+                          <Package className="h-4 w-4 md:h-5 md:w-5 text-slate-400" />
                         </div>
                       )}
                     </div>
                     
                     {/* Info - takes remaining space, text wraps/truncates */}
                     <div className="flex-1 min-w-0 overflow-hidden">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={cn("text-xl md:text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
+                      <div className="flex items-center gap-1.5 md:gap-2 flex-wrap">
+                        <span className={cn("text-base md:text-lg font-black font-mono flex-shrink-0", isCompleted ? "text-slate-400" : "text-primary")}>
                           {item.location}
                         </span>
                         <button
                           onClick={() => openEditQtyDialog(idx)}
                           className={cn(
-                            "text-base font-bold px-2.5 py-1 rounded flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all min-h-[32px]",
+                            "text-sm md:text-base font-bold px-2 py-0.5 md:px-2.5 md:py-1 rounded flex-shrink-0 cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all",
                             isCompleted 
                               ? "bg-emerald-100 text-emerald-700" 
                               : "bg-amber-100 text-amber-800"
@@ -3368,60 +3368,50 @@ export default function Picking() {
                           {item.picked}/{item.qty}
                         </button>
                       </div>
-                      <div className="text-sm md:text-xs text-slate-600 break-words line-clamp-2">{item.name}</div>
-                      <div className="text-xs md:text-[10px] font-mono font-semibold text-slate-500 truncate">{item.sku}</div>
-                      {item.barcode && <div className="text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
+                      <div className="text-xs md:text-sm text-slate-600 break-words line-clamp-1">{item.name}</div>
+                      <div className="text-[10px] md:text-xs font-mono font-semibold text-slate-500 truncate">{item.sku}</div>
+                      {item.barcode && <div className="text-[9px] md:text-[10px] font-mono text-blue-500 truncate">BC: {item.barcode}</div>}
                     </div>
                     
                     {/* Buttons - fixed width, always visible, touch-friendly */}
-                    <div className="flex-shrink-0 flex gap-1.5 justify-end">
+                    <div className="flex-shrink-0 flex gap-1 justify-end">
                       {!isCompleted ? (
-                        <div className="flex gap-1.5">
+                        <div className="flex gap-1">
                           {/* -1 Button */}
                           <Button 
                             size="icon" 
                             variant="outline"
-                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-slate-300 text-slate-600 flex-shrink-0"
+                            className="h-9 w-9 md:h-11 md:w-11 border-slate-300 text-slate-600 flex-shrink-0"
                             onClick={() => handleListItemDecrement(idx)}
                             disabled={item.picked <= 0}
                             data-testid={`button-minus-${item.id}`}
                           >
-                            <Minus className="h-5 w-5" />
+                            <Minus className="h-4 w-4 md:h-5 md:w-5" />
                           </Button>
                           {/* +1 Button */}
                           <Button 
                             size="icon" 
                             variant="outline"
-                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-blue-400 text-blue-600 flex-shrink-0"
+                            className="h-9 w-9 md:h-11 md:w-11 border-blue-400 text-blue-600 flex-shrink-0"
                             onClick={() => handleListItemManualPickOne(idx)}
                             disabled={item.picked >= item.qty}
                             data-testid={`button-plus-${item.id}`}
                           >
-                            <Plus className="h-5 w-5" />
+                            <Plus className="h-4 w-4 md:h-5 md:w-5" />
                           </Button>
                           {/* Pick All Button */}
                           <Button 
                             size="icon" 
-                            className="h-11 w-11 min-h-[44px] min-w-[44px] bg-emerald-500 text-white flex-shrink-0" 
+                            className="h-9 w-9 md:h-11 md:w-11 bg-emerald-500 text-white flex-shrink-0" 
                             onClick={() => handleListItemPick(idx)} 
                             data-testid={`button-pick-${item.id}`}
                           >
-                            <CheckCircle2 className="h-5 w-5" />
-                          </Button>
-                          {/* Short Button */}
-                          <Button 
-                            size="icon" 
-                            variant="outline" 
-                            className="h-11 w-11 min-h-[44px] min-w-[44px] border-amber-400 text-amber-600 flex-shrink-0" 
-                            onClick={() => handleListItemShort(idx)} 
-                            data-testid={`button-short-${item.id}`}
-                          >
-                            <AlertTriangle className="h-5 w-5" />
+                            <CheckCircle2 className="h-4 w-4 md:h-5 md:w-5" />
                           </Button>
                         </div>
                       ) : (
-                        <div className="h-11 w-11 flex items-center justify-center">
-                          {item.status === "completed" ? <CheckCircle2 className="h-6 w-6 text-emerald-500" /> : <AlertTriangle className="h-6 w-6 text-amber-500" />}
+                        <div className="h-9 w-9 md:h-11 md:w-11 flex items-center justify-center">
+                          {item.status === "completed" ? <CheckCircle2 className="h-5 w-5 md:h-6 md:w-6 text-emerald-500" /> : <AlertTriangle className="h-5 w-5 md:h-6 md:w-6 text-amber-500" />}
                         </div>
                       )}
                     </div>
