@@ -37,10 +37,18 @@ Echelon uses a hub-and-spoke pattern for multi-channel orders:
 
 Key tables:
 - `users`: Authentication with role-based access
-- `product_locations`: SKU to warehouse location mapping
+- `catalog_products`: **Master product catalog (PIM)** - internal `id` is the source of truth for product identity. Contains shopifyVariantId as sync metadata.
+- `product_locations`: Product to warehouse bin mapping. Uses `catalogProductId` as primary link (internal ID is source of truth, not SKU or shopifyVariantId)
 - `orders`: ALL orders from all channels with operational fields (sourceTableId, customerName, shipping address, priority, status, itemCount, unitCount)
-- `order_items`: ALL items with **requiresShipping** flag per item (sourceItemId, sku, name, imageUrl, barcode, quantity, pickedQuantity, status, location, zone, requiresShipping)
+- `order_items`: ALL items with **requiresShipping** flag per item. Has optional `catalogProductId` for analytics (doesn't affect order creation)
+- `picking_logs`: Audit trail with optional `catalogProductId` for analytics
 - `shopify_orders`, `shopify_order_items`: Full Shopify data (billing address, financials, notes, tags, variant info, pricing, properties, **requires_shipping**) - populated by external shellz_club app
+
+**Product Identity Architecture:**
+- `catalog_products.id` is the **internal source of truth** for product identity
+- `shopifyVariantId` is metadata from Shopify sync, not a structural dependency
+- Products can exist without SKUs (many Shopify products don't have SKUs assigned)
+- All product relationships (locations, analytics) link via `catalogProductId`
 
 **Order Routing:**
 - ALL orders go into `orders` table (shipping + non-shipping like memberships)
