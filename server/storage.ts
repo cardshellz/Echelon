@@ -41,6 +41,10 @@ import {
   type InsertPartnerProfile,
   type ChannelReservation,
   type InsertChannelReservation,
+  type CatalogProduct,
+  type InsertCatalogProduct,
+  type CatalogAsset,
+  type InsertCatalogAsset,
   users,
   productLocations,
   orders,
@@ -59,6 +63,8 @@ import {
   channelConnections,
   partnerProfiles,
   channelReservations,
+  catalogProducts,
+  catalogAssets,
   generateLocationCode,
   appSettings
 } from "@shared/schema";
@@ -145,8 +151,22 @@ export interface IStorage {
   updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null>;
   deleteWarehouseLocation(id: number): Promise<boolean>;
   
+  // Catalog Products
+  getAllCatalogProducts(): Promise<CatalogProduct[]>;
+  getCatalogProductById(id: number): Promise<CatalogProduct | undefined>;
+  getCatalogProductByInventoryItemId(inventoryItemId: number): Promise<CatalogProduct | undefined>;
+  createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct>;
+  updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null>;
+  deleteCatalogProduct(id: number): Promise<boolean>;
+  
+  // Catalog Assets
+  getCatalogAssetsByProductId(catalogProductId: number): Promise<CatalogAsset[]>;
+  createCatalogAsset(asset: InsertCatalogAsset): Promise<CatalogAsset>;
+  deleteCatalogAsset(id: number): Promise<boolean>;
+  
   // Inventory Items (Master SKUs)
   getAllInventoryItems(): Promise<InventoryItem[]>;
+  getInventoryItemById(id: number): Promise<InventoryItem | undefined>;
   getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
   getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
   createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
@@ -1060,8 +1080,64 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Inventory Items (Master SKUs)
+  // Catalog Products
+  async getAllCatalogProducts(): Promise<CatalogProduct[]> {
+    return await db.select().from(catalogProducts).orderBy(desc(catalogProducts.updatedAt));
+  }
+
+  async getCatalogProductById(id: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.id, id));
+    return result[0];
+  }
+
+  async getCatalogProductByInventoryItemId(inventoryItemId: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.inventoryItemId, inventoryItemId));
+    return result[0];
+  }
+
+  async createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct> {
+    const result = await db.insert(catalogProducts).values(product).returning();
+    return result[0];
+  }
+
+  async updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null> {
+    const result = await db.update(catalogProducts)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(catalogProducts.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteCatalogProduct(id: number): Promise<boolean> {
+    const result = await db.delete(catalogProducts).where(eq(catalogProducts.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // Catalog Assets
+  async getCatalogAssetsByProductId(catalogProductId: number): Promise<CatalogAsset[]> {
+    return await db.select().from(catalogAssets)
+      .where(eq(catalogAssets.catalogProductId, catalogProductId))
+      .orderBy(asc(catalogAssets.position));
+  }
+
+  async createCatalogAsset(asset: InsertCatalogAsset): Promise<CatalogAsset> {
+    const result = await db.insert(catalogAssets).values(asset).returning();
+    return result[0];
+  }
+
+  async deleteCatalogAsset(id: number): Promise<boolean> {
+    const result = await db.delete(catalogAssets).where(eq(catalogAssets.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // Inventory Items (Master SKUs)
   async getAllInventoryItems(): Promise<InventoryItem[]> {
     return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
+  }
+
+  async getInventoryItemById(id: number): Promise<InventoryItem | undefined> {
+    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.id, id));
+    return result[0];
   }
 
   async getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined> {

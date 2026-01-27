@@ -24,6 +24,8 @@ import Users from "@/pages/Users";
 import Roles from "@/pages/Roles";
 import Channels from "@/pages/Channels";
 import Reserves from "@/pages/Reserves";
+import Products from "@/pages/Products";
+import ProductDetail from "@/pages/ProductDetail";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -126,6 +128,12 @@ function Router() {
         </Route>
         <Route path="/channels/reserves">
           <ProtectedRoute component={Reserves} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/products">
+          <ProtectedRoute component={Products} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/products/:id">
+          <ProtectedRoute component={ProductDetail} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />

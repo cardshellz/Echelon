@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -3428,6 +3428,146 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error creating warehouse location:", error);
       res.status(500).json({ error: "Failed to create location" });
+    }
+  });
+
+  // Catalog Products API
+  app.get("/api/catalog/products", async (req, res) => {
+    try {
+      const products = await storage.getAllCatalogProducts();
+      res.json(products);
+    } catch (error) {
+      console.error("Error fetching catalog products:", error);
+      res.status(500).json({ error: "Failed to fetch catalog products" });
+    }
+  });
+
+  app.get("/api/catalog/products/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const product = await storage.getCatalogProductById(id);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      
+      // Also get inventory item and variants
+      const inventoryItem = await storage.getInventoryItemById(product.inventoryItemId);
+      const variants = inventoryItem ? await storage.getUomVariantsByInventoryItemId(inventoryItem.id) : [];
+      const assets = await storage.getCatalogAssetsByProductId(product.id);
+      
+      res.json({ ...product, inventoryItem, variants, assets });
+    } catch (error) {
+      console.error("Error fetching catalog product:", error);
+      res.status(500).json({ error: "Failed to fetch catalog product" });
+    }
+  });
+
+  app.post("/api/catalog/products", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const validatedData = insertCatalogProductSchema.parse(req.body);
+      const product = await storage.createCatalogProduct(validatedData);
+      res.json(product);
+    } catch (error: any) {
+      if (error.name === "ZodError") {
+        return res.status(400).json({ error: "Invalid product data", details: error.errors });
+      }
+      console.error("Error creating catalog product:", error);
+      res.status(500).json({ error: error.message || "Failed to create catalog product" });
+    }
+  });
+
+  app.patch("/api/catalog/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const validatedData = insertCatalogProductSchema.partial().parse(req.body);
+      const product = await storage.updateCatalogProduct(id, validatedData);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json(product);
+    } catch (error: any) {
+      if (error.name === "ZodError") {
+        return res.status(400).json({ error: "Invalid product data", details: error.errors });
+      }
+      console.error("Error updating catalog product:", error);
+      res.status(500).json({ error: error.message || "Failed to update catalog product" });
+    }
+  });
+
+  app.delete("/api/catalog/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteCatalogProduct(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting catalog product:", error);
+      res.status(500).json({ error: error.message || "Failed to delete catalog product" });
+    }
+  });
+
+  // Single product with all related data (for detail views)
+  app.get("/api/products/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const inventoryItem = await storage.getInventoryItemById(id);
+      
+      if (!inventoryItem) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      
+      const catalogProduct = await storage.getCatalogProductByInventoryItemId(id);
+      const variants = await storage.getUomVariantsByInventoryItemId(id);
+      const assets = catalogProduct ? await storage.getCatalogAssetsByProductId(catalogProduct.id) : [];
+      
+      res.json({
+        ...inventoryItem,
+        catalogProduct,
+        variants,
+        assets,
+      });
+    } catch (error) {
+      console.error("Error fetching product:", error);
+      res.status(500).json({ error: "Failed to fetch product" });
+    }
+  });
+
+  // Products with joined inventory data (for list views)
+  app.get("/api/products", async (req, res) => {
+    try {
+      // Get all inventory items with their catalog product data
+      const inventoryItemsList = await storage.getAllInventoryItems();
+      const catalogProductsList = await storage.getAllCatalogProducts();
+      const variantsList = await storage.getAllUomVariants();
+      
+      // Create lookup maps
+      const catalogByItemId = new Map(catalogProductsList.map(p => [p.inventoryItemId, p]));
+      const variantsByItemId = new Map<number, typeof variantsList>();
+      for (const v of variantsList) {
+        if (!variantsByItemId.has(v.inventoryItemId)) {
+          variantsByItemId.set(v.inventoryItemId, []);
+        }
+        variantsByItemId.get(v.inventoryItemId)!.push(v);
+      }
+      
+      // Combine into product view
+      const products = inventoryItemsList.map(item => ({
+        id: item.id,
+        baseSku: item.baseSku,
+        name: item.name,
+        imageUrl: item.imageUrl,
+        active: item.active,
+        catalogProduct: catalogByItemId.get(item.id) || null,
+        variantCount: variantsByItemId.get(item.id)?.length || 0,
+        variants: variantsByItemId.get(item.id) || [],
+      }));
+      
+      res.json(products);
+    } catch (error) {
+      console.error("Error fetching products:", error);
+      res.status(500).json({ error: "Failed to fetch products" });
     }
   });
 
