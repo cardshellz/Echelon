@@ -1985,10 +1985,11 @@ export async function registerRoutes(
       let assetsCreated = 0;
       
       for (const product of shopifyProducts) {
-        // 1. Upsert inventory_items (base product record)
-        const existingItem = await storage.getInventoryItemByBaseSku(product.sku);
-        const inventoryItem = await storage.upsertInventoryItem({
-          baseSku: product.sku,
+        // 1. Upsert inventory_items by variant ID (primary identifier)
+        const existingItem = await storage.getInventoryItemByShopifyVariantId(product.variantId);
+        const inventoryItem = await storage.upsertInventoryItemByVariantId(product.variantId, {
+          baseSku: product.sku, // May be null
+          shopifyProductId: product.shopifyProductId,
           name: product.title,
           description: product.description,
           baseUnit: "each",
@@ -2002,9 +2003,10 @@ export async function registerRoutes(
           inventoryCreated++;
         }
         
-        // 2. Upsert catalog_products (extended catalog data)
-        const existingCatalog = await storage.getCatalogProductBySku(product.sku);
-        const catalogProduct = await storage.upsertCatalogProductBySku(product.sku, inventoryItem.id, {
+        // 2. Upsert catalog_products by variant ID (primary identifier)
+        const existingCatalog = await storage.getCatalogProductByVariantId(product.variantId);
+        const catalogProduct = await storage.upsertCatalogProductByVariantId(product.variantId, inventoryItem.id, {
+          sku: product.sku, // May be null
           title: product.title,
           description: product.description,
           brand: product.vendor,
@@ -2034,12 +2036,11 @@ export async function registerRoutes(
           });
           assetsCreated++;
         }
-      }
-      
-      // Also sync to product_locations for warehouse assignment compatibility
-      const simpleProducts = await fetchAllShopifyProducts();
-      for (const product of simpleProducts) {
-        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl, product.barcode);
+        
+        // 4. Also sync to product_locations for warehouse assignment (only if has SKU)
+        if (product.sku) {
+          await storage.upsertProductLocationBySku(product.sku, product.title, product.status, product.imageUrl || undefined, product.barcode || undefined);
+        }
       }
       
       console.log(`Sync complete: inventory ${inventoryCreated} created/${inventoryUpdated} updated, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);

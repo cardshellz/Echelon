@@ -36,7 +36,7 @@ export interface ShopifyProduct {
 // Full product data for catalog sync
 export interface ShopifyCatalogProduct {
   shopifyProductId: number;
-  sku: string;
+  sku: string | null; // SKU is optional - variant ID is the primary identifier
   variantId: number;
   title: string;
   description: string | null;
@@ -106,25 +106,24 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
       const tags = product.tags ? product.tags.split(",").map(t => t.trim()).filter(t => t) : [];
       
       for (const variant of product.variants) {
-        if (variant.sku && variant.sku.trim()) {
-          const variantTitle = variant.title !== "Default Title" ? ` - ${variant.title}` : "";
-          const imageUrl = variant.image_id ? imageMap.get(variant.image_id) || defaultImage : defaultImage;
-          
-          allProducts.push({
-            shopifyProductId: product.id,
-            sku: variant.sku.trim().toUpperCase(),
-            variantId: variant.id,
-            title: `${product.title}${variantTitle}`,
-            description: product.body_html || null,
-            vendor: product.vendor || null,
-            productType: product.product_type || null,
-            tags,
-            status: product.status,
-            imageUrl,
-            barcode: variant.barcode?.trim() || null,
-            allImages,
-          });
-        }
+        // Include ALL variants - variant ID is the primary identifier, SKU is optional
+        const variantTitle = variant.title !== "Default Title" ? ` - ${variant.title}` : "";
+        const imageUrl = variant.image_id ? imageMap.get(variant.image_id) || defaultImage : defaultImage;
+        
+        allProducts.push({
+          shopifyProductId: product.id,
+          sku: variant.sku?.trim()?.toUpperCase() || null, // SKU is optional
+          variantId: variant.id,
+          title: `${product.title}${variantTitle}`,
+          description: product.body_html || null,
+          vendor: product.vendor || null,
+          productType: product.product_type || null,
+          tags,
+          status: product.status,
+          imageUrl,
+          barcode: variant.barcode?.trim() || null,
+          allImages,
+        });
       }
     }
     

@@ -169,13 +169,17 @@ export interface IStorage {
   getInventoryItemById(id: number): Promise<InventoryItem | undefined>;
   getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
   getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
+  getInventoryItemByShopifyVariantId(variantId: number): Promise<InventoryItem | undefined>;
   createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
   upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
+  upsertInventoryItemByVariantId(variantId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem>;
   updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null>;
   
   // Catalog Products - additional methods
   getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
+  getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined>;
   upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
+  upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
   deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
   
   // UOM Variants
@@ -1152,6 +1156,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getInventoryItemByShopifyVariantId(variantId: number): Promise<InventoryItem | undefined> {
+    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.shopifyVariantId, variantId));
+    return result[0];
+  }
+
   async getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined> {
     // First try to match as a base SKU
     const byBase = await this.getInventoryItemByBaseSku(sku);
@@ -1170,19 +1179,38 @@ export class DatabaseStorage implements IStorage {
   async createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
     const result = await db.insert(inventoryItems).values({
       ...item,
-      baseSku: item.baseSku.toUpperCase(),
+      baseSku: item.baseSku?.toUpperCase() || null,
     }).returning();
     return result[0];
   }
 
   async upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
-    const sku = item.baseSku.toUpperCase();
-    const existing = await this.getInventoryItemByBaseSku(sku);
-    if (existing) {
-      const updated = await this.updateInventoryItem(existing.id, item);
-      return updated || existing;
+    // If we have a SKU, use that for matching
+    if (item.baseSku) {
+      const sku = item.baseSku.toUpperCase();
+      const existing = await this.getInventoryItemByBaseSku(sku);
+      if (existing) {
+        const updated = await this.updateInventoryItem(existing.id, item);
+        return updated || existing;
+      }
     }
     return await this.createInventoryItem(item);
+  }
+
+  async upsertInventoryItemByVariantId(variantId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem> {
+    const existing = await this.getInventoryItemByShopifyVariantId(variantId);
+    if (existing) {
+      const updated = await this.updateInventoryItem(existing.id, { ...item, shopifyVariantId: variantId });
+      return updated || existing;
+    }
+    // Create new item with variant ID
+    const result = await db.insert(inventoryItems).values({
+      ...item,
+      shopifyVariantId: variantId,
+      baseSku: item.baseSku?.toUpperCase() || null,
+      baseUnit: item.baseUnit || "each",
+    }).returning();
+    return result[0];
   }
 
   async updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null> {
@@ -1199,6 +1227,11 @@ export class DatabaseStorage implements IStorage {
 
   async getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined> {
     const result = await db.select().from(catalogProducts).where(eq(catalogProducts.sku, sku.toUpperCase()));
+    return result[0];
+  }
+
+  async getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.shopifyVariantId, variantId));
     return result[0];
   }
 
@@ -1221,6 +1254,37 @@ export class DatabaseStorage implements IStorage {
       inventoryItemId,
       sku: normalizedSku,
       title: data.title || normalizedSku,
+      description: data.description,
+      category: data.category,
+      brand: data.brand,
+      manufacturer: data.manufacturer,
+      tags: data.tags,
+      status: data.status || "active",
+    }).returning();
+    return result[0];
+  }
+
+  async upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
+    const existing = await this.getCatalogProductByVariantId(variantId);
+    
+    if (existing) {
+      const result = await db.update(catalogProducts)
+        .set({
+          ...data,
+          sku: data.sku?.toUpperCase() || existing.sku,
+          shopifyVariantId: variantId,
+          updatedAt: new Date(),
+        })
+        .where(eq(catalogProducts.id, existing.id))
+        .returning();
+      return result[0];
+    }
+    
+    const result = await db.insert(catalogProducts).values({
+      inventoryItemId,
+      shopifyVariantId: variantId,
+      sku: data.sku?.toUpperCase() || null,
+      title: data.title || "Untitled Product",
       description: data.description,
       category: data.category,
       brand: data.brand,
