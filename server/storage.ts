@@ -170,6 +170,13 @@ export interface IStorage {
   getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
   getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
   createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
+  upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
+  updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null>;
+  
+  // Catalog Products - additional methods
+  getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
+  upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
+  deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
   
   // UOM Variants
   getAllUomVariants(): Promise<UomVariant[]>;
@@ -1166,6 +1173,67 @@ export class DatabaseStorage implements IStorage {
       baseSku: item.baseSku.toUpperCase(),
     }).returning();
     return result[0];
+  }
+
+  async upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
+    const sku = item.baseSku.toUpperCase();
+    const existing = await this.getInventoryItemByBaseSku(sku);
+    if (existing) {
+      const updated = await this.updateInventoryItem(existing.id, item);
+      return updated || existing;
+    }
+    return await this.createInventoryItem(item);
+  }
+
+  async updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null> {
+    const result = await db.update(inventoryItems)
+      .set({
+        ...updates,
+        baseSku: updates.baseSku?.toUpperCase(),
+        updatedAt: new Date(),
+      })
+      .where(eq(inventoryItems.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.sku, sku.toUpperCase()));
+    return result[0];
+  }
+
+  async upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
+    const normalizedSku = sku.toUpperCase();
+    const existing = await this.getCatalogProductBySku(normalizedSku);
+    
+    if (existing) {
+      const result = await db.update(catalogProducts)
+        .set({
+          ...data,
+          updatedAt: new Date(),
+        })
+        .where(eq(catalogProducts.id, existing.id))
+        .returning();
+      return result[0];
+    }
+    
+    const result = await db.insert(catalogProducts).values({
+      inventoryItemId,
+      sku: normalizedSku,
+      title: data.title || normalizedSku,
+      description: data.description,
+      category: data.category,
+      brand: data.brand,
+      manufacturer: data.manufacturer,
+      tags: data.tags,
+      status: data.status || "active",
+    }).returning();
+    return result[0];
+  }
+
+  async deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number> {
+    const result = await db.delete(catalogAssets).where(eq(catalogAssets.catalogProductId, catalogProductId)).returning();
+    return result.length;
   }
 
   // UOM Variants

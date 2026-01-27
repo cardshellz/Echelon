@@ -23,10 +23,30 @@ export interface ShopifyImage {
 export interface ShopifyProduct {
   id: number;
   title: string;
+  body_html?: string;
+  vendor?: string;
+  product_type?: string;
+  tags?: string;
   status: "active" | "draft" | "archived";
   variants: ShopifyVariant[];
   images?: ShopifyImage[];
   image?: { src: string };
+}
+
+// Full product data for catalog sync
+export interface ShopifyCatalogProduct {
+  shopifyProductId: number;
+  sku: string;
+  variantId: number;
+  title: string;
+  description: string | null;
+  vendor: string | null;
+  productType: string | null;
+  tags: string[];
+  status: string;
+  imageUrl: string | null;
+  barcode: string | null;
+  allImages: { url: string; position: number }[];
 }
 
 export interface ShopifyProductsResponse {
@@ -43,6 +63,83 @@ function getShopifyConfig() {
     store,
     accessToken: SHOPIFY_ACCESS_TOKEN,
   };
+}
+
+// Fetch full product catalog data for PIM sync
+export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProduct[]> {
+  const config = getShopifyConfig();
+  const allProducts: ShopifyCatalogProduct[] = [];
+  let pageInfo: string | null = null;
+  
+  do {
+    const url: string = pageInfo
+      ? `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
+      : `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
+    
+    const response: Response = await fetch(url, {
+      headers: {
+        "X-Shopify-Access-Token": config.accessToken,
+        "Content-Type": "application/json",
+      },
+    });
+    
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Shopify API error: ${response.status} - ${error}`);
+    }
+    
+    const data: ShopifyProductsResponse = await response.json();
+    
+    for (const product of data.products) {
+      // Build image map
+      const imageMap = new Map<number, string>();
+      const allImages: { url: string; position: number }[] = [];
+      if (product.images) {
+        product.images.forEach((img, index) => {
+          imageMap.set(img.id, img.src);
+          allImages.push({ url: img.src, position: index });
+        });
+      }
+      const defaultImage = product.image?.src || (product.images && product.images[0]?.src) || null;
+      
+      // Parse tags
+      const tags = product.tags ? product.tags.split(",").map(t => t.trim()).filter(t => t) : [];
+      
+      for (const variant of product.variants) {
+        if (variant.sku && variant.sku.trim()) {
+          const variantTitle = variant.title !== "Default Title" ? ` - ${variant.title}` : "";
+          const imageUrl = variant.image_id ? imageMap.get(variant.image_id) || defaultImage : defaultImage;
+          
+          allProducts.push({
+            shopifyProductId: product.id,
+            sku: variant.sku.trim().toUpperCase(),
+            variantId: variant.id,
+            title: `${product.title}${variantTitle}`,
+            description: product.body_html || null,
+            vendor: product.vendor || null,
+            productType: product.product_type || null,
+            tags,
+            status: product.status,
+            imageUrl,
+            barcode: variant.barcode?.trim() || null,
+            allImages,
+          });
+        }
+      }
+    }
+    
+    // Handle pagination
+    const linkHeader: string | null = response.headers.get("Link");
+    pageInfo = null;
+    if (linkHeader) {
+      const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
+      if (nextMatch) {
+        pageInfo = nextMatch[1];
+      }
+    }
+  } while (pageInfo);
+  
+  return allProducts;
 }
 
 export async function fetchAllShopifyProducts(): Promise<{ sku: string; name: string; status: string; imageUrl?: string; barcode?: string }[]> {

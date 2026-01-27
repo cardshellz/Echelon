@@ -5,7 +5,7 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -1969,37 +1969,86 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Sync API
+  // Shopify Sync API - syncs to inventory_items, catalog_products, and catalog_assets
   app.post("/api/shopify/sync", async (req, res) => {
     try {
-      console.log("Starting Shopify SKU sync...");
+      console.log("Starting Shopify catalog sync...");
       
-      const shopifyProducts = await fetchAllShopifyProducts();
-      console.log(`Fetched ${shopifyProducts.length} SKUs from Shopify`);
+      // Fetch full catalog data from Shopify
+      const shopifyProducts = await fetchShopifyCatalogProducts();
+      console.log(`Fetched ${shopifyProducts.length} products from Shopify`);
       
-      let created = 0;
-      let updated = 0;
+      let inventoryCreated = 0;
+      let inventoryUpdated = 0;
+      let catalogCreated = 0;
+      let catalogUpdated = 0;
+      let assetsCreated = 0;
       
       for (const product of shopifyProducts) {
-        const existing = await storage.getProductLocationBySku(product.sku);
-        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl, product.barcode);
-        if (existing) {
-          updated++;
+        // 1. Upsert inventory_items (base product record)
+        const existingItem = await storage.getInventoryItemByBaseSku(product.sku);
+        const inventoryItem = await storage.upsertInventoryItem({
+          baseSku: product.sku,
+          name: product.title,
+          description: product.description,
+          baseUnit: "each",
+          imageUrl: product.imageUrl,
+          active: product.status === "active" ? 1 : 0,
+        });
+        
+        if (existingItem) {
+          inventoryUpdated++;
         } else {
-          created++;
+          inventoryCreated++;
+        }
+        
+        // 2. Upsert catalog_products (extended catalog data)
+        const existingCatalog = await storage.getCatalogProductBySku(product.sku);
+        const catalogProduct = await storage.upsertCatalogProductBySku(product.sku, inventoryItem.id, {
+          title: product.title,
+          description: product.description,
+          brand: product.vendor,
+          category: product.productType,
+          tags: product.tags,
+          status: product.status,
+        });
+        
+        if (existingCatalog) {
+          catalogUpdated++;
+        } else {
+          catalogCreated++;
+        }
+        
+        // 3. Sync catalog_assets (images)
+        // Delete existing assets and recreate to ensure sync
+        await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
+        
+        for (let i = 0; i < product.allImages.length; i++) {
+          const img = product.allImages[i];
+          await storage.createCatalogAsset({
+            catalogProductId: catalogProduct.id,
+            assetType: "image",
+            url: img.url,
+            position: img.position,
+            isPrimary: i === 0 ? 1 : 0,
+          });
+          assetsCreated++;
         }
       }
       
-      const validSkus = shopifyProducts.map(p => p.sku);
-      const deleted = await storage.deleteOrphanedSkus(validSkus);
+      // Also sync to product_locations for warehouse assignment compatibility
+      const simpleProducts = await fetchAllShopifyProducts();
+      for (const product of simpleProducts) {
+        await storage.upsertProductLocationBySku(product.sku, product.name, product.status, product.imageUrl, product.barcode);
+      }
       
-      console.log(`Sync complete: ${created} created, ${updated} updated, ${deleted} deleted`);
+      console.log(`Sync complete: inventory ${inventoryCreated} created/${inventoryUpdated} updated, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
       
       res.json({
         success: true,
-        created,
-        updated,
-        deleted,
+        inventory: { created: inventoryCreated, updated: inventoryUpdated },
+        catalog: { created: catalogCreated, updated: catalogUpdated },
+        assets: assetsCreated,
         total: shopifyProducts.length,
       });
     } catch (error: any) {
@@ -3508,35 +3557,32 @@ export async function registerRoutes(
     }
   });
 
-  // Single product with all related data (for detail views) - uses product_locations
+  // Single product with all related data (for detail views) - uses catalog_products as master
   app.get("/api/products/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const productLocation = await storage.getProductLocationById(id);
+      const catalogProduct = await storage.getCatalogProductById(id);
       
-      if (!productLocation) {
+      if (!catalogProduct) {
         return res.status(404).json({ error: "Product not found" });
       }
       
-      // Get catalog product by SKU
-      const catalogProducts = await storage.getAllCatalogProducts();
-      const catalogProduct = catalogProducts.find(p => p.sku === productLocation.sku) || null;
-      const assets = catalogProduct ? await storage.getCatalogAssetsByProductId(catalogProduct.id) : [];
+      // Get linked inventory item and assets
+      const inventoryItem = await storage.getInventoryItemById(catalogProduct.inventoryItemId);
+      const assets = await storage.getCatalogAssetsByProductId(catalogProduct.id);
+      const variants = await storage.getUomVariantsByInventoryItemId(catalogProduct.inventoryItemId);
       
       res.json({
-        id: productLocation.id,
-        baseSku: productLocation.sku,
-        name: productLocation.name,
-        imageUrl: productLocation.imageUrl,
-        active: productLocation.status === "active" ? 1 : 0,
-        description: null,
-        baseUnit: "each",
-        costPerUnit: null,
-        barcode: productLocation.barcode,
-        location: productLocation.location,
-        zone: productLocation.zone,
+        id: catalogProduct.id,
+        baseSku: catalogProduct.sku,
+        name: catalogProduct.title,
+        imageUrl: inventoryItem?.imageUrl || null,
+        active: catalogProduct.status === "active" ? 1 : 0,
+        description: catalogProduct.description,
+        baseUnit: inventoryItem?.baseUnit || "each",
+        costPerUnit: inventoryItem?.costPerUnit || null,
         catalogProduct,
-        variants: [],
+        variants,
         assets,
       });
     } catch (error) {
@@ -3545,30 +3591,38 @@ export async function registerRoutes(
     }
   });
 
-  // Products with joined data (for list views) - uses product_locations which is synced from Shopify
+  // Products with joined data (for list views) - uses catalog_products as master
   app.get("/api/products", async (req, res) => {
     try {
-      // Get all product locations (source of truth from Shopify sync)
-      const productLocationsList = await storage.getAllProductLocations();
+      // Get all catalog products (master source from Shopify sync)
       const catalogProductsList = await storage.getAllCatalogProducts();
+      const inventoryItemsList = await storage.getAllInventoryItems();
+      const variantsList = await storage.getAllUomVariants();
       
-      // Create lookup map for catalog data by SKU
-      const catalogBySku = new Map(catalogProductsList.map(p => [p.sku, p]));
+      // Create lookup maps
+      const inventoryById = new Map(inventoryItemsList.map(i => [i.id, i]));
+      const variantsByItemId = new Map<number, typeof variantsList>();
+      for (const v of variantsList) {
+        if (!variantsByItemId.has(v.inventoryItemId)) {
+          variantsByItemId.set(v.inventoryItemId, []);
+        }
+        variantsByItemId.get(v.inventoryItemId)!.push(v);
+      }
       
       // Combine into product view
-      const products = productLocationsList.map(item => ({
-        id: item.id,
-        baseSku: item.sku,
-        name: item.name,
-        imageUrl: item.imageUrl,
-        active: item.status === "active" ? 1 : 0,
-        barcode: item.barcode,
-        location: item.location,
-        zone: item.zone,
-        catalogProduct: catalogBySku.get(item.sku) || null,
-        variantCount: 0,
-        variants: [],
-      }));
+      const products = catalogProductsList.map(catalog => {
+        const inventoryItem = inventoryById.get(catalog.inventoryItemId);
+        return {
+          id: catalog.id,
+          baseSku: catalog.sku,
+          name: catalog.title,
+          imageUrl: inventoryItem?.imageUrl || null,
+          active: catalog.status === "active" ? 1 : 0,
+          catalogProduct: catalog,
+          variantCount: variantsByItemId.get(catalog.inventoryItemId)?.length || 0,
+          variants: variantsByItemId.get(catalog.inventoryItemId) || [],
+        };
+      });
       
       res.json(products);
     } catch (error) {

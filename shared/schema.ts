@@ -705,6 +705,7 @@ export type ChannelReservation = typeof channelReservations.$inferSelect;
 export const catalogProducts = pgTable("catalog_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }).unique(),
+  sku: varchar("sku", { length: 100 }).notNull().unique(), // For Shopify sync lookups
   title: varchar("title", { length: 500 }).notNull(),
   description: text("description"), // HTML/markdown
   bulletPoints: jsonb("bullet_points"), // Array of feature bullet points
