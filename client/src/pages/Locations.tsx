@@ -199,7 +199,7 @@ export default function Locations() {
   const filteredLocations = locations
     .filter(loc => {
       const matchesSearch = 
-        loc.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (loc.sku?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
         loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         loc.location.toLowerCase().includes(searchQuery.toLowerCase());
       
