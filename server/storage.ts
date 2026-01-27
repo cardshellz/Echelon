@@ -1160,6 +1160,29 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
   }
 
+  async getInventoryItemsWithoutLocations(): Promise<InventoryItem[]> {
+    // Get all inventory items that don't have a product_locations entry
+    const result = await db
+      .select({
+        id: inventoryItems.id,
+        baseSku: inventoryItems.baseSku,
+        shopifyVariantId: inventoryItems.shopifyVariantId,
+        shopifyProductId: inventoryItems.shopifyProductId,
+        name: inventoryItems.name,
+        description: inventoryItems.description,
+        baseUnit: inventoryItems.baseUnit,
+        imageUrl: inventoryItems.imageUrl,
+        active: inventoryItems.active,
+        createdAt: inventoryItems.createdAt,
+        updatedAt: inventoryItems.updatedAt,
+      })
+      .from(inventoryItems)
+      .leftJoin(productLocations, eq(inventoryItems.baseSku, productLocations.sku))
+      .where(isNull(productLocations.id))
+      .orderBy(asc(inventoryItems.name));
+    return result;
+  }
+
   async getInventoryItemById(id: number): Promise<InventoryItem | undefined> {
     const result = await db.select().from(inventoryItems).where(eq(inventoryItems.id, id));
     return result[0];

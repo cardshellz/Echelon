@@ -114,7 +114,21 @@ export default function Locations() {
   const [newLocation, setNewLocation] = useState("");
   const [editPopoverOpen, setEditPopoverOpen] = useState(false);
   const [newLocationPopoverOpen, setNewLocationPopoverOpen] = useState(false);
+  const [productPopoverOpen, setProductPopoverOpen] = useState(false);
+  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch products without locations for assignment
+  interface UnassignedProduct {
+    id: number;
+    baseSku: string | null;
+    name: string | null;
+    imageUrl: string | null;
+  }
+  const { data: unassignedProducts = [] } = useQuery<UnassignedProduct[]>({
+    queryKey: ["/api/inventory/items/unassigned"],
+    enabled: addDialogOpen, // Only fetch when dialog is open
+  });
 
   // Group warehouse locations by zone for easier selection
   const locationsByZone = warehouseLocations.reduce((acc, loc) => {
@@ -868,37 +882,96 @@ export default function Locations() {
       </div>
       
       {/* Add Dialog */}
-      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent className="max-w-sm">
+      <Dialog open={addDialogOpen} onOpenChange={(open) => {
+        setAddDialogOpen(open);
+        if (!open) {
+          setSelectedProductId(null);
+          setNewSku("");
+          setNewName("");
+          setNewLocation("");
+        }
+      }}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Add Product Location</DialogTitle>
             <DialogDescription>
-              Map a SKU to its bin location
+              Select a product to assign to a bin location
             </DialogDescription>
           </DialogHeader>
           
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="sku">SKU *</Label>
-              <Input 
-                id="sku"
-                placeholder="e.g. NK-292-BLK"
-                value={newSku}
-                onChange={(e) => setNewSku(e.target.value)}
-                className="uppercase"
-                data-testid="input-new-sku"
-              />
+              <Label>Select Product *</Label>
+              {unassignedProducts.length === 0 ? (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    All products have been assigned to locations, or no products have been synced yet.
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Popover open={productPopoverOpen} onOpenChange={setProductPopoverOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={productPopoverOpen}
+                      className="w-full justify-between text-left font-normal"
+                      data-testid="combobox-select-product"
+                    >
+                      {selectedProductId ? (
+                        <span className="truncate">
+                          {unassignedProducts.find(p => p.id === selectedProductId)?.name || newSku}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">Search products...</span>
+                      )}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[350px] p-0" align="start">
+                    <Command>
+                      <CommandInput placeholder="Type to search products..." className="h-9" data-testid="input-search-product" />
+                      <CommandList>
+                        <CommandEmpty>No products found.</CommandEmpty>
+                        <CommandGroup heading={`${unassignedProducts.length} products without locations`}>
+                          {unassignedProducts.map((product) => (
+                            <CommandItem
+                              key={product.id}
+                              value={`${product.baseSku || ''} ${product.name || ''}`}
+                              onSelect={() => {
+                                setSelectedProductId(product.id);
+                                setNewSku(product.baseSku || "");
+                                setNewName(product.name || "");
+                                setProductPopoverOpen(false);
+                              }}
+                              className="flex items-center gap-2"
+                              data-testid={`option-product-${product.id}`}
+                            >
+                              <Check className={cn("h-4 w-4 flex-shrink-0", selectedProductId === product.id ? "opacity-100" : "opacity-0")} />
+                              {product.imageUrl && (
+                                <img src={product.imageUrl} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className="text-sm truncate">{product.name || "Unnamed"}</div>
+                                <div className="text-xs text-muted-foreground font-mono">{product.baseSku || "No SKU"}</div>
+                              </div>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="name">Product Name</Label>
-              <Input 
-                id="name"
-                placeholder="e.g. Nike Air Max 90 Black"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                data-testid="input-new-name"
-              />
-            </div>
+            
+            {selectedProductId && (
+              <div className="rounded-lg border p-3 bg-muted/30">
+                <div className="text-sm font-medium">{newName || "Unnamed Product"}</div>
+                <div className="text-xs text-muted-foreground font-mono">{newSku || "No SKU"}</div>
+              </div>
+            )}
             <div className="space-y-2">
               <Label htmlFor="location">Bin Location *</Label>
               {warehouseLocations.length === 0 ? (
@@ -958,7 +1031,7 @@ export default function Locations() {
             <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAdd} disabled={!newSku || !newLocation || warehouseLocations.length === 0}>
+            <Button onClick={handleAdd} disabled={!selectedProductId || !newLocation || warehouseLocations.length === 0}>
               Add Location
             </Button>
           </DialogFooter>
