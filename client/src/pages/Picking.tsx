@@ -844,7 +844,7 @@ export default function Picking() {
       // Set up interval to maintain focus (for scanner devices)
       const interval = setInterval(maintainFocus, 500);
       
-      // Also refocus on any click/touch on the document
+      // Refocus on click/touch on the document
       const handleInteraction = () => {
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
         focusTimeoutRef.current = setTimeout(maintainFocus, 100);
@@ -853,10 +853,22 @@ export default function Picking() {
       document.addEventListener("click", handleInteraction);
       document.addEventListener("touchend", handleInteraction);
       
+      // Prevent buttons from stealing focus - this keeps keyboard from popping up
+      const preventBlur = (e: Event) => {
+        const target = e.target as HTMLElement;
+        if (target.closest('button, [role="button"]')) {
+          e.preventDefault();
+        }
+      };
+      document.addEventListener("mousedown", preventBlur);
+      document.addEventListener("touchstart", preventBlur);
+      
       return () => {
         clearInterval(interval);
         document.removeEventListener("click", handleInteraction);
         document.removeEventListener("touchend", handleInteraction);
+        document.removeEventListener("mousedown", preventBlur);
+        document.removeEventListener("touchstart", preventBlur);
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
       };
     }
@@ -3246,7 +3258,6 @@ export default function Picking() {
                         autoCapitalize="off"
                         spellCheck={false}
                         enterKeyHint="done"
-                        inputMode="none"
                         data-testid="input-scan-sku"
                       />
                     </div>
@@ -3301,7 +3312,6 @@ export default function Picking() {
                 autoCapitalize="off"
                 spellCheck={false}
                 enterKeyHint="done"
-                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
