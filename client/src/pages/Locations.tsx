@@ -98,6 +98,8 @@ export default function Locations() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
+  const [zoneFilter, setZoneFilter] = useState<string | null>(null);
+  const [warehouseLocationFilter, setWarehouseLocationFilter] = useState<string | null>(null);
   const [sortField, setSortField] = useState<"sku" | "name" | "location" | "zone" | "updatedAt">("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -192,7 +194,11 @@ export default function Locations() {
         (assignmentFilter === "unassigned" && isUnassigned) ||
         (assignmentFilter === "assigned" && !isUnassigned);
       
-      return matchesSearch && matchesAssignment;
+      const matchesZone = !zoneFilter || loc.zone === zoneFilter;
+      
+      const matchesWarehouseLocation = !warehouseLocationFilter || loc.location === warehouseLocationFilter;
+      
+      return matchesSearch && matchesAssignment && matchesZone && matchesWarehouseLocation;
     })
     .sort((a, b) => {
       let aVal: string | Date = "";
@@ -496,7 +502,7 @@ export default function Locations() {
               data-testid="input-search-locations"
             />
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Select value={assignmentFilter} onValueChange={(val) => setAssignmentFilter(val as "all" | "assigned" | "unassigned")}>
               <SelectTrigger className="flex-1 sm:w-[140px]" data-testid="select-assignment-filter">
                 <SelectValue placeholder="Filter" />
@@ -505,6 +511,29 @@ export default function Locations() {
                 <SelectItem value="all">All Products</SelectItem>
                 <SelectItem value="assigned">Assigned</SelectItem>
                 <SelectItem value="unassigned">Unassigned</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select 
+              value={warehouseLocationFilter || "all"} 
+              onValueChange={(val) => setWarehouseLocationFilter(val === "all" ? null : val)}
+            >
+              <SelectTrigger className="flex-1 sm:w-[160px]" data-testid="select-warehouse-location-filter">
+                <SelectValue placeholder="All Locations" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Locations</SelectItem>
+                {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                  <React.Fragment key={zone}>
+                    <SelectItem disabled value={`zone-header-${zone}`} className="font-semibold text-xs opacity-60">
+                      {zone}
+                    </SelectItem>
+                    {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                      <SelectItem key={wloc.code} value={wloc.code} className="pl-4 font-mono text-sm">
+                        {wloc.code}
+                      </SelectItem>
+                    ))}
+                  </React.Fragment>
+                ))}
               </SelectContent>
             </Select>
             <Select 
@@ -540,12 +569,28 @@ export default function Locations() {
           {zones.map(zone => (
             <Badge 
               key={zone} 
-              variant="secondary" 
-              className="px-3 py-1"
+              variant={zoneFilter === zone ? "default" : "secondary"} 
+              className={cn(
+                "px-3 py-1 cursor-pointer transition-colors",
+                zoneFilter === zone ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              )}
+              onClick={() => setZoneFilter(zoneFilter === zone ? null : zone)}
+              data-testid={`badge-zone-${zone}`}
             >
               Zone {zone}: {locations.filter(l => l.zone === zone).length} products
             </Badge>
           ))}
+          {zoneFilter && (
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="h-6 px-2 text-xs"
+              onClick={() => setZoneFilter(null)}
+            >
+              <X className="h-3 w-3 mr-1" />
+              Clear filter
+            </Button>
+          )}
         </div>
         
         {/* Sync Result Message */}
