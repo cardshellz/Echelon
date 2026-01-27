@@ -148,6 +148,8 @@ export default function Locations() {
       setNewSku("");
       setNewName("");
       setNewLocation("");
+      setEditingId(null);
+      setEditLocation("");
     },
   });
   
