@@ -1163,6 +1163,7 @@ export class DatabaseStorage implements IStorage {
   async getAllCatalogProductsWithLocations(): Promise<{
     id: number;
     catalogProductId: number;
+    productLocationId: number | null;
     shopifyVariantId: number | null;
     sku: string | null;
     name: string;
@@ -1178,6 +1179,7 @@ export class DatabaseStorage implements IStorage {
       .select({
         id: catalogProducts.id,
         catalogProductId: catalogProducts.id,
+        productLocationId: productLocations.id,
         shopifyVariantId: catalogProducts.shopifyVariantId,
         sku: catalogProducts.sku,
         name: catalogProducts.title,

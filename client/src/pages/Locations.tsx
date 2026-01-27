@@ -241,18 +241,39 @@ export default function Locations() {
     setEditLocation(currentLocation);
   };
   
-  // Save edit
-  const handleSaveEdit = (id: number) => {
+  // Save edit - handles both updating existing and creating new location assignments
+  const handleSaveEdit = (catalogProductId: number) => {
+    if (!editLocation) return;
+    
     const selectedWarehouseLoc = warehouseLocations.find(l => l.code === editLocation);
     const zone = selectedWarehouseLoc?.zone || editLocation.split("-")[0]?.toUpperCase() || "A";
-    updateMutation.mutate({ 
-      id, 
-      data: { 
-        location: editLocation.toUpperCase(), 
+    
+    // Find the product to check if it already has a location assigned
+    const product = locations.find(l => l.id === catalogProductId) as (typeof locations[0] & { productLocationId?: number }) | undefined;
+    
+    if (product?.productLocationId) {
+      // Product already has a location - update existing product_location record
+      updateMutation.mutate({ 
+        id: product.productLocationId,
+        data: { 
+          location: editLocation.toUpperCase(), 
+          zone,
+          warehouseLocationId: selectedWarehouseLoc?.id 
+        } as any
+      });
+    } else if (product) {
+      // Product doesn't have a location - create new product_location record
+      createMutation.mutate({
+        catalogProductId: catalogProductId,
+        sku: product.sku || undefined,
+        shopifyVariantId: product.shopifyVariantId || undefined,
+        name: product.name || "Unnamed Product",
+        location: editLocation.toUpperCase(),
         zone,
-        warehouseLocationId: selectedWarehouseLoc?.id 
-      } as any
-    });
+        warehouseLocationId: selectedWarehouseLoc?.id,
+        status: "active",
+      });
+    }
   };
   
   // Cancel edit
@@ -725,18 +746,24 @@ export default function Locations() {
                               </Command>
                             </PopoverContent>
                           </Popover>
-                        ) : (
+                        ) : loc.location ? (
                           <Badge variant="outline" className="font-mono bg-primary/5">
                             <MapPin className="h-3 w-3 mr-1" />
                             {loc.location}
                           </Badge>
+                        ) : (
+                          <span className="text-muted-foreground text-sm">Unassigned</span>
                         )}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="secondary">{loc.zone}</Badge>
+                        {loc.zone ? (
+                          <Badge variant="secondary">{loc.zone}</Badge>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-muted-foreground text-sm">
-                        {formatDistanceToNow(new Date(loc.updatedAt), { addSuffix: true })}
+                        {loc.updatedAt ? formatDistanceToNow(new Date(loc.updatedAt), { addSuffix: true }) : "-"}
                       </TableCell>
                       <TableCell className="text-right">
                         {editingId === loc.id ? (
@@ -758,14 +785,14 @@ export default function Locations() {
                               <X className="h-4 w-4" />
                             </Button>
                           </div>
-                        ) : (
+                        ) : loc.location ? (
                           <div className="flex items-center justify-end gap-1">
                             <Button 
                               size="icon" 
                               variant="ghost" 
                               className="h-8 w-8"
                               onClick={() => handleStartEdit(loc.id, loc.location)}
-                              data-testid={`button-edit-${loc.sku}`}
+                              data-testid={`button-edit-${loc.id}`}
                             >
                               <Edit2 className="h-4 w-4" />
                             </Button>
@@ -778,6 +805,17 @@ export default function Locations() {
                               <Trash2 className="h-4 w-4" />
                             </Button>
                           </div>
+                        ) : (
+                          <Button 
+                            size="sm" 
+                            variant="outline"
+                            className="h-8"
+                            onClick={() => handleStartEdit(loc.id, "")}
+                            data-testid={`button-assign-${loc.id}`}
+                          >
+                            <MapPin className="h-3 w-3 mr-1" />
+                            Assign
+                          </Button>
                         )}
                       </TableCell>
                     </TableRow>
