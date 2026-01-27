@@ -705,27 +705,47 @@ export default function Locations() {
                       <TableCell className="font-mono text-muted-foreground">{loc.sku || "-"}</TableCell>
                       <TableCell>
                         {editingId === loc.id ? (
-                          <Select value={editLocation} onValueChange={(value) => setEditLocation(value)}>
-                            <SelectTrigger className="h-8 w-40 font-mono text-sm" data-testid="select-edit-location">
-                              <SelectValue placeholder="Select bin..." />
-                            </SelectTrigger>
-                            <SelectContent className="max-h-60">
-                              {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
-                                <React.Fragment key={zone}>
-                                  <div className="px-2 py-1 text-xs font-semibold text-muted-foreground">{zone}</div>
-                                  {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
-                                    <SelectItem 
-                                      key={wloc.id} 
-                                      value={wloc.code}
-                                      className="font-mono text-sm"
-                                    >
-                                      {wloc.code}
-                                    </SelectItem>
+                          <Popover open={editPopoverOpen} onOpenChange={setEditPopoverOpen}>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="outline"
+                                role="combobox"
+                                aria-expanded={editPopoverOpen}
+                                className="h-8 w-40 justify-between font-mono text-sm"
+                                data-testid="combobox-edit-location"
+                              >
+                                {editLocation || "Select bin..."}
+                                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-48 p-0" align="start">
+                              <Command>
+                                <CommandInput placeholder="Type to search..." className="h-9" data-testid="input-search-edit-location" />
+                                <CommandList>
+                                  <CommandEmpty>No location found.</CommandEmpty>
+                                  {Object.entries(locationsByZone).sort().map(([zone, locs]) => (
+                                    <CommandGroup key={zone} heading={zone}>
+                                      {locs.sort((a, b) => a.code.localeCompare(b.code)).map((wloc) => (
+                                        <CommandItem
+                                          key={wloc.id}
+                                          value={wloc.code}
+                                          onSelect={() => {
+                                            setEditLocation(wloc.code);
+                                            setEditPopoverOpen(false);
+                                          }}
+                                          className="font-mono text-sm"
+                                          data-testid={`option-edit-location-${wloc.code}`}
+                                        >
+                                          <Check className={cn("mr-2 h-4 w-4", editLocation === wloc.code ? "opacity-100" : "opacity-0")} />
+                                          {wloc.code}
+                                        </CommandItem>
+                                      ))}
+                                    </CommandGroup>
                                   ))}
-                                </React.Fragment>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                                </CommandList>
+                              </Command>
+                            </PopoverContent>
+                          </Popover>
                         ) : loc.location ? (
                           <Badge variant="outline" className="font-mono bg-primary/5">
                             <MapPin className="h-3 w-3 mr-1" />
