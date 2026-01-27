@@ -115,12 +115,12 @@ export default function Locations() {
   const [editPopoverOpen, setEditPopoverOpen] = useState(false);
   const [newLocationPopoverOpen, setNewLocationPopoverOpen] = useState(false);
   const [productPopoverOpen, setProductPopoverOpen] = useState(false);
-  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
+  const [selectedCatalogProductId, setSelectedCatalogProductId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch catalog products without locations for assignment (uses shopifyVariantId for linking)
+  // Fetch catalog products without locations for assignment (uses internal catalog_product_id as source of truth)
   interface UnassignedProduct {
-    id: number;
+    id: number; // This is catalog_products.id - internal source of truth
     shopifyVariantId: number | null;
     sku: string | null;
     title: string;
@@ -130,7 +130,6 @@ export default function Locations() {
     queryKey: ["/api/inventory/items/unassigned"],
     enabled: addDialogOpen, // Only fetch when dialog is open
   });
-  const [selectedVariantId, setSelectedVariantId] = useState<number | null>(null);
 
   // Group warehouse locations by zone for easier selection
   const locationsByZone = warehouseLocations.reduce((acc, loc) => {
@@ -264,15 +263,19 @@ export default function Locations() {
   
   // Add new
   const handleAdd = () => {
-    if (!selectedVariantId || !newLocation) return;
+    if (!selectedCatalogProductId || !newLocation) return;
     
     // Find the selected warehouse location to get zone and id
     const selectedWarehouseLoc = warehouseLocations.find(l => l.code === newLocation);
     const zone = selectedWarehouseLoc?.zone || newLocation.split("-")[0]?.toUpperCase() || "A";
     
+    // Get the selected product to cache shopifyVariantId
+    const selectedProduct = unassignedProducts.find(p => p.id === selectedCatalogProductId);
+    
     createMutation.mutate({
+      catalogProductId: selectedCatalogProductId,
       sku: newSku ? newSku.toUpperCase() : undefined,
-      shopifyVariantId: selectedVariantId,
+      shopifyVariantId: selectedProduct?.shopifyVariantId || undefined,
       name: newName || newSku?.toUpperCase() || "Unnamed Product",
       location: newLocation.toUpperCase(),
       zone,
@@ -888,8 +891,7 @@ export default function Locations() {
       <Dialog open={addDialogOpen} onOpenChange={(open) => {
         setAddDialogOpen(open);
         if (!open) {
-          setSelectedProductId(null);
-          setSelectedVariantId(null);
+          setSelectedCatalogProductId(null);
           setNewSku("");
           setNewName("");
           setNewLocation("");
@@ -923,9 +925,9 @@ export default function Locations() {
                       className="w-full justify-between text-left font-normal"
                       data-testid="combobox-select-product"
                     >
-                      {selectedProductId ? (
+                      {selectedCatalogProductId ? (
                         <span className="truncate">
-                          {unassignedProducts.find(p => p.id === selectedProductId)?.title || newSku}
+                          {unassignedProducts.find(p => p.id === selectedCatalogProductId)?.title || newSku}
                         </span>
                       ) : (
                         <span className="text-muted-foreground">Search products...</span>
@@ -944,8 +946,7 @@ export default function Locations() {
                               key={product.id}
                               value={`${product.sku || ''} ${product.title || ''}`}
                               onSelect={() => {
-                                setSelectedProductId(product.id);
-                                setSelectedVariantId(product.shopifyVariantId);
+                                setSelectedCatalogProductId(product.id);
                                 setNewSku(product.sku || "");
                                 setNewName(product.title || "");
                                 setProductPopoverOpen(false);
@@ -953,7 +954,7 @@ export default function Locations() {
                               className="flex items-center gap-2"
                               data-testid={`option-product-${product.id}`}
                             >
-                              <Check className={cn("h-4 w-4 flex-shrink-0", selectedProductId === product.id ? "opacity-100" : "opacity-0")} />
+                              <Check className={cn("h-4 w-4 flex-shrink-0", selectedCatalogProductId === product.id ? "opacity-100" : "opacity-0")} />
                               {product.imageUrl && (
                                 <img src={product.imageUrl} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
                               )}
@@ -971,7 +972,7 @@ export default function Locations() {
               )}
             </div>
             
-            {selectedProductId && (
+            {selectedCatalogProductId && (
               <div className="rounded-lg border p-3 bg-muted/30">
                 <div className="text-sm font-medium">{newName || "Unnamed Product"}</div>
                 <div className="text-xs text-muted-foreground font-mono">{newSku || "No SKU"}</div>
@@ -1036,7 +1037,7 @@ export default function Locations() {
             <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAdd} disabled={!selectedVariantId || !newLocation || warehouseLocations.length === 0}>
+            <Button onClick={handleAdd} disabled={!selectedCatalogProductId || !newLocation || warehouseLocations.length === 0}>
               Add Location
             </Button>
           </DialogFooter>

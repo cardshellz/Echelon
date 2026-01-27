@@ -1167,7 +1167,7 @@ export class DatabaseStorage implements IStorage {
     title: string;
     imageUrl: string | null;
   }[]> {
-    // Get all catalog products that don't have a product_locations entry (join by shopifyVariantId)
+    // Get all catalog products that don't have a product_locations entry (join by catalogProductId - internal ID is source of truth)
     const result = await db
       .select({
         id: catalogProducts.id,
@@ -1178,7 +1178,7 @@ export class DatabaseStorage implements IStorage {
       })
       .from(catalogProducts)
       .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
-      .leftJoin(productLocations, eq(catalogProducts.shopifyVariantId, productLocations.shopifyVariantId))
+      .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
       .where(isNull(productLocations.id))
       .orderBy(asc(catalogProducts.title));
     return result;

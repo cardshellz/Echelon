@@ -32,8 +32,9 @@ export type SafeUser = Omit<User, "password">;
 
 export const productLocations = pgTable("product_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  sku: varchar("sku", { length: 100 }), // Optional - products may not have SKUs
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Primary identifier for linking to catalog_products
+  catalogProductId: integer("catalog_product_id").unique(), // Primary link to catalog_products - internal ID is source of truth
+  sku: varchar("sku", { length: 100 }), // Optional - cached from catalog for display/legacy
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }), // Optional - cached from catalog for quick Shopify lookups
   name: text("name").notNull(),
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
@@ -160,6 +161,7 @@ export const orderItems = pgTable("order_items", {
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
   
   // ===== PRODUCT (for picking display) =====
+  catalogProductId: integer("catalog_product_id"), // Optional link to catalog_products for analytics (nullable - doesn't affect order creation)
   sku: varchar("sku", { length: 100 }).notNull(),
   name: text("name").notNull(),
   imageUrl: text("image_url"),
@@ -230,6 +232,7 @@ export const pickingLogs = pgTable("picking_logs", {
   
   // Which item (for item-level actions)
   orderItemId: integer("order_item_id").references(() => orderItems.id, { onDelete: "set null" }),
+  catalogProductId: integer("catalog_product_id"), // Optional link to catalog_products for analytics
   sku: varchar("sku", { length: 100 }),
   itemName: text("item_name"),
   locationCode: varchar("location_code", { length: 50 }),
