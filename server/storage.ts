@@ -631,6 +631,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   async claimOrder(orderId: number, pickerId: string): Promise<Order | null> {
+    // First, check if this picker already owns the order (can continue their work)
+    const existingOrder = await db.select().from(orders).where(
+      and(
+        eq(orders.id, orderId),
+        eq(orders.assignedPickerId, pickerId)
+      )
+    );
+    
+    if (existingOrder.length > 0) {
+      // Picker already owns this order - return it so they can continue
+      return existingOrder[0];
+    }
+    
+    // Otherwise, try to claim an unassigned ready order
     const result = await db
       .update(orders)
       .set({
