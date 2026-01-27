@@ -841,17 +841,11 @@ export default function Picking() {
     if (view === "picking") {
       maintainFocus();
       
-      // Set up interval to maintain focus (for scanner devices) - only on non-touch devices
-      const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-      const interval = isTouchDevice ? null : setInterval(maintainFocus, 500);
+      // Set up interval to maintain focus (for scanner devices)
+      const interval = setInterval(maintainFocus, 500);
       
-      // Also refocus on any click/touch on the document - but not if clicking buttons
-      const handleInteraction = (e: Event) => {
-        const target = e.target as HTMLElement;
-        // Don't refocus if clicking buttons, inputs, or interactive elements
-        if (target.closest('button, input, [role="button"], [data-testid]')) {
-          return;
-        }
+      // Also refocus on any click/touch on the document
+      const handleInteraction = () => {
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
         focusTimeoutRef.current = setTimeout(maintainFocus, 100);
       };
@@ -860,7 +854,7 @@ export default function Picking() {
       document.addEventListener("touchend", handleInteraction);
       
       return () => {
-        if (interval) clearInterval(interval);
+        clearInterval(interval);
         document.removeEventListener("click", handleInteraction);
         document.removeEventListener("touchend", handleInteraction);
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
@@ -3252,6 +3246,7 @@ export default function Picking() {
                         autoCapitalize="off"
                         spellCheck={false}
                         enterKeyHint="done"
+                        inputMode="none"
                         data-testid="input-scan-sku"
                       />
                     </div>
@@ -3306,6 +3301,7 @@ export default function Picking() {
                 autoCapitalize="off"
                 spellCheck={false}
                 enterKeyHint="done"
+                inputMode="none"
                 data-testid="input-scan-sku-list"
               />
             </div>
