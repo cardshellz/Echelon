@@ -413,8 +413,8 @@ export type WarehouseLocation = typeof warehouseLocations.$inferSelect;
 // Master inventory items (base SKU level)
 export const inventoryItems = pgTable("inventory_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  baseSku: varchar("base_sku", { length: 100 }), // e.g., "EG-STD-SLV" - optional, products may not have SKU yet
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }), // Shopify variant ID - primary key for syncing
+  baseSku: varchar("base_sku", { length: 100 }), // e.g., "EG-STD-SLV" - optional, not unique since variant_id is primary identifier
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Shopify variant ID - primary key for syncing
   shopifyProductId: bigint("shopify_product_id", { mode: "number" }), // Shopify product ID
   name: text("name").notNull(),
   description: text("description"),
@@ -707,7 +707,7 @@ export type ChannelReservation = typeof channelReservations.$inferSelect;
 export const catalogProducts = pgTable("catalog_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }).unique(),
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }), // Primary key for Shopify sync
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Primary key for Shopify sync
   sku: varchar("sku", { length: 100 }), // Optional - products may not have SKU yet
   title: varchar("title", { length: 500 }).notNull(),
   description: text("description"), // HTML/markdown
