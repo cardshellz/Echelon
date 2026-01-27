@@ -192,8 +192,8 @@ export default function Inventory() {
   });
 
   const filteredItems = inventorySummary.filter(item => 
-    item.baseSku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    item.name.toLowerCase().includes(searchQuery.toLowerCase())
+    (item.baseSku?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
+    (item.name?.toLowerCase() || '').includes(searchQuery.toLowerCase())
   );
 
   const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandBase || 0), 0);
