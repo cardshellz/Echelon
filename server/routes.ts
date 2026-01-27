@@ -398,7 +398,7 @@ export async function registerRoutes(
     }
   }
 
-  // Create location
+  // Create location (with upsert support for catalogProductId)
   app.post("/api/locations", async (req, res) => {
     try {
       const parsed = insertProductLocationSchema.safeParse(req.body);
@@ -424,13 +424,23 @@ export async function registerRoutes(
         zone: warehouseLoc.zone || data.zone, // Use zone from warehouse location
       };
       
+      // Check if a product_location already exists for this catalogProductId (upsert)
+      if (data.catalogProductId) {
+        const existing = await storage.getProductLocationByCatalogProductId(data.catalogProductId);
+        if (existing) {
+          // Update existing record instead of creating duplicate
+          const updated = await storage.updateProductLocation(existing.id, dataWithRef);
+          return res.status(200).json(updated);
+        }
+      }
+      
       const location = await storage.createProductLocation(dataWithRef);
       
       res.status(201).json(location);
     } catch (error: any) {
       console.error("Error creating location:", error);
       if (error.code === "23505") { // Unique constraint violation
-        return res.status(409).json({ error: "SKU already exists" });
+        return res.status(409).json({ error: "Product already has a location assigned" });
       }
       res.status(500).json({ error: error.message || "Failed to create location" });
     }

@@ -400,6 +400,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getProductLocationByCatalogProductId(catalogProductId: number): Promise<ProductLocation | undefined> {
+    const result = await db.select().from(productLocations).where(eq(productLocations.catalogProductId, catalogProductId));
+    return result[0];
+  }
+
   async createProductLocation(location: InsertProductLocation): Promise<ProductLocation> {
     const result = await db.insert(productLocations).values({
       ...location,
