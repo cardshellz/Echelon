@@ -3643,14 +3643,14 @@ export async function registerRoutes(
     }
   });
 
-  // Get inventory items without bin locations (for assignment)
+  // Get catalog products without bin locations (for assignment)
   app.get("/api/inventory/items/unassigned", async (req, res) => {
     try {
-      const items = await storage.getInventoryItemsWithoutLocations();
-      res.json(items);
+      const products = await storage.getCatalogProductsWithoutLocations();
+      res.json(products);
     } catch (error) {
-      console.error("Error fetching unassigned items:", error);
-      res.status(500).json({ error: "Failed to fetch unassigned items" });
+      console.error("Error fetching unassigned products:", error);
+      res.status(500).json({ error: "Failed to fetch unassigned products" });
     }
   });
 

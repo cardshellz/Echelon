@@ -118,17 +118,19 @@ export default function Locations() {
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch products without locations for assignment
+  // Fetch catalog products without locations for assignment (uses shopifyVariantId for linking)
   interface UnassignedProduct {
     id: number;
-    baseSku: string | null;
-    name: string | null;
+    shopifyVariantId: number | null;
+    sku: string | null;
+    title: string;
     imageUrl: string | null;
   }
   const { data: unassignedProducts = [] } = useQuery<UnassignedProduct[]>({
     queryKey: ["/api/inventory/items/unassigned"],
     enabled: addDialogOpen, // Only fetch when dialog is open
   });
+  const [selectedVariantId, setSelectedVariantId] = useState<number | null>(null);
 
   // Group warehouse locations by zone for easier selection
   const locationsByZone = warehouseLocations.reduce((acc, loc) => {
@@ -262,15 +264,16 @@ export default function Locations() {
   
   // Add new
   const handleAdd = () => {
-    if (!newSku || !newLocation) return;
+    if (!selectedVariantId || !newLocation) return;
     
     // Find the selected warehouse location to get zone and id
     const selectedWarehouseLoc = warehouseLocations.find(l => l.code === newLocation);
     const zone = selectedWarehouseLoc?.zone || newLocation.split("-")[0]?.toUpperCase() || "A";
     
     createMutation.mutate({
-      sku: newSku.toUpperCase(),
-      name: newName || newSku.toUpperCase(),
+      sku: newSku ? newSku.toUpperCase() : undefined,
+      shopifyVariantId: selectedVariantId,
+      name: newName || newSku?.toUpperCase() || "Unnamed Product",
       location: newLocation.toUpperCase(),
       zone,
       warehouseLocationId: selectedWarehouseLoc?.id,
@@ -886,6 +889,7 @@ export default function Locations() {
         setAddDialogOpen(open);
         if (!open) {
           setSelectedProductId(null);
+          setSelectedVariantId(null);
           setNewSku("");
           setNewName("");
           setNewLocation("");
@@ -921,7 +925,7 @@ export default function Locations() {
                     >
                       {selectedProductId ? (
                         <span className="truncate">
-                          {unassignedProducts.find(p => p.id === selectedProductId)?.name || newSku}
+                          {unassignedProducts.find(p => p.id === selectedProductId)?.title || newSku}
                         </span>
                       ) : (
                         <span className="text-muted-foreground">Search products...</span>
@@ -938,11 +942,12 @@ export default function Locations() {
                           {unassignedProducts.map((product) => (
                             <CommandItem
                               key={product.id}
-                              value={`${product.baseSku || ''} ${product.name || ''}`}
+                              value={`${product.sku || ''} ${product.title || ''}`}
                               onSelect={() => {
                                 setSelectedProductId(product.id);
-                                setNewSku(product.baseSku || "");
-                                setNewName(product.name || "");
+                                setSelectedVariantId(product.shopifyVariantId);
+                                setNewSku(product.sku || "");
+                                setNewName(product.title || "");
                                 setProductPopoverOpen(false);
                               }}
                               className="flex items-center gap-2"
@@ -953,8 +958,8 @@ export default function Locations() {
                                 <img src={product.imageUrl} alt="" className="h-8 w-8 rounded object-cover flex-shrink-0" />
                               )}
                               <div className="flex-1 min-w-0">
-                                <div className="text-sm truncate">{product.name || "Unnamed"}</div>
-                                <div className="text-xs text-muted-foreground font-mono">{product.baseSku || "No SKU"}</div>
+                                <div className="text-sm truncate">{product.title || "Unnamed"}</div>
+                                <div className="text-xs text-muted-foreground font-mono">{product.sku || "No SKU"}</div>
                               </div>
                             </CommandItem>
                           ))}
@@ -1031,7 +1036,7 @@ export default function Locations() {
             <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleAdd} disabled={!selectedProductId || !newLocation || warehouseLocations.length === 0}>
+            <Button onClick={handleAdd} disabled={!selectedVariantId || !newLocation || warehouseLocations.length === 0}>
               Add Location
             </Button>
           </DialogFooter>

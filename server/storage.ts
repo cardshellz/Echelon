@@ -1160,26 +1160,27 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
   }
 
-  async getInventoryItemsWithoutLocations(): Promise<InventoryItem[]> {
-    // Get all inventory items that don't have a product_locations entry
+  async getCatalogProductsWithoutLocations(): Promise<{
+    id: number;
+    shopifyVariantId: number | null;
+    sku: string | null;
+    title: string;
+    imageUrl: string | null;
+  }[]> {
+    // Get all catalog products that don't have a product_locations entry (join by shopifyVariantId)
     const result = await db
       .select({
-        id: inventoryItems.id,
-        baseSku: inventoryItems.baseSku,
-        shopifyVariantId: inventoryItems.shopifyVariantId,
-        shopifyProductId: inventoryItems.shopifyProductId,
-        name: inventoryItems.name,
-        description: inventoryItems.description,
-        baseUnit: inventoryItems.baseUnit,
+        id: catalogProducts.id,
+        shopifyVariantId: catalogProducts.shopifyVariantId,
+        sku: catalogProducts.sku,
+        title: catalogProducts.title,
         imageUrl: inventoryItems.imageUrl,
-        active: inventoryItems.active,
-        createdAt: inventoryItems.createdAt,
-        updatedAt: inventoryItems.updatedAt,
       })
-      .from(inventoryItems)
-      .leftJoin(productLocations, eq(inventoryItems.baseSku, productLocations.sku))
+      .from(catalogProducts)
+      .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
+      .leftJoin(productLocations, eq(catalogProducts.shopifyVariantId, productLocations.shopifyVariantId))
       .where(isNull(productLocations.id))
-      .orderBy(asc(inventoryItems.name));
+      .orderBy(asc(catalogProducts.title));
     return result;
   }
 
