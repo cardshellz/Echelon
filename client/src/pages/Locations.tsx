@@ -200,8 +200,8 @@ export default function Locations() {
     .filter(loc => {
       const matchesSearch = 
         (loc.sku?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
-        loc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        loc.location.toLowerCase().includes(searchQuery.toLowerCase());
+        (loc.name?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
+        (loc.location?.toLowerCase() || '').includes(searchQuery.toLowerCase());
       
       const isUnassigned = !loc.location || loc.location === "UNASSIGNED";
       const matchesAssignment = 
