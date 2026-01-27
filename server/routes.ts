@@ -3368,6 +3368,17 @@ export async function registerRoutes(
             continue;
           }
           
+          const rowWarehouseId = loc.warehouseId || loc.warehouse_id;
+          let effectiveWarehouseId: number | null = warehouseId || null;
+          if (rowWarehouseId) {
+            const parsed = parseInt(rowWarehouseId);
+            if (isNaN(parsed)) {
+              results.errors.push(`Row ${rowNum}: Invalid warehouse_id "${rowWarehouseId}"`);
+              continue;
+            }
+            effectiveWarehouseId = parsed;
+          }
+          
           await storage.createWarehouseLocation({
             zone,
             aisle,
@@ -3380,7 +3391,7 @@ export async function registerRoutes(
             pickSequence: loc.pickSequence || loc.pick_sequence ? parseInt(loc.pickSequence || loc.pick_sequence) : null,
             minQty: loc.minQty || loc.min_qty ? parseInt(loc.minQty || loc.min_qty) : null,
             maxQty: loc.maxQty || loc.max_qty ? parseInt(loc.maxQty || loc.max_qty) : null,
-            warehouseId: warehouseId || null,
+            warehouseId: effectiveWarehouseId,
           });
           results.created++;
         } catch (err: any) {

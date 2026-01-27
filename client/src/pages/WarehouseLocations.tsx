@@ -89,6 +89,7 @@ export default function WarehouseLocations() {
   const [editingLocation, setEditingLocation] = useState<WarehouseLocation | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [csvData, setCsvData] = useState("");
+  const [importWarehouseId, setImportWarehouseId] = useState<string>("");
   const [isReassignOpen, setIsReassignOpen] = useState(false);
   const [targetLocationId, setTargetLocationId] = useState<string>("");
   const [newLocation, setNewLocation] = useState({
@@ -103,6 +104,7 @@ export default function WarehouseLocations() {
     pickSequence: "",
     minQty: "",
     maxQty: "",
+    warehouseId: "",
   });
   const [newZone, setNewZone] = useState({
     code: "",
@@ -265,6 +267,7 @@ export default function WarehouseLocations() {
       queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
       setIsImportOpen(false);
       setCsvData("");
+      setImportWarehouseId("");
       if (data.errors?.length > 0) {
         toast({ 
           title: `Imported ${data.created} locations`, 
@@ -332,6 +335,7 @@ export default function WarehouseLocations() {
       pickSequence: "",
       minQty: "",
       maxQty: "",
+      warehouseId: "",
     });
   };
 
@@ -349,6 +353,7 @@ export default function WarehouseLocations() {
     if (newLocation.pickSequence) data.pickSequence = parseInt(newLocation.pickSequence);
     if (newLocation.minQty) data.minQty = parseInt(newLocation.minQty);
     if (newLocation.maxQty) data.maxQty = parseInt(newLocation.maxQty);
+    if (newLocation.warehouseId) data.warehouseId = parseInt(newLocation.warehouseId);
     
     createLocationMutation.mutate(data);
   };
@@ -368,6 +373,7 @@ export default function WarehouseLocations() {
     if (editingLocation.pickSequence) data.pickSequence = editingLocation.pickSequence;
     if (editingLocation.minQty) data.minQty = editingLocation.minQty;
     if (editingLocation.maxQty) data.maxQty = editingLocation.maxQty;
+    data.warehouseId = editingLocation.warehouseId;
     
     updateLocationMutation.mutate({ id: editingLocation.id, data });
   };
@@ -454,12 +460,12 @@ export default function WarehouseLocations() {
       toast({ title: "No data found", description: "Please check your CSV format", variant: "destructive" });
       return;
     }
-    const warehouseId = selectedWarehouseId !== "all" ? parseInt(selectedWarehouseId) : null;
+    const warehouseId = importWarehouseId ? parseInt(importWarehouseId) : null;
     bulkImportMutation.mutate({ locations, warehouseId });
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence\nFWD,A,01,A,1,Forward Pick A1,bin,1,1\nBULK,B,02,B,,Bulk B2,bulk_reserve,0,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,bin,1,1,\nBULK,B,02,B,,Bulk B2,bulk_reserve,0,,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -868,13 +874,22 @@ export default function WarehouseLocations() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label>Friendly Name (optional)</Label>
-                <Input
-                  placeholder="Main floor left"
-                  value={newLocation.name}
-                  onChange={(e) => setNewLocation({ ...newLocation, name: e.target.value })}
-                  data-testid="input-location-name"
-                />
+                <Label>Warehouse</Label>
+                <Select
+                  value={newLocation.warehouseId}
+                  onValueChange={(v) => setNewLocation({ ...newLocation, warehouseId: v })}
+                >
+                  <SelectTrigger data-testid="select-location-warehouse">
+                    <SelectValue placeholder="Select warehouse..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {warehouses.map((wh) => (
+                      <SelectItem key={wh.id} value={wh.id.toString()}>
+                        {wh.name} ({wh.code})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div>
                 <Label>Location Type</Label>
@@ -892,6 +907,16 @@ export default function WarehouseLocations() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div>
+              <Label>Friendly Name (optional)</Label>
+              <Input
+                placeholder="Main floor left"
+                value={newLocation.name}
+                onChange={(e) => setNewLocation({ ...newLocation, name: e.target.value })}
+                data-testid="input-location-name"
+              />
             </div>
 
             <div className="grid grid-cols-3 gap-4">
@@ -995,11 +1020,23 @@ export default function WarehouseLocations() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label>Friendly Name</Label>
-                  <Input
-                    value={editingLocation.name || ""}
-                    onChange={(e) => setEditingLocation({ ...editingLocation, name: e.target.value || null })}
-                  />
+                  <Label>Warehouse</Label>
+                  <Select
+                    value={editingLocation.warehouseId?.toString() || ""}
+                    onValueChange={(v) => setEditingLocation({ ...editingLocation, warehouseId: v ? parseInt(v) : null })}
+                  >
+                    <SelectTrigger data-testid="select-edit-warehouse">
+                      <SelectValue placeholder="Select warehouse..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">No warehouse</SelectItem>
+                      {warehouses.map((wh) => (
+                        <SelectItem key={wh.id} value={wh.id.toString()}>
+                          {wh.name} ({wh.code})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div>
                   <Label>Location Type</Label>
@@ -1017,6 +1054,14 @@ export default function WarehouseLocations() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              <div>
+                <Label>Friendly Name</Label>
+                <Input
+                  value={editingLocation.name || ""}
+                  onChange={(e) => setEditingLocation({ ...editingLocation, name: e.target.value || null })}
+                />
               </div>
 
               <div className="grid grid-cols-3 gap-4">
@@ -1143,14 +1188,31 @@ export default function WarehouseLocations() {
             <DialogTitle>Import Locations from CSV</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <p className="text-sm text-muted-foreground">
-                Upload a CSV file with columns: zone, aisle, bay, level, bin, name, location_type, is_pickable, pick_sequence
+                Upload a CSV file with location data. Set a default warehouse or include warehouse_id in CSV.
               </p>
               <Button variant="outline" size="sm" onClick={downloadTemplate} data-testid="btn-download-template">
                 <Download className="h-4 w-4 mr-2" />
                 Download Template
               </Button>
+            </div>
+
+            <div>
+              <Label>Default Warehouse (applies to rows without warehouse_id)</Label>
+              <Select value={importWarehouseId} onValueChange={setImportWarehouseId}>
+                <SelectTrigger data-testid="select-import-warehouse">
+                  <SelectValue placeholder="Select warehouse..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">No default (use CSV values)</SelectItem>
+                  {warehouses.map((wh) => (
+                    <SelectItem key={wh.id} value={wh.id.toString()}>
+                      {wh.name} ({wh.code})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             
             <div className="space-y-3">
@@ -1205,11 +1267,12 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                 <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, putaway_staging, packing, shipping_lane, staging, returns, quarantine, crossdock, hazmat, cold_storage, secure (default: bin)</li>
                 <li><code>is_pickable</code> - 1 for pickable, 0 for non-pickable (default: 1)</li>
                 <li><code>pick_sequence</code> - Picking order number (optional)</li>
+                <li><code>warehouse_id</code> - Warehouse ID (optional, overrides default above)</li>
               </ul>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setIsImportOpen(false); setCsvData(""); }}>Cancel</Button>
+            <Button variant="outline" onClick={() => { setIsImportOpen(false); setCsvData(""); setImportWarehouseId(""); }}>Cancel</Button>
             <Button 
               onClick={handleImport}
               disabled={!csvData.trim() || bulkImportMutation.isPending}
