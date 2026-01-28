@@ -461,7 +461,7 @@ export class DatabaseStorage implements IStorage {
     imageUrl?: string | null;
     barcode?: string | null;
   }): Promise<ProductLocation> {
-    // Check if product already has a location entry (for databases with legacy sku unique constraint)
+    // Check if product already has a location entry (handles legacy unique constraints on sku or catalog_product_id)
     // If so, update the existing entry instead of inserting
     const existingByProduct = await db.select().from(productLocations)
       .where(eq(productLocations.catalogProductId, data.catalogProductId));
@@ -472,6 +472,9 @@ export class DatabaseStorage implements IStorage {
       const result = await db.update(productLocations)
         .set({
           warehouseLocationId: data.warehouseLocationId,
+          sku: data.sku?.toUpperCase() || existing.sku,
+          shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
+          name: data.name || existing.name,
           location: data.location.toUpperCase(),
           zone: data.zone.toUpperCase(),
           locationType: data.locationType || existing.locationType,
@@ -483,6 +486,33 @@ export class DatabaseStorage implements IStorage {
         .where(eq(productLocations.id, existing.id))
         .returning();
       return result[0];
+    }
+    
+    // Also check by SKU in case product was synced via legacy path
+    if (data.sku) {
+      const existingBySku = await db.select().from(productLocations)
+        .where(eq(productLocations.sku, data.sku.toUpperCase()));
+      
+      if (existingBySku.length > 0) {
+        const existing = existingBySku[0];
+        const result = await db.update(productLocations)
+          .set({
+            catalogProductId: data.catalogProductId,
+            warehouseLocationId: data.warehouseLocationId,
+            shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
+            name: data.name || existing.name,
+            location: data.location.toUpperCase(),
+            zone: data.zone.toUpperCase(),
+            locationType: data.locationType || existing.locationType,
+            isPrimary: data.isPrimary ?? 1,
+            imageUrl: data.imageUrl || existing.imageUrl,
+            barcode: data.barcode || existing.barcode,
+            updatedAt: new Date(),
+          })
+          .where(eq(productLocations.id, existing.id))
+          .returning();
+        return result[0];
+      }
     }
     
     if (data.isPrimary === 1) {
