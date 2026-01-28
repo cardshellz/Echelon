@@ -162,6 +162,7 @@ export default function WarehouseLocations() {
     sku: string | null;
     locationType: string;
     isPrimary: number;
+    warehouseLocationId?: number;
   }
   const { data: productsInBin = [], refetch: refetchProductsInBin } = useQuery<ProductInBin[]>({
     queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "products"],
@@ -173,6 +174,33 @@ export default function WarehouseLocations() {
     },
     enabled: !!assigningToLocation,
   });
+
+  // Fetch all product locations to show SKUs in the table
+  const { data: allProductLocations = [] } = useQuery<ProductInBin[]>({
+    queryKey: ["/api/locations"],
+    queryFn: async () => {
+      const res = await fetch("/api/locations");
+      if (!res.ok) throw new Error("Failed to fetch product locations");
+      return res.json();
+    },
+    enabled: canView,
+  });
+
+  // Map warehouse location ID to SKU for quick lookup
+  const skuByLocationId = React.useMemo(() => {
+    const map = new Map<number, string>();
+    for (const pl of allProductLocations) {
+      if (pl.warehouseLocationId && pl.sku) {
+        const existing = map.get(pl.warehouseLocationId);
+        if (existing) {
+          map.set(pl.warehouseLocationId, existing + ", " + pl.sku);
+        } else {
+          map.set(pl.warehouseLocationId, pl.sku);
+        }
+      }
+    }
+    return map;
+  }, [allProductLocations]);
 
   const createLocationMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -756,6 +784,7 @@ export default function WarehouseLocations() {
                   )}
                   <TableHead>Warehouse</TableHead>
                   <TableHead>Location Code</TableHead>
+                  <TableHead>SKU</TableHead>
                   <TableHead>Zone</TableHead>
                   <TableHead>Aisle</TableHead>
                   <TableHead>Bay</TableHead>
@@ -763,17 +792,17 @@ export default function WarehouseLocations() {
                   <TableHead>Bin</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Pick Seq</TableHead>
-                  {canEdit && <TableHead className="w-[100px]"></TableHead>}
+                  {canEdit && <TableHead className="w-[120px]"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {locationsLoading ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 12 : 10} className="text-center py-8">Loading...</TableCell>
+                    <TableCell colSpan={canEdit ? 13 : 11} className="text-center py-8">Loading...</TableCell>
                   </TableRow>
                 ) : locations.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 12 : 10} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={canEdit ? 13 : 11} className="text-center py-8 text-muted-foreground">
                       No locations defined yet. Add your first location or import from CSV.
                     </TableCell>
                   </TableRow>
@@ -791,6 +820,9 @@ export default function WarehouseLocations() {
                       )}
                       <TableCell>{getWarehouseName(loc.warehouseId)}</TableCell>
                       <TableCell className="font-mono font-medium">{loc.code}</TableCell>
+                      <TableCell className="font-mono text-sm">
+                        {skuByLocationId.get(loc.id) || <span className="text-muted-foreground">-</span>}
+                      </TableCell>
                       <TableCell>{loc.zone || '-'}</TableCell>
                       <TableCell>{loc.aisle || '-'}</TableCell>
                       <TableCell>{loc.bay || '-'}</TableCell>
