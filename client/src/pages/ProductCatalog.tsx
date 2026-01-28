@@ -89,19 +89,12 @@ export default function ProductCatalog() {
     },
   });
 
-  // Build a set of all variant SKUs to identify which inventory items are actually variants
-  const allVariantSkus = new Set(variants.map(v => v.sku.toLowerCase()));
-  
-  // Only show inventory items whose baseSku is NOT found as a variant SKU of ANY other item
-  // This filters out child SKUs that were incorrectly created as separate inventory_items
+  // Only show inventory items that have a hierarchyLevel 1 variant (true parent products)
+  // Child SKUs created as separate items won't have hierarchyLevel 1 variants
   const parentItemsOnly = items.filter(item => {
-    const itemBaseSku = (item.baseSku || '').toLowerCase();
-    // Check if this item's baseSku appears as a variant SKU of a DIFFERENT item
-    const isVariantOfAnother = variants.some(v => 
-      v.sku.toLowerCase() === itemBaseSku && 
-      v.inventoryItemId !== item.id
-    );
-    return !isVariantOfAnother;
+    const itemVariants = variants.filter(v => v.inventoryItemId === item.id);
+    // A true parent product has a base unit variant (hierarchyLevel 1)
+    return itemVariants.some(v => v.hierarchyLevel === 1);
   });
 
   const productsWithVariants: ProductWithVariants[] = parentItemsOnly.map(item => ({
