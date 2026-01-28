@@ -71,6 +71,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },
     { type: "separator", label: "Purchasing", roles: ["admin", "lead"] },
+    { type: 'link', label: "Receiving", icon: Truck, href: "/receiving", roles: ["admin", "lead"] },
     { type: 'link', label: "Product Catalog", icon: Layers, href: "/purchasing/catalog", roles: ["admin", "lead"] },
     { type: 'link', label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing", roles: ["admin", "lead"] },
     { type: "separator", label: "Orders", roles: ["admin", "lead"] },

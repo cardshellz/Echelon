@@ -1095,3 +1095,135 @@ export const insertCycleCountItemSchema = createInsertSchema(cycleCountItems).om
 
 export type InsertCycleCountItem = z.infer<typeof insertCycleCountItemSchema>;
 export type CycleCountItem = typeof cycleCountItems.$inferSelect;
+
+// ===== RECEIVING & VENDORS =====
+
+// Vendors - suppliers for receiving POs
+export const vendors = pgTable("vendors", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 20 }).notNull().unique(), // Short code like "ACME"
+  name: text("name").notNull(),
+  contactName: text("contact_name"),
+  email: varchar("email", { length: 255 }),
+  phone: varchar("phone", { length: 50 }),
+  address: text("address"),
+  notes: text("notes"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertVendorSchema = createInsertSchema(vendors).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertVendor = z.infer<typeof insertVendorSchema>;
+export type Vendor = typeof vendors.$inferSelect;
+
+// Receiving status workflow: draft → open → receiving → verified → closed
+export const receivingStatusEnum = ["draft", "open", "receiving", "verified", "closed", "cancelled"] as const;
+export type ReceivingStatus = typeof receivingStatusEnum[number];
+
+// Receiving source types
+export const receivingSourceEnum = ["po", "asn", "blind", "initial_load"] as const;
+export type ReceivingSource = typeof receivingSourceEnum[number];
+
+// Receiving Orders - header for each receipt
+export const receivingOrders = pgTable("receiving_orders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  
+  // Identification
+  receiptNumber: varchar("receipt_number", { length: 50 }).notNull().unique(), // Auto-generated RCV-YYYYMMDD-XXX
+  poNumber: varchar("po_number", { length: 100 }), // External PO number from vendor
+  asnNumber: varchar("asn_number", { length: 100 }), // Advance shipment notice number
+  
+  // Source & vendor
+  sourceType: varchar("source_type", { length: 20 }).notNull().default("blind"), // po, asn, blind, initial_load
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  
+  // Warehouse
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }),
+  receivingLocationId: integer("receiving_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // Staging area
+  
+  // Status & dates
+  status: varchar("status", { length: 20 }).notNull().default("draft"), // draft, open, receiving, verified, closed, cancelled
+  expectedDate: timestamp("expected_date"),
+  receivedDate: timestamp("received_date"), // When receiving started
+  closedDate: timestamp("closed_date"), // When receipt was finalized
+  
+  // Counts
+  expectedLineCount: integer("expected_line_count").default(0),
+  receivedLineCount: integer("received_line_count").default(0),
+  expectedTotalUnits: integer("expected_total_units").default(0),
+  receivedTotalUnits: integer("received_total_units").default(0),
+  
+  // Audit
+  notes: text("notes"),
+  createdBy: varchar("created_by", { length: 100 }),
+  receivedBy: varchar("received_by", { length: 100 }),
+  closedBy: varchar("closed_by", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReceivingOrderSchema = createInsertSchema(receivingOrders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReceivingOrder = z.infer<typeof insertReceivingOrderSchema>;
+export type ReceivingOrder = typeof receivingOrders.$inferSelect;
+
+// Receiving line status
+export const receivingLineStatusEnum = ["pending", "partial", "complete", "overage", "short"] as const;
+export type ReceivingLineStatus = typeof receivingLineStatusEnum[number];
+
+// Receiving Lines - individual items on a receipt
+export const receivingLines = pgTable("receiving_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
+  
+  // Product reference
+  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id),
+  uomVariantId: integer("uom_variant_id").references(() => uomVariants.id),
+  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
+  
+  // Product info (cached for display)
+  sku: varchar("sku", { length: 100 }),
+  productName: text("product_name"),
+  barcode: varchar("barcode", { length: 100 }),
+  
+  // Quantities
+  expectedQty: integer("expected_qty").notNull().default(0), // From PO (0 for blind receives)
+  receivedQty: integer("received_qty").notNull().default(0), // Actually received
+  damagedQty: integer("damaged_qty").notNull().default(0), // Damaged during receipt
+  
+  // Cost tracking
+  unitCost: integer("unit_cost"), // Cost per unit in cents
+  
+  // Put-away location (where it goes after receiving)
+  putawayLocationId: integer("putaway_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
+  putawayComplete: integer("putaway_complete").notNull().default(0), // 1 = put away
+  
+  // Status
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, partial, complete, overage, short
+  
+  // Audit
+  receivedBy: varchar("received_by", { length: 100 }),
+  receivedAt: timestamp("received_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReceivingLineSchema = createInsertSchema(receivingLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReceivingLine = z.infer<typeof insertReceivingLineSchema>;
+export type ReceivingLine = typeof receivingLines.$inferSelect;

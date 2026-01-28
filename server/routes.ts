@@ -5833,5 +5833,503 @@ export async function registerRoutes(
     }
   });
 
+  // ===== VENDORS API =====
+  
+  app.get("/api/vendors", async (req, res) => {
+    try {
+      const vendors = await storage.getAllVendors();
+      res.json(vendors);
+    } catch (error) {
+      console.error("Error fetching vendors:", error);
+      res.status(500).json({ error: "Failed to fetch vendors" });
+    }
+  });
+  
+  app.get("/api/vendors/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const vendor = await storage.getVendorById(id);
+      if (!vendor) {
+        return res.status(404).json({ error: "Vendor not found" });
+      }
+      res.json(vendor);
+    } catch (error) {
+      console.error("Error fetching vendor:", error);
+      res.status(500).json({ error: "Failed to fetch vendor" });
+    }
+  });
+  
+  app.post("/api/vendors", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { code, name, contactName, email, phone, address, notes } = req.body;
+      if (!code || !name) {
+        return res.status(400).json({ error: "Code and name are required" });
+      }
+      
+      const existing = await storage.getVendorByCode(code);
+      if (existing) {
+        return res.status(400).json({ error: "Vendor code already exists" });
+      }
+      
+      const vendor = await storage.createVendor({
+        code,
+        name,
+        contactName,
+        email,
+        phone,
+        address,
+        notes,
+      });
+      res.status(201).json(vendor);
+    } catch (error) {
+      console.error("Error creating vendor:", error);
+      res.status(500).json({ error: "Failed to create vendor" });
+    }
+  });
+  
+  app.patch("/api/vendors/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      const vendor = await storage.updateVendor(id, updates);
+      if (!vendor) {
+        return res.status(404).json({ error: "Vendor not found" });
+      }
+      res.json(vendor);
+    } catch (error) {
+      console.error("Error updating vendor:", error);
+      res.status(500).json({ error: "Failed to update vendor" });
+    }
+  });
+  
+  app.delete("/api/vendors/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteVendor(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Vendor not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting vendor:", error);
+      res.status(500).json({ error: "Failed to delete vendor" });
+    }
+  });
+  
+  // ===== RECEIVING ORDERS API =====
+  
+  app.get("/api/receiving", async (req, res) => {
+    try {
+      const status = req.query.status as string | undefined;
+      const orders = status 
+        ? await storage.getReceivingOrdersByStatus(status)
+        : await storage.getAllReceivingOrders();
+      
+      // Enrich with vendor info
+      const vendors = await storage.getAllVendors();
+      const vendorMap = new Map(vendors.map(v => [v.id, v]));
+      
+      const enriched = orders.map(order => ({
+        ...order,
+        vendor: order.vendorId ? vendorMap.get(order.vendorId) : null,
+      }));
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching receiving orders:", error);
+      res.status(500).json({ error: "Failed to fetch receiving orders" });
+    }
+  });
+  
+  app.get("/api/receiving/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.getReceivingOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      
+      const lines = await storage.getReceivingLines(id);
+      const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
+      
+      res.json({ ...order, lines, vendor });
+    } catch (error) {
+      console.error("Error fetching receiving order:", error);
+      res.status(500).json({ error: "Failed to fetch receiving order" });
+    }
+  });
+  
+  app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
+      
+      const receiptNumber = await storage.generateReceiptNumber();
+      const userId = req.session.user?.id || null;
+      
+      const order = await storage.createReceivingOrder({
+        receiptNumber,
+        sourceType: sourceType || "blind",
+        vendorId: vendorId || null,
+        warehouseId: warehouseId || null,
+        poNumber: poNumber || null,
+        asnNumber: asnNumber || null,
+        expectedDate: expectedDate ? new Date(expectedDate) : null,
+        notes: notes || null,
+        status: "draft",
+        createdBy: userId,
+      });
+      
+      res.status(201).json(order);
+    } catch (error) {
+      console.error("Error creating receiving order:", error);
+      res.status(500).json({ error: "Failed to create receiving order" });
+    }
+  });
+  
+  app.patch("/api/receiving/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      
+      const order = await storage.updateReceivingOrder(id, updates);
+      if (!order) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      res.json(order);
+    } catch (error) {
+      console.error("Error updating receiving order:", error);
+      res.status(500).json({ error: "Failed to update receiving order" });
+    }
+  });
+  
+  app.delete("/api/receiving/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteReceivingOrder(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting receiving order:", error);
+      res.status(500).json({ error: "Failed to delete receiving order" });
+    }
+  });
+  
+  // Open a receiving order for receiving
+  app.post("/api/receiving/:id/open", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.getReceivingOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      if (order.status !== "draft") {
+        return res.status(400).json({ error: "Can only open orders in draft status" });
+      }
+      
+      const userId = req.session.user?.id || null;
+      const updated = await storage.updateReceivingOrder(id, {
+        status: "open",
+        receivedBy: userId,
+        receivedDate: new Date(),
+      });
+      res.json(updated);
+    } catch (error) {
+      console.error("Error opening receiving order:", error);
+      res.status(500).json({ error: "Failed to open receiving order" });
+    }
+  });
+  
+  // Close/complete a receiving order - updates inventory
+  app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const order = await storage.getReceivingOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      if (order.status === "closed" || order.status === "cancelled") {
+        return res.status(400).json({ error: "Order already closed or cancelled" });
+      }
+      
+      const lines = await storage.getReceivingLines(id);
+      const userId = req.session.user?.id || null;
+      
+      // Create inventory transactions for each line
+      const batchId = `RCV-${id}-${Date.now()}`;
+      let totalReceived = 0;
+      let linesReceived = 0;
+      
+      for (const line of lines) {
+        if (line.receivedQty > 0 && line.inventoryItemId && line.putawayLocationId) {
+          // Get or create inventory level at location
+          let level = await storage.getInventoryLevelByItemAndLocation(line.inventoryItemId, line.putawayLocationId);
+          
+          const baseQtyBefore = level?.onHandBase || 0;
+          const qtyToAdd = line.receivedQty;
+          const baseQtyAfter = baseQtyBefore + qtyToAdd;
+          
+          if (level) {
+            // Update existing level
+            await storage.updateInventoryLevel(level.id, {
+              onHandBase: baseQtyAfter,
+            });
+          } else {
+            // Create new level
+            await storage.createInventoryLevel({
+              inventoryItemId: line.inventoryItemId,
+              warehouseLocationId: line.putawayLocationId,
+              onHandBase: qtyToAdd,
+              reservedBase: 0,
+              availableBase: qtyToAdd,
+            });
+          }
+          
+          // Create transaction record
+          await storage.createInventoryTransaction({
+            inventoryItemId: line.inventoryItemId,
+            variantId: line.uomVariantId || null,
+            warehouseLocationId: line.putawayLocationId,
+            transactionType: "receive",
+            baseQtyDelta: qtyToAdd,
+            baseQtyBefore,
+            baseQtyAfter,
+            batchId,
+            referenceType: "receiving",
+            referenceId: order.receiptNumber,
+            notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
+            userId,
+          });
+          
+          // Mark line as put away
+          await storage.updateReceivingLine(line.id, {
+            putawayComplete: 1,
+            status: "complete",
+          });
+          
+          totalReceived += qtyToAdd;
+          linesReceived++;
+        }
+      }
+      
+      // Update order totals and close
+      const updated = await storage.updateReceivingOrder(id, {
+        status: "closed",
+        closedDate: new Date(),
+        closedBy: userId,
+        receivedLineCount: linesReceived,
+        receivedTotalUnits: totalReceived,
+      });
+      
+      res.json({ 
+        success: true, 
+        order: updated,
+        linesProcessed: linesReceived,
+        unitsReceived: totalReceived,
+      });
+    } catch (error) {
+      console.error("Error closing receiving order:", error);
+      res.status(500).json({ error: "Failed to close receiving order" });
+    }
+  });
+  
+  // ===== RECEIVING LINES API =====
+  
+  app.get("/api/receiving/:orderId/lines", async (req, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      const lines = await storage.getReceivingLines(orderId);
+      res.json(lines);
+    } catch (error) {
+      console.error("Error fetching receiving lines:", error);
+      res.status(500).json({ error: "Failed to fetch receiving lines" });
+    }
+  });
+  
+  app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      const { sku, productName, expectedQty, inventoryItemId, uomVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
+      
+      const line = await storage.createReceivingLine({
+        receivingOrderId: orderId,
+        sku: sku || null,
+        productName: productName || null,
+        expectedQty: expectedQty || 0,
+        receivedQty: 0,
+        damagedQty: 0,
+        inventoryItemId: inventoryItemId || null,
+        uomVariantId: uomVariantId || null,
+        catalogProductId: catalogProductId || null,
+        barcode: barcode || null,
+        unitCost: unitCost || null,
+        putawayLocationId: putawayLocationId || null,
+        status: "pending",
+      });
+      
+      // Update order line count
+      const lines = await storage.getReceivingLines(orderId);
+      await storage.updateReceivingOrder(orderId, {
+        expectedLineCount: lines.length,
+        expectedTotalUnits: lines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
+      });
+      
+      res.status(201).json(line);
+    } catch (error) {
+      console.error("Error creating receiving line:", error);
+      res.status(500).json({ error: "Failed to create receiving line" });
+    }
+  });
+  
+  app.patch("/api/receiving/lines/:lineId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId);
+      const updates = req.body;
+      
+      // Calculate status based on quantities
+      if (updates.receivedQty !== undefined) {
+        const line = await storage.getReceivingLineById(lineId);
+        if (line) {
+          const expectedQty = updates.expectedQty ?? line.expectedQty ?? 0;
+          const receivedQty = updates.receivedQty ?? line.receivedQty ?? 0;
+          
+          if (receivedQty === 0) {
+            updates.status = "pending";
+          } else if (receivedQty < expectedQty) {
+            updates.status = "partial";
+          } else if (receivedQty === expectedQty) {
+            updates.status = "complete";
+          } else if (receivedQty > expectedQty) {
+            updates.status = "overage";
+          }
+        }
+      }
+      
+      const line = await storage.updateReceivingLine(lineId, updates);
+      if (!line) {
+        return res.status(404).json({ error: "Receiving line not found" });
+      }
+      res.json(line);
+    } catch (error) {
+      console.error("Error updating receiving line:", error);
+      res.status(500).json({ error: "Failed to update receiving line" });
+    }
+  });
+  
+  app.delete("/api/receiving/lines/:lineId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId);
+      const line = await storage.getReceivingLineById(lineId);
+      if (!line) {
+        return res.status(404).json({ error: "Receiving line not found" });
+      }
+      
+      const deleted = await storage.deleteReceivingLine(lineId);
+      
+      // Update order line count
+      const lines = await storage.getReceivingLines(line.receivingOrderId);
+      await storage.updateReceivingOrder(line.receivingOrderId, {
+        expectedLineCount: lines.length,
+        expectedTotalUnits: lines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting receiving line:", error);
+      res.status(500).json({ error: "Failed to delete receiving line" });
+    }
+  });
+  
+  // Bulk add lines from CSV for initial inventory load
+  app.post("/api/receiving/:orderId/lines/bulk", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      const { lines } = req.body;
+      
+      if (!Array.isArray(lines) || lines.length === 0) {
+        return res.status(400).json({ error: "Lines array is required" });
+      }
+      
+      // Lookup SKUs to get inventory item IDs
+      const linesToCreate: any[] = [];
+      const errors: string[] = [];
+      
+      for (const line of lines) {
+        const { sku, qty, location } = line;
+        
+        if (!sku) {
+          errors.push(`Missing SKU in line`);
+          continue;
+        }
+        
+        // Look up variant by SKU
+        const variant = await storage.getUomVariantBySku(sku);
+        let inventoryItemId = null;
+        let uomVariantId = null;
+        let productName = sku;
+        
+        if (variant) {
+          uomVariantId = variant.id;
+          inventoryItemId = variant.inventoryItemId;
+          productName = variant.name;
+        } else {
+          // Try to find by catalog product
+          const catalogProducts = await storage.getAllCatalogProducts();
+          const catalog = catalogProducts.find(p => p.sku?.toUpperCase() === sku.toUpperCase());
+          if (catalog && catalog.inventoryItemId) {
+            inventoryItemId = catalog.inventoryItemId;
+            productName = catalog.title;
+          }
+        }
+        
+        // Look up location
+        let putawayLocationId = null;
+        if (location) {
+          const allLocations = await storage.getAllWarehouseLocations();
+          const loc = allLocations.find(l => l.code.toUpperCase() === location.toUpperCase());
+          if (loc) {
+            putawayLocationId = loc.id;
+          } else {
+            errors.push(`Location ${location} not found for SKU ${sku}`);
+          }
+        }
+        
+        linesToCreate.push({
+          receivingOrderId: orderId,
+          sku: sku.toUpperCase(),
+          productName,
+          expectedQty: qty || 0,
+          receivedQty: qty || 0, // For initial load, received = expected
+          damagedQty: 0,
+          inventoryItemId,
+          uomVariantId,
+          putawayLocationId,
+          status: putawayLocationId ? "complete" : "pending",
+        });
+      }
+      
+      const created = await storage.bulkCreateReceivingLines(linesToCreate);
+      
+      // Update order totals
+      const allLines = await storage.getReceivingLines(orderId);
+      await storage.updateReceivingOrder(orderId, {
+        expectedLineCount: allLines.length,
+        receivedLineCount: allLines.filter(l => l.receivedQty > 0).length,
+        expectedTotalUnits: allLines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
+        receivedTotalUnits: allLines.reduce((sum, l) => sum + (l.receivedQty || 0), 0),
+      });
+      
+      res.status(201).json({
+        success: true,
+        created: created.length,
+        errors: errors.length > 0 ? errors : undefined,
+      });
+    } catch (error) {
+      console.error("Error bulk creating receiving lines:", error);
+      res.status(500).json({ error: "Failed to create receiving lines" });
+    }
+  });
+
   return httpServer;
 }

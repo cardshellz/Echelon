@@ -49,6 +49,12 @@ import {
   type InsertCycleCount,
   type CycleCountItem,
   type InsertCycleCountItem,
+  type Vendor,
+  type InsertVendor,
+  type ReceivingOrder,
+  type InsertReceivingOrder,
+  type ReceivingLine,
+  type InsertReceivingLine,
   users,
   productLocations,
   orders,
@@ -71,6 +77,9 @@ import {
   catalogAssets,
   cycleCounts,
   cycleCountItems,
+  vendors,
+  receivingOrders,
+  receivingLines,
   generateLocationCode,
   appSettings
 } from "@shared/schema";
@@ -367,6 +376,32 @@ export interface IStorage {
   updateCycleCountItem(id: number, updates: Partial<InsertCycleCountItem>): Promise<CycleCountItem | null>;
   deleteCycleCountItem(id: number): Promise<boolean>;
   bulkCreateCycleCountItems(items: InsertCycleCountItem[]): Promise<CycleCountItem[]>;
+  
+  // Vendors
+  getAllVendors(): Promise<Vendor[]>;
+  getVendorById(id: number): Promise<Vendor | undefined>;
+  getVendorByCode(code: string): Promise<Vendor | undefined>;
+  createVendor(data: InsertVendor): Promise<Vendor>;
+  updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null>;
+  deleteVendor(id: number): Promise<boolean>;
+  
+  // Receiving Orders
+  getAllReceivingOrders(): Promise<ReceivingOrder[]>;
+  getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined>;
+  getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
+  getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
+  createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder>;
+  updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null>;
+  deleteReceivingOrder(id: number): Promise<boolean>;
+  generateReceiptNumber(): Promise<string>;
+  
+  // Receiving Lines
+  getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]>;
+  getReceivingLineById(id: number): Promise<ReceivingLine | undefined>;
+  createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine>;
+  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null>;
+  deleteReceivingLine(id: number): Promise<boolean>;
+  bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2644,6 +2679,139 @@ export class DatabaseStorage implements IStorage {
   async bulkCreateCycleCountItems(items: InsertCycleCountItem[]): Promise<CycleCountItem[]> {
     if (items.length === 0) return [];
     return await db.insert(cycleCountItems).values(items).returning();
+  }
+  
+  // ===== VENDORS =====
+  async getAllVendors(): Promise<Vendor[]> {
+    return await db.select().from(vendors).orderBy(asc(vendors.name));
+  }
+  
+  async getVendorById(id: number): Promise<Vendor | undefined> {
+    const result = await db.select().from(vendors).where(eq(vendors.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async getVendorByCode(code: string): Promise<Vendor | undefined> {
+    const result = await db.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
+    return result[0];
+  }
+  
+  async createVendor(data: InsertVendor): Promise<Vendor> {
+    const result = await db.insert(vendors).values({
+      ...data,
+      code: data.code.toUpperCase(),
+    }).returning();
+    return result[0];
+  }
+  
+  async updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor | null> {
+    const updateData: any = { ...updates, updatedAt: new Date() };
+    if (updates.code) updateData.code = updates.code.toUpperCase();
+    const result = await db.update(vendors)
+      .set(updateData)
+      .where(eq(vendors.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteVendor(id: number): Promise<boolean> {
+    const result = await db.delete(vendors).where(eq(vendors.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+  
+  // ===== RECEIVING ORDERS =====
+  async getAllReceivingOrders(): Promise<ReceivingOrder[]> {
+    return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt));
+  }
+  
+  async getReceivingOrderById(id: number): Promise<ReceivingOrder | undefined> {
+    const result = await db.select().from(receivingOrders).where(eq(receivingOrders.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined> {
+    const result = await db.select().from(receivingOrders).where(eq(receivingOrders.receiptNumber, receiptNumber)).limit(1);
+    return result[0];
+  }
+  
+  async getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]> {
+    return await db.select().from(receivingOrders)
+      .where(eq(receivingOrders.status, status))
+      .orderBy(desc(receivingOrders.createdAt));
+  }
+  
+  async createReceivingOrder(data: InsertReceivingOrder): Promise<ReceivingOrder> {
+    const result = await db.insert(receivingOrders).values(data).returning();
+    return result[0];
+  }
+  
+  async updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>): Promise<ReceivingOrder | null> {
+    const result = await db.update(receivingOrders)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(receivingOrders.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteReceivingOrder(id: number): Promise<boolean> {
+    const result = await db.delete(receivingOrders).where(eq(receivingOrders.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+  
+  async generateReceiptNumber(): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `RCV-${dateStr}-`;
+    
+    // Find highest existing receipt number for today
+    const existing = await db.select({ receiptNumber: receivingOrders.receiptNumber })
+      .from(receivingOrders)
+      .where(like(receivingOrders.receiptNumber, `${prefix}%`))
+      .orderBy(desc(receivingOrders.receiptNumber))
+      .limit(1);
+    
+    let nextNum = 1;
+    if (existing.length > 0 && existing[0].receiptNumber) {
+      const lastNum = parseInt(existing[0].receiptNumber.replace(prefix, ''), 10);
+      if (!isNaN(lastNum)) nextNum = lastNum + 1;
+    }
+    
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  }
+  
+  // ===== RECEIVING LINES =====
+  async getReceivingLines(receivingOrderId: number): Promise<ReceivingLine[]> {
+    return await db.select().from(receivingLines)
+      .where(eq(receivingLines.receivingOrderId, receivingOrderId))
+      .orderBy(asc(receivingLines.id));
+  }
+  
+  async getReceivingLineById(id: number): Promise<ReceivingLine | undefined> {
+    const result = await db.select().from(receivingLines).where(eq(receivingLines.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async createReceivingLine(data: InsertReceivingLine): Promise<ReceivingLine> {
+    const result = await db.insert(receivingLines).values(data).returning();
+    return result[0];
+  }
+  
+  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null> {
+    const result = await db.update(receivingLines)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(receivingLines.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteReceivingLine(id: number): Promise<boolean> {
+    const result = await db.delete(receivingLines).where(eq(receivingLines.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+  
+  async bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]> {
+    if (lines.length === 0) return [];
+    return await db.insert(receivingLines).values(lines).returning();
   }
 }
 
