@@ -11,9 +11,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, MoveRight } from "lucide-react";
+import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, MoveRight, Package, Star, Search } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface WarehouseZone {
   id: number;
@@ -92,6 +95,13 @@ export default function WarehouseLocations() {
   const [importWarehouseId, setImportWarehouseId] = useState<string>("");
   const [isReassignOpen, setIsReassignOpen] = useState(false);
   const [targetLocationId, setTargetLocationId] = useState<string>("");
+  const [isAssignProductsOpen, setIsAssignProductsOpen] = useState(false);
+  const [assigningToLocation, setAssigningToLocation] = useState<WarehouseLocation | null>(null);
+  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
+  const [productSearchOpen, setProductSearchOpen] = useState(false);
+  const [productSearchQuery, setProductSearchQuery] = useState("");
+  const [assignLocationType, setAssignLocationType] = useState("forward_pick");
+  const [assignIsPrimary, setAssignIsPrimary] = useState(true);
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -132,6 +142,36 @@ export default function WarehouseLocations() {
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
     queryKey: ["/api/warehouses"],
     enabled: canView,
+  });
+
+  interface CatalogProduct {
+    id: number;
+    title: string;
+    sku: string | null;
+    imageUrl: string | null;
+  }
+  const { data: catalogProducts = [] } = useQuery<CatalogProduct[]>({
+    queryKey: ["/api/catalog/products"],
+    enabled: isAssignProductsOpen,
+  });
+
+  interface ProductInBin {
+    id: number;
+    catalogProductId: number | null;
+    name: string;
+    sku: string | null;
+    locationType: string;
+    isPrimary: number;
+  }
+  const { data: productsInBin = [], refetch: refetchProductsInBin } = useQuery<ProductInBin[]>({
+    queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "products"],
+    queryFn: async () => {
+      if (!assigningToLocation) return [];
+      const res = await fetch(`/api/warehouse/locations/${assigningToLocation.id}/products`);
+      if (!res.ok) throw new Error("Failed to fetch products");
+      return res.json();
+    },
+    enabled: !!assigningToLocation,
   });
 
   const createLocationMutation = useMutation({
@@ -301,6 +341,47 @@ export default function WarehouseLocations() {
       setIsCreateZoneOpen(false);
       setNewZone({ code: "", name: "", description: "", locationType: "bin", isPickable: 1 });
       toast({ title: "Zone created successfully" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const assignProductMutation = useMutation({
+    mutationFn: async ({ warehouseLocationId, catalogProductId, locationType, isPrimary }: { warehouseLocationId: number; catalogProductId: number; locationType: string; isPrimary: number }) => {
+      const res = await fetch(`/api/warehouse/locations/${warehouseLocationId}/products`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalogProductId, locationType, isPrimary }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "Failed to assign product");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchProductsInBin();
+      queryClient.invalidateQueries({ queryKey: ["locations"] });
+      setSelectedProductId(null);
+      setProductSearchQuery("");
+      toast({ title: "Product assigned to location" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const removeProductFromLocationMutation = useMutation({
+    mutationFn: async (productLocationId: number) => {
+      const res = await fetch(`/api/locations/${productLocationId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to remove product");
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchProductsInBin();
+      queryClient.invalidateQueries({ queryKey: ["locations"] });
+      toast({ title: "Product removed from location" });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -722,6 +803,18 @@ export default function WarehouseLocations() {
                       {canEdit && (
                         <TableCell>
                           <div className="flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setAssigningToLocation(loc);
+                                setIsAssignProductsOpen(true);
+                              }}
+                              title="Assign Products"
+                              data-testid={`btn-assign-products-${loc.id}`}
+                            >
+                              <Package className="h-4 w-4" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"
@@ -1338,6 +1431,177 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
             >
               <MoveRight className="h-4 w-4 mr-2" />
               {bulkReassignMutation.isPending ? "Moving..." : "Move Products"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Assign Products to Bin Dialog */}
+      <Dialog open={isAssignProductsOpen} onOpenChange={(open) => {
+        setIsAssignProductsOpen(open);
+        if (!open) {
+          setAssigningToLocation(null);
+          setSelectedProductId(null);
+          setProductSearchQuery("");
+          setAssignLocationType("forward_pick");
+          setAssignIsPrimary(true);
+        }
+      }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MapPin className="h-5 w-5" />
+              Assign Products to {assigningToLocation?.code}
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-4">
+            {/* Products currently in this bin */}
+            <div>
+              <Label className="text-sm font-medium">Products in this location ({productsInBin.length})</Label>
+              {productsInBin.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-2">No products assigned to this location yet.</p>
+              ) : (
+                <ScrollArea className="h-40 border rounded-md mt-2">
+                  <div className="p-2 space-y-2">
+                    {productsInBin.map((product) => (
+                      <div key={product.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          {product.isPrimary === 1 && <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />}
+                          <div>
+                            <div className="font-medium text-sm">{product.name}</div>
+                            <div className="text-xs text-muted-foreground flex gap-2">
+                              {product.sku && <span>SKU: {product.sku}</span>}
+                              <Badge variant="outline" className="text-xs">{product.locationType.replace('_', ' ')}</Badge>
+                            </div>
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => removeProductFromLocationMutation.mutate(product.id)}
+                          disabled={removeProductFromLocationMutation.isPending}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              )}
+            </div>
+
+            {/* Add new product */}
+            <div className="border-t pt-4">
+              <Label className="text-sm font-medium">Add product to this location</Label>
+              <div className="grid grid-cols-2 gap-4 mt-2">
+                <div className="col-span-2">
+                  <Popover open={productSearchOpen} onOpenChange={setProductSearchOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="outline"
+                        role="combobox"
+                        aria-expanded={productSearchOpen}
+                        className="w-full justify-between"
+                        data-testid="btn-select-product"
+                      >
+                        {selectedProductId
+                          ? catalogProducts.find(p => p.id === selectedProductId)?.title?.slice(0, 40) || "Select product..."
+                          : "Search and select product..."}
+                        <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[400px] p-0" align="start">
+                      <Command>
+                        <CommandInput 
+                          placeholder="Search by name or SKU..." 
+                          value={productSearchQuery}
+                          onValueChange={setProductSearchQuery}
+                          data-testid="input-product-search"
+                        />
+                        <CommandList>
+                          <CommandEmpty>No products found.</CommandEmpty>
+                          <CommandGroup>
+                            {catalogProducts
+                              .filter(p => 
+                                p.title.toLowerCase().includes(productSearchQuery.toLowerCase()) ||
+                                (p.sku && p.sku.toLowerCase().includes(productSearchQuery.toLowerCase()))
+                              )
+                              .slice(0, 50)
+                              .map(product => (
+                                <CommandItem
+                                  key={product.id}
+                                  value={`${product.title} ${product.sku || ''}`}
+                                  onSelect={() => {
+                                    setSelectedProductId(product.id);
+                                    setProductSearchOpen(false);
+                                  }}
+                                  className="flex items-center gap-2"
+                                >
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-sm truncate">{product.title}</div>
+                                    <div className="text-xs text-muted-foreground">{product.sku || 'No SKU'}</div>
+                                  </div>
+                                </CommandItem>
+                              ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                
+                <div>
+                  <Label className="text-xs">Location Type</Label>
+                  <Select value={assignLocationType} onValueChange={setAssignLocationType}>
+                    <SelectTrigger data-testid="select-assign-location-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="forward_pick">Forward Pick</SelectItem>
+                      <SelectItem value="bulk_storage">Bulk Storage</SelectItem>
+                      <SelectItem value="overflow">Overflow</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                
+                <div className="flex items-end gap-2">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="isPrimary"
+                      checked={assignIsPrimary}
+                      onCheckedChange={(checked) => setAssignIsPrimary(!!checked)}
+                      data-testid="checkbox-is-primary"
+                    />
+                    <Label htmlFor="isPrimary" className="text-sm cursor-pointer">
+                      Primary pick location
+                    </Label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsAssignProductsOpen(false)}>
+              Close
+            </Button>
+            <Button
+              onClick={() => {
+                if (assigningToLocation && selectedProductId) {
+                  assignProductMutation.mutate({
+                    warehouseLocationId: assigningToLocation.id,
+                    catalogProductId: selectedProductId,
+                    locationType: assignLocationType,
+                    isPrimary: assignIsPrimary ? 1 : 0,
+                  });
+                }
+              }}
+              disabled={!selectedProductId || assignProductMutation.isPending}
+              data-testid="btn-assign-product"
+            >
+              <Package className="h-4 w-4 mr-2" />
+              {assignProductMutation.isPending ? "Assigning..." : "Assign Product"}
             </Button>
           </DialogFooter>
         </DialogContent>
