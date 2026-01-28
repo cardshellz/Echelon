@@ -36,6 +36,7 @@ import {
   Plus, 
   Truck, 
   Upload, 
+  Download,
   Check, 
   X, 
   FileText, 
@@ -130,6 +131,21 @@ export default function Receiving() {
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
+  
+  // Download CSV template
+  const downloadTemplate = () => {
+    const template = `sku,qty,location
+ABC-123,10,A-01-01-01-01
+XYZ-789,25,B-02-03-02-01
+DEF-456,5,`;
+    const blob = new Blob([template], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'inventory_import_template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   
   // New receipt form
   const [newReceipt, setNewReceipt] = useState({
@@ -723,6 +739,14 @@ export default function Receiving() {
                 <div className="flex gap-2 flex-wrap">
                   {selectedReceipt.status === "draft" && (
                     <>
+                      <Button 
+                        variant="outline" 
+                        onClick={downloadTemplate}
+                        data-testid="btn-download-template"
+                      >
+                        <Download className="h-4 w-4 mr-2" />
+                        Download Template
+                      </Button>
                       <Button 
                         variant="outline" 
                         onClick={() => { setShowCSVImport(true); }}
