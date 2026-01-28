@@ -3474,34 +3474,8 @@ export async function registerRoutes(
       if (isNaN(warehouseLocationId)) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
-      
-      // Get products linked by warehouse_location_id OR by matching location code
-      const warehouseLocation = await storage.getWarehouseLocation(warehouseLocationId);
-      if (!warehouseLocation) {
-        return res.status(404).json({ error: "Warehouse location not found" });
-      }
-      
-      // Get products by warehouse_location_id
-      const productsByLinkage = await storage.getProductLocationsByWarehouseLocationId(warehouseLocationId);
-      
-      // Also get products by matching location code (for legacy data without linkage)
-      const allProducts = await storage.getLocations();
-      const productsByCode = allProducts.filter(p => 
-        p.location === warehouseLocation.code && 
-        !productsByLinkage.some(linked => linked.id === p.id)
-      );
-      
-      // Combine both sets
-      const combined = [...productsByLinkage, ...productsByCode.map(p => ({
-        id: p.id,
-        catalogProductId: p.catalogProductId,
-        name: p.name,
-        sku: p.sku,
-        locationType: (p as any).locationType || 'forward_pick',
-        isPrimary: (p as any).isPrimary ?? 1,
-      }))];
-      
-      res.json(combined);
+      const products = await storage.getProductLocationsByWarehouseLocationId(warehouseLocationId);
+      res.json(products);
     } catch (error: any) {
       console.error("Error fetching products for location:", error);
       res.status(500).json({ error: error.message || "Failed to fetch products" });
