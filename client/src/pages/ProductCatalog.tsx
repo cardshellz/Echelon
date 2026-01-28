@@ -95,8 +95,8 @@ export default function ProductCatalog() {
   }));
 
   const filteredProducts = productsWithVariants.filter(p =>
-    p.item.baseSku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    p.item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (p.item.baseSku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (p.item.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
     p.variants.some(v => v.sku.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
