@@ -1002,3 +1002,95 @@ export const insertAppSettingSchema = createInsertSchema(appSettings).omit({
 
 export type InsertAppSetting = z.infer<typeof insertAppSettingSchema>;
 export type AppSetting = typeof appSettings.$inferSelect;
+
+// ============================================
+// CYCLE COUNTS (Inventory Reconciliation)
+// ============================================
+
+// Cycle count status workflow
+export const cycleCountStatusEnum = ["draft", "in_progress", "pending_review", "completed", "cancelled"] as const;
+export type CycleCountStatus = typeof cycleCountStatusEnum[number];
+
+// Variance types for reconciliation
+export const varianceTypeEnum = [
+  "quantity_over",     // Found more than expected
+  "quantity_under",    // Found less than expected (shrinkage/damage)
+  "sku_mismatch",      // Different SKU in bin than expected
+  "unexpected_item",   // Item found but not expected in this bin
+  "missing_item",      // Item expected but not found
+] as const;
+export type VarianceType = typeof varianceTypeEnum[number];
+
+// Cycle count sessions (monthly reconciliation)
+export const cycleCounts = pgTable("cycle_counts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: varchar("name", { length: 100 }).notNull(), // e.g., "January 2026 Cycle Count"
+  description: text("description"),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id),
+  zoneFilter: varchar("zone_filter", { length: 20 }), // Optional: limit to specific zone
+  assignedTo: varchar("assigned_to", { length: 100 }), // User assigned to count
+  totalBins: integer("total_bins").notNull().default(0),
+  countedBins: integer("counted_bins").notNull().default(0),
+  varianceCount: integer("variance_count").notNull().default(0),
+  approvedVariances: integer("approved_variances").notNull().default(0),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdBy: varchar("created_by", { length: 100 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertCycleCountSchema = createInsertSchema(cycleCounts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertCycleCount = z.infer<typeof insertCycleCountSchema>;
+export type CycleCount = typeof cycleCounts.$inferSelect;
+
+// Individual bin counts within a cycle count session
+export const cycleCountItems = pgTable("cycle_count_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  cycleCountId: integer("cycle_count_id").notNull().references(() => cycleCounts.id, { onDelete: "cascade" }),
+  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
+  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id), // Expected item (null if bin should be empty)
+  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id), // Link to catalog
+  
+  // Expected (system) values at time of count
+  expectedSku: varchar("expected_sku", { length: 100 }),
+  expectedQty: integer("expected_qty").notNull().default(0),
+  
+  // Actual (counted) values
+  countedSku: varchar("counted_sku", { length: 100 }),
+  countedQty: integer("counted_qty"),
+  
+  // Variance tracking
+  varianceQty: integer("variance_qty"), // countedQty - expectedQty
+  varianceType: varchar("variance_type", { length: 30 }), // from varianceTypeEnum
+  varianceReason: varchar("variance_reason", { length: 50 }), // damaged, shrinkage, misplaced, found, etc.
+  varianceNotes: text("variance_notes"),
+  
+  // Status
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, counted, variance, approved, adjusted
+  
+  // Approval workflow
+  requiresApproval: integer("requires_approval").notNull().default(0), // 1 if variance exceeds threshold
+  approvedBy: varchar("approved_by", { length: 100 }),
+  approvedAt: timestamp("approved_at"),
+  adjustmentTransactionId: integer("adjustment_transaction_id").references(() => inventoryTransactions.id),
+  
+  // Audit
+  countedBy: varchar("counted_by", { length: 100 }),
+  countedAt: timestamp("counted_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertCycleCountItemSchema = createInsertSchema(cycleCountItems).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertCycleCountItem = z.infer<typeof insertCycleCountItemSchema>;
+export type CycleCountItem = typeof cycleCountItems.$inferSelect;

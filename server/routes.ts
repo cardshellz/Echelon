@@ -12,7 +12,7 @@ import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { inventoryService } from "./inventory";
 import multer from "multer";
-import { seedRBAC, seedDefaultChannels, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
+import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -50,6 +50,9 @@ export async function registerRoutes(
   
   // Seed default channels (Shopify, etc.)
   await seedDefaultChannels();
+  
+  // Seed adjustment reasons for inventory operations
+  await seedAdjustmentReasons();
   
   // Auth API
   app.post("/api/auth/login", async (req, res) => {
@@ -5146,6 +5149,585 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Debug sync error:", error);
       res.status(500).json({ error: String(error) });
+    }
+  });
+
+  // ============================================
+  // INVENTORY MANAGEMENT (User-Friendly API)
+  // ============================================
+
+  // Get all inventory levels with product and location details
+  app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const result = await db.execute<{
+        id: number;
+        inventory_item_id: number;
+        warehouse_location_id: number;
+        on_hand_base: number;
+        reserved_base: number;
+        picked_base: number;
+        packed_base: number;
+        catalog_product_id: number | null;
+        sku: string | null;
+        title: string | null;
+        location_code: string | null;
+        zone: string | null;
+        aisle: string | null;
+        bay: string | null;
+        level: string | null;
+        bin: string | null;
+        location_type: string | null;
+      }>(sql`
+        SELECT 
+          il.id,
+          il.inventory_item_id,
+          il.warehouse_location_id,
+          il.on_hand_base,
+          il.reserved_base,
+          il.picked_base,
+          il.packed_base,
+          cp.id as catalog_product_id,
+          cp.sku,
+          cp.title,
+          wl.code as location_code,
+          wl.zone,
+          wl.aisle,
+          wl.bay,
+          wl.level,
+          wl.bin,
+          wl.location_type
+        FROM inventory_levels il
+        LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
+        LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
+        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        ORDER BY cp.sku, wl.code
+      `);
+      
+      const levels = result.rows.map(row => ({
+        id: row.id,
+        inventoryItemId: row.inventory_item_id,
+        warehouseLocationId: row.warehouse_location_id,
+        onHandBase: row.on_hand_base,
+        reservedBase: row.reserved_base,
+        pickedBase: row.picked_base,
+        packedBase: row.packed_base,
+        available: row.on_hand_base - row.reserved_base - row.picked_base,
+        catalogProductId: row.catalog_product_id,
+        sku: row.sku,
+        title: row.title,
+        locationCode: row.location_code,
+        zone: row.zone,
+        aisle: row.aisle,
+        bay: row.bay,
+        level: row.level,
+        bin: row.bin,
+        locationType: row.location_type,
+      }));
+      
+      res.json(levels);
+    } catch (error) {
+      console.error("Error fetching inventory levels:", error);
+      res.status(500).json({ error: "Failed to fetch inventory levels" });
+    }
+  });
+
+  // Add inventory to a bin (simplified receipt)
+  app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { catalogProductId, warehouseLocationId, quantity, notes } = req.body;
+      const userId = req.session.user?.id;
+      
+      if (!catalogProductId || !warehouseLocationId || quantity === undefined) {
+        return res.status(400).json({ error: "Missing required fields: catalogProductId, warehouseLocationId, quantity" });
+      }
+      
+      // Get the catalog product to find its inventory_item_id
+      const product = await storage.getCatalogProductById(catalogProductId);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      
+      // Use the inventory service to receive the stock
+      await inventoryService.receiveInventory(
+        product.inventoryItemId,
+        warehouseLocationId,
+        quantity,
+        "MANUAL_ADD", // Reference ID
+        notes || "Stock added via inventory page",
+        userId
+      );
+      
+      res.json({ success: true, quantityAdded: quantity });
+    } catch (error) {
+      console.error("Error adding stock:", error);
+      res.status(500).json({ error: "Failed to add stock" });
+    }
+  });
+
+  // Adjust inventory with reason code
+  app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { catalogProductId, warehouseLocationId, quantityDelta, reasonCode, notes } = req.body;
+      const userId = req.session.user?.id;
+      
+      if (!catalogProductId || !warehouseLocationId || quantityDelta === undefined || !reasonCode) {
+        return res.status(400).json({ error: "Missing required fields: catalogProductId, warehouseLocationId, quantityDelta, reasonCode" });
+      }
+      
+      // Get the catalog product to find its inventory_item_id
+      const product = await storage.getCatalogProductById(catalogProductId);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      
+      // Use the inventory service to adjust
+      await inventoryService.adjustInventory(
+        product.inventoryItemId,
+        warehouseLocationId,
+        quantityDelta,
+        reasonCode,
+        userId,
+        notes
+      );
+      
+      res.json({ success: true, quantityDelta });
+    } catch (error) {
+      console.error("Error adjusting stock:", error);
+      res.status(500).json({ error: "Failed to adjust stock" });
+    }
+  });
+
+  // CSV import for bulk inventory upload
+  app.post("/api/inventory/import-csv", requirePermission("inventory", "upload"), upload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+      
+      const userId = req.session.user?.id;
+      const csvContent = req.file.buffer.toString("utf-8");
+      const { data, errors } = Papa.parse<{ sku: string; location_code: string; quantity: string }>(csvContent, {
+        header: true,
+        skipEmptyLines: true,
+      });
+      
+      if (errors.length > 0) {
+        return res.status(400).json({ error: "CSV parse error", details: errors });
+      }
+      
+      const results = {
+        processed: 0,
+        created: 0,
+        updated: 0,
+        errors: [] as string[],
+      };
+      
+      for (const row of data) {
+        try {
+          const sku = row.sku?.trim();
+          const locationCode = row.location_code?.trim();
+          const quantity = parseInt(row.quantity, 10);
+          
+          if (!sku || !locationCode || isNaN(quantity)) {
+            results.errors.push(`Invalid row: SKU=${sku}, Location=${locationCode}, Qty=${row.quantity}`);
+            continue;
+          }
+          
+          // Find product by SKU
+          const products = await storage.getAllCatalogProducts();
+          const product = products.find(p => p.sku === sku);
+          
+          if (!product) {
+            results.errors.push(`Product not found: ${sku}`);
+            continue;
+          }
+          
+          // Find location by code
+          const location = await storage.getWarehouseLocationByCode(locationCode);
+          if (!location) {
+            results.errors.push(`Location not found: ${locationCode}`);
+            continue;
+          }
+          
+          // Check if inventory level exists
+          const levels = await storage.getInventoryLevelsByItemId(product.inventoryItemId);
+          const existingLevel = levels.find(l => l.warehouseLocationId === location.id);
+          
+          if (existingLevel) {
+            // Calculate delta to reach target quantity
+            const delta = quantity - existingLevel.onHandBase;
+            if (delta !== 0) {
+              await inventoryService.adjustInventory(
+                product.inventoryItemId,
+                location.id,
+                delta,
+                "CSV_UPLOAD",
+                userId
+              );
+              results.updated++;
+            }
+          } else {
+            // Create new inventory level
+            await inventoryService.receiveInventory(
+              product.inventoryItemId,
+              location.id,
+              quantity,
+              "CSV_UPLOAD",
+              "Initial inventory from CSV import",
+              userId
+            );
+            results.created++;
+          }
+          
+          results.processed++;
+        } catch (rowError) {
+          results.errors.push(`Error processing row: ${JSON.stringify(row)} - ${rowError}`);
+        }
+      }
+      
+      res.json(results);
+    } catch (error) {
+      console.error("Error importing inventory CSV:", error);
+      res.status(500).json({ error: "Failed to import CSV" });
+    }
+  });
+
+  // CSV template for inventory import
+  app.get("/api/inventory/import-template", requireAuth, (req, res) => {
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=inventory_import_template.csv");
+    res.send("sku,location_code,quantity\nSKU-001,A-01-01,100\nSKU-002,A-01-02,50");
+  });
+
+  // ============================================
+  // CYCLE COUNTS (Inventory Reconciliation)
+  // ============================================
+
+  // Get all cycle counts
+  app.get("/api/cycle-counts", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const counts = await storage.getAllCycleCounts();
+      res.json(counts);
+    } catch (error) {
+      console.error("Error fetching cycle counts:", error);
+      res.status(500).json({ error: "Failed to fetch cycle counts" });
+    }
+  });
+
+  // Get single cycle count with items
+  app.get("/api/cycle-counts/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const cycleCount = await storage.getCycleCountById(id);
+      
+      if (!cycleCount) {
+        return res.status(404).json({ error: "Cycle count not found" });
+      }
+      
+      const items = await storage.getCycleCountItems(id);
+      
+      // Enrich items with location details
+      const enrichedItems = await Promise.all(items.map(async (item) => {
+        const location = await storage.getWarehouseLocationById(item.warehouseLocationId);
+        return {
+          ...item,
+          locationCode: location?.code,
+          zone: location?.zone,
+        };
+      }));
+      
+      res.json({ ...cycleCount, items: enrichedItems });
+    } catch (error) {
+      console.error("Error fetching cycle count:", error);
+      res.status(500).json({ error: "Failed to fetch cycle count" });
+    }
+  });
+
+  // Create new cycle count
+  app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const userId = req.session.user?.id;
+      const { name, description, warehouseId, zoneFilter } = req.body;
+      
+      if (!name) {
+        return res.status(400).json({ error: "Name is required" });
+      }
+      
+      const cycleCount = await storage.createCycleCount({
+        name,
+        description,
+        warehouseId: warehouseId || null,
+        zoneFilter: zoneFilter || null,
+        status: "draft",
+        createdBy: userId,
+      });
+      
+      res.status(201).json(cycleCount);
+    } catch (error) {
+      console.error("Error creating cycle count:", error);
+      res.status(500).json({ error: "Failed to create cycle count" });
+    }
+  });
+
+  // Initialize cycle count with bins (generates items from current inventory)
+  app.post("/api/cycle-counts/:id/initialize", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const cycleCount = await storage.getCycleCountById(id);
+      
+      if (!cycleCount) {
+        return res.status(404).json({ error: "Cycle count not found" });
+      }
+      
+      if (cycleCount.status !== "draft") {
+        return res.status(400).json({ error: "Can only initialize draft cycle counts" });
+      }
+      
+      // Get all warehouse locations (filtered by zone if specified)
+      let locations = await storage.getAllWarehouseLocations();
+      if (cycleCount.zoneFilter) {
+        locations = locations.filter(l => l.zone === cycleCount.zoneFilter);
+      }
+      if (cycleCount.warehouseId) {
+        locations = locations.filter(l => l.warehouseId === cycleCount.warehouseId);
+      }
+      
+      // For each location, get current inventory and create count items
+      const items: any[] = [];
+      
+      for (const location of locations) {
+        // Get inventory levels at this location
+        const result = await db.execute<{
+          inventory_item_id: number;
+          on_hand_base: number;
+          catalog_product_id: number | null;
+          sku: string | null;
+        }>(sql`
+          SELECT 
+            il.inventory_item_id,
+            il.on_hand_base,
+            cp.id as catalog_product_id,
+            cp.sku
+          FROM inventory_levels il
+          LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
+          LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
+          WHERE il.warehouse_location_id = ${location.id}
+        `);
+        
+        if (result.rows.length > 0) {
+          // Has inventory - create item for each product
+          for (const row of result.rows) {
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              inventoryItemId: row.inventory_item_id,
+              catalogProductId: row.catalog_product_id,
+              expectedSku: row.sku,
+              expectedQty: row.on_hand_base,
+              status: "pending",
+            });
+          }
+        } else {
+          // Empty bin - still create item to verify it's empty
+          items.push({
+            cycleCountId: id,
+            warehouseLocationId: location.id,
+            inventoryItemId: null,
+            catalogProductId: null,
+            expectedSku: null,
+            expectedQty: 0,
+            status: "pending",
+          });
+        }
+      }
+      
+      // Bulk create items
+      if (items.length > 0) {
+        await storage.bulkCreateCycleCountItems(items);
+      }
+      
+      // Update cycle count status and counts
+      await storage.updateCycleCount(id, {
+        status: "in_progress",
+        totalBins: locations.length,
+        countedBins: 0,
+        startedAt: new Date(),
+      });
+      
+      res.json({ success: true, binsCreated: locations.length, itemsCreated: items.length });
+    } catch (error) {
+      console.error("Error initializing cycle count:", error);
+      res.status(500).json({ error: "Failed to initialize cycle count" });
+    }
+  });
+
+  // Record count for a bin
+  app.post("/api/cycle-counts/:id/items/:itemId/count", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const userId = req.session.user?.id;
+      const { countedSku, countedQty, notes } = req.body;
+      
+      const item = await storage.getCycleCountItemById(itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+      
+      // Calculate variance
+      const varianceQty = (countedQty ?? 0) - (item.expectedQty ?? 0);
+      let varianceType: string | null = null;
+      
+      if (countedSku && item.expectedSku && countedSku !== item.expectedSku) {
+        varianceType = "sku_mismatch";
+      } else if (countedQty > 0 && !item.expectedSku) {
+        varianceType = "unexpected_item";
+      } else if (countedQty === 0 && item.expectedQty > 0) {
+        varianceType = "missing_item";
+      } else if (varianceQty > 0) {
+        varianceType = "quantity_over";
+      } else if (varianceQty < 0) {
+        varianceType = "quantity_under";
+      }
+      
+      const requiresApproval = Math.abs(varianceQty) > 10 || varianceType === "sku_mismatch";
+      
+      await storage.updateCycleCountItem(itemId, {
+        countedSku: countedSku || null,
+        countedQty,
+        varianceQty,
+        varianceType,
+        varianceNotes: notes || null,
+        status: varianceType ? "variance" : "counted",
+        requiresApproval: requiresApproval ? 1 : 0,
+        countedBy: userId,
+        countedAt: new Date(),
+      });
+      
+      // Update cycle count progress
+      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
+      if (cycleCount) {
+        const allItems = await storage.getCycleCountItems(item.cycleCountId);
+        const countedCount = allItems.filter(i => i.status !== "pending").length;
+        const varianceCount = allItems.filter(i => i.varianceType).length;
+        
+        await storage.updateCycleCount(item.cycleCountId, {
+          countedBins: countedCount,
+          varianceCount,
+        });
+      }
+      
+      res.json({ success: true, varianceType, varianceQty, requiresApproval });
+    } catch (error) {
+      console.error("Error recording count:", error);
+      res.status(500).json({ error: "Failed to record count" });
+    }
+  });
+
+  // Approve variance and apply adjustment
+  app.post("/api/cycle-counts/:id/items/:itemId/approve", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const userId = req.session.user?.id;
+      const { reasonCode, notes } = req.body;
+      
+      const item = await storage.getCycleCountItemById(itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+      
+      if (!item.varianceType) {
+        return res.status(400).json({ error: "No variance to approve" });
+      }
+      
+      // Apply inventory adjustment if we have an inventory item
+      if (item.inventoryItemId && item.varianceQty !== null) {
+        await inventoryService.adjustInventory(
+          item.inventoryItemId,
+          item.warehouseLocationId,
+          item.varianceQty,
+          reasonCode || "CYCLE_COUNT",
+          userId,
+          notes
+        );
+      }
+      
+      // Update item as approved
+      await storage.updateCycleCountItem(itemId, {
+        status: "approved",
+        approvedBy: userId,
+        approvedAt: new Date(),
+        varianceReason: reasonCode,
+      });
+      
+      // Update cycle count approved count
+      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
+      if (cycleCount) {
+        const allItems = await storage.getCycleCountItems(item.cycleCountId);
+        const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
+        
+        await storage.updateCycleCount(item.cycleCountId, {
+          approvedVariances: approvedCount,
+        });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error approving variance:", error);
+      res.status(500).json({ error: "Failed to approve variance" });
+    }
+  });
+
+  // Complete cycle count
+  app.post("/api/cycle-counts/:id/complete", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const cycleCount = await storage.getCycleCountById(id);
+      
+      if (!cycleCount) {
+        return res.status(404).json({ error: "Cycle count not found" });
+      }
+      
+      // Check all items are counted
+      const items = await storage.getCycleCountItems(id);
+      const pendingItems = items.filter(i => i.status === "pending");
+      
+      if (pendingItems.length > 0) {
+        return res.status(400).json({ error: `${pendingItems.length} items still pending` });
+      }
+      
+      // Check all variances are approved
+      const unapprovedVariances = items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "adjusted");
+      
+      if (unapprovedVariances.length > 0) {
+        return res.status(400).json({ error: `${unapprovedVariances.length} variances not approved` });
+      }
+      
+      await storage.updateCycleCount(id, {
+        status: "completed",
+        completedAt: new Date(),
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error completing cycle count:", error);
+      res.status(500).json({ error: "Failed to complete cycle count" });
+    }
+  });
+
+  // Delete cycle count
+  app.delete("/api/cycle-counts/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteCycleCount(id);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Cycle count not found" });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting cycle count:", error);
+      res.status(500).json({ error: "Failed to delete cycle count" });
     }
   });
 

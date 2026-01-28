@@ -26,6 +26,7 @@ import Channels from "@/pages/Channels";
 import Reserves from "@/pages/Reserves";
 import Products from "@/pages/Products";
 import ProductDetail from "@/pages/ProductDetail";
+import CycleCounts from "@/pages/CycleCounts";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -88,6 +89,9 @@ function Router() {
         </Route>
         <Route path="/inventory">
           <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/cycle-counts">
+          <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/orders">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />

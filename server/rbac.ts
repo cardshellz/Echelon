@@ -1,9 +1,30 @@
 import { db } from "./db";
 import { 
-  authRoles, authPermissions, authRolePermissions, authUserRoles, users, channels,
-  type AuthRole, type AuthPermission, type InsertAuthPermission
+  authRoles, authPermissions, authRolePermissions, authUserRoles, users, channels, adjustmentReasons,
+  type AuthRole, type AuthPermission, type InsertAuthPermission, type InsertAdjustmentReason
 } from "@shared/schema";
 import { eq, and, inArray, sql } from "drizzle-orm";
+
+// Default adjustment reasons for inventory operations
+export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
+  // Receipt reasons
+  { code: "po_received", name: "PO Received", description: "Inventory received from purchase order", transactionType: "receipt", requiresNote: 0, sortOrder: 10 },
+  { code: "rma_return", name: "RMA Return", description: "Customer return received", transactionType: "receipt", requiresNote: 1, sortOrder: 20 },
+  
+  // Adjustment reasons (cycle count / audit)
+  { code: "cycle_count", name: "Cycle Count", description: "Variance found during cycle count", transactionType: "adjustment", requiresNote: 0, sortOrder: 30 },
+  { code: "damaged", name: "Damaged", description: "Product damaged and removed from inventory", transactionType: "adjustment", requiresNote: 1, sortOrder: 40 },
+  { code: "shrinkage", name: "Shrinkage", description: "Inventory loss (theft, miscount)", transactionType: "adjustment", requiresNote: 1, sortOrder: 50 },
+  { code: "found", name: "Found Stock", description: "Additional stock found during audit", transactionType: "adjustment", requiresNote: 0, sortOrder: 60 },
+  { code: "expired", name: "Expired", description: "Product expired and disposed", transactionType: "adjustment", requiresNote: 0, sortOrder: 70 },
+  { code: "sample", name: "Sample", description: "Product removed as sample", transactionType: "adjustment", requiresNote: 0, sortOrder: 80 },
+  { code: "donation", name: "Donation", description: "Product donated", transactionType: "adjustment", requiresNote: 0, sortOrder: 90 },
+  
+  // Transfer reasons
+  { code: "replenishment", name: "Replenishment", description: "Moved from bulk to pick location", transactionType: "replenish", requiresNote: 0, sortOrder: 100 },
+  { code: "relocation", name: "Relocation", description: "Moved to different bin", transactionType: "transfer", requiresNote: 0, sortOrder: 110 },
+  { code: "misplaced", name: "Misplaced", description: "Found in wrong location", transactionType: "transfer", requiresNote: 1, sortOrder: 120 },
+];
 
 // Default permissions for Echelon
 export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
@@ -359,4 +380,28 @@ export async function assignUserRoles(userId: string, roleIds: number[]): Promis
       }))
     );
   }
+}
+
+// Seed adjustment reasons for inventory operations
+export async function seedAdjustmentReasons() {
+  console.log("Checking adjustment reasons...");
+  
+  try {
+    // Check if table exists
+    await db.select().from(adjustmentReasons).limit(1);
+  } catch (e: any) {
+    console.log("Adjustment reasons table not yet created - skipping seed.");
+    return;
+  }
+  
+  // Insert all adjustment reasons (ignore duplicates)
+  for (const reason of DEFAULT_ADJUSTMENT_REASONS) {
+    try {
+      await db.insert(adjustmentReasons).values(reason).onConflictDoNothing();
+    } catch (e) {
+      // Already exists
+    }
+  }
+  
+  console.log("Adjustment reasons seeding complete!");
 }
