@@ -3467,6 +3467,100 @@ export async function registerRoutes(
     }
   });
 
+  // Get products assigned to a specific bin (warehouse location) - for bin-centric view
+  app.get("/api/warehouse/locations/:id/products", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseLocationId = parseInt(req.params.id);
+      if (isNaN(warehouseLocationId)) {
+        return res.status(400).json({ error: "Invalid location ID" });
+      }
+      const products = await storage.getProductLocationsByWarehouseLocationId(warehouseLocationId);
+      res.json(products);
+    } catch (error: any) {
+      console.error("Error fetching products for location:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch products" });
+    }
+  });
+
+  // Assign a product to a bin (add location) - for bin-centric assignment
+  app.post("/api/warehouse/locations/:id/products", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const warehouseLocationId = parseInt(req.params.id);
+      if (isNaN(warehouseLocationId)) {
+        return res.status(400).json({ error: "Invalid location ID" });
+      }
+      
+      const { catalogProductId, locationType, isPrimary } = req.body;
+      if (!catalogProductId) {
+        return res.status(400).json({ error: "catalogProductId is required" });
+      }
+      
+      // Get warehouse location details
+      const warehouseLocation = await storage.getWarehouseLocationById(warehouseLocationId);
+      if (!warehouseLocation) {
+        return res.status(404).json({ error: "Warehouse location not found" });
+      }
+      
+      // Get catalog product details
+      const catalogProduct = await storage.getCatalogProductById(catalogProductId);
+      if (!catalogProduct) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      
+      const productLocation = await storage.addProductToLocation({
+        catalogProductId,
+        warehouseLocationId,
+        sku: catalogProduct.sku || null,
+        shopifyVariantId: catalogProduct.shopifyVariantId || null,
+        name: catalogProduct.title,
+        location: warehouseLocation.code,
+        zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
+        locationType: locationType || "forward_pick",
+        isPrimary: isPrimary ?? 1,
+        imageUrl: catalogProduct.imageUrl || null,
+        barcode: catalogProduct.barcode || null,
+      });
+      
+      res.status(201).json(productLocation);
+    } catch (error: any) {
+      console.error("Error assigning product to location:", error);
+      res.status(500).json({ error: error.message || "Failed to assign product" });
+    }
+  });
+
+  // Get all locations for a specific product
+  app.get("/api/products/:catalogProductId/locations", async (req, res) => {
+    try {
+      const catalogProductId = parseInt(req.params.catalogProductId);
+      if (isNaN(catalogProductId)) {
+        return res.status(400).json({ error: "Invalid product ID" });
+      }
+      const locations = await storage.getProductLocationsByCatalogProductId(catalogProductId);
+      res.json(locations);
+    } catch (error: any) {
+      console.error("Error fetching locations for product:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch locations" });
+    }
+  });
+
+  // Set a location as primary for a product
+  app.post("/api/product-locations/:id/set-primary", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const productLocationId = parseInt(req.params.id);
+      if (isNaN(productLocationId)) {
+        return res.status(400).json({ error: "Invalid product location ID" });
+      }
+      const updated = await storage.setPrimaryLocation(productLocationId);
+      if (!updated) {
+        return res.status(404).json({ error: "Product location not found" });
+      }
+      res.json(updated);
+    } catch (error: any) {
+      console.error("Error setting primary location:", error);
+      res.status(500).json({ error: error.message || "Failed to set primary location" });
+    }
+  });
+
   // Legacy Warehouse Locations (for backward compatibility with existing /api/inventory/locations)
   app.get("/api/inventory/locations", async (req, res) => {
     try {
