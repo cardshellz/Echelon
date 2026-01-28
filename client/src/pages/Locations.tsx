@@ -22,7 +22,8 @@ import {
   MoreVertical,
   ArrowUpDown,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Warehouse
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -80,10 +81,37 @@ interface WarehouseLocation {
   code: string;
   zone: string | null;
   locationType: string;
+  warehouseId: number | null;
+}
+
+interface Warehouse {
+  id: number;
+  code: string;
+  name: string;
+  isDefault: number;
+  isActive: number;
 }
 
 export default function Locations() {
   const queryClient = useQueryClient();
+  
+  // Fetch warehouses
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({
+    queryKey: ["/api/warehouses"],
+  });
+  
+  // Selected warehouse (default to first/default warehouse)
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
+  
+  // Set default warehouse when data loads
+  React.useEffect(() => {
+    if (warehouses.length > 0 && selectedWarehouseId === null) {
+      const defaultWarehouse = warehouses.find(w => w.isDefault === 1) || warehouses[0];
+      setSelectedWarehouseId(defaultWarehouse.id);
+    }
+  }, [warehouses, selectedWarehouseId]);
+  
+  const selectedWarehouse = warehouses.find(w => w.id === selectedWarehouseId);
   
   // Fetch locations
   const { data: locations = [], isLoading } = useQuery({
@@ -95,6 +123,11 @@ export default function Locations() {
   const { data: warehouseLocations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"],
   });
+  
+  // Filter warehouse locations by selected warehouse
+  const filteredWarehouseLocations = warehouseLocations.filter(
+    loc => !selectedWarehouseId || loc.warehouseId === selectedWarehouseId || loc.warehouseId === null
+  );
 
   const [searchQuery, setSearchQuery] = useState("");
   const [assignmentFilter, setAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
@@ -131,8 +164,8 @@ export default function Locations() {
     enabled: addDialogOpen, // Only fetch when dialog is open
   });
 
-  // Group warehouse locations by zone for easier selection
-  const locationsByZone = warehouseLocations.reduce((acc, loc) => {
+  // Group warehouse locations by zone for easier selection (filtered by selected warehouse)
+  const locationsByZone = filteredWarehouseLocations.reduce((acc, loc) => {
     const zone = loc.zone || "Other";
     if (!acc[zone]) acc[zone] = [];
     acc[zone].push(loc);
@@ -430,7 +463,7 @@ export default function Locations() {
         
         {/* Mobile Header - Compact */}
         <div className="md:hidden">
-          <div className="flex items-center justify-between gap-2 mb-3">
+          <div className="flex items-center justify-between gap-2 mb-2">
             <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
               <MapPin className="h-5 w-5 text-primary" />
               Product Locations
@@ -471,18 +504,57 @@ export default function Locations() {
               </DropdownMenu>
             </div>
           </div>
+          {/* Mobile Warehouse Selector */}
+          {warehouses.length > 0 && (
+            <Select 
+              value={selectedWarehouseId?.toString() || ""} 
+              onValueChange={(val) => setSelectedWarehouseId(parseInt(val))}
+            >
+              <SelectTrigger className="w-full mb-3" data-testid="select-warehouse-mobile">
+                <Warehouse className="h-4 w-4 mr-2 text-muted-foreground" />
+                <SelectValue placeholder="Select warehouse..." />
+              </SelectTrigger>
+              <SelectContent>
+                {warehouses.filter(w => w.isActive === 1).map((w) => (
+                  <SelectItem key={w.id} value={w.id.toString()}>
+                    {w.name} ({w.code})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
         
         {/* Desktop Header */}
         <div className="hidden md:flex md:items-center justify-between gap-4 mb-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-              <MapPin className="h-6 w-6 text-primary" />
-              Product Locations
-            </h1>
-            <p className="text-muted-foreground text-sm">
-              Map SKUs to bin locations for picking
-            </p>
+          <div className="flex items-center gap-4">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+                <MapPin className="h-6 w-6 text-primary" />
+                Product Locations
+              </h1>
+              <p className="text-muted-foreground text-sm">
+                Map products to bin locations for picking
+              </p>
+            </div>
+            {warehouses.length > 0 && (
+              <Select 
+                value={selectedWarehouseId?.toString() || ""} 
+                onValueChange={(val) => setSelectedWarehouseId(parseInt(val))}
+              >
+                <SelectTrigger className="w-[200px]" data-testid="select-warehouse">
+                  <Warehouse className="h-4 w-4 mr-2 text-muted-foreground" />
+                  <SelectValue placeholder="Select warehouse..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {warehouses.filter(w => w.isActive === 1).map((w) => (
+                    <SelectItem key={w.id} value={w.id.toString()}>
+                      {w.name} ({w.code})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
           
           <div className="flex items-center gap-2">
