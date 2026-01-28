@@ -290,10 +290,6 @@ export type MovementPolicy = typeof movementPolicyEnum[number];
 export const zoneTypeEnum = ["RCV", "BULK", "FWD", "PACK", "SHIP"] as const;
 export type ZoneType = typeof zoneTypeEnum[number];
 
-// Location types for warehouse management
-export const locationTypeEnum = ["forward_pick", "bulk_storage", "receiving", "packing", "shipping", "staging", "pallet"] as const;
-export type LocationType = typeof locationTypeEnum[number];
-
 // Warehouse zones (optional - for organizing locations)
 export const warehouseZones = pgTable("warehouse_zones", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
