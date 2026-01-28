@@ -176,9 +176,11 @@ export interface IStorage {
   getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
   getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
   getInventoryItemByShopifyVariantId(variantId: number): Promise<InventoryItem | undefined>;
+  getInventoryItemByShopifyProductId(productId: number): Promise<InventoryItem | undefined>;
   createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
   upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
   upsertInventoryItemByVariantId(variantId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem>;
+  upsertInventoryItemByProductId(productId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem>;
   updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null>;
   
   // Catalog Products - additional methods
@@ -1337,6 +1339,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getInventoryItemByShopifyProductId(productId: number): Promise<InventoryItem | undefined> {
+    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.shopifyProductId, productId));
+    return result[0];
+  }
+
   async getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined> {
     // First try to match as a base SKU
     const byBase = await this.getInventoryItemByBaseSku(sku);
@@ -1383,6 +1390,23 @@ export class DatabaseStorage implements IStorage {
     const result = await db.insert(inventoryItems).values({
       ...item,
       shopifyVariantId: variantId,
+      baseSku: item.baseSku?.toUpperCase() || null,
+      baseUnit: item.baseUnit || "each",
+    }).returning();
+    return result[0];
+  }
+
+  async upsertInventoryItemByProductId(productId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem> {
+    const existing = await this.getInventoryItemByShopifyProductId(productId);
+    if (existing) {
+      const updated = await this.updateInventoryItem(existing.id, { ...item, shopifyProductId: productId });
+      return updated || existing;
+    }
+    // Create new item with product ID (no variant ID - this is the parent)
+    const result = await db.insert(inventoryItems).values({
+      ...item,
+      shopifyProductId: productId,
+      shopifyVariantId: null, // Parent items don't have a variant ID
       baseSku: item.baseSku?.toUpperCase() || null,
       baseUnit: item.baseUnit || "each",
     }).returning();

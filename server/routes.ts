@@ -1983,32 +1983,56 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Sync API - syncs to inventory_items, catalog_products, and catalog_assets
+  // Shopify Sync API - syncs to inventory_items (grouped by product), uom_variants, catalog_products, and catalog_assets
+  // Uses Shopify's natural hierarchy: Product -> Variants
+  // - inventory_items: ONE per Shopify Product (parent container)
+  // - uom_variants: ONE per Shopify Variant (sellable SKUs)
+  // - catalog_products: ONE per Shopify Variant (storefront display)
   app.post("/api/shopify/sync", async (req, res) => {
     try {
       console.log("Starting Shopify catalog sync...");
       
       // Fetch full catalog data from Shopify
       const shopifyProducts = await fetchShopifyCatalogProducts();
-      console.log(`Fetched ${shopifyProducts.length} products from Shopify`);
+      console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
+      
+      // Group variants by Shopify Product ID
+      const productGroups = new Map<number, typeof shopifyProducts>();
+      for (const variant of shopifyProducts) {
+        const group = productGroups.get(variant.shopifyProductId) || [];
+        group.push(variant);
+        productGroups.set(variant.shopifyProductId, group);
+      }
+      console.log(`Grouped into ${productGroups.size} parent products`);
       
       let inventoryCreated = 0;
       let inventoryUpdated = 0;
+      let variantsCreated = 0;
+      let variantsUpdated = 0;
       let catalogCreated = 0;
       let catalogUpdated = 0;
       let assetsCreated = 0;
       
-      for (const product of shopifyProducts) {
-        // 1. Upsert inventory_items by variant ID (primary identifier)
-        const existingItem = await storage.getInventoryItemByShopifyVariantId(product.variantId);
-        const inventoryItem = await storage.upsertInventoryItemByVariantId(product.variantId, {
-          baseSku: product.sku, // May be null
-          shopifyProductId: product.shopifyProductId,
-          name: product.title,
-          description: product.description,
+      for (const [shopifyProductId, variants] of productGroups) {
+        // Use first variant for parent product info (they share product-level data)
+        const firstVariant = variants[0];
+        
+        // Extract base product name (without variant suffix like " - Pack of 50")
+        let productName = firstVariant.title;
+        const dashIndex = productName.lastIndexOf(' - ');
+        if (dashIndex > 0 && variants.length > 1) {
+          // Only strip suffix if there are multiple variants
+          productName = productName.substring(0, dashIndex);
+        }
+        
+        // 1. Upsert inventory_item by Shopify PRODUCT ID (one per product family)
+        const existingItem = await storage.getInventoryItemByShopifyProductId(shopifyProductId);
+        const inventoryItem = await storage.upsertInventoryItemByProductId(shopifyProductId, {
+          name: productName,
+          description: firstVariant.description,
           baseUnit: "each",
-          imageUrl: product.imageUrl,
-          active: product.status === "active" ? 1 : 0,
+          imageUrl: firstVariant.imageUrl,
+          active: firstVariant.status === "active" ? 1 : 0,
         });
         
         if (existingItem) {
@@ -2017,54 +2041,77 @@ export async function registerRoutes(
           inventoryCreated++;
         }
         
-        // 2. Upsert catalog_products by variant ID (primary identifier)
-        const existingCatalog = await storage.getCatalogProductByVariantId(product.variantId);
-        const catalogProduct = await storage.upsertCatalogProductByVariantId(product.variantId, inventoryItem.id, {
-          sku: product.sku, // May be null
-          title: product.title,
-          description: product.description,
-          brand: product.vendor,
-          category: product.productType,
-          tags: product.tags,
-          status: product.status,
-        });
-        
-        if (existingCatalog) {
-          catalogUpdated++;
-        } else {
-          catalogCreated++;
-        }
-        
-        // 3. Sync catalog_assets (images)
-        // Delete existing assets and recreate to ensure sync
-        await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
-        
-        for (let i = 0; i < product.allImages.length; i++) {
-          const img = product.allImages[i];
-          await storage.createCatalogAsset({
-            catalogProductId: catalogProduct.id,
-            assetType: "image",
-            url: img.url,
-            position: img.position,
-            isPrimary: i === 0 ? 1 : 0,
+        // 2. Create uom_variants for each Shopify variant
+        for (const variant of variants) {
+          // Get variant-specific name (just the variant part, e.g., "Pack of 50")
+          let variantName = variant.title;
+          
+          // Upsert uom_variant by Shopify VARIANT ID
+          const existingVariant = await storage.getUomVariantByShopifyVariantId(variant.variantId);
+          await storage.upsertUomVariantByShopifyVariantId(variant.variantId, inventoryItem.id, {
+            sku: variant.sku,
+            name: variantName,
+            barcode: variant.barcode,
+            imageUrl: variant.imageUrl,
+            active: variant.status === "active" ? 1 : 0,
           });
-          assetsCreated++;
-        }
-        
-        // 4. Also sync to product_locations for warehouse assignment (only if has SKU)
-        if (product.sku) {
-          await storage.upsertProductLocationBySku(product.sku, product.title, product.status, product.imageUrl || undefined, product.barcode || undefined);
+          
+          if (existingVariant) {
+            variantsUpdated++;
+          } else {
+            variantsCreated++;
+          }
+          
+          // 3. Upsert catalog_products by variant ID (storefront display, one per variant)
+          const existingCatalog = await storage.getCatalogProductByVariantId(variant.variantId);
+          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, inventoryItem.id, {
+            sku: variant.sku,
+            title: variant.title,
+            description: variant.description,
+            brand: variant.vendor,
+            category: variant.productType,
+            tags: variant.tags,
+            status: variant.status,
+          });
+          
+          if (existingCatalog) {
+            catalogUpdated++;
+          } else {
+            catalogCreated++;
+          }
+          
+          // 4. Sync catalog_assets (images)
+          await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
+          
+          for (let i = 0; i < variant.allImages.length; i++) {
+            const img = variant.allImages[i];
+            await storage.createCatalogAsset({
+              catalogProductId: catalogProduct.id,
+              assetType: "image",
+              url: img.url,
+              position: img.position,
+              isPrimary: i === 0 ? 1 : 0,
+            });
+            assetsCreated++;
+          }
+          
+          // 5. Also sync to product_locations for warehouse assignment (only if has SKU)
+          if (variant.sku) {
+            await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, variant.imageUrl || undefined, variant.barcode || undefined);
+          }
         }
       }
       
-      console.log(`Sync complete: inventory ${inventoryCreated} created/${inventoryUpdated} updated, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
+      console.log(`Sync complete: inventory ${inventoryCreated} created/${inventoryUpdated} updated, variants ${variantsCreated} created/${variantsUpdated} updated, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
       
       res.json({
         success: true,
         inventory: { created: inventoryCreated, updated: inventoryUpdated },
+        variants: { created: variantsCreated, updated: variantsUpdated },
         catalog: { created: catalogCreated, updated: catalogUpdated },
         assets: assetsCreated,
-        total: shopifyProducts.length,
+        totalProducts: productGroups.size,
+        totalVariants: shopifyProducts.length,
       });
     } catch (error: any) {
       console.error("Shopify sync error:", error);
