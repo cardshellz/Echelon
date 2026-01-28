@@ -248,7 +248,12 @@ export default function Locations() {
       
       const matchesWarehouseLocation = !warehouseLocationFilter || loc.location === warehouseLocationFilter;
       
-      return matchesSearch && matchesAssignment && matchesZone && matchesWarehouseLocation;
+      // Filter by selected warehouse - unassigned products (no warehouseId) show in all warehouses
+      const matchesWarehouse = !selectedWarehouseId || 
+        !loc.warehouseId || // Unassigned products show everywhere
+        loc.warehouseId === selectedWarehouseId;
+      
+      return matchesSearch && matchesAssignment && matchesZone && matchesWarehouseLocation && matchesWarehouse;
     })
     .sort((a, b) => {
       let aVal: string | Date = "";
@@ -267,8 +272,10 @@ export default function Locations() {
       }
     });
   
-  // Group by zone
-  const zones = Array.from(new Set(locations.map(l => l.zone))).sort();
+  // Group by zone - filtered to selected warehouse's locations
+  const zones = Array.from(new Set(
+    filteredWarehouseLocations.map(l => l.zone).filter(Boolean)
+  )).sort() as string[];
   
   // Start editing
   const handleStartEdit = (id: number, currentLocation: string) => {

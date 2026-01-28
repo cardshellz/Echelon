@@ -1175,11 +1175,13 @@ export class DatabaseStorage implements IStorage {
     location: string | null;
     zone: string | null;
     warehouseLocationId: number | null;
+    warehouseId: number | null;
     status: string;
     imageUrl: string | null;
     updatedAt: Date | null;
   }[]> {
     // Get ALL catalog products with their locations (if assigned)
+    // Join to warehouse_locations to get warehouseId for filtering
     const result = await db
       .select({
         id: catalogProducts.id,
@@ -1191,6 +1193,7 @@ export class DatabaseStorage implements IStorage {
         location: productLocations.location,
         zone: productLocations.zone,
         warehouseLocationId: productLocations.warehouseLocationId,
+        warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
         imageUrl: inventoryItems.imageUrl,
         updatedAt: productLocations.updatedAt,
@@ -1198,6 +1201,7 @@ export class DatabaseStorage implements IStorage {
       .from(catalogProducts)
       .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
       .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
+      .leftJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
       .orderBy(asc(catalogProducts.title));
     return result;
   }
