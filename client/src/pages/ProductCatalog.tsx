@@ -89,7 +89,26 @@ export default function ProductCatalog() {
     },
   });
 
-  const productsWithVariants: ProductWithVariants[] = items.map(item => ({
+  // Build a set of all variant SKUs to identify which inventory items are actually variants
+  const allVariantSkus = new Set(variants.map(v => v.sku.toLowerCase()));
+  
+  // Only include inventory items that are true parent products (not child variant SKUs)
+  // An item is a parent if: its baseSku is NOT found as a variant SKU of ANOTHER item
+  const parentItemsOnly = items.filter(item => {
+    const itemVariants = variants.filter(v => v.inventoryItemId === item.id);
+    // If this item has its own variants, it's a parent
+    if (itemVariants.length > 0) {
+      // Check if this item's baseSku is a variant of another item
+      const isVariantOfAnother = variants.some(v => 
+        v.sku.toLowerCase() === (item.baseSku || '').toLowerCase() && 
+        v.inventoryItemId !== item.id
+      );
+      return !isVariantOfAnother;
+    }
+    return true; // Items without variants are standalone
+  });
+
+  const productsWithVariants: ProductWithVariants[] = parentItemsOnly.map(item => ({
     item,
     variants: variants.filter(v => v.inventoryItemId === item.id).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
   }));
@@ -253,7 +272,7 @@ export default function ProductCatalog() {
                                     </Badge>
                                   </td>
                                   <td className="px-4 py-3 text-right font-mono text-sm text-muted-foreground">
-                                    1 (base)
+                                    {baseUnit.unitsPerVariant} (base)
                                   </td>
                                   <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                                     {baseUnit.barcode || "-"}
