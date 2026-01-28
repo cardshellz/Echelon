@@ -5156,72 +5156,54 @@ export async function registerRoutes(
   // INVENTORY MANAGEMENT (User-Friendly API)
   // ============================================
 
-  // Get all inventory levels with product and location details
+  // Get all inventory levels - variant-centric view (storable units: packs, boxes, cases)
+  // Groups by variant SKU with aggregated quantities across all locations
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const result = await db.execute<{
-        id: number;
-        inventory_item_id: number;
-        warehouse_location_id: number;
-        on_hand_base: number;
-        reserved_base: number;
-        picked_base: number;
-        packed_base: number;
-        catalog_product_id: number | null;
-        sku: string | null;
-        title: string | null;
-        location_code: string | null;
-        zone: string | null;
-        aisle: string | null;
-        bay: string | null;
-        level: string | null;
-        bin: string | null;
-        location_type: string | null;
+        variant_id: number;
+        variant_sku: string;
+        variant_name: string;
+        units_per_variant: number;
+        base_sku: string | null;
+        total_variant_qty: string;
+        total_on_hand_base: string;
+        total_reserved_base: string;
+        total_picked_base: string;
+        location_count: string;
       }>(sql`
         SELECT 
-          il.id,
-          il.inventory_item_id,
-          il.warehouse_location_id,
-          il.on_hand_base,
-          il.reserved_base,
-          il.picked_base,
-          il.packed_base,
-          cp.id as catalog_product_id,
-          cp.sku,
-          cp.title,
-          wl.code as location_code,
-          wl.zone,
-          wl.aisle,
-          wl.bay,
-          wl.level,
-          wl.bin,
-          wl.location_type
-        FROM inventory_levels il
-        LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
-        LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
-        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        ORDER BY cp.sku, wl.code
+          uv.id as variant_id,
+          uv.sku as variant_sku,
+          uv.name as variant_name,
+          uv.units_per_variant,
+          ii.base_sku,
+          COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+          COALESCE(SUM(il.on_hand_base), 0) as total_on_hand_base,
+          COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
+          COALESCE(SUM(il.picked_base), 0) as total_picked_base,
+          COUNT(DISTINCT il.warehouse_location_id) as location_count
+        FROM uom_variants uv
+        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+        LEFT JOIN inventory_levels il ON il.variant_id = uv.id
+        WHERE uv.active = 1
+        GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
+        ORDER BY uv.sku
       `);
       
       const levels = result.rows.map(row => ({
-        id: row.id,
-        inventoryItemId: row.inventory_item_id,
-        warehouseLocationId: row.warehouse_location_id,
-        onHandBase: row.on_hand_base,
-        reservedBase: row.reserved_base,
-        pickedBase: row.picked_base,
-        packedBase: row.packed_base,
-        available: row.on_hand_base - row.reserved_base - row.picked_base,
-        catalogProductId: row.catalog_product_id,
-        sku: row.sku,
-        title: row.title,
-        locationCode: row.location_code,
-        zone: row.zone,
-        aisle: row.aisle,
-        bay: row.bay,
-        level: row.level,
-        bin: row.bin,
-        locationType: row.location_type,
+        variantId: row.variant_id,
+        sku: row.variant_sku,
+        name: row.variant_name,
+        unitsPerVariant: row.units_per_variant,
+        baseSku: row.base_sku,
+        variantQty: parseInt(row.total_variant_qty) || 0,
+        onHandBase: parseInt(row.total_on_hand_base) || 0,
+        reservedBase: parseInt(row.total_reserved_base) || 0,
+        pickedBase: parseInt(row.total_picked_base) || 0,
+        available: (parseInt(row.total_on_hand_base) || 0) - (parseInt(row.total_reserved_base) || 0) - (parseInt(row.total_picked_base) || 0),
+        totalPieces: parseInt(row.total_on_hand_base) || 0,
+        locationCount: parseInt(row.location_count) || 0,
       }));
       
       res.json(levels);
@@ -5231,73 +5213,162 @@ export async function registerRoutes(
     }
   });
 
-  // Add inventory to a bin (simplified receipt)
+  // Get inventory breakdown by location for a specific variant
+  app.get("/api/inventory/levels/:variantId/locations", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const variantId = parseInt(req.params.variantId);
+      
+      const result = await db.execute<{
+        id: number;
+        warehouse_location_id: number;
+        location_code: string | null;
+        zone: string | null;
+        variant_qty: number;
+        on_hand_base: number;
+        reserved_base: number;
+        picked_base: number;
+      }>(sql`
+        SELECT 
+          il.id,
+          il.warehouse_location_id,
+          wl.code as location_code,
+          wl.zone,
+          il.variant_qty,
+          il.on_hand_base,
+          il.reserved_base,
+          il.picked_base
+        FROM inventory_levels il
+        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.variant_id = ${variantId}
+        ORDER BY wl.code
+      `);
+      
+      const locations = result.rows.map(row => ({
+        id: row.id,
+        warehouseLocationId: row.warehouse_location_id,
+        locationCode: row.location_code,
+        zone: row.zone,
+        variantQty: row.variant_qty,
+        onHandBase: row.on_hand_base,
+        reservedBase: row.reserved_base,
+        pickedBase: row.picked_base,
+        available: row.on_hand_base - row.reserved_base - row.picked_base,
+      }));
+      
+      res.json(locations);
+    } catch (error) {
+      console.error("Error fetching variant locations:", error);
+      res.status(500).json({ error: "Failed to fetch variant locations" });
+    }
+  });
+
+  // Add inventory to a bin (simplified receipt) - variant-centric
   app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { catalogProductId, warehouseLocationId, quantity, notes } = req.body;
+      const { variantId, warehouseLocationId, variantQty, notes } = req.body;
       const userId = req.session.user?.id;
       
-      if (!catalogProductId || !warehouseLocationId || quantity === undefined) {
-        return res.status(400).json({ error: "Missing required fields: catalogProductId, warehouseLocationId, quantity" });
+      if (!variantId || !warehouseLocationId || variantQty === undefined) {
+        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQty" });
       }
       
-      // Get the catalog product to find its inventory_item_id
-      const product = await storage.getCatalogProductById(catalogProductId);
-      if (!product) {
-        return res.status(404).json({ error: "Product not found" });
+      // Get the variant to find its inventory_item_id and units_per_variant
+      const variant = await storage.getUomVariantById(variantId);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
       }
       
-      // Use the inventory service to receive the stock
-      await inventoryService.receiveInventory(
-        product.inventoryItemId,
-        warehouseLocationId,
-        quantity,
-        "MANUAL_ADD", // Reference ID
-        notes || "Stock added via inventory page",
-        userId
-      );
+      // Calculate base units from variant quantity
+      const baseUnits = variantQty * variant.unitsPerVariant;
       
-      res.json({ success: true, quantityAdded: quantity });
+      // Check if inventory level exists for this variant at this location
+      let existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
+      
+      if (existingLevel) {
+        // Update existing level - add to current quantities
+        await storage.adjustInventoryLevel(existingLevel.id, {
+          variantQty: variantQty,
+          onHandBase: baseUnits,
+        });
+      } else {
+        // Use the inventory service to create new inventory level
+        await inventoryService.receiveInventory(
+          variant.inventoryItemId,
+          warehouseLocationId,
+          baseUnits,
+          "MANUAL_ADD",
+          notes || "Stock added via inventory page",
+          userId
+        );
+        
+        // Update the newly created level with variant info
+        const levels = await storage.getInventoryLevelsByItemId(variant.inventoryItemId);
+        const newLevel = levels.find(l => l.warehouseLocationId === warehouseLocationId);
+        if (newLevel) {
+          await storage.updateInventoryLevel(newLevel.id, {
+            variantId: variantId,
+            variantQty: variantQty,
+          });
+        }
+      }
+      
+      res.json({ success: true, variantQtyAdded: variantQty, baseUnitsAdded: baseUnits });
     } catch (error) {
       console.error("Error adding stock:", error);
       res.status(500).json({ error: "Failed to add stock" });
     }
   });
 
-  // Adjust inventory with reason code
+  // Adjust inventory with reason code - variant-centric
   app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { catalogProductId, warehouseLocationId, quantityDelta, reasonCode, notes } = req.body;
+      const { variantId, warehouseLocationId, variantQtyDelta, reasonCode, notes } = req.body;
       const userId = req.session.user?.id;
       
-      if (!catalogProductId || !warehouseLocationId || quantityDelta === undefined || !reasonCode) {
-        return res.status(400).json({ error: "Missing required fields: catalogProductId, warehouseLocationId, quantityDelta, reasonCode" });
+      if (!variantId || !warehouseLocationId || variantQtyDelta === undefined || !reasonCode) {
+        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQtyDelta, reasonCode" });
       }
       
-      // Get the catalog product to find its inventory_item_id
-      const product = await storage.getCatalogProductById(catalogProductId);
-      if (!product) {
-        return res.status(404).json({ error: "Product not found" });
+      // Get the variant to find its inventory_item_id and units_per_variant
+      const variant = await storage.getUomVariantById(variantId);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
       }
       
-      // Use the inventory service to adjust
+      // Calculate base units from variant quantity delta
+      const baseUnitsDelta = variantQtyDelta * variant.unitsPerVariant;
+      
+      // Find the inventory level for this variant at this location
+      const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
+      
+      if (!existingLevel) {
+        return res.status(404).json({ error: "No inventory level found for this variant at this location" });
+      }
+      
+      // Use the inventory service to adjust base units
       await inventoryService.adjustInventory(
-        product.inventoryItemId,
+        variant.inventoryItemId,
         warehouseLocationId,
-        quantityDelta,
+        baseUnitsDelta,
         reasonCode,
         userId,
         notes
       );
       
-      res.json({ success: true, quantityDelta });
+      // Also adjust the variant qty
+      await storage.adjustInventoryLevel(existingLevel.id, {
+        variantQty: variantQtyDelta,
+      });
+      
+      res.json({ success: true, variantQtyDelta, baseUnitsDelta });
     } catch (error) {
       console.error("Error adjusting stock:", error);
       res.status(500).json({ error: "Failed to adjust stock" });
     }
   });
 
-  // CSV import for bulk inventory upload
+  // CSV import for bulk inventory upload - variant-centric
+  // CSV format: variant_sku, location_code, variant_qty
   app.post("/api/inventory/import-csv", requirePermission("inventory", "upload"), upload.single("file"), async (req, res) => {
     try {
       if (!req.file) {
@@ -5326,19 +5397,18 @@ export async function registerRoutes(
         try {
           const sku = row.sku?.trim();
           const locationCode = row.location_code?.trim();
-          const quantity = parseInt(row.quantity, 10);
+          const variantQty = parseInt(row.quantity, 10);
           
-          if (!sku || !locationCode || isNaN(quantity)) {
+          if (!sku || !locationCode || isNaN(variantQty)) {
             results.errors.push(`Invalid row: SKU=${sku}, Location=${locationCode}, Qty=${row.quantity}`);
             continue;
           }
           
-          // Find product by SKU
-          const products = await storage.getAllCatalogProducts();
-          const product = products.find(p => p.sku === sku);
+          // Find variant by SKU (storable unit like pack/case)
+          const variant = await storage.getUomVariantBySku(sku);
           
-          if (!product) {
-            results.errors.push(`Product not found: ${sku}`);
+          if (!variant) {
+            results.errors.push(`Variant not found: ${sku}`);
             continue;
           }
           
@@ -5349,33 +5419,49 @@ export async function registerRoutes(
             continue;
           }
           
-          // Check if inventory level exists
-          const levels = await storage.getInventoryLevelsByItemId(product.inventoryItemId);
-          const existingLevel = levels.find(l => l.warehouseLocationId === location.id);
+          // Calculate base units from variant quantity
+          const baseUnits = variantQty * variant.unitsPerVariant;
+          
+          // Check if inventory level exists for this variant at this location
+          const existingLevel = await storage.getInventoryLevelByLocationAndVariant(location.id, variant.id);
           
           if (existingLevel) {
-            // Calculate delta to reach target quantity
-            const delta = quantity - existingLevel.onHandBase;
+            // Calculate delta to reach target quantity (in base units)
+            const targetBaseUnits = variantQty * variant.unitsPerVariant;
+            const delta = targetBaseUnits - existingLevel.onHandBase;
             if (delta !== 0) {
               await inventoryService.adjustInventory(
-                product.inventoryItemId,
+                variant.inventoryItemId,
                 location.id,
                 delta,
                 "CSV_UPLOAD",
                 userId
               );
+              // Update variant qty
+              await storage.updateInventoryLevel(existingLevel.id, {
+                variantQty: variantQty,
+              });
               results.updated++;
             }
           } else {
             // Create new inventory level
             await inventoryService.receiveInventory(
-              product.inventoryItemId,
+              variant.inventoryItemId,
               location.id,
-              quantity,
+              baseUnits,
               "CSV_UPLOAD",
               "Initial inventory from CSV import",
               userId
             );
+            // Update the newly created level with variant info
+            const levels = await storage.getInventoryLevelsByItemId(variant.inventoryItemId);
+            const newLevel = levels.find(l => l.warehouseLocationId === location.id);
+            if (newLevel) {
+              await storage.updateInventoryLevel(newLevel.id, {
+                variantId: variant.id,
+                variantQty: variantQty,
+              });
+            }
             results.created++;
           }
           
@@ -5392,7 +5478,7 @@ export async function registerRoutes(
     }
   });
 
-  // CSV template for inventory import
+  // CSV template for inventory import - variant-centric
   app.get("/api/inventory/import-template", requireAuth, (req, res) => {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader("Content-Disposition", "attachment; filename=inventory_import_template.csv");

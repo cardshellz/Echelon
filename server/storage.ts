@@ -190,6 +190,7 @@ export interface IStorage {
   
   // UOM Variants
   getAllUomVariants(): Promise<UomVariant[]>;
+  getUomVariantById(id: number): Promise<UomVariant | undefined>;
   getUomVariantBySku(sku: string): Promise<UomVariant | undefined>;
   getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]>;
   createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
@@ -200,6 +201,7 @@ export interface IStorage {
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
+  updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null>;
   getTotalOnHandByItemId(inventoryItemId: number, pickableOnly?: boolean): Promise<number>;
   getTotalReservedByItemId(inventoryItemId: number): Promise<number>;
   
@@ -1475,6 +1477,11 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(uomVariants).orderBy(asc(uomVariants.sku));
   }
 
+  async getUomVariantById(id: number): Promise<UomVariant | undefined> {
+    const result = await db.select().from(uomVariants).where(eq(uomVariants.id, id));
+    return result[0];
+  }
+
   async getUomVariantBySku(sku: string): Promise<UomVariant | undefined> {
     const result = await db.select().from(uomVariants).where(eq(uomVariants.sku, sku.toUpperCase()));
     return result[0];
@@ -1565,6 +1572,28 @@ export class DatabaseStorage implements IStorage {
     const result = await db
       .update(inventoryLevels)
       .set(updates)
+      .where(eq(inventoryLevels.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null> {
+    const setValues: any = { updatedAt: new Date() };
+    
+    // Absolute updates: set values directly (not delta-based)
+    if (updates.variantId !== undefined) {
+      setValues.variantId = updates.variantId;
+    }
+    if (updates.variantQty !== undefined) {
+      setValues.variantQty = updates.variantQty;
+    }
+    if (updates.onHandBase !== undefined) {
+      setValues.onHandBase = updates.onHandBase;
+    }
+    
+    const result = await db
+      .update(inventoryLevels)
+      .set(setValues)
       .where(eq(inventoryLevels.id, id))
       .returning();
     return result[0] || null;
