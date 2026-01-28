@@ -38,7 +38,7 @@ Echelon uses a hub-and-spoke pattern for multi-channel orders:
 Key tables:
 - `users`: Authentication with role-based access
 - `catalog_products`: **Master product catalog (PIM)** - internal `id` is the source of truth for product identity. Contains shopifyVariantId as sync metadata.
-- `product_locations`: Product to warehouse bin mapping. Uses `catalogProductId` as primary link (internal ID is source of truth, not SKU or shopifyVariantId)
+- `product_locations`: Product to warehouse bin mapping. **Supports multi-location storage** - products can be stored in multiple bins with `isPrimary` (1=primary pick location, 0=secondary) and `locationType` (forward_pick, bulk_storage, overflow) fields. Uses `catalogProductId` as primary link (internal ID is source of truth, not SKU or shopifyVariantId)
 - `orders`: ALL orders from all channels with operational fields (sourceTableId, customerName, shipping address, priority, status, itemCount, unitCount)
 - `order_items`: ALL items with **requiresShipping** flag per item. Has optional `catalogProductId` for analytics (doesn't affect order creation)
 - `picking_logs`: Audit trail with optional `catalogProductId` for analytics
