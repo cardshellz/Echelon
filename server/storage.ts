@@ -405,6 +405,69 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getProductLocationsByCatalogProductId(catalogProductId: number): Promise<ProductLocation[]> {
+    return await db.select().from(productLocations)
+      .where(eq(productLocations.catalogProductId, catalogProductId))
+      .orderBy(sql`${productLocations.isPrimary} DESC`);
+  }
+
+  async getProductLocationsByWarehouseLocationId(warehouseLocationId: number): Promise<ProductLocation[]> {
+    return await db.select().from(productLocations)
+      .where(eq(productLocations.warehouseLocationId, warehouseLocationId))
+      .orderBy(productLocations.name);
+  }
+
+  async addProductToLocation(data: {
+    catalogProductId: number;
+    warehouseLocationId: number;
+    sku?: string | null;
+    shopifyVariantId?: number | null;
+    name: string;
+    location: string;
+    zone: string;
+    locationType?: string;
+    isPrimary?: number;
+    imageUrl?: string | null;
+    barcode?: string | null;
+  }): Promise<ProductLocation> {
+    if (data.isPrimary === 1) {
+      await db.update(productLocations)
+        .set({ isPrimary: 0, updatedAt: new Date() })
+        .where(eq(productLocations.catalogProductId, data.catalogProductId));
+    }
+    
+    const result = await db.insert(productLocations).values({
+      catalogProductId: data.catalogProductId,
+      warehouseLocationId: data.warehouseLocationId,
+      sku: data.sku?.toUpperCase() || null,
+      shopifyVariantId: data.shopifyVariantId || null,
+      name: data.name,
+      location: data.location.toUpperCase(),
+      zone: data.zone.toUpperCase(),
+      locationType: data.locationType || "forward_pick",
+      isPrimary: data.isPrimary ?? 1,
+      status: "active",
+      imageUrl: data.imageUrl || null,
+      barcode: data.barcode || null,
+    }).returning();
+    return result[0];
+  }
+
+  async setPrimaryLocation(productLocationId: number): Promise<ProductLocation | undefined> {
+    const location = await this.getProductLocationById(productLocationId);
+    if (!location || !location.catalogProductId) return undefined;
+    
+    await db.update(productLocations)
+      .set({ isPrimary: 0, updatedAt: new Date() })
+      .where(eq(productLocations.catalogProductId, location.catalogProductId));
+    
+    const result = await db.update(productLocations)
+      .set({ isPrimary: 1, updatedAt: new Date() })
+      .where(eq(productLocations.id, productLocationId))
+      .returning();
+    return result[0];
+  }
+
   async createProductLocation(location: InsertProductLocation): Promise<ProductLocation> {
     const result = await db.insert(productLocations).values({
       ...location,

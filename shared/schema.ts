@@ -30,15 +30,21 @@ export type User = typeof users.$inferSelect;
 
 export type SafeUser = Omit<User, "password">;
 
+// Location types for multi-location WMS support
+export const locationTypeEnum = ["forward_pick", "bulk_storage", "overflow", "receiving", "staging"] as const;
+export type LocationType = typeof locationTypeEnum[number];
+
 export const productLocations = pgTable("product_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  catalogProductId: integer("catalog_product_id").unique(), // Primary link to catalog_products - internal ID is source of truth
+  catalogProductId: integer("catalog_product_id"), // Primary link to catalog_products - NOT unique, allows multiple locations per product
   sku: varchar("sku", { length: 100 }), // Optional - cached from catalog for display/legacy
   shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }), // Optional - cached from catalog for quick Shopify lookups
   name: text("name").notNull(),
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
   warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // FK to warehouse_locations
+  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"), // forward_pick, bulk_storage, overflow
+  isPrimary: integer("is_primary").notNull().default(1), // 1 = primary pick location, 0 = secondary/bulk
   status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // Product barcode from Shopify for scanner matching
