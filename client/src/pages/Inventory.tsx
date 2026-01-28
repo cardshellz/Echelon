@@ -111,6 +111,21 @@ interface UomVariant {
   active: number;
 }
 
+interface VariantLevel {
+  variantId: number;
+  sku: string;
+  name: string;
+  unitsPerVariant: number;
+  baseSku: string | null;
+  variantQty: number;
+  onHandBase: number;
+  reservedBase: number;
+  pickedBase: number;
+  available: number;
+  totalPieces: number;
+  locationCount: number;
+}
+
 export default function Inventory() {
   const [activeTab, setActiveTab] = useState("items");
   const [searchQuery, setSearchQuery] = useState("");
@@ -138,6 +153,10 @@ export default function Inventory() {
 
   const { data: variants = [] } = useQuery<UomVariant[]>({
     queryKey: ["/api/inventory/variants"],
+  });
+
+  const { data: variantLevels = [], isLoading: loadingVariantLevels } = useQuery<VariantLevel[]>({
+    queryKey: ["/api/inventory/levels"],
   });
 
   const createItemMutation = useMutation({
@@ -545,54 +564,82 @@ export default function Inventory() {
             )}
           </>
         ) : activeTab === "variants" ? (
+          loadingVariantLevels ? (
+            <div className="flex-1 flex items-center justify-center">
+              <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
           <>
-            {/* Mobile card layout for variants */}
+            {/* Mobile card layout for variant levels */}
             <div className="md:hidden space-y-3 flex-1 overflow-auto">
-              {variants.map((variant) => (
-                <div key={variant.id} className="rounded-md border bg-card p-4">
+              {variantLevels.filter(v => 
+                v.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                v.name.toLowerCase().includes(searchQuery.toLowerCase())
+              ).map((level) => (
+                <div key={level.variantId} className="rounded-md border bg-card p-4">
                   <div className="flex items-start justify-between mb-2">
-                    <div className="font-mono font-medium text-primary text-sm">{variant.sku}</div>
-                    <Badge variant="outline">Level {variant.hierarchyLevel}</Badge>
+                    <div>
+                      <div className="font-mono font-medium text-primary text-sm">{level.sku}</div>
+                      <div className="text-sm font-medium mt-1">{level.name}</div>
+                    </div>
+                    {getStatusBadge(level.available)}
                   </div>
-                  <div className="text-sm font-medium mb-2">{variant.name}</div>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>Units Per: <span className="font-mono font-medium text-foreground">{variant.unitsPerVariant}</span></span>
-                    <span>Barcode: <span className="font-mono">{variant.barcode || "-"}</span></span>
+                  <div className="grid grid-cols-3 gap-2 text-xs mt-3">
+                    <div className="bg-muted/30 p-2 rounded">
+                      <div className="text-muted-foreground">Qty</div>
+                      <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
+                    </div>
+                    <div className="bg-muted/30 p-2 rounded">
+                      <div className="text-muted-foreground">Pieces</div>
+                      <div className="font-mono font-bold">{level.totalPieces.toLocaleString()}</div>
+                    </div>
+                    <div className="bg-muted/30 p-2 rounded">
+                      <div className="text-muted-foreground">Locations</div>
+                      <div className="font-mono font-bold">{level.locationCount}</div>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
 
-            {/* Desktop table layout for variants */}
+            {/* Desktop table layout for variant levels */}
             <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
               <Table>
                 <TableHeader className="bg-muted/40 sticky top-0 z-10">
                   <TableRow>
-                    <TableHead className="w-[200px]">SKU</TableHead>
+                    <TableHead className="w-[180px]">SKU</TableHead>
                     <TableHead>Name</TableHead>
-                    <TableHead className="text-right w-[120px]">Units Per</TableHead>
-                    <TableHead className="w-[100px]">Level</TableHead>
-                    <TableHead className="w-[150px]">Barcode</TableHead>
+                    <TableHead className="text-right w-[100px]">Qty</TableHead>
+                    <TableHead className="text-right w-[100px]">Units/Pkg</TableHead>
+                    <TableHead className="text-right w-[100px]">Pieces</TableHead>
+                    <TableHead className="text-right w-[100px]">Reserved</TableHead>
+                    <TableHead className="text-right w-[100px]">Available</TableHead>
+                    <TableHead className="text-right w-[80px]">Locations</TableHead>
+                    <TableHead className="w-[100px]">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {variants.map((variant) => (
-                    <TableRow key={variant.id}>
-                      <TableCell className="font-mono font-medium text-primary">{variant.sku}</TableCell>
-                      <TableCell>{variant.name}</TableCell>
-                      <TableCell className="text-right font-mono">{variant.unitsPerVariant}</TableCell>
-                      <TableCell>
-                        <Badge variant="outline">Level {variant.hierarchyLevel}</Badge>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-muted-foreground">
-                        {variant.barcode || "-"}
-                      </TableCell>
+                  {variantLevels.filter(v => 
+                    v.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    v.name.toLowerCase().includes(searchQuery.toLowerCase())
+                  ).map((level) => (
+                    <TableRow key={level.variantId} data-testid={`row-variant-${level.variantId}`}>
+                      <TableCell className="font-mono font-medium text-primary">{level.sku}</TableCell>
+                      <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
+                      <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
+                      <TableCell className="text-right font-mono">{level.totalPieces.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
+                      <TableCell className="text-right">{level.locationCount}</TableCell>
+                      <TableCell>{getStatusBadge(level.available)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
           </>
+          )
         ) : (
           <>
             {/* Mobile card layout for locations */}
