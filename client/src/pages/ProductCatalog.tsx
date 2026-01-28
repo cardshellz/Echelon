@@ -92,20 +92,16 @@ export default function ProductCatalog() {
   // Build a set of all variant SKUs to identify which inventory items are actually variants
   const allVariantSkus = new Set(variants.map(v => v.sku.toLowerCase()));
   
-  // Only include inventory items that are true parent products (not child variant SKUs)
-  // An item is a parent if: its baseSku is NOT found as a variant SKU of ANOTHER item
+  // Only show inventory items whose baseSku is NOT found as a variant SKU of ANY other item
+  // This filters out child SKUs that were incorrectly created as separate inventory_items
   const parentItemsOnly = items.filter(item => {
-    const itemVariants = variants.filter(v => v.inventoryItemId === item.id);
-    // If this item has its own variants, it's a parent
-    if (itemVariants.length > 0) {
-      // Check if this item's baseSku is a variant of another item
-      const isVariantOfAnother = variants.some(v => 
-        v.sku.toLowerCase() === (item.baseSku || '').toLowerCase() && 
-        v.inventoryItemId !== item.id
-      );
-      return !isVariantOfAnother;
-    }
-    return true; // Items without variants are standalone
+    const itemBaseSku = (item.baseSku || '').toLowerCase();
+    // Check if this item's baseSku appears as a variant SKU of a DIFFERENT item
+    const isVariantOfAnother = variants.some(v => 
+      v.sku.toLowerCase() === itemBaseSku && 
+      v.inventoryItemId !== item.id
+    );
+    return !isVariantOfAnother;
   });
 
   const productsWithVariants: ProductWithVariants[] = parentItemsOnly.map(item => ({
@@ -152,18 +148,12 @@ export default function ProductCatalog() {
 
   const getVariantTypeLabel = (level: number) => {
     switch (level) {
-      case 1: return "Base Unit (Piece)";
+      case 1: return "Piece";
       case 2: return "Pack";
       case 3: return "Case";
       case 4: return "Pallet";
       default: return `Level ${level}`;
     }
-  };
-
-  const buildHierarchyTree = (variants: UomVariant[]) => {
-    const baseUnit = variants.find(v => v.hierarchyLevel === 1);
-    const storableVariants = variants.filter(v => v.hierarchyLevel > 1);
-    return { baseUnit, storableVariants };
   };
 
   if (loadingItems || loadingVariants) {
@@ -216,7 +206,6 @@ export default function ProductCatalog() {
         ) : (
           <div className="space-y-4">
             {filteredProducts.map(({ item, variants }) => {
-              const { baseUnit, storableVariants } = buildHierarchyTree(variants);
               const isExpanded = expandedProducts.has(item.id);
 
               return (
@@ -236,14 +225,7 @@ export default function ProductCatalog() {
                               <CardDescription className="mt-1">{item.name}</CardDescription>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline">{variants.length} variants</Badge>
-                            {baseUnit && (
-                              <Badge className="bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
-                                Base: {baseUnit.name}
-                              </Badge>
-                            )}
-                          </div>
+                          <Badge variant="outline">{variants.length} variants</Badge>
                         </div>
                       </CardHeader>
                     </CollapsibleTrigger>
@@ -262,27 +244,7 @@ export default function ProductCatalog() {
                               </tr>
                             </thead>
                             <tbody>
-                              {baseUnit && (
-                                <tr className="border-t bg-blue-50/50 dark:bg-blue-950/20">
-                                  <td className="px-4 py-3 font-mono text-sm text-primary">{baseUnit.sku}</td>
-                                  <td className="px-4 py-3 text-sm">{baseUnit.name}</td>
-                                  <td className="px-4 py-3">
-                                    <Badge variant="secondary" className="text-xs">
-                                      {getVariantTypeLabel(baseUnit.hierarchyLevel)}
-                                    </Badge>
-                                  </td>
-                                  <td className="px-4 py-3 text-right font-mono text-sm text-muted-foreground">
-                                    {baseUnit.unitsPerVariant} (base)
-                                  </td>
-                                  <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                                    {baseUnit.barcode || "-"}
-                                  </td>
-                                  <td className="px-4 py-3 text-right">
-                                    <span className="text-xs text-muted-foreground">Purchase Unit</span>
-                                  </td>
-                                </tr>
-                              )}
-                              {storableVariants.map((variant) => (
+                              {variants.map((variant) => (
                                 <tr key={variant.id} className="border-t" data-testid={`row-variant-${variant.id}`}>
                                   <td className="px-4 py-3 font-mono text-sm text-primary">{variant.sku}</td>
                                   <td className="px-4 py-3 text-sm">{variant.name}</td>
