@@ -586,10 +586,10 @@ export default function WarehouseLocations() {
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <MapPin className="h-6 w-6" />
-            Warehouse Locations
+            Bin Locations
           </h1>
           <p className="text-muted-foreground">
-            Manage your warehouse zones and bin locations
+            Manage your warehouse bins and assign products
           </p>
         </div>
       </div>
