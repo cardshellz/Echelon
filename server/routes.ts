@@ -3471,10 +3471,12 @@ export async function registerRoutes(
   app.get("/api/warehouse/locations/:id/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseLocationId = parseInt(req.params.id);
+      console.log(`[DEBUG] Fetching products for warehouse_location_id: ${warehouseLocationId}`);
       if (isNaN(warehouseLocationId)) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
       const products = await storage.getProductLocationsByWarehouseLocationId(warehouseLocationId);
+      console.log(`[DEBUG] Found ${products.length} products for location ${warehouseLocationId}`);
       res.json(products);
     } catch (error: any) {
       console.error("Error fetching products for location:", error);
