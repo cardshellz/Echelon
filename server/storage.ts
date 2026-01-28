@@ -461,6 +461,30 @@ export class DatabaseStorage implements IStorage {
     imageUrl?: string | null;
     barcode?: string | null;
   }): Promise<ProductLocation> {
+    // Check if product already has a location entry (for databases with legacy sku unique constraint)
+    // If so, update the existing entry instead of inserting
+    const existingByProduct = await db.select().from(productLocations)
+      .where(eq(productLocations.catalogProductId, data.catalogProductId));
+    
+    if (existingByProduct.length > 0) {
+      // Product already has a location - update the existing entry to the new location
+      const existing = existingByProduct[0];
+      const result = await db.update(productLocations)
+        .set({
+          warehouseLocationId: data.warehouseLocationId,
+          location: data.location.toUpperCase(),
+          zone: data.zone.toUpperCase(),
+          locationType: data.locationType || existing.locationType,
+          isPrimary: data.isPrimary ?? 1,
+          imageUrl: data.imageUrl || existing.imageUrl,
+          barcode: data.barcode || existing.barcode,
+          updatedAt: new Date(),
+        })
+        .where(eq(productLocations.id, existing.id))
+        .returning();
+      return result[0];
+    }
+    
     if (data.isPrimary === 1) {
       await db.update(productLocations)
         .set({ isPrimary: 0, updatedAt: new Date() })
