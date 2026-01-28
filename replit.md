@@ -99,3 +99,12 @@ Supports multi-channel sales and dropship partner management through dedicated U
 - **Inventory Allocation**: `channel_reservations` for priority stock allocation with `reserve_base_qty`, `min_stock_base`, and `max_stock_base`.
 - **Catalog Management**: `catalog_products`, `catalog_assets`, `channel_product_overrides`, `channel_variant_overrides`, `channel_asset_overrides`, `channel_pricing`, and `channel_listings` for managing product content and pricing per channel.
 - **ATP Calculation with Reserves**: Calculates Global ATP and Channel ATP based on on-hand inventory and channel-specific reserves.
+
+### Receiving Subsystem
+The receiving system handles inventory intake from vendors and supports initial inventory loads:
+- **Vendors**: Supplier tracking with contact info, terms, and metadata
+- **Receiving Orders**: Header records with status workflow (draft → open → closed)
+- **Receiving Lines**: Line items with expected/received quantities and put-away location assignment
+- **CSV Bulk Import**: Upload CSV files (format: `sku,qty,location`) for initial inventory load - looks up variants by SKU, creates receiving lines, and assigns warehouse locations
+- **Inventory Updates**: When a receiving order is closed, it creates inventory_transactions for audit trail and updates inventory_levels at the put-away locations
+- **Navigation**: Accessible via Purchasing → Receiving in the sidebar
