@@ -1147,14 +1147,14 @@ export default function WarehouseLocations() {
                 <div>
                   <Label>Warehouse</Label>
                   <Select
-                    value={editingLocation.warehouseId?.toString() || ""}
-                    onValueChange={(v) => setEditingLocation({ ...editingLocation, warehouseId: v ? parseInt(v) : null })}
+                    value={editingLocation.warehouseId?.toString() || "none"}
+                    onValueChange={(v) => setEditingLocation({ ...editingLocation, warehouseId: v && v !== "none" ? parseInt(v) : null })}
                   >
                     <SelectTrigger data-testid="select-edit-warehouse">
                       <SelectValue placeholder="Select warehouse..." />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">No warehouse</SelectItem>
+                      <SelectItem value="none">No warehouse</SelectItem>
                       {warehouses.map((wh) => (
                         <SelectItem key={wh.id} value={wh.id.toString()}>
                           {wh.name} ({wh.code})
@@ -1325,12 +1325,12 @@ export default function WarehouseLocations() {
 
             <div>
               <Label>Default Warehouse (applies to rows without warehouse_id)</Label>
-              <Select value={importWarehouseId} onValueChange={setImportWarehouseId}>
+              <Select value={importWarehouseId || "none"} onValueChange={(v) => setImportWarehouseId(v === "none" ? "" : v)}>
                 <SelectTrigger data-testid="select-import-warehouse">
                   <SelectValue placeholder="Select warehouse..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">No default (use CSV values)</SelectItem>
+                  <SelectItem value="none">No default (use CSV values)</SelectItem>
                   {warehouses.map((wh) => (
                     <SelectItem key={wh.id} value={wh.id.toString()}>
                       {wh.name} ({wh.code})
