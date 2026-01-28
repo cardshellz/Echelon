@@ -107,7 +107,6 @@ export default function Products() {
     total: products.length,
     active: products.filter(p => p.active === 1).length,
     withCatalog: products.filter(p => p.catalogProduct).length,
-    withVariants: products.filter(p => p.variantCount > 0).length,
   };
 
   return (
@@ -135,7 +134,7 @@ export default function Products() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <Card>
           <CardContent className="p-4">
             <div className="text-2xl font-bold">{stats.total}</div>
@@ -152,12 +151,6 @@ export default function Products() {
           <CardContent className="p-4">
             <div className="text-2xl font-bold">{stats.withCatalog}</div>
             <div className="text-sm text-muted-foreground">With Catalog Data</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.withVariants}</div>
-            <div className="text-sm text-muted-foreground">With Variants</div>
           </CardContent>
         </Card>
       </div>
@@ -263,9 +256,6 @@ export default function Products() {
                     <Badge variant={product.active ? "default" : "secondary"}>
                       {product.active ? "Active" : "Inactive"}
                     </Badge>
-                    {product.variantCount > 0 && (
-                      <Badge variant="outline">{product.variantCount} variants</Badge>
-                    )}
                   </div>
                 </div>
               </CardContent>
@@ -281,7 +271,6 @@ export default function Products() {
                 <TableHead>Product</TableHead>
                 <TableHead>SKU</TableHead>
                 <TableHead>Category</TableHead>
-                <TableHead>Variants</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="w-12"></TableHead>
               </TableRow>
@@ -317,13 +306,6 @@ export default function Products() {
                   </TableCell>
                   <TableCell className="font-mono text-sm">{product.baseSku}</TableCell>
                   <TableCell>{product.catalogProduct?.category || "-"}</TableCell>
-                  <TableCell>
-                    {product.variantCount > 0 ? (
-                      <Badge variant="outline">{product.variantCount}</Badge>
-                    ) : (
-                      <span className="text-muted-foreground">-</span>
-                    )}
-                  </TableCell>
                   <TableCell>
                     <Badge variant={product.active ? "default" : "secondary"}>
                       {product.active ? "Active" : "Inactive"}
