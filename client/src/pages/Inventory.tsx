@@ -127,7 +127,7 @@ interface VariantLevel {
 }
 
 export default function Inventory() {
-  const [activeTab, setActiveTab] = useState("items");
+  const [activeTab, setActiveTab] = useState("levels");
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItemSummary | null>(null);
@@ -381,20 +381,12 @@ export default function Inventory() {
           
           <div className="flex items-center bg-muted/50 p-1 rounded-md overflow-x-auto">
             <Button 
-              variant={activeTab === "items" ? "default" : "ghost"} 
+              variant={activeTab === "levels" ? "default" : "ghost"} 
               size="sm" 
               className="h-7 text-xs whitespace-nowrap"
-              onClick={() => setActiveTab("items")}
+              onClick={() => setActiveTab("levels")}
             >
-              All Items
-            </Button>
-            <Button 
-              variant={activeTab === "variants" ? "default" : "ghost"} 
-              size="sm" 
-              className="h-7 text-xs whitespace-nowrap"
-              onClick={() => setActiveTab("variants")}
-            >
-              Variants
+              Stock Levels
             </Button>
             <Button 
               variant={activeTab === "locations" ? "default" : "ghost"} 
@@ -413,157 +405,7 @@ export default function Inventory() {
           <div className="flex-1 flex items-center justify-center">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
-        ) : activeTab === "items" ? (
-          <>
-            {filteredItems.length === 0 ? (
-              <div className="flex-1 bg-card rounded-md border flex flex-col items-center justify-center text-center p-12">
-                <div className="bg-primary/10 p-4 rounded-full mb-4">
-                  <Package className="h-10 w-10 text-primary" />
-                </div>
-                <h2 className="text-2xl font-bold mb-2">No Inventory Items Yet</h2>
-                <p className="text-muted-foreground max-w-md mb-8">
-                  Start by adding your first inventory item. Items are tracked at the base unit level with sellable variants.
-                </p>
-                <Button onClick={() => setAddItemDialogOpen(true)}>
-                  <Plus size={16} className="mr-2" /> Add First Item
-                </Button>
-              </div>
-            ) : (
-              <>
-                {/* Mobile card layout */}
-                <div className="md:hidden space-y-3 flex-1 overflow-auto">
-                  {filteredItems.map((item) => (
-                    <div key={item.inventoryItemId} className="rounded-md border bg-card p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <div className="font-mono font-medium text-primary text-sm">{item.baseSku}</div>
-                          <div className="font-medium text-sm mt-1">{item.name}</div>
-                        </div>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8">
-                              <MoreHorizontal className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                            <DropdownMenuItem className="gap-2" onClick={() => handleAdjustClick(item)}>
-                              <Edit size={14} /> Adjust Stock
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem className="gap-2">
-                              <History size={14} /> View History
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                      <div className="flex items-center gap-2 mb-3">
-                        {getStatusBadge(item.totalAtpBase)}
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 text-xs">
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">On Hand</div>
-                          <div className="font-mono font-bold">{item.totalOnHandBase.toLocaleString()}</div>
-                        </div>
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Reserved</div>
-                          <div className="font-mono">{item.totalReservedBase.toLocaleString()}</div>
-                        </div>
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">ATP</div>
-                          <div className="font-mono font-bold">{item.totalAtpBase.toLocaleString()}</div>
-                        </div>
-                      </div>
-                      {item.variants.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-3">
-                          {item.variants.slice(0, 3).map((v, i) => (
-                            <Badge key={i} variant="outline" className="text-[10px]">
-                              {v.sku.split("-").pop()} ({v.variantQty || 0})
-                            </Badge>
-                          ))}
-                          {item.variants.length > 3 && (
-                            <Badge variant="outline" className="text-[10px]">+{item.variants.length - 3}</Badge>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-
-                {/* Desktop table layout */}
-                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
-                  <Table>
-                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                      <TableRow>
-                        <TableHead className="w-[180px]">Base SKU</TableHead>
-                        <TableHead>Name</TableHead>
-                        <TableHead className="text-right w-[120px]">On Hand</TableHead>
-                        <TableHead className="text-right w-[120px]">Reserved</TableHead>
-                        <TableHead className="text-right w-[120px]">ATP</TableHead>
-                        <TableHead className="w-[120px]">Status</TableHead>
-                        <TableHead className="w-[120px]">Variants</TableHead>
-                        <TableHead className="w-[50px]"></TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {filteredItems.map((item) => (
-                        <TableRow key={item.inventoryItemId} className="hover:bg-muted/5">
-                          <TableCell className="font-mono font-medium text-primary">
-                            {item.baseSku}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-col">
-                              <span className="font-medium">{item.name}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell className="text-right font-mono">{item.totalOnHandBase.toLocaleString()}</TableCell>
-                          <TableCell className="text-right font-mono text-muted-foreground">{item.totalReservedBase.toLocaleString()}</TableCell>
-                          <TableCell className="text-right font-mono font-bold">
-                            {item.totalAtpBase.toLocaleString()}
-                          </TableCell>
-                          <TableCell>
-                            {getStatusBadge(item.totalAtpBase)}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap gap-1">
-                              {item.variants.slice(0, 3).map((v, i) => (
-                                <Badge key={i} variant="outline" className="text-[10px]">
-                                  {v.sku.split("-").pop()} ({v.variantQty || 0})
-                                </Badge>
-                              ))}
-                              {item.variants.length > 3 && (
-                                <Badge variant="outline" className="text-[10px]">+{item.variants.length - 3}</Badge>
-                              )}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-8 w-8">
-                                  <MoreHorizontal className="h-4 w-4" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                                <DropdownMenuItem className="gap-2" onClick={() => handleAdjustClick(item)}>
-                                  <Edit size={14} /> Adjust Stock
-                                </DropdownMenuItem>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem className="gap-2">
-                                  <History size={14} /> View History
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </>
-            )}
-          </>
-        ) : activeTab === "variants" ? (
+        ) : activeTab === "levels" ? (
           loadingVariantLevels ? (
             <div className="flex-1 flex items-center justify-center">
               <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -573,8 +415,8 @@ export default function Inventory() {
             {/* Mobile card layout for variant levels */}
             <div className="md:hidden space-y-3 flex-1 overflow-auto">
               {variantLevels.filter(v => 
-                v.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                v.name.toLowerCase().includes(searchQuery.toLowerCase())
+                (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
               ).map((level) => (
                 <div key={level.variantId} className="rounded-md border bg-card p-4">
                   <div className="flex items-start justify-between mb-2">
@@ -620,8 +462,8 @@ export default function Inventory() {
                 </TableHeader>
                 <TableBody>
                   {variantLevels.filter(v => 
-                    v.sku.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                    v.name.toLowerCase().includes(searchQuery.toLowerCase())
+                    (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
                   ).map((level) => (
                     <TableRow key={level.variantId} data-testid={`row-variant-${level.variantId}`}>
                       <TableCell className="font-mono font-medium text-primary">{level.sku}</TableCell>
@@ -716,9 +558,12 @@ export default function Inventory() {
           </>
         )}
         
-        {activeTab === "items" && filteredItems.length > 0 && (
+        {activeTab === "levels" && variantLevels.length > 0 && (
           <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-            <div>Showing {filteredItems.length} of {inventorySummary.length} items</div>
+            <div>Showing {variantLevels.filter(v => 
+              (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+              (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+            ).length} of {variantLevels.length} variants</div>
           </div>
         )}
       </div>
