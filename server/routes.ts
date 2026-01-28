@@ -5980,9 +5980,10 @@ export async function registerRoutes(
       });
       
       res.status(201).json(order);
-    } catch (error) {
-      console.error("Error creating receiving order:", error);
-      res.status(500).json({ error: "Failed to create receiving order" });
+    } catch (error: any) {
+      console.error("Error creating receiving order:", error?.message || error);
+      if (error?.stack) console.error(error.stack);
+      res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
   
