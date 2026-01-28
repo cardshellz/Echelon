@@ -3803,6 +3803,27 @@ export async function registerRoutes(
     }
   });
 
+  app.patch("/api/inventory/variants/:variantId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const variantId = parseInt(req.params.variantId);
+      const { unitsPerVariant } = req.body;
+      
+      if (!unitsPerVariant || unitsPerVariant < 1) {
+        return res.status(400).json({ error: "unitsPerVariant must be at least 1" });
+      }
+      
+      const updated = await storage.updateUomVariant(variantId, { unitsPerVariant });
+      if (!updated) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating variant:", error);
+      res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
   app.get("/api/inventory/items/:id/variants", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -5186,7 +5207,7 @@ export async function registerRoutes(
         FROM uom_variants uv
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
         LEFT JOIN inventory_levels il ON il.variant_id = uv.id
-        WHERE uv.active = 1
+        WHERE uv.active = 1 AND uv.hierarchy_level > 1
         GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
         ORDER BY uv.sku
       `);

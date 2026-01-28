@@ -25,7 +25,9 @@ import {
   Shield,
   Store,
   Building2,
-  Cog
+  Cog,
+  ShoppingBag,
+  Layers
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -69,7 +71,9 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Product Locations", icon: Package, href: "/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },
-    { type: 'link', label: "Purchase Orders", icon: Box, href: "/purchasing", roles: ["admin", "lead"] },
+    { type: "separator", label: "Purchasing", roles: ["admin", "lead"] },
+    { type: 'link', label: "Product Catalog", icon: Layers, href: "/purchasing/catalog", roles: ["admin", "lead"] },
+    { type: 'link', label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing", roles: ["admin", "lead"] },
     { type: "separator", label: "Orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },

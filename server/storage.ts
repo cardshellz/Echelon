@@ -194,6 +194,7 @@ export interface IStorage {
   getUomVariantBySku(sku: string): Promise<UomVariant | undefined>;
   getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]>;
   createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
+  updateUomVariant(id: number, updates: { unitsPerVariant?: number; name?: string; barcode?: string }): Promise<UomVariant | null>;
   
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
@@ -1501,6 +1502,32 @@ export class DatabaseStorage implements IStorage {
       sku: variant.sku.toUpperCase(),
     }).returning();
     return result[0];
+  }
+
+  async updateUomVariant(id: number, updates: { unitsPerVariant?: number; name?: string; barcode?: string }): Promise<UomVariant | null> {
+    const setValues: any = {};
+    
+    if (updates.unitsPerVariant !== undefined) {
+      setValues.unitsPerVariant = updates.unitsPerVariant;
+    }
+    if (updates.name !== undefined) {
+      setValues.name = updates.name;
+    }
+    if (updates.barcode !== undefined) {
+      setValues.barcode = updates.barcode;
+    }
+    
+    if (Object.keys(setValues).length === 0) {
+      const existing = await this.getUomVariantById(id);
+      return existing || null;
+    }
+    
+    const result = await db
+      .update(uomVariants)
+      .set(setValues)
+      .where(eq(uomVariants.id, id))
+      .returning();
+    return result[0] || null;
   }
 
   // Inventory Levels
