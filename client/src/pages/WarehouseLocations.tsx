@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -187,7 +187,7 @@ export default function WarehouseLocations() {
   });
 
   // Map warehouse location ID to SKU for quick lookup
-  const skuByLocationId = React.useMemo(() => {
+  const skuByLocationId = useMemo(() => {
     const map = new Map<number, string>();
     for (const pl of allProductLocations) {
       if (pl.warehouseLocationId && pl.sku) {
