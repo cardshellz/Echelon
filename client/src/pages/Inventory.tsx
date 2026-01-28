@@ -48,6 +48,13 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 
@@ -127,7 +134,6 @@ interface VariantLevel {
 }
 
 export default function Inventory() {
-  const [activeTab, setActiveTab] = useState("levels");
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItemSummary | null>(null);
@@ -139,6 +145,8 @@ export default function Inventory() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvResults, setCsvResults] = useState<{ row: number; sku: string; location: string; status: string; message: string }[] | null>(null);
   const [csvUploading, setCsvUploading] = useState(false);
+  const [receiveStockOpen, setReceiveStockOpen] = useState(false);
+  const [receiveForm, setReceiveForm] = useState({ variantId: "", locationId: "", quantity: "" });
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -207,6 +215,23 @@ export default function Inventory() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to sync locations", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const receiveStockMutation = useMutation({
+    mutationFn: async (data: { variantId: number; warehouseLocationId: number; quantity: number }) => {
+      const response = await apiRequest("POST", "/api/inventory/receive", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Stock received successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
+      setReceiveStockOpen(false);
+      setReceiveForm({ variantId: "", locationId: "", quantity: "" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to receive stock", description: error.message, variant: "destructive" });
     },
   });
 
@@ -330,8 +355,8 @@ export default function Inventory() {
             <Button variant="outline" size="sm" className="gap-2">
               <Download size={16} /> <span className="hidden sm:inline">Export</span>
             </Button>
-            <Button size="sm" className="gap-2" onClick={() => setAddItemDialogOpen(true)}>
-              <Plus size={16} /> <span className="hidden sm:inline">Add Item</span>
+            <Button size="sm" className="gap-2" onClick={() => setReceiveStockOpen(true)} data-testid="button-receive-stock">
+              <Plus size={16} /> <span className="hidden sm:inline">Receive Stock</span>
             </Button>
           </div>
         </div>
@@ -379,38 +404,15 @@ export default function Inventory() {
             </Button>
           </div>
           
-          <div className="flex items-center bg-muted/50 p-1 rounded-md overflow-x-auto">
-            <Button 
-              variant={activeTab === "levels" ? "default" : "ghost"} 
-              size="sm" 
-              className="h-7 text-xs whitespace-nowrap"
-              onClick={() => setActiveTab("levels")}
-            >
-              Stock Levels
-            </Button>
-            <Button 
-              variant={activeTab === "locations" ? "default" : "ghost"} 
-              size="sm" 
-              className="h-7 text-xs whitespace-nowrap"
-              onClick={() => setActiveTab("locations")}
-            >
-              Locations
-            </Button>
-          </div>
         </div>
       </div>
 
       <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
-        {loadingInventory || loadingLocations ? (
+        {loadingInventory || loadingVariantLevels ? (
           <div className="flex-1 flex items-center justify-center">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
-        ) : activeTab === "levels" ? (
-          loadingVariantLevels ? (
-            <div className="flex-1 flex items-center justify-center">
-              <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
+        ) : (
           <>
             {/* Mobile card layout for variant levels */}
             <div className="md:hidden space-y-3 flex-1 overflow-auto">
@@ -481,84 +483,9 @@ export default function Inventory() {
               </Table>
             </div>
           </>
-          )
-        ) : (
-          <>
-            {/* Mobile card layout for locations */}
-            <div className="md:hidden space-y-3 flex-1 overflow-auto">
-              {locations.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
-                  No warehouse locations defined yet
-                </div>
-              ) : (
-                locations.map((loc) => (
-                  <div key={loc.id} className="rounded-md border bg-card p-4">
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="font-mono font-medium">{loc.code}</div>
-                      {loc.isPickable ? (
-                        <Badge className="bg-emerald-100 text-emerald-700">Pickable</Badge>
-                      ) : (
-                        <Badge variant="secondary">Not Pickable</Badge>
-                      )}
-                    </div>
-                    <div className="text-sm mb-2">{loc.name || "-"}</div>
-                    <div className="flex flex-wrap gap-2 text-xs">
-                      <Badge variant="outline">{loc.locationType}</Badge>
-                      <span className="text-muted-foreground">Zone: <span className="font-mono">{loc.zone}</span></span>
-                      <span className="text-muted-foreground">Policy: {loc.movementPolicy}</span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            {/* Desktop table layout for locations */}
-            <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
-              <Table>
-                <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                  <TableRow>
-                    <TableHead className="w-[150px]">Code</TableHead>
-                    <TableHead>Name</TableHead>
-                    <TableHead className="w-[120px]">Type</TableHead>
-                    <TableHead className="w-[80px]">Zone</TableHead>
-                    <TableHead className="w-[100px]">Pickable</TableHead>
-                    <TableHead className="w-[120px]">Policy</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {locations.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">
-                        No warehouse locations defined yet
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    locations.map((loc) => (
-                      <TableRow key={loc.id}>
-                        <TableCell className="font-mono font-medium">{loc.code}</TableCell>
-                        <TableCell>{loc.name || "-"}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{loc.locationType}</Badge>
-                        </TableCell>
-                        <TableCell className="font-mono">{loc.zone}</TableCell>
-                        <TableCell>
-                          {loc.isPickable ? (
-                            <Badge className="bg-emerald-100 text-emerald-700">Yes</Badge>
-                          ) : (
-                            <Badge variant="secondary">No</Badge>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs">{loc.movementPolicy}</TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </>
         )}
         
-        {activeTab === "levels" && variantLevels.length > 0 && (
+        {variantLevels.length > 0 && (
           <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
             <div>Showing {variantLevels.filter(v => 
               (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -778,6 +705,83 @@ export default function Inventory() {
                 {csvUploading ? "Uploading..." : "Upload & Process"}
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={receiveStockOpen} onOpenChange={setReceiveStockOpen}>
+        <DialogContent className="w-[95vw] max-w-lg mx-auto">
+          <DialogHeader>
+            <DialogTitle>Receive Stock</DialogTitle>
+            <DialogDescription>
+              Add inventory for a variant at a specific bin location.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="variant">Variant</Label>
+              <Select
+                value={receiveForm.variantId}
+                onValueChange={(value) => setReceiveForm({ ...receiveForm, variantId: value })}
+              >
+                <SelectTrigger className="w-full" data-testid="select-variant">
+                  <SelectValue placeholder="Select a variant..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {variants.filter(v => v.hierarchyLevel > 1).map((v) => (
+                    <SelectItem key={v.id} value={v.id.toString()}>
+                      {v.sku} - {v.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="location">Bin Location</Label>
+              <Select
+                value={receiveForm.locationId}
+                onValueChange={(value) => setReceiveForm({ ...receiveForm, locationId: value })}
+              >
+                <SelectTrigger className="w-full" data-testid="select-location">
+                  <SelectValue placeholder="Select a location..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {locations.map((loc) => (
+                    <SelectItem key={loc.id} value={loc.id.toString()}>
+                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="quantity">Quantity</Label>
+              <Input
+                id="quantity"
+                type="number"
+                min="1"
+                placeholder="Enter quantity to receive"
+                value={receiveForm.quantity}
+                onChange={(e) => setReceiveForm({ ...receiveForm, quantity: e.target.value })}
+                className="w-full"
+                data-testid="input-receive-quantity"
+              />
+            </div>
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setReceiveStockOpen(false)} className="w-full sm:w-auto">Cancel</Button>
+            <Button 
+              onClick={() => receiveStockMutation.mutate({
+                variantId: parseInt(receiveForm.variantId),
+                warehouseLocationId: parseInt(receiveForm.locationId),
+                quantity: parseInt(receiveForm.quantity),
+              })}
+              disabled={!receiveForm.variantId || !receiveForm.locationId || !receiveForm.quantity || receiveStockMutation.isPending}
+              className="w-full sm:w-auto"
+              data-testid="button-confirm-receive"
+            >
+              {receiveStockMutation.isPending ? "Receiving..." : "Receive Stock"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
