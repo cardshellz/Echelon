@@ -713,6 +713,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
+    // DEDUPLICATION: Check if order already exists by shopifyOrderId OR sourceTableId
+    if (order.shopifyOrderId) {
+      const existingByShopifyId = await this.getOrderByShopifyId(order.shopifyOrderId);
+      if (existingByShopifyId) {
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by shopifyOrderId: ${order.shopifyOrderId}`);
+        return existingByShopifyId;
+      }
+    }
+    if (order.sourceTableId) {
+      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.sourceTableId, order.sourceTableId));
+      if (existingBySourceTableId.length > 0) {
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`);
+        return existingBySourceTableId[0];
+      }
+    }
+    
     const [newOrder] = await db.insert(orders).values({
       ...order,
       itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
