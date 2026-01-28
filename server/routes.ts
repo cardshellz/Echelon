@@ -2017,13 +2017,8 @@ export async function registerRoutes(
         // Use first variant for parent product info (they share product-level data)
         const firstVariant = variants[0];
         
-        // Extract base product name (without variant suffix like " - Pack of 50")
-        let productName = firstVariant.title;
-        const dashIndex = productName.lastIndexOf(' - ');
-        if (dashIndex > 0 && variants.length > 1) {
-          // Only strip suffix if there are multiple variants
-          productName = productName.substring(0, dashIndex);
-        }
+        // Use the productTitle field directly (no string parsing needed)
+        const productName = firstVariant.productTitle;
         
         // 1. Upsert inventory_item by Shopify PRODUCT ID (one per product family)
         const existingItem = await storage.getInventoryItemByShopifyProductId(shopifyProductId);
@@ -2043,7 +2038,7 @@ export async function registerRoutes(
         
         // 2. Create uom_variants for each Shopify variant
         for (const variant of variants) {
-          // Get variant-specific name (just the variant part, e.g., "Pack of 50")
+          // Use the full title for the variant (includes product name for clarity)
           let variantName = variant.title;
           
           // Upsert uom_variant by Shopify VARIANT ID

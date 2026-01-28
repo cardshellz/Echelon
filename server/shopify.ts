@@ -38,7 +38,9 @@ export interface ShopifyCatalogProduct {
   shopifyProductId: number;
   sku: string | null; // SKU is optional - variant ID is the primary identifier
   variantId: number;
-  title: string;
+  productTitle: string; // Base product title (without variant suffix)
+  variantTitle: string; // Variant-specific title (e.g., "Pack of 50", or empty for "Default Title")
+  title: string; // Combined title for display
   description: string | null;
   vendor: string | null;
   productType: string | null;
@@ -107,14 +109,17 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
       
       for (const variant of product.variants) {
         // Include ALL variants - variant ID is the primary identifier, SKU is optional
-        const variantTitle = variant.title !== "Default Title" ? ` - ${variant.title}` : "";
+        const variantTitleClean = variant.title !== "Default Title" ? variant.title : "";
+        const variantTitleSuffix = variantTitleClean ? ` - ${variantTitleClean}` : "";
         const imageUrl = variant.image_id ? imageMap.get(variant.image_id) || defaultImage : defaultImage;
         
         allProducts.push({
           shopifyProductId: product.id,
           sku: variant.sku?.trim()?.toUpperCase() || null, // SKU is optional
           variantId: variant.id,
-          title: `${product.title}${variantTitle}`,
+          productTitle: product.title, // Base product title
+          variantTitle: variantTitleClean, // Just the variant part (e.g., "Pack of 50")
+          title: `${product.title}${variantTitleSuffix}`, // Combined for display
           description: product.body_html || null,
           vendor: product.vendor || null,
           productType: product.product_type || null,
