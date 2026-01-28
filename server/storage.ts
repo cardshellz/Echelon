@@ -192,8 +192,10 @@ export interface IStorage {
   getAllUomVariants(): Promise<UomVariant[]>;
   getUomVariantById(id: number): Promise<UomVariant | undefined>;
   getUomVariantBySku(sku: string): Promise<UomVariant | undefined>;
+  getUomVariantByShopifyVariantId(shopifyVariantId: number): Promise<UomVariant | undefined>;
   getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]>;
   createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
+  upsertUomVariantByShopifyVariantId(shopifyVariantId: number, inventoryItemId: number, data: Partial<InsertUomVariant>): Promise<UomVariant>;
   updateUomVariant(id: number, updates: { unitsPerVariant?: number; name?: string; barcode?: string }): Promise<UomVariant | null>;
   
   // Inventory Levels
@@ -1489,6 +1491,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getUomVariantByShopifyVariantId(shopifyVariantId: number): Promise<UomVariant | undefined> {
+    const result = await db.select().from(uomVariants).where(eq(uomVariants.shopifyVariantId, shopifyVariantId));
+    return result[0];
+  }
+
   async getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]> {
     return await db
       .select()
@@ -1500,7 +1507,44 @@ export class DatabaseStorage implements IStorage {
   async createUomVariant(variant: InsertUomVariant): Promise<UomVariant> {
     const result = await db.insert(uomVariants).values({
       ...variant,
-      sku: variant.sku.toUpperCase(),
+      sku: variant.sku ? variant.sku.toUpperCase() : null,
+    }).returning();
+    return result[0];
+  }
+
+  async upsertUomVariantByShopifyVariantId(shopifyVariantId: number, inventoryItemId: number, data: Partial<InsertUomVariant>): Promise<UomVariant> {
+    const existing = await this.getUomVariantByShopifyVariantId(shopifyVariantId);
+    
+    if (existing) {
+      const setValues: any = {
+        updatedAt: new Date(),
+      };
+      if (data.sku !== undefined) setValues.sku = data.sku ? data.sku.toUpperCase() : null;
+      if (data.name !== undefined) setValues.name = data.name;
+      if (data.unitsPerVariant !== undefined) setValues.unitsPerVariant = data.unitsPerVariant;
+      if (data.hierarchyLevel !== undefined) setValues.hierarchyLevel = data.hierarchyLevel;
+      if (data.barcode !== undefined) setValues.barcode = data.barcode;
+      if (data.imageUrl !== undefined) setValues.imageUrl = data.imageUrl;
+      if (data.active !== undefined) setValues.active = data.active;
+      
+      const result = await db
+        .update(uomVariants)
+        .set(setValues)
+        .where(eq(uomVariants.id, existing.id))
+        .returning();
+      return result[0];
+    }
+    
+    const result = await db.insert(uomVariants).values({
+      shopifyVariantId,
+      inventoryItemId,
+      sku: data.sku ? data.sku.toUpperCase() : null,
+      name: data.name || 'Unknown Variant',
+      unitsPerVariant: data.unitsPerVariant || 1,
+      hierarchyLevel: data.hierarchyLevel || 1,
+      barcode: data.barcode,
+      imageUrl: data.imageUrl,
+      active: data.active ?? 1,
     }).returning();
     return result[0];
   }

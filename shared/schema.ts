@@ -444,10 +444,11 @@ export type InventoryItem = typeof inventoryItems.$inferSelect;
 // UOM Variants - sellable SKUs at different pack levels
 export const uomVariants = pgTable("uom_variants", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  sku: varchar("sku", { length: 100 }).notNull().unique(), // e.g., "EG-STD-SLV-P100"
+  sku: varchar("sku", { length: 100 }), // e.g., "EG-STD-SLV-P100" - optional, not all Shopify variants have SKUs
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Shopify variant ID - primary key for syncing
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
   name: text("name").notNull(), // "Easy Glide Sleeves - Pack of 100"
-  unitsPerVariant: integer("units_per_variant").notNull(), // 100 for P100, 500 for B500, etc.
+  unitsPerVariant: integer("units_per_variant").notNull().default(1), // 100 for P100, 500 for B500, etc.
   hierarchyLevel: integer("hierarchy_level").notNull().default(1), // 1=smallest, 2, 3, 4=largest
   parentVariantId: integer("parent_variant_id"), // For replenishment chain (P1 <- B25 <- C250)
   barcode: varchar("barcode", { length: 100 }),
