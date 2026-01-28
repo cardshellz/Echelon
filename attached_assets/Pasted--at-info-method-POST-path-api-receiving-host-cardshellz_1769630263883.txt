@@ -1,0 +1,26 @@
+ at=info method=POST path="/api/receiving" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=91e127a8-bd81-9ea7-faa1-a9584a622ae2 fwd="67.20.233.54" dyno=web.1 connect=0ms service=51ms status=500 bytes=44 protocol=http1.1 tls=true tls_version=unknown
+2026-01-28T19:57:31.947065+00:00 app[web.1]: Error creating receiving order: error: column "received_by" of relation "receiving_orders" does not exist
+2026-01-28T19:57:31.947080+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-28T19:57:31.947082+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-28T19:57:31.947082+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37969
+2026-01-28T19:57:31.947083+00:00 app[web.1]:     at async Hv.createReceivingOrder (/app/dist/index.cjs:130:7802)
+2026-01-28T19:57:31.947083+00:00 app[web.1]:     at async /app/dist/index.cjs:315:6551 {
+2026-01-28T19:57:31.947084+00:00 app[web.1]:   length: 141,
+2026-01-28T19:57:31.947086+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-28T19:57:31.947086+00:00 app[web.1]:   code: '42703',
+2026-01-28T19:57:31.947086+00:00 app[web.1]:   detail: undefined,
+2026-01-28T19:57:31.947086+00:00 app[web.1]:   hint: undefined,
+2026-01-28T19:57:31.947087+00:00 app[web.1]:   position: '329',
+2026-01-28T19:57:31.947088+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-28T19:57:31.947088+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-28T19:57:31.947088+00:00 app[web.1]:   where: undefined,
+2026-01-28T19:57:31.947088+00:00 app[web.1]:   schema: undefined,
+2026-01-28T19:57:31.947088+00:00 app[web.1]:   table: undefined,
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   column: undefined,
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   dataType: undefined,
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   constraint: undefined,
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   file: 'parse_target.c',
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   line: '1278',
+2026-01-28T19:57:31.947089+00:00 app[web.1]:   routine: 'checkInsertTargets'
+2026-01-28T19:57:31.947089+00:00 app[web.1]: }
+2026-01-28T19:57:31.950602+00:00 app[web.1]: 7:57:31 PM [express] POST /api/receiving 500 in 29ms :: {"error":"Failed to create receiving order"}
