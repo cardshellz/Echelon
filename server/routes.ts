@@ -2547,117 +2547,15 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Orders Sync - fetch all unfulfilled orders from Shopify API (legacy)
+  // Shopify Orders Sync - DEPRECATED: Use sync-from-raw-tables instead
+  // Orders now flow through: shopify_orders table -> sync-from-raw-tables -> orders table
   app.post("/api/shopify/sync-orders", async (req, res) => {
-    try {
-      console.log("Starting Shopify orders sync...");
-      
-      // Get default Shopify channel for linking orders
-      const allChannels = await storage.getAllChannels();
-      const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
-      const shopifyChannelId = shopifyChannel?.id || null;
-      
-      const shopifyOrders = await fetchUnfulfilledOrders();
-      console.log(`Fetched ${shopifyOrders.length} unfulfilled orders from Shopify`);
-      
-      let created = 0;
-      let updated = 0;
-      let skipped = 0;
-      
-      for (const orderData of shopifyOrders) {
-        // Skip orders with no shippable items (e.g., digital memberships)
-        if (orderData.items.length === 0) {
-          skipped++;
-          continue;
-        }
-        
-        // Check if order already exists
-        const existingOrder = await storage.getOrderByShopifyId(orderData.shopifyOrderId);
-        
-        if (existingOrder) {
-          // Skip orders that already exist - we don't want to overwrite in-progress picking
-          skipped++;
-          continue;
-        }
-        
-        // Only create NEW orders
-        // Calculate total units
-        const totalUnits = orderData.items.reduce((sum, item) => sum + item.quantity, 0);
-        
-        // Enrich items with location data from product_locations
-        const enrichedItems: InsertOrderItem[] = [];
-        for (const item of orderData.items) {
-          const productLocation = await storage.getProductLocationBySku(item.sku);
-          enrichedItems.push({
-            orderId: 0, // Will be set by createOrder
-            shopifyLineItemId: item.shopifyLineItemId,
-            sourceItemId: item.shopifyLineItemId, // Link to shopify_order_items
-            sku: item.sku,
-            name: item.name,
-            quantity: item.quantity,
-            pickedQuantity: 0,
-            fulfilledQuantity: 0,
-            status: "pending",
-            location: productLocation?.location || "UNASSIGNED",
-            zone: productLocation?.zone || "U",
-            imageUrl: productLocation?.imageUrl || item.imageUrl || null,
-            barcode: productLocation?.barcode || null,
-          });
-        }
-        
-        // Create order - operational subset only
-        // Full order data stays in shopify_orders table
-        await storage.createOrderWithItems({
-          shopifyOrderId: orderData.shopifyOrderId,
-          externalOrderId: orderData.shopifyOrderId,
-          sourceTableId: orderData.shopifyOrderId, // Links to shopify_orders for JOIN lookups
-          channelId: shopifyChannelId,
-          source: "shopify",
-          orderNumber: orderData.orderNumber,
-          customerName: orderData.customerName,
-          customerEmail: orderData.customerEmail,
-          shippingAddress: orderData.shippingAddress,
-          shippingCity: orderData.shippingCity,
-          shippingState: orderData.shippingState,
-          shippingPostalCode: orderData.shippingPostalCode,
-          shippingCountry: orderData.shippingCountry,
-          priority: orderData.priority,
-          status: "ready",
-          itemCount: orderData.items.length,
-          unitCount: totalUnits,
-          totalAmount: orderData.totalAmount,
-          currency: orderData.currency,
-          shopifyCreatedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-          orderPlacedAt: orderData.shopifyCreatedAt ? new Date(orderData.shopifyCreatedAt) : undefined,
-        }, enrichedItems);
-        
-        created++;
-      }
-      
-      console.log(`Orders sync complete: ${created} created, ${updated} updated, ${skipped} skipped (in progress)`);
-      
-      // Reconcile locations for pending items (update from product_locations if changed)
-      const reconcileResult = await reconcileOrderItemLocations();
-      
-      // Now sync fulfillment status for all non-shipped orders in our system
-      const fulfillmentResult = await syncFulfillmentStatus();
-      
-      res.json({
-        success: true,
-        created,
-        updated,
-        skipped,
-        total: shopifyOrders.length,
-        fulfillmentSync: fulfillmentResult,
-        locationReconcile: reconcileResult,
-      });
-    } catch (error: any) {
-      console.error("Shopify orders sync error:", error);
-      res.status(500).json({ 
-        error: "Failed to sync orders from Shopify",
-        message: error.message 
-      });
-    }
+    console.log("[DEPRECATED] /api/shopify/sync-orders called - redirecting to sync-from-raw-tables");
+    res.status(410).json({ 
+      error: "This endpoint is deprecated",
+      message: "Orders are now synced from shopify_orders table. Use POST /api/shopify/sync-from-raw-tables instead.",
+      redirect: "/api/shopify/sync-from-raw-tables"
+    });
   });
 
   // Helper function to sync fulfillment status for all non-terminal orders
