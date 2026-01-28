@@ -17,7 +17,9 @@ import {
   Upload,
   FileSpreadsheet,
   CheckCircle,
-  XCircle
+  XCircle,
+  ChevronRight,
+  ChevronDown
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -133,6 +135,84 @@ interface VariantLevel {
   locationCount: number;
 }
 
+interface VariantLocationLevel {
+  id: number;
+  variantQty: number;
+  onHandBase: number;
+  reservedBase: number;
+  location: {
+    id: number;
+    code: string;
+    name: string | null;
+    locationType: string;
+  } | null;
+}
+
+function VariantLocationRows({ variantId }: { variantId: number }) {
+  const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
+    queryKey: [`/api/inventory/variants/${variantId}/locations`],
+  });
+
+  if (isLoading) {
+    return (
+      <TableRow className="bg-muted/20">
+        <TableCell colSpan={9} className="py-2 pl-8">
+          <RefreshCw className="h-4 w-4 animate-spin inline mr-2" />
+          Loading locations...
+        </TableCell>
+      </TableRow>
+    );
+  }
+
+  if (isError) {
+    return (
+      <TableRow className="bg-red-50 dark:bg-red-900/10">
+        <TableCell colSpan={9} className="py-2 pl-8 text-red-600 text-sm">
+          <AlertTriangle className="h-4 w-4 inline mr-2" />
+          Failed to load location data
+        </TableCell>
+      </TableRow>
+    );
+  }
+
+  if (locationLevels.length === 0) {
+    return (
+      <TableRow className="bg-muted/20">
+        <TableCell colSpan={9} className="py-2 pl-8 text-muted-foreground text-sm">
+          No stock at any location
+        </TableCell>
+      </TableRow>
+    );
+  }
+
+  return (
+    <>
+      {locationLevels.map((locLevel) => (
+        <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
+          <TableCell className="pl-8">
+            <div className="flex items-center gap-2">
+              <MapPin className="h-3 w-3 text-muted-foreground" />
+              <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
+            </div>
+          </TableCell>
+          <TableCell className="text-muted-foreground text-xs">
+            {locLevel.location?.name || "-"}
+          </TableCell>
+          <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
+          <TableCell></TableCell>
+          <TableCell className="text-right font-mono text-xs">{locLevel.onHandBase}</TableCell>
+          <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase}</TableCell>
+          <TableCell className="text-right font-mono text-xs">{locLevel.onHandBase - locLevel.reservedBase}</TableCell>
+          <TableCell>
+            <Badge variant="outline" className="text-xs">{locLevel.location?.locationType || "-"}</Badge>
+          </TableCell>
+          <TableCell></TableCell>
+        </TableRow>
+      ))}
+    </>
+  );
+}
+
 export default function Inventory() {
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
@@ -147,6 +227,7 @@ export default function Inventory() {
   const [csvUploading, setCsvUploading] = useState(false);
   const [receiveStockOpen, setReceiveStockOpen] = useState(false);
   const [receiveForm, setReceiveForm] = useState({ variantId: "", locationId: "", quantity: "" });
+  const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -467,17 +548,45 @@ export default function Inventory() {
                     (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                     (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
                   ).map((level) => (
-                    <TableRow key={level.variantId} data-testid={`row-variant-${level.variantId}`}>
-                      <TableCell className="font-mono font-medium text-primary">{level.sku}</TableCell>
-                      <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
-                      <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
-                      <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
-                      <TableCell className="text-right font-mono">{level.totalPieces.toLocaleString()}</TableCell>
-                      <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
-                      <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
-                      <TableCell className="text-right">{level.locationCount}</TableCell>
-                      <TableCell>{getStatusBadge(level.available)}</TableCell>
-                    </TableRow>
+                    <React.Fragment key={level.variantId}>
+                      <TableRow 
+                        data-testid={`row-variant-${level.variantId}`}
+                        className={level.locationCount > 0 ? "cursor-pointer hover:bg-muted/50" : ""}
+                        onClick={() => {
+                          if (level.locationCount > 0) {
+                            const newExpanded = new Set(expandedVariants);
+                            if (newExpanded.has(level.variantId)) {
+                              newExpanded.delete(level.variantId);
+                            } else {
+                              newExpanded.add(level.variantId);
+                            }
+                            setExpandedVariants(newExpanded);
+                          }
+                        }}
+                      >
+                        <TableCell className="font-mono font-medium text-primary">
+                          <div className="flex items-center gap-1">
+                            {level.locationCount > 0 && (
+                              expandedVariants.has(level.variantId) ? 
+                                <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
+                                <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                            )}
+                            {level.sku}
+                          </div>
+                        </TableCell>
+                        <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
+                        <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
+                        <TableCell className="text-right font-mono">{level.totalPieces.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
+                        <TableCell className="text-right">{level.locationCount}</TableCell>
+                        <TableCell>{getStatusBadge(level.available)}</TableCell>
+                      </TableRow>
+                      {expandedVariants.has(level.variantId) && (
+                        <VariantLocationRows variantId={level.variantId} />
+                      )}
+                    </React.Fragment>
                   ))}
                 </TableBody>
               </Table>

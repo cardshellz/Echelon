@@ -4163,31 +4163,50 @@ export async function registerRoutes(
   });
 
   app.post("/api/inventory/receive", async (req, res) => {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    
     try {
-      const { inventoryItemId, warehouseLocationId, variantId, variantQty, referenceId, notes } = req.body;
-      const userId = req.session.user?.id;
+      const { variantId, warehouseLocationId, quantity, referenceId, notes } = req.body;
+      const userId = req.session.user.id;
       
-      if (!inventoryItemId || !warehouseLocationId || !variantId || !variantQty || !referenceId) {
-        return res.status(400).json({ error: "Missing required fields: inventoryItemId, warehouseLocationId, variantId, variantQty, referenceId" });
+      if (!variantId || !warehouseLocationId || !quantity) {
+        return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, quantity" });
       }
       
-      // Get the variant to calculate base units
-      const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
-      const targetVariant = variants.find(v => v.id === variantId);
+      // Get the variant by ID directly (more efficient than getting all)
+      const targetVariant = await storage.getUomVariantById(variantId);
       
       if (!targetVariant) {
-        return res.status(400).json({ error: "Variant not found" });
+        return res.status(404).json({ error: "Variant not found" });
       }
+      
+      if (!targetVariant.active) {
+        return res.status(400).json({ error: "Cannot receive stock for inactive variant" });
+      }
+      
+      // Verify warehouse location exists
+      const location = await storage.getWarehouseLocationById(warehouseLocationId);
+      if (!location) {
+        return res.status(404).json({ error: "Warehouse location not found" });
+      }
+      
+      const inventoryItemId = targetVariant.inventoryItemId;
+      const variantQty = quantity;
       
       // Calculate base units from variant quantity
       const baseUnits = variantQty * targetVariant.unitsPerVariant;
+      
+      // Generate a reference ID if not provided
+      const refId = referenceId || `RCV-${Date.now()}`;
       
       await inventoryService.receiveInventory(
         inventoryItemId,
         warehouseLocationId,
         baseUnits,
-        referenceId,
-        notes,
+        refId,
+        notes || "Stock received via UI",
         userId,
         variantId,
         variantQty
@@ -4197,6 +4216,42 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error receiving inventory:", error);
       res.status(500).json({ error: "Failed to receive inventory" });
+    }
+  });
+
+  // Get inventory levels by variant ID (for expandable location breakdown)
+  app.get("/api/inventory/variants/:variantId/locations", async (req, res) => {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    
+    try {
+      const variantId = parseInt(req.params.variantId);
+      if (isNaN(variantId) || variantId <= 0) {
+        return res.status(400).json({ error: "Invalid variant ID" });
+      }
+      
+      // Verify variant exists
+      const variant = await storage.getUomVariantById(variantId);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      
+      const levels = await storage.getInventoryLevelsByVariantId(variantId);
+      
+      // Join with warehouse locations to get location codes
+      const locations = await storage.getAllWarehouseLocations();
+      const locationMap = new Map(locations.map(l => [l.id, l]));
+      
+      const result = levels.map(level => ({
+        ...level,
+        location: locationMap.get(level.warehouseLocationId)
+      }));
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error getting variant locations:", error);
+      res.status(500).json({ error: "Failed to get variant locations" });
     }
   });
 

@@ -199,6 +199,7 @@ export interface IStorage {
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
+  getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
@@ -1540,6 +1541,13 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(inventoryLevels)
       .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
+  }
+
+  async getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]> {
+    return await db
+      .select()
+      .from(inventoryLevels)
+      .where(eq(inventoryLevels.variantId, variantId));
   }
 
   async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined> {
