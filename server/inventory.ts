@@ -36,7 +36,7 @@ export class InventoryService {
    * ATP = On Hand (pickable locations) - Reserved
    */
   async calculateATP(inventoryItemId: number): Promise<number> {
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, true);
+    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
     const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
     return onHand - reserved;
   }
@@ -50,7 +50,7 @@ export class InventoryService {
     const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
     const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
     const atp = await this.calculateATP(inventoryItemId);
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, true);
+    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
     const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
     
     return variants.map(variant => {
@@ -81,7 +81,7 @@ export class InventoryService {
     if (!item) return null;
 
     const variants = await this.calculateVariantAvailability(inventoryItemId);
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, true);
+    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
     const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
     
     return {
