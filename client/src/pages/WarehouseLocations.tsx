@@ -1117,7 +1117,7 @@ export default function WarehouseLocations() {
                 data-testid="checkbox-location-pickable"
               />
               <Label htmlFor="create-is-pickable" className="text-sm font-normal cursor-pointer">
-                Pickable Location (contributes to available inventory)
+                Forward Pick Location (direct picker access)
               </Label>
             </div>
           </div>
@@ -1280,7 +1280,7 @@ export default function WarehouseLocations() {
                   data-testid="checkbox-edit-location-pickable"
                 />
                 <Label htmlFor="edit-is-pickable" className="text-sm font-normal cursor-pointer">
-                  Pickable Location (contributes to available inventory)
+                  Forward Pick Location (direct picker access)
                 </Label>
               </div>
             </div>
