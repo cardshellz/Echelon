@@ -5638,6 +5638,7 @@ export async function registerRoutes(
       
       for (const location of locations) {
         // Get inventory levels at this location with actual stock
+        // Use product_locations to find the SKU since that's where product-to-bin mapping lives
         const result = await db.execute<{
           inventory_item_id: number;
           variant_qty: number;
@@ -5647,12 +5648,11 @@ export async function registerRoutes(
           SELECT 
             il.inventory_item_id,
             il.variant_qty,
-            cp.id as catalog_product_id,
-            COALESCE(cp.sku, uv.sku) as sku
+            pl.catalog_product_id,
+            cp.sku
           FROM inventory_levels il
-          LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
-          LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
-          LEFT JOIN uom_variants uv ON il.variant_id = uv.id
+          LEFT JOIN product_locations pl ON pl.warehouse_location_id = il.warehouse_location_id
+          LEFT JOIN catalog_products cp ON cp.id = pl.catalog_product_id
           WHERE il.warehouse_location_id = ${location.id}
             AND il.variant_qty > 0
         `);
