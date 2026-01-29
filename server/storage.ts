@@ -2589,32 +2589,43 @@ export class DatabaseStorage implements IStorage {
   }
   
   async getSetting(key: string): Promise<string | null> {
-    const result = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
-    return result[0]?.value ?? null;
+    try {
+      const result = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+      return result[0]?.value ?? null;
+    } catch (error) {
+      // Handle case where app_settings table has different structure (legacy table)
+      console.warn(`getSetting failed for key "${key}" - app_settings table may have legacy structure`);
+      return null;
+    }
   }
   
-  async upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting> {
-    const existing = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
-    
-    if (existing.length > 0) {
-      const updated = await db.update(appSettings)
-        .set({ value, updatedAt: new Date() })
-        .where(eq(appSettings.key, key))
-        .returning();
-      return updated[0];
+  async upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting | null> {
+    try {
+      const existing = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+      
+      if (existing.length > 0) {
+        const updated = await db.update(appSettings)
+          .set({ value, updatedAt: new Date() })
+          .where(eq(appSettings.key, key))
+          .returning();
+        return updated[0];
+      }
+      
+      const inserted = await db.insert(appSettings).values({
+        key,
+        value,
+        type: "string",
+        category: category || (
+          key.startsWith("company_") ? "company" : 
+          key.startsWith("low_stock") || key.startsWith("critical_stock") ? "inventory" :
+          key.startsWith("picking") || key.startsWith("auto_release") ? "picking" : "general"
+        ),
+      }).returning();
+      return inserted[0];
+    } catch (error) {
+      console.warn(`upsertSetting failed for key "${key}" - app_settings table may have legacy structure`);
+      return null;
     }
-    
-    const inserted = await db.insert(appSettings).values({
-      key,
-      value,
-      type: "string",
-      category: category || (
-        key.startsWith("company_") ? "company" : 
-        key.startsWith("low_stock") || key.startsWith("critical_stock") ? "inventory" :
-        key.startsWith("picking") || key.startsWith("auto_release") ? "picking" : "general"
-      ),
-    }).returning();
-    return inserted[0];
   }
   
   // ============================================
