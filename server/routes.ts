@@ -6404,7 +6404,7 @@ export async function registerRoutes(
               putawayLocationId,
               notes: notes || null,
               status: putawayLocationId ? "complete" : "pending",
-              receivedBy: req.session?.user?.username || req.session?.user?.email || null,
+              receivedBy: req.session?.user?.username || null,
               receivedAt: new Date(),
             }
           });
@@ -6424,7 +6424,7 @@ export async function registerRoutes(
             putawayLocationId,
             notes: notes || null,
             status: putawayLocationId ? "complete" : "pending",
-            receivedBy: req.session?.user?.username || req.session?.user?.email || null,
+            receivedBy: req.session?.user?.username || null,
             receivedAt: new Date(),
           });
         }
