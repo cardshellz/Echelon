@@ -6278,8 +6278,17 @@ export async function registerRoutes(
         existingProductLocations = await storage.getAllProductLocations();
       }
       
+      // Fetch existing lines for this order to enable idempotent imports (update vs create)
+      const existingLines = await storage.getReceivingLines(orderId);
+      const existingBySku = new Map(
+        existingLines
+          .filter(l => l.sku)
+          .map(l => [l.sku!.toUpperCase(), l])
+      );
+      
       // Lookup SKUs to get inventory item IDs
       const linesToCreate: any[] = [];
+      const linesToUpdate: { id: number; updates: any }[] = [];
       const errors: string[] = [];
       const warnings: string[] = [];
       
@@ -6371,26 +6380,57 @@ export async function registerRoutes(
         const parsedDamagedQty = parseInt(damaged_qty) || 0;
         const parsedUnitCost = unit_cost ? Math.round(parseFloat(unit_cost) * 100) : null; // Convert dollars to cents
         
-        linesToCreate.push({
-          receivingOrderId: orderId,
-          sku: sku.toUpperCase(),
-          productName,
-          barcode: productBarcode,
-          expectedQty: parsedQty,
-          receivedQty: parsedQty, // For initial load, received = expected
-          damagedQty: parsedDamagedQty,
-          unitCost: parsedUnitCost,
-          inventoryItemId,
-          uomVariantId,
-          catalogProductId,
-          putawayLocationId,
-          notes: notes || null,
-          status: putawayLocationId ? "complete" : "pending",
-          receivedBy: req.session?.user?.username || req.session?.user?.email || null,
-          receivedAt: new Date(),
-        });
+        // Check if line with same SKU already exists in this order (idempotent import)
+        const existingLine = existingBySku.get(sku.toUpperCase());
+        if (existingLine) {
+          // Update existing line instead of creating duplicate
+          linesToUpdate.push({
+            id: existingLine.id,
+            updates: {
+              productName,
+              barcode: productBarcode,
+              expectedQty: parsedQty,
+              receivedQty: parsedQty,
+              damagedQty: parsedDamagedQty,
+              unitCost: parsedUnitCost,
+              inventoryItemId,
+              uomVariantId,
+              catalogProductId,
+              putawayLocationId,
+              notes: notes || null,
+              status: putawayLocationId ? "complete" : "pending",
+              receivedBy: req.session?.user?.username || req.session?.user?.email || null,
+              receivedAt: new Date(),
+            }
+          });
+        } else {
+          linesToCreate.push({
+            receivingOrderId: orderId,
+            sku: sku.toUpperCase(),
+            productName,
+            barcode: productBarcode,
+            expectedQty: parsedQty,
+            receivedQty: parsedQty, // For initial load, received = expected
+            damagedQty: parsedDamagedQty,
+            unitCost: parsedUnitCost,
+            inventoryItemId,
+            uomVariantId,
+            catalogProductId,
+            putawayLocationId,
+            notes: notes || null,
+            status: putawayLocationId ? "complete" : "pending",
+            receivedBy: req.session?.user?.username || req.session?.user?.email || null,
+            receivedAt: new Date(),
+          });
+        }
       }
       
+      // Update existing lines
+      for (const item of linesToUpdate) {
+        await storage.updateReceivingLine(item.id, item.updates);
+      }
+      
+      // Create new lines
       const created = await storage.bulkCreateReceivingLines(linesToCreate);
       
       // Update order totals
@@ -6405,7 +6445,9 @@ export async function registerRoutes(
       res.status(201).json({
         success: true,
         created: created.length,
+        updated: linesToUpdate.length,
         errors: errors.length > 0 ? errors : undefined,
+        warnings: warnings.length > 0 ? warnings : undefined,
       });
     } catch (error) {
       console.error("Error bulk creating receiving lines:", error);

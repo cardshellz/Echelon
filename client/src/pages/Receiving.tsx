@@ -283,19 +283,25 @@ DEF-456,25,,,5.00,,Location TBD`;
       setShowCSVImport(false);
       setCsvText("");
       
-      if (result.errors?.length) {
-        console.log("Import warnings:", result.errors);
-        const warningList = result.errors.slice(0, 5).join("\n");
-        const moreCount = result.errors.length > 5 ? `\n...and ${result.errors.length - 5} more` : "";
+      const totalProcessed = (result.created || 0) + (result.updated || 0);
+      const createdMsg = result.created ? `${result.created} created` : "";
+      const updatedMsg = result.updated ? `${result.updated} updated` : "";
+      const linesMsg = [createdMsg, updatedMsg].filter(Boolean).join(", ");
+      
+      if (result.errors?.length || result.warnings?.length) {
+        const allWarnings = [...(result.errors || []), ...(result.warnings || [])];
+        console.log("Import warnings:", allWarnings);
+        const warningList = allWarnings.slice(0, 5).join("\n");
+        const moreCount = allWarnings.length > 5 ? `\n...and ${allWarnings.length - 5} more` : "";
         toast({ 
-          title: `Import complete with ${result.errors.length} warnings`, 
-          description: `${result.created} lines imported.\n\nWarnings:\n${warningList}${moreCount}`,
+          title: `Import complete with ${allWarnings.length} warnings`, 
+          description: `${totalProcessed} lines (${linesMsg}).\n\nWarnings:\n${warningList}${moreCount}`,
           duration: 10000,
         });
       } else {
         toast({ 
           title: "Import complete", 
-          description: `${result.created} lines imported successfully` 
+          description: `${totalProcessed} lines processed (${linesMsg})` 
         });
       }
     },
