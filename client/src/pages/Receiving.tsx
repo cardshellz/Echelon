@@ -916,6 +916,34 @@ DEF-456,25,,,5.00,,Location TBD`;
               PROD-001,100,A-01<br/>
               PROD-002,50,B-02
             </div>
+            
+            <div className="flex items-center gap-4">
+              <div className="flex-1">
+                <label className="flex items-center justify-center gap-2 border-2 border-dashed rounded-lg p-4 cursor-pointer hover:border-primary transition-colors">
+                  <Upload className="h-5 w-5 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Choose CSV file or drag & drop</span>
+                  <input 
+                    type="file" 
+                    accept=".csv,text/csv"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          setCsvText(event.target?.result as string || "");
+                        };
+                        reader.readAsText(file);
+                      }
+                    }}
+                    data-testid="input-csv-file"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="text-center text-xs text-muted-foreground">— or paste directly —</div>
+            
             <Textarea 
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
