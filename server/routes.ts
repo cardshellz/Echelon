@@ -4169,9 +4169,8 @@ export async function registerRoutes(
       const inventoryItemId = targetVariant.inventoryItemId;
       const variantQty = quantity;
       
-      // Both onHandBase and variantQty track the same value (variant count)
-      // for consistency across the system
-      const baseUnits = variantQty;
+      // Calculate base units: variantQty × unitsPerVariant
+      const baseUnits = variantQty * targetVariant.unitsPerVariant;
       
       // Generate a reference ID if not provided
       const refId = referenceId || `RCV-${Date.now()}`;
@@ -4187,7 +4186,7 @@ export async function registerRoutes(
         variantQty
       );
       
-      res.json({ success: true, qtyReceived: variantQty });
+      res.json({ success: true, baseUnitsReceived: baseUnits, variantQtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
       res.status(500).json({ error: "Failed to receive inventory" });

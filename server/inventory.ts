@@ -329,18 +329,14 @@ export class InventoryService {
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
     
     if (levelAtLocation) {
-      // Delta: add the adjustment (can be positive or negative)
-      // Both onHandBase and variantQty must be updated together to stay in sync
-      await storage.adjustInventoryLevel(levelAtLocation.id, { 
-        onHandBase: baseUnitsDelta,
-        variantQty: baseUnitsDelta,
-      });
+      // Delta adjustment in base units only
+      // variantQty is managed separately based on actual variant count changes
+      await storage.adjustInventoryLevel(levelAtLocation.id, { onHandBase: baseUnitsDelta });
     } else if (baseUnitsDelta > 0) {
       await storage.upsertInventoryLevel({
         inventoryItemId,
         warehouseLocationId,
         onHandBase: baseUnitsDelta,
-        variantQty: baseUnitsDelta,
         reservedBase: 0,
         pickedBase: 0,
         packedBase: 0,
