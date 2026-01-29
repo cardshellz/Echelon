@@ -3177,7 +3177,7 @@ export async function registerRoutes(
       const locations = await storage.getAllWarehouseLocations();
       
       const csvRows = [
-        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence"].join(",")
+        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence", "min_qty", "max_qty"].join(",")
       ];
       
       for (const loc of locations) {
@@ -3191,7 +3191,9 @@ export async function registerRoutes(
           `"${(loc.name || "").replace(/"/g, '""')}"`,
           loc.locationType || "",
           loc.isPickable ?? 1,
-          loc.pickSequence ?? ""
+          loc.pickSequence ?? "",
+          loc.minQty ?? "",
+          loc.maxQty ?? ""
         ].join(","));
       }
       
