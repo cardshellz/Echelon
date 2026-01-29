@@ -6333,14 +6333,15 @@ export async function registerRoutes(
         // Look up location
         let putawayLocationId = null;
         if (location) {
-          const loc = locationMap.get(location.toUpperCase());
+          const cleanLocation = location.trim().toUpperCase();
+          const loc = locationMap.get(cleanLocation);
           if (loc) {
             putawayLocationId = loc.id;
             
             // Check if bin is already occupied by a different SKU
             if (!allowMultipleSkus) {
               const existingInBin = existingProductLocations.find(
-                pl => pl.location?.toUpperCase() === location.toUpperCase() && 
+                pl => pl.location?.trim().toUpperCase() === cleanLocation && 
                       pl.sku?.toUpperCase() !== sku.toUpperCase()
               );
               if (existingInBin) {
@@ -6349,7 +6350,10 @@ export async function registerRoutes(
               }
             }
           } else {
-            errors.push(`Location ${location} not found for SKU ${sku}`);
+            // Log available locations for debugging
+            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found. Available codes:`, 
+              Array.from(locationMap.keys()).slice(0, 10).join(', ') + (locationMap.size > 10 ? '...' : ''));
+            warnings.push(`Location "${location}" not found for SKU ${sku}`);
           }
         }
         
