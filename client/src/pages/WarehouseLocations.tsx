@@ -124,6 +124,7 @@ export default function WarehouseLocations() {
     isPickable: 1,
   });
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all");
+  const [binSearchQuery, setBinSearchQuery] = useState<string>("");
 
   const canView = hasPermission("inventory", "view");
   const canEdit = hasPermission("inventory", "edit");
@@ -596,10 +597,31 @@ export default function WarehouseLocations() {
     );
   }
 
-  // Filter locations by selected warehouse
-  const filteredLocations = selectedWarehouseId === "all" 
-    ? locations 
-    : locations.filter(loc => loc.warehouseId === parseInt(selectedWarehouseId));
+  // Filter locations by selected warehouse and search query
+  const filteredLocations = useMemo(() => {
+    let result = locations;
+    
+    // Filter by warehouse
+    if (selectedWarehouseId !== "all") {
+      result = result.filter(loc => loc.warehouseId === parseInt(selectedWarehouseId));
+    }
+    
+    // Filter by search query
+    if (binSearchQuery.trim()) {
+      const query = binSearchQuery.toLowerCase().trim();
+      result = result.filter(loc => 
+        loc.code?.toLowerCase().includes(query) ||
+        loc.name?.toLowerCase().includes(query) ||
+        loc.zone?.toLowerCase().includes(query) ||
+        loc.aisle?.toLowerCase().includes(query) ||
+        loc.bay?.toLowerCase().includes(query) ||
+        loc.level?.toLowerCase().includes(query) ||
+        loc.bin?.toLowerCase().includes(query)
+      );
+    }
+    
+    return result;
+  }, [locations, selectedWarehouseId, binSearchQuery]);
 
   // Helper to get warehouse name
   const getWarehouseName = (warehouseId: number | null) => {
@@ -639,6 +661,16 @@ export default function WarehouseLocations() {
         <TabsContent value="locations" className="space-y-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full sm:w-auto">
+              <div className="relative w-full sm:w-64">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search bins..."
+                  value={binSearchQuery}
+                  onChange={(e) => setBinSearchQuery(e.target.value)}
+                  className="pl-9"
+                  data-testid="input-bin-search"
+                />
+              </div>
               <Select value={selectedWarehouseId} onValueChange={setSelectedWarehouseId}>
                 <SelectTrigger className="w-full sm:w-48" data-testid="select-warehouse-filter">
                   <SelectValue placeholder="All Warehouses" />
