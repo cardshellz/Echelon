@@ -477,17 +477,17 @@ export default function WarehouseLocations() {
     const data: any = {
       locationType: editingLocation.locationType,
       isPickable: editingLocation.isPickable,
+      zone: editingLocation.zone?.trim()?.toUpperCase() || null,
+      aisle: editingLocation.aisle?.trim()?.toUpperCase() || null,
+      bay: editingLocation.bay?.trim() ? editingLocation.bay.trim().padStart(2, '0') : null,
+      level: editingLocation.level?.trim()?.toUpperCase() || null,
+      bin: editingLocation.bin?.trim() || null,
+      name: editingLocation.name?.trim() || null,
+      pickSequence: editingLocation.pickSequence || null,
+      minQty: editingLocation.minQty || null,
+      maxQty: editingLocation.maxQty || null,
+      warehouseId: editingLocation.warehouseId || null,
     };
-    if (editingLocation.zone) data.zone = editingLocation.zone.toUpperCase();
-    if (editingLocation.aisle) data.aisle = editingLocation.aisle.toUpperCase();
-    if (editingLocation.bay) data.bay = editingLocation.bay.padStart(2, '0');
-    if (editingLocation.level) data.level = editingLocation.level?.toUpperCase();
-    if (editingLocation.bin) data.bin = editingLocation.bin;
-    if (editingLocation.name) data.name = editingLocation.name;
-    if (editingLocation.pickSequence) data.pickSequence = editingLocation.pickSequence;
-    if (editingLocation.minQty) data.minQty = editingLocation.minQty;
-    if (editingLocation.maxQty) data.maxQty = editingLocation.maxQty;
-    data.warehouseId = editingLocation.warehouseId;
     
     updateLocationMutation.mutate({ id: editingLocation.id, data });
   };
