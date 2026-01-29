@@ -181,7 +181,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
-    queryKey: ["/api/warehouse-locations"],
+    queryKey: ["/api/warehouse/locations"],
   });
 
   const { data: variants = [] } = useQuery<{ id: number; sku: string; name: string; inventoryItemId: number }[]>({
