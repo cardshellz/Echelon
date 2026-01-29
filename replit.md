@@ -100,6 +100,18 @@ Supports multi-channel sales and dropship partner management through dedicated U
 - **Catalog Management**: `catalog_products`, `catalog_assets`, `channel_product_overrides`, `channel_variant_overrides`, `channel_asset_overrides`, `channel_pricing`, and `channel_listings` for managing product content and pricing per channel.
 - **ATP Calculation with Reserves**: Calculates Global ATP and Channel ATP based on on-hand inventory and channel-specific reserves.
 
+### Application Settings (PENDING MIGRATION)
+**ISSUE**: The external database has a legacy `app_settings` table with a different structure (single row, many columns like `shopify_shop_domain`, `notifications_enabled`, etc.) used by other apps. Echelon expects a key-value structure with `key` and `value` columns.
+
+**Solution Options** (user to decide):
+1. Create new `echelon_settings` table and update Echelon code to use it (safest - preserves legacy table)
+2. Add key/value columns to existing table (messy - mixes two patterns)
+
+**Required Code Changes** (if option 1 chosen):
+- Update `shared/schema.ts` to rename `appSettings` table to `echelonSettings`
+- Update all references in `server/storage.ts` and `server/routes.ts`
+- Run provided SQL to create `echelon_settings` table with seed data
+
 ### Receiving Subsystem
 The receiving system handles inventory intake from vendors and supports initial inventory loads:
 - **Vendors**: Supplier tracking with contact info, terms, and metadata
