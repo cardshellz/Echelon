@@ -30,6 +30,25 @@ export type User = typeof users.$inferSelect;
 
 export type SafeUser = Omit<User, "password">;
 
+// User audit trail for tracking username/profile changes
+export const userAudit = pgTable("user_audit", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  fieldChanged: varchar("field_changed", { length: 50 }).notNull(), // username, displayName, role, etc.
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  changedBy: varchar("changed_by").references(() => users.id),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+});
+
+export const insertUserAuditSchema = createInsertSchema(userAudit).omit({
+  id: true,
+  changedAt: true,
+});
+
+export type InsertUserAudit = z.infer<typeof insertUserAuditSchema>;
+export type UserAudit = typeof userAudit.$inferSelect;
+
 // Location types for multi-location WMS support
 export const locationTypeEnum = ["forward_pick", "bulk_storage", "overflow", "receiving", "staging"] as const;
 export type LocationType = typeof locationTypeEnum[number];
@@ -1212,7 +1231,7 @@ export const receivingLines = pgTable("receiving_lines", {
   status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, partial, complete, overage, short
   
   // Audit
-  receivedBy: varchar("received_by", { length: 100 }),
+  receivedBy: varchar("received_by").references(() => users.id, { onDelete: "set null" }),
   receivedAt: timestamp("received_at"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
