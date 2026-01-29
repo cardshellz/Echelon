@@ -757,6 +757,7 @@ export async function registerRoutes(
       }
       
       // Add picker display name, channel info, and C2P (Click to Pick) time to orders
+      // Also filter out non-shippable items from the pick list (donations, memberships, etc.)
       const ordersWithMetadata = filteredOrders.map(order => {
         // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
         let c2pMs: number | null = null;
@@ -766,8 +767,12 @@ export async function registerRoutes(
         
         const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
         
+        // Only include items that require shipping in the pick list
+        const shippableItems = order.items.filter(item => item.requiresShipping === 1);
+        
         return {
           ...order,
+          items: shippableItems,
           pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
           c2pMs, // Click to Pick time in milliseconds
           channelName: channelInfo?.name || null,
@@ -782,7 +787,7 @@ export async function registerRoutes(
     }
   });
 
-  // Get a specific order with items
+  // Get a specific order with items (for picking - only shippable items)
   app.get("/api/picking/orders/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -792,8 +797,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Order not found" });
       }
       
-      const items = await storage.getOrderItems(id);
-      res.json({ ...order, items });
+      const allItems = await storage.getOrderItems(id);
+      // Only include items that require shipping in the pick list
+      const shippableItems = allItems.filter(item => item.requiresShipping === 1);
+      res.json({ ...order, items: shippableItems });
     } catch (error) {
       console.error("Error fetching order:", error);
       res.status(500).json({ error: "Failed to fetch order" });
