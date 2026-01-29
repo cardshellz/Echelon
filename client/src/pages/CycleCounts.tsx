@@ -12,7 +12,8 @@ import {
   Package,
   MapPin,
   Check,
-  RotateCcw
+  RotateCcw,
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -237,6 +238,28 @@ export default function CycleCounts() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/cycle-counts/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to delete");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Cycle count deleted" });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
+      setSelectedCount(null);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to delete", description: error.message, variant: "destructive" });
+    },
+  });
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "draft": return <Badge variant="outline">Draft</Badge>;
@@ -309,6 +332,20 @@ export default function CycleCounts() {
           {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && (
             <Button onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
               <CheckCircle className="h-4 w-4 mr-2" /> Complete
+            </Button>
+          )}
+          {cycleCountDetail.status !== "completed" && (
+            <Button 
+              variant="destructive" 
+              size="sm"
+              onClick={() => {
+                if (confirm("Are you sure you want to delete this cycle count? This cannot be undone.")) {
+                  deleteMutation.mutate(selectedCount);
+                }
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              <Trash2 className="h-4 w-4 mr-2" /> Delete
             </Button>
           )}
         </div>
