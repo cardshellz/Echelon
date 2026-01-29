@@ -583,16 +583,16 @@ export default function Inventory() {
                         {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                       </div>
                     </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Qty
-                        {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
                     <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("units")}>
                       <div className="flex items-center justify-end gap-1">
                         Units/Pkg
                         {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Qty
+                        {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                       </div>
                     </TableHead>
                     <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("pickable")}>
@@ -651,8 +651,8 @@ export default function Inventory() {
                           </div>
                         </TableCell>
                         <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
-                        <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
+                        <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
