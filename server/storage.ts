@@ -214,6 +214,8 @@ export interface IStorage {
   getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
   getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
+  getInventoryLevelByItemAndLocation(inventoryItemId: number, warehouseLocationId: number): Promise<InventoryLevel | undefined>;
+  createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
   updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null>;
@@ -1731,6 +1733,22 @@ export class DatabaseStorage implements IStorage {
         eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
         eq(inventoryLevels.variantId, variantId)
       ));
+    return result[0];
+  }
+
+  async getInventoryLevelByItemAndLocation(inventoryItemId: number, warehouseLocationId: number): Promise<InventoryLevel | undefined> {
+    const result = await db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.inventoryItemId, inventoryItemId),
+        eq(inventoryLevels.warehouseLocationId, warehouseLocationId)
+      ));
+    return result[0];
+  }
+
+  async createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
+    const result = await db.insert(inventoryLevels).values(level).returning();
     return result[0];
   }
 
