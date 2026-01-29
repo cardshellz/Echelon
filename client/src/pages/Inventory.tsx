@@ -136,6 +136,7 @@ interface VariantLevel {
   available: number;
   totalPieces: number;
   locationCount: number;
+  pickableQty: number;
 }
 
 interface VariantLocationLevel {
@@ -352,6 +353,7 @@ export default function Inventory() {
         case "name": aVal = a.name || ""; bVal = b.name || ""; break;
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
         case "units": aVal = a.unitsPerVariant; bVal = b.unitsPerVariant; break;
+        case "pickable": aVal = a.pickableQty; bVal = b.pickableQty; break;
         case "reserved": aVal = a.reservedBase; bVal = b.reservedBase; break;
         case "available": aVal = a.available; bVal = b.available; break;
         case "locations": aVal = a.locationCount; bVal = b.locationCount; break;
@@ -593,6 +595,12 @@ export default function Inventory() {
                         {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                       </div>
                     </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("pickable")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Pickable
+                        {sortField === "pickable" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
                     <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
                       <div className="flex items-center justify-end gap-1">
                         Reserved
@@ -645,6 +653,7 @@ export default function Inventory() {
                         <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
                         <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
+                        <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
                         <TableCell className="text-right">{level.locationCount}</TableCell>

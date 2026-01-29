@@ -5195,6 +5195,7 @@ export async function registerRoutes(
         total_reserved_base: string;
         total_picked_base: string;
         location_count: string;
+        pickable_qty: string;
       }>(sql`
         SELECT 
           uv.id as variant_id,
@@ -5206,10 +5207,12 @@ export async function registerRoutes(
           COALESCE(SUM(il.on_hand_base), 0) as total_on_hand_base,
           COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
           COALESCE(SUM(il.picked_base), 0) as total_picked_base,
-          COUNT(DISTINCT il.warehouse_location_id) as location_count
+          COUNT(DISTINCT il.warehouse_location_id) as location_count,
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_qty
         FROM uom_variants uv
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
         LEFT JOIN inventory_levels il ON il.variant_id = uv.id
+        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE uv.active = 1 AND uv.hierarchy_level > 1
         GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
         ORDER BY uv.sku
@@ -5228,6 +5231,7 @@ export async function registerRoutes(
         available: (parseInt(row.total_on_hand_base) || 0) - (parseInt(row.total_reserved_base) || 0) - (parseInt(row.total_picked_base) || 0),
         totalPieces: parseInt(row.total_on_hand_base) || 0,
         locationCount: parseInt(row.location_count) || 0,
+        pickableQty: parseInt(row.pickable_qty) || 0,
       }));
       
       res.json(levels);

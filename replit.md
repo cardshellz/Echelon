@@ -72,6 +72,9 @@ Echelon acts as the source of truth for inventory, managing on-hand and availabl
 - **Dual-Level Inventory Tracking**: Tracks `variantQty` (physical count) and `onHandBase` (derived smallest unit count).
 - **Hierarchical Warehouse Locations**: Uses a 5-level hierarchy (Zone, Aisle, Bay, Level, Bin) with smart display logic. Supports various location types (bin, pallet, carton_flow, bulk_reserve, receiving, etc.) with associated pick types.
 - **Core WMS functionalities**: Extended database schema for inventory, allocation service, ATP calculation, variant cascading, replenishment, backorder handling, and a robust Shopify sync.
+- **ATP Calculation**: ATP = Total On-Hand (ALL locations) - Reserved - Picked. Includes bulk storage, forward pick, and all other locations regardless of `isPickable` flag.
+- **Pickable Qty**: Operational metric showing inventory in forward pick locations only (`is_pickable=1`). Used for same-day ship capability planning.
+- **Multi-Tier Replenishment**: Schema supports `parentLocationId` for direct location chaining and `replenSourceType` for location-type-based replenishment (e.g., forward_pick → bulk_storage). Uses `minQty`/`maxQty` thresholds for automated alerts.
 
 ### Picking Logs (Audit Trail)
 A comprehensive, append-only `picking_logs` table captures all picking actions for auditing. It includes timestamps, action types, picker info, order context, item details, quantities, and status snapshots, allowing for querying and generation of order timelines.

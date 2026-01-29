@@ -411,7 +411,8 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   pickSequence: integer("pick_sequence"), // Walk order for optimized picking (null = not sequenced)
   
   // Replenishment chain
-  parentLocationId: integer("parent_location_id"), // Bulk location that feeds this forward pick
+  parentLocationId: integer("parent_location_id"), // Specific location that feeds this one (optional)
+  replenSourceType: varchar("replen_source_type", { length: 30 }), // Location type that feeds this: bulk_storage, case_pick, pallet_pick
   movementPolicy: varchar("movement_policy", { length: 20 }).notNull().default("implicit"),
   
   // Capacity constraints
