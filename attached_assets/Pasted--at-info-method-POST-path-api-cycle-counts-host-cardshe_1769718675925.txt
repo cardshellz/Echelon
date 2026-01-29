@@ -1,0 +1,26 @@
+: at=info method=POST path="/api/cycle-counts" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=94656c2d-6aeb-bc72-a220-23d26c1b090f fwd="67.20.233.54" dyno=web.1 connect=0ms service=64ms status=500 bytes=40 protocol=http1.1 tls=true tls_version=unknown
+2026-01-29T20:31:04.638268+00:00 app[web.1]: Error creating cycle count: error: relation "cycle_counts" does not exist
+2026-01-29T20:31:04.638288+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-29T20:31:04.638289+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-29T20:31:04.638289+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37955
+2026-01-29T20:31:04.638290+00:00 app[web.1]:     at async Kv.createCycleCount (/app/dist/index.cjs:130:6138)
+2026-01-29T20:31:04.638290+00:00 app[web.1]:     at async /app/dist/index.cjs:307:985 {
+2026-01-29T20:31:04.638302+00:00 app[web.1]:   length: 111,
+2026-01-29T20:31:04.638302+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-29T20:31:04.638302+00:00 app[web.1]:   code: '42P01',
+2026-01-29T20:31:04.638303+00:00 app[web.1]:   detail: undefined,
+2026-01-29T20:31:04.638303+00:00 app[web.1]:   hint: undefined,
+2026-01-29T20:31:04.638303+00:00 app[web.1]:   position: '13',
+2026-01-29T20:31:04.638304+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-29T20:31:04.638304+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-29T20:31:04.638304+00:00 app[web.1]:   where: undefined,
+2026-01-29T20:31:04.638304+00:00 app[web.1]:   schema: undefined,
+2026-01-29T20:31:04.638305+00:00 app[web.1]:   table: undefined,
+2026-01-29T20:31:04.638305+00:00 app[web.1]:   column: undefined,
+2026-01-29T20:31:04.638305+00:00 app[web.1]:   dataType: undefined,
+2026-01-29T20:31:04.638305+00:00 app[web.1]:   constraint: undefined,
+2026-01-29T20:31:04.638306+00:00 app[web.1]:   file: 'parse_relation.c',
+2026-01-29T20:31:04.638306+00:00 app[web.1]:   line: '1494',
+2026-01-29T20:31:04.638306+00:00 app[web.1]:   routine: 'parserOpenTable'
+2026-01-29T20:31:04.638306+00:00 app[web.1]: }
+2026-01-29T20:31:04.641312+00:00 app[web.1]: 8:31:04 PM [express] POST /api/cycle-counts 500 in 45ms :: {"error":"Failed to create cycle count"}
