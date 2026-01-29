@@ -6099,7 +6099,6 @@ export async function registerRoutes(
               warehouseLocationId: line.putawayLocationId,
               onHandBase: qtyToAdd,
               reservedBase: 0,
-              availableBase: qtyToAdd,
             });
           }
           
