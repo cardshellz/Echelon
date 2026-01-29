@@ -5951,18 +5951,26 @@ export async function registerRoutes(
   app.get("/api/receiving/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      console.log("[RECEIVING] Fetching order id:", id);
+      
       const order = await storage.getReceivingOrderById(id);
+      console.log("[RECEIVING] Order found:", order ? "yes" : "no");
+      
       if (!order) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
       
       const lines = await storage.getReceivingLines(id);
+      console.log("[RECEIVING] Lines count:", lines.length);
+      
       const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
+      console.log("[RECEIVING] Vendor:", vendor ? vendor.name : "none");
       
       res.json({ ...order, lines, vendor });
-    } catch (error) {
-      console.error("Error fetching receiving order:", error);
-      res.status(500).json({ error: "Failed to fetch receiving order" });
+    } catch (error: any) {
+      console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
+      console.error("[RECEIVING] Stack:", error?.stack);
+      res.status(500).json({ error: "Failed to fetch receiving order", details: error?.message });
     }
   });
   
