@@ -3354,7 +3354,7 @@ export async function registerRoutes(
     }
   });
 
-  // Bulk import warehouse locations from CSV
+  // Bulk import warehouse locations from CSV (upsert - updates existing, creates new)
   app.post("/api/warehouse/locations/bulk-import", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const { locations, warehouseId } = req.body;
@@ -3362,7 +3362,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No locations provided" });
       }
       
-      const results = { created: 0, errors: [] as string[] };
+      const results = { created: 0, updated: 0, errors: [] as string[] };
       
       for (let i = 0; i < locations.length; i++) {
         const loc = locations[i];
@@ -3392,7 +3392,15 @@ export async function registerRoutes(
             effectiveWarehouseId = parsed;
           }
           
-          await storage.createWarehouseLocation({
+          // Generate the code to check if location exists
+          const codeParts = [zone, aisle, bay, level, bin].filter(Boolean);
+          const code = loc.code?.trim() || codeParts.join("-");
+          
+          // Check if location with this code already exists
+          const existingLocations = await storage.getAllWarehouseLocations();
+          const existing = existingLocations.find(l => l.code === code);
+          
+          const locationData = {
             zone,
             aisle,
             bay,
@@ -3400,13 +3408,30 @@ export async function registerRoutes(
             bin,
             name: loc.name?.trim() || null,
             locationType: (loc.locationType || loc.location_type || "bin").trim(),
-            isPickable: loc.isPickable !== undefined ? parseInt(loc.isPickable) : 1,
-            pickSequence: loc.pickSequence || loc.pick_sequence ? parseInt(loc.pickSequence || loc.pick_sequence) : null,
-            minQty: loc.minQty || loc.min_qty ? parseInt(loc.minQty || loc.min_qty) : null,
-            maxQty: loc.maxQty || loc.max_qty ? parseInt(loc.maxQty || loc.max_qty) : null,
-            warehouseId: effectiveWarehouseId,
-          });
-          results.created++;
+            isPickable: loc.isPickable !== undefined || loc.is_pickable !== undefined 
+              ? parseInt(loc.isPickable ?? loc.is_pickable) 
+              : (existing?.isPickable ?? 1),
+            pickSequence: loc.pickSequence || loc.pick_sequence 
+              ? parseInt(loc.pickSequence || loc.pick_sequence) 
+              : (existing?.pickSequence ?? null),
+            minQty: loc.minQty || loc.min_qty 
+              ? parseInt(loc.minQty || loc.min_qty) 
+              : (existing?.minQty ?? null),
+            maxQty: loc.maxQty || loc.max_qty 
+              ? parseInt(loc.maxQty || loc.max_qty) 
+              : (existing?.maxQty ?? null),
+            warehouseId: effectiveWarehouseId ?? existing?.warehouseId ?? null,
+          };
+          
+          if (existing) {
+            // Update existing location
+            await storage.updateWarehouseLocation(existing.id, locationData);
+            results.updated++;
+          } else {
+            // Create new location
+            await storage.createWarehouseLocation(locationData);
+            results.created++;
+          }
         } catch (err: any) {
           results.errors.push(`Row ${rowNum}: ${err.message}`);
         }

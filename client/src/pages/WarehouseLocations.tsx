@@ -337,14 +337,18 @@ export default function WarehouseLocations() {
       setIsImportOpen(false);
       setCsvData("");
       setImportWarehouseId("");
+      const summary = [
+        data.created > 0 ? `${data.created} created` : null,
+        data.updated > 0 ? `${data.updated} updated` : null,
+      ].filter(Boolean).join(", ");
       if (data.errors?.length > 0) {
         toast({ 
-          title: `Imported ${data.created} locations`, 
+          title: `Import complete: ${summary || "0 changes"}`, 
           description: `${data.errors.length} errors: ${data.errors.slice(0, 3).join(", ")}${data.errors.length > 3 ? "..." : ""}`,
           variant: "default" 
         });
       } else {
-        toast({ title: `Successfully imported ${data.created} locations` });
+        toast({ title: `Import complete: ${summary}` });
       }
     },
     onError: (error: Error) => {
