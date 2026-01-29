@@ -312,23 +312,224 @@ export default function CycleCounts() {
     setApproveDialogOpen(true);
   };
 
+  // Mobile counting mode state
+  const [mobileCountMode, setMobileCountMode] = useState(false);
+  const [currentBinIndex, setCurrentBinIndex] = useState(0);
+  const [quickCountQty, setQuickCountQty] = useState("");
+
   if (selectedCount && cycleCountDetail) {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
     const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved").length;
     
+    // Get pending items for mobile mode
+    const pendingItems = cycleCountDetail.items.filter(i => i.status === "pending");
+    const currentItem = pendingItems[currentBinIndex];
+    
+    // Quick count submission for mobile
+    const handleQuickCount = () => {
+      if (!currentItem || quickCountQty === "") return;
+      countMutation.mutate({
+        itemId: currentItem.id,
+        data: {
+          countedSku: currentItem.expectedSku,
+          countedQty: parseInt(quickCountQty) || 0,
+          notes: null,
+        }
+      }, {
+        onSuccess: () => {
+          setQuickCountQty("");
+          // Auto-advance to next bin
+          if (currentBinIndex < pendingItems.length - 1) {
+            setCurrentBinIndex(currentBinIndex + 1);
+          }
+        }
+      });
+    };
+    
+    // Mobile counting view
+    if (mobileCountMode && pendingItems.length > 0) {
+      return (
+        <div className="flex flex-col h-full bg-slate-50">
+          {/* Header */}
+          <div className="bg-white border-b px-4 py-3 flex items-center justify-between">
+            <Button variant="ghost" size="sm" onClick={() => setMobileCountMode(false)}>
+              <RotateCcw className="h-4 w-4 mr-2" /> Exit
+            </Button>
+            <div className="text-center">
+              <div className="text-sm text-muted-foreground">Bin {currentBinIndex + 1} of {pendingItems.length}</div>
+            </div>
+            <div className="w-16" />
+          </div>
+          
+          {/* Progress bar */}
+          <div className="h-2 bg-slate-200">
+            <div 
+              className="h-full bg-emerald-500 transition-all" 
+              style={{ width: `${((cycleCountDetail.countedBins) / cycleCountDetail.totalBins) * 100}%` }}
+            />
+          </div>
+          
+          {/* Main counting card */}
+          <div className="flex-1 p-4 flex flex-col gap-4">
+            <Card className="flex-1">
+              <CardContent className="pt-6 flex flex-col items-center justify-center h-full gap-6">
+                {/* Location - BIG and prominent */}
+                <div className="text-center">
+                  <div className="text-sm text-muted-foreground mb-1">Go to bin</div>
+                  <div className="text-5xl font-bold font-mono text-blue-600">
+                    {currentItem?.locationCode}
+                  </div>
+                </div>
+                
+                {/* SKU */}
+                <div className="text-center">
+                  <div className="text-sm text-muted-foreground mb-1">Product</div>
+                  <div className="text-xl font-semibold">
+                    {currentItem?.expectedSku || "(Empty bin)"}
+                  </div>
+                </div>
+                
+                {/* Expected quantity hint */}
+                <div className="text-center bg-slate-100 rounded-lg px-6 py-3">
+                  <div className="text-sm text-muted-foreground">Expected</div>
+                  <div className="text-3xl font-bold">{currentItem?.expectedQty}</div>
+                </div>
+                
+                {/* Quantity input */}
+                <div className="w-full max-w-xs">
+                  <div className="text-sm text-muted-foreground text-center mb-2">Count what you see</div>
+                  <div className="flex items-center gap-3">
+                    <Button 
+                      variant="outline" 
+                      size="lg"
+                      className="h-16 w-16 text-2xl"
+                      onClick={() => setQuickCountQty(String(Math.max(0, (parseInt(quickCountQty) || 0) - 1)))}
+                      data-testid="button-decrease-qty"
+                    >
+                      -
+                    </Button>
+                    <Input
+                      type="number"
+                      inputMode="numeric"
+                      value={quickCountQty}
+                      onChange={(e) => setQuickCountQty(e.target.value)}
+                      className="h-16 text-3xl text-center font-mono flex-1"
+                      placeholder="0"
+                      autoFocus
+                      data-testid="input-quick-count"
+                    />
+                    <Button 
+                      variant="outline" 
+                      size="lg"
+                      className="h-16 w-16 text-2xl"
+                      onClick={() => setQuickCountQty(String((parseInt(quickCountQty) || 0) + 1))}
+                      data-testid="button-increase-qty"
+                    >
+                      +
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            
+            {/* Navigation and confirm */}
+            <div className="flex gap-3">
+              <Button 
+                variant="outline" 
+                size="lg"
+                className="h-14"
+                onClick={() => setCurrentBinIndex(Math.max(0, currentBinIndex - 1))}
+                disabled={currentBinIndex === 0}
+              >
+                Prev
+              </Button>
+              <Button 
+                size="lg"
+                className="flex-1 h-14 text-lg"
+                onClick={handleQuickCount}
+                disabled={countMutation.isPending || quickCountQty === ""}
+                data-testid="button-confirm-count"
+              >
+                <Check className="h-5 w-5 mr-2" />
+                Confirm & Next
+              </Button>
+              <Button 
+                variant="outline" 
+                size="lg"
+                className="h-14"
+                onClick={() => setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1))}
+                disabled={currentBinIndex === pendingItems.length - 1}
+              >
+                Skip
+              </Button>
+            </div>
+            
+            {/* Quick match button */}
+            <Button 
+              variant="secondary" 
+              size="lg"
+              className="h-12"
+              onClick={() => {
+                setQuickCountQty(String(currentItem?.expectedQty || 0));
+              }}
+              data-testid="button-match-expected"
+            >
+              Matches Expected ({currentItem?.expectedQty})
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    
+    // Mobile done state
+    if (mobileCountMode && pendingItems.length === 0) {
+      return (
+        <div className="flex flex-col h-full items-center justify-center p-6 gap-6">
+          <CheckCircle className="h-20 w-20 text-emerald-500" />
+          <h2 className="text-2xl font-bold text-center">All Bins Counted!</h2>
+          <p className="text-muted-foreground text-center">
+            {varianceCount > 0 
+              ? `${varianceCount} variance(s) need review`
+              : "No variances found - ready to complete"}
+          </p>
+          <Button size="lg" onClick={() => setMobileCountMode(false)}>
+            View Results
+          </Button>
+        </div>
+      );
+    }
+    
     return (
       <div className="flex flex-col h-full p-4 md:p-6 gap-4">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-2 md:gap-4">
           <Button variant="ghost" size="sm" onClick={() => setSelectedCount(null)}>
             <RotateCcw className="h-4 w-4 mr-2" /> Back
           </Button>
-          <div className="flex-1">
-            <h1 className="text-2xl font-bold">{cycleCountDetail.name}</h1>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-xl md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
             <p className="text-muted-foreground text-sm">
               {cycleCountDetail.countedBins} / {cycleCountDetail.totalBins} bins counted
             </p>
           </div>
           {getStatusBadge(cycleCountDetail.status)}
+        </div>
+        
+        {/* Action buttons row */}
+        <div className="flex flex-wrap gap-2">
+          {cycleCountDetail.status === "in_progress" && pendingCount > 0 && (
+            <Button 
+              size="lg" 
+              className="flex-1 md:flex-none"
+              onClick={() => {
+                setCurrentBinIndex(0);
+                setQuickCountQty("");
+                setMobileCountMode(true);
+              }}
+              data-testid="button-start-counting"
+            >
+              <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
+            </Button>
+          )}
           {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && (
             <Button onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
               <CheckCircle className="h-4 w-4 mr-2" /> Complete
@@ -350,31 +551,31 @@ export default function CycleCounts() {
           )}
         </div>
 
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
           <Card>
-            <CardContent className="pt-4">
-              <div className="text-2xl font-bold">{cycleCountDetail.totalBins}</div>
-              <div className="text-sm text-muted-foreground">Total Bins</div>
+            <CardContent className="pt-4 p-3 md:p-6">
+              <div className="text-xl md:text-2xl font-bold">{cycleCountDetail.totalBins}</div>
+              <div className="text-xs md:text-sm text-muted-foreground">Total</div>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="pt-4">
-              <div className="text-2xl font-bold">{pendingCount}</div>
-              <div className="text-sm text-muted-foreground">Pending</div>
+            <CardContent className="pt-4 p-3 md:p-6">
+              <div className="text-xl md:text-2xl font-bold">{pendingCount}</div>
+              <div className="text-xs md:text-sm text-muted-foreground">Pending</div>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="pt-4">
-              <div className="text-2xl font-bold text-amber-600">{varianceCount}</div>
-              <div className="text-sm text-muted-foreground">Variances</div>
+            <CardContent className="pt-4 p-3 md:p-6">
+              <div className="text-xl md:text-2xl font-bold text-amber-600">{varianceCount}</div>
+              <div className="text-xs md:text-sm text-muted-foreground">Variances</div>
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="pt-4">
-              <div className="text-2xl font-bold text-emerald-600">
+            <CardContent className="pt-4 p-3 md:p-6">
+              <div className="text-xl md:text-2xl font-bold text-emerald-600">
                 {cycleCountDetail.countedBins - varianceCount}
               </div>
-              <div className="text-sm text-muted-foreground">OK</div>
+              <div className="text-xs md:text-sm text-muted-foreground">OK</div>
             </CardContent>
           </Card>
         </div>
@@ -385,12 +586,53 @@ export default function CycleCounts() {
             placeholder="Search by location or SKU..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-10 max-w-md"
+            className="pl-10"
             data-testid="input-search"
           />
         </div>
 
-        <div className="rounded-md border bg-card flex-1 overflow-auto">
+        {/* Mobile-friendly card list */}
+        <div className="flex-1 overflow-auto space-y-2 md:hidden">
+          {filteredItems.map((item) => (
+            <Card key={item.id} className={item.varianceType ? "border-amber-300 bg-amber-50/50" : ""}>
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono font-bold text-lg text-blue-600">{item.locationCode}</div>
+                    <div className="text-sm truncate">{item.expectedSku || "(empty)"}</div>
+                    <div className="flex items-center gap-3 mt-2 text-sm">
+                      <span>Expected: <strong>{item.expectedQty}</strong></span>
+                      {item.countedQty !== null && (
+                        <span>Counted: <strong>{item.countedQty}</strong></span>
+                      )}
+                      {item.varianceQty !== null && item.varianceQty !== 0 && (
+                        <span className={item.varianceQty > 0 ? "text-emerald-600 font-bold" : "text-rose-600 font-bold"}>
+                          {item.varianceQty > 0 ? "+" : ""}{item.varianceQty}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end gap-2">
+                    {getItemStatusBadge(item)}
+                    {item.status === "pending" && (
+                      <Button size="sm" onClick={() => handleCountClick(item)}>
+                        Count
+                      </Button>
+                    )}
+                    {item.varianceType && item.status !== "approved" && (
+                      <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
+                        Approve
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {/* Desktop table view */}
+        <div className="rounded-md border bg-card flex-1 overflow-auto hidden md:block">
           <Table>
             <TableHeader className="bg-muted/40 sticky top-0">
               <TableRow>
