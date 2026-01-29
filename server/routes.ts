@@ -5637,22 +5637,24 @@ export async function registerRoutes(
       const items: any[] = [];
       
       for (const location of locations) {
-        // Get inventory levels at this location
+        // Get inventory levels at this location with actual stock
         const result = await db.execute<{
           inventory_item_id: number;
-          on_hand_base: number;
+          variant_qty: number;
           catalog_product_id: number | null;
           sku: string | null;
         }>(sql`
           SELECT 
             il.inventory_item_id,
-            il.on_hand_base,
+            il.variant_qty,
             cp.id as catalog_product_id,
-            cp.sku
+            COALESCE(cp.sku, uv.sku) as sku
           FROM inventory_levels il
           LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
           LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
+          LEFT JOIN uom_variants uv ON il.variant_id = uv.id
           WHERE il.warehouse_location_id = ${location.id}
+            AND il.variant_qty > 0
         `);
         
         if (result.rows.length > 0) {
@@ -5664,7 +5666,7 @@ export async function registerRoutes(
               inventoryItemId: row.inventory_item_id,
               catalogProductId: row.catalog_product_id,
               expectedSku: row.sku,
-              expectedQty: row.on_hand_base,
+              expectedQty: row.variant_qty,
               status: "pending",
             });
           }
