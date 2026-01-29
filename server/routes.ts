@@ -6088,9 +6088,11 @@ export async function registerRoutes(
           const baseQtyAfter = baseQtyBefore + qtyToAdd;
           
           if (level) {
-            // Update existing level
+            // Update existing level - also set variantId if missing
             await storage.updateInventoryLevel(level.id, {
               onHandBase: baseQtyAfter,
+              variantId: line.uomVariantId || level.variantId,
+              variantQty: (level.variantQty || 0) + qtyToAdd,
             });
           } else {
             // Create new level - include variantId for variant-centric inventory tracking
@@ -6099,8 +6101,8 @@ export async function registerRoutes(
               warehouseLocationId: line.putawayLocationId,
               onHandBase: qtyToAdd,
               reservedBase: 0,
-              variantId: line.uomVariantId || null,
-              variantQty: line.uomVariantId ? qtyToAdd : null,
+              variantId: line.uomVariantId || undefined,
+              variantQty: qtyToAdd,
             });
           }
           
