@@ -4997,7 +4997,8 @@ export async function registerRoutes(
     "company_name", "company_address", "company_city", "company_state", 
     "company_postal_code", "company_country", "default_timezone", 
     "default_warehouse_id", "low_stock_threshold", "critical_stock_threshold",
-    "enable_low_stock_alerts", "picking_batch_size", "auto_release_delay_minutes"
+    "enable_low_stock_alerts", "allow_multiple_skus_per_bin", "picking_batch_size", 
+    "auto_release_delay_minutes"
   ] as const;
 
   const settingsUpdateSchema = z.record(
