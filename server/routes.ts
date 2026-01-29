@@ -6093,12 +6093,14 @@ export async function registerRoutes(
               onHandBase: baseQtyAfter,
             });
           } else {
-            // Create new level
+            // Create new level - include variantId for variant-centric inventory tracking
             await storage.createInventoryLevel({
               inventoryItemId: line.inventoryItemId,
               warehouseLocationId: line.putawayLocationId,
               onHandBase: qtyToAdd,
               reservedBase: 0,
+              variantId: line.uomVariantId || null,
+              variantQty: line.uomVariantId ? qtyToAdd : null,
             });
           }
           
