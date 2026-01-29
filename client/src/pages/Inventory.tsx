@@ -195,7 +195,7 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
     <>
       {locationLevels.map((locLevel) => {
         const isPickable = locLevel.location?.isPickable === 1;
-        const available = locLevel.onHandBase - locLevel.reservedBase - (locLevel.pickedBase || 0);
+        const available = locLevel.variantQty - locLevel.reservedBase - (locLevel.pickedBase || 0);
         return (
           <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
             <TableCell className="pl-8">
@@ -214,13 +214,15 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
             {/* Pickable indicator */}
             <TableCell className="text-right font-mono text-xs">
               {isPickable ? (
-                <span className="text-green-600">{locLevel.onHandBase}</span>
+                <span className="text-green-600">{locLevel.variantQty}</span>
               ) : (
                 <span className="text-muted-foreground">-</span>
               )}
             </TableCell>
             {/* Reserved */}
             <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase || 0}</TableCell>
+            {/* Committed (picked but not shipped) */}
+            <TableCell className="text-right font-mono text-xs">{locLevel.pickedBase || 0}</TableCell>
             {/* Available at this location */}
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
             {/* Pickable status */}
@@ -629,6 +631,11 @@ export default function Inventory() {
                         {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                       </div>
                     </TableHead>
+                    <TableHead className="text-right w-[100px]">
+                      <div className="flex items-center justify-end gap-1">
+                        Committed
+                      </div>
+                    </TableHead>
                     <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("available")}>
                       <div className="flex items-center justify-end gap-1">
                         Available
@@ -677,6 +684,7 @@ export default function Inventory() {
                         <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
+                        <TableCell className="text-right font-mono text-muted-foreground">{(level.pickedBase || 0).toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
                         <TableCell className="text-right">{level.locationCount}</TableCell>
                         <TableCell>{getStatusBadge(level.available)}</TableCell>
