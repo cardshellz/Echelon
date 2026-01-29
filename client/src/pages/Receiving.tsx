@@ -390,16 +390,21 @@ DEF-456,25,,,5.00,,Location TBD`;
   };
 
   const handleCSVImport = () => {
-    if (!selectedReceipt) return;
+    if (!selectedReceipt) {
+      toast({ title: "Error", description: "No receipt selected", variant: "destructive" });
+      return;
+    }
     const result = parseCSV(csvText);
+    console.log("CSV parse result:", result);
     if (result.error) {
       toast({ title: "Error", description: result.error, variant: "destructive" });
       return;
     }
     if (!result.lines || result.lines.length === 0) {
-      toast({ title: "Error", description: "No valid lines found", variant: "destructive" });
+      toast({ title: "Error", description: "No valid lines found in CSV", variant: "destructive" });
       return;
     }
+    console.log("Importing lines:", result.lines);
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
   };
 
