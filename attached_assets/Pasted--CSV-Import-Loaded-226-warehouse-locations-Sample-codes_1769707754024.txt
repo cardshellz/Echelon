@@ -1,0 +1,26 @@
+ [CSV Import] Loaded 226 warehouse locations. Sample codes: A-01, A-02, A-03, A-04, A-05
+2026-01-29T17:29:06.156084+00:00 app[web.1]: [CSV Import] Location 'J-02-C' (cleaned: 'J-02-C') not found in code or name lookup.
+2026-01-29T17:29:06.196528+00:00 app[web.1]: Error bulk creating receiving lines: error: insert or update on table "receiving_lines" violates foreign key constraint "receiving_lines_received_by_fkey"
+2026-01-29T17:29:06.196539+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-29T17:29:06.196540+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-29T17:29:06.196540+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37955
+2026-01-29T17:29:06.196542+00:00 app[web.1]:     at async Kv.bulkCreateReceivingLines (/app/dist/index.cjs:130:9246)
+2026-01-29T17:29:06.196542+00:00 app[web.1]:     at async /app/dist/index.cjs:315:14967 {
+2026-01-29T17:29:06.196543+00:00 app[web.1]:   length: 298,
+2026-01-29T17:29:06.196544+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-29T17:29:06.196544+00:00 app[web.1]:   code: '23503',
+2026-01-29T17:29:06.196544+00:00 app[web.1]:   detail: 'Key (received_by)=(admin) is not present in table "users".',
+2026-01-29T17:29:06.196545+00:00 app[web.1]:   hint: undefined,
+2026-01-29T17:29:06.196545+00:00 app[web.1]:   position: undefined,
+2026-01-29T17:29:06.196545+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-29T17:29:06.196546+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-29T17:29:06.196546+00:00 app[web.1]:   where: undefined,
+2026-01-29T17:29:06.196546+00:00 app[web.1]:   schema: 'public',
+2026-01-29T17:29:06.196546+00:00 app[web.1]:   table: 'receiving_lines',
+2026-01-29T17:29:06.196546+00:00 app[web.1]:   column: undefined,
+2026-01-29T17:29:06.196557+00:00 app[web.1]:   dataType: undefined,
+2026-01-29T17:29:06.196558+00:00 app[web.1]:   constraint: 'receiving_lines_received_by_fkey',
+2026-01-29T17:29:06.196558+00:00 app[web.1]:   file: 'ri_triggers.c',
+2026-01-29T17:29:06.196559+00:00 app[web.1]:   line: '2636',
+2026-01-29T17:29:06.196559+00:00 app[web.1]:   routine: 'ri_ReportViolation'
+2026-01-29T17:29:06.196559+00:00 app[web.1]: }
