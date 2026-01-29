@@ -6286,7 +6286,11 @@ export async function registerRoutes(
       // Pre-fetch warehouse locations for efficient lookup - match by code OR name
       const allWarehouseLocations = await storage.getAllWarehouseLocations();
       const locationByCode = new Map(allWarehouseLocations.map(l => [l.code.toUpperCase().trim(), l]));
-      const locationByName = new Map(allWarehouseLocations.map(l => [l.name.toUpperCase().trim(), l]));
+      const locationByName = new Map(
+        allWarehouseLocations
+          .filter(l => l.name)
+          .map(l => [l.name!.toUpperCase().trim(), l])
+      );
       console.log(`[CSV Import] Loaded ${allWarehouseLocations.length} warehouse locations. Sample codes:`, 
         allWarehouseLocations.slice(0, 5).map(l => l.code).join(', '));
       
