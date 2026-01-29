@@ -6279,11 +6279,15 @@ export async function registerRoutes(
       }
       
       // Fetch existing lines for this order to enable idempotent imports (update vs create)
+      // Uniqueness key: SKU + Location (allows same SKU at different locations)
       const existingLines = await storage.getReceivingLines(orderId);
-      const existingBySku = new Map(
+      const existingBySkuLocation = new Map(
         existingLines
           .filter(l => l.sku)
-          .map(l => [l.sku!.toUpperCase(), l])
+          .map(l => {
+            const locationId = l.putawayLocationId || 'none';
+            return [`${l.sku!.toUpperCase()}|${locationId}`, l];
+          })
       );
       
       // Lookup SKUs to get inventory item IDs
@@ -6380,8 +6384,9 @@ export async function registerRoutes(
         const parsedDamagedQty = parseInt(damaged_qty) || 0;
         const parsedUnitCost = unit_cost ? Math.round(parseFloat(unit_cost) * 100) : null; // Convert dollars to cents
         
-        // Check if line with same SKU already exists in this order (idempotent import)
-        const existingLine = existingBySku.get(sku.toUpperCase());
+        // Check if line with same SKU + Location already exists in this order (idempotent import)
+        const uniqueKey = `${sku.toUpperCase()}|${putawayLocationId || 'none'}`;
+        const existingLine = existingBySkuLocation.get(uniqueKey);
         if (existingLine) {
           // Update existing line instead of creating duplicate
           linesToUpdate.push({
