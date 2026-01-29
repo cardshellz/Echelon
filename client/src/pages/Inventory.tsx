@@ -19,7 +19,10 @@ import {
   CheckCircle,
   XCircle,
   ChevronRight,
-  ChevronDown
+  ChevronDown,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -228,6 +231,8 @@ export default function Inventory() {
   const [receiveStockOpen, setReceiveStockOpen] = useState(false);
   const [receiveForm, setReceiveForm] = useState({ variantId: "", locationId: "", quantity: "" });
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
+  const [sortField, setSortField] = useState<string>("sku");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -325,6 +330,38 @@ export default function Inventory() {
   const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedBase || 0), 0);
   const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpBase || 0), 0);
   const lowStockItems = inventorySummary.filter(item => Number(item.totalAtpBase || 0) <= 0).length;
+
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  const sortedVariantLevels = [...variantLevels]
+    .filter(v => 
+      (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+    )
+    .sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (sortField) {
+        case "sku": aVal = a.sku || ""; bVal = b.sku || ""; break;
+        case "name": aVal = a.name || ""; bVal = b.name || ""; break;
+        case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
+        case "units": aVal = a.unitsPerVariant; bVal = b.unitsPerVariant; break;
+        case "reserved": aVal = a.reservedBase; bVal = b.reservedBase; break;
+        case "available": aVal = a.available; bVal = b.available; break;
+        case "locations": aVal = a.locationCount; bVal = b.locationCount; break;
+        default: aVal = a.sku || ""; bVal = b.sku || "";
+      }
+      if (typeof aVal === "string") {
+        return sortDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
+    });
 
   const handleAdjustClick = (item: InventoryItemSummary) => {
     setSelectedItem(item);
@@ -515,8 +552,8 @@ export default function Inventory() {
                       <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Pieces</div>
-                      <div className="font-mono font-bold">{level.totalPieces.toLocaleString()}</div>
+                      <div className="text-muted-foreground">Available</div>
+                      <div className="font-mono font-bold">{level.available.toLocaleString()}</div>
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
                       <div className="text-muted-foreground">Locations</div>
@@ -532,22 +569,53 @@ export default function Inventory() {
               <Table>
                 <TableHeader className="bg-muted/40 sticky top-0 z-10">
                   <TableRow>
-                    <TableHead className="w-[180px]">SKU</TableHead>
-                    <TableHead>Name</TableHead>
-                    <TableHead className="text-right w-[100px]">Qty</TableHead>
-                    <TableHead className="text-right w-[100px]">Units/Pkg</TableHead>
-                    <TableHead className="text-right w-[100px]">Pieces</TableHead>
-                    <TableHead className="text-right w-[100px]">Reserved</TableHead>
-                    <TableHead className="text-right w-[100px]">Available</TableHead>
-                    <TableHead className="text-right w-[80px]">Locations</TableHead>
+                    <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
+                      <div className="flex items-center gap-1">
+                        SKU
+                        {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("name")}>
+                      <div className="flex items-center gap-1">
+                        Name
+                        {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Qty
+                        {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("units")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Units/Pkg
+                        {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Reserved
+                        {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("available")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Available
+                        {sortField === "available" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("locations")}>
+                      <div className="flex items-center justify-end gap-1">
+                        Locations
+                        {sortField === "locations" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                      </div>
+                    </TableHead>
                     <TableHead className="w-[100px]">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {variantLevels.filter(v => 
-                    (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                    (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
-                  ).map((level) => (
+                  {sortedVariantLevels.map((level) => (
                     <React.Fragment key={level.variantId}>
                       <TableRow 
                         data-testid={`row-variant-${level.variantId}`}
@@ -577,7 +645,6 @@ export default function Inventory() {
                         <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
                         <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
-                        <TableCell className="text-right font-mono">{level.totalPieces.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
                         <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
                         <TableCell className="text-right">{level.locationCount}</TableCell>
