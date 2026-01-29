@@ -87,6 +87,8 @@ interface CycleCountItem {
   countedAt: string | null;
   locationCode?: string;
   zone?: string;
+  relatedItemId: number | null;
+  mismatchType: string | null; // "expected_missing" or "unexpected_found"
 }
 
 interface CycleCountDetail extends CycleCount {
@@ -288,6 +290,18 @@ export default function CycleCounts() {
       case "unexpected_item": return <Badge className="bg-amber-100 text-amber-700">Unexpected</Badge>;
       case "missing_item": return <Badge className="bg-rose-100 text-rose-700">Missing</Badge>;
       default: return <Badge variant="outline">{type}</Badge>;
+    }
+  };
+
+  const getMismatchTypeBadge = (item: CycleCountItem) => {
+    if (!item.mismatchType) return null;
+    switch (item.mismatchType) {
+      case "expected_missing": 
+        return <Badge className="bg-rose-100 text-rose-700 text-xs">Expected: {item.expectedSku}</Badge>;
+      case "unexpected_found": 
+        return <Badge className="bg-amber-100 text-amber-700 text-xs">Found: {item.countedSku}</Badge>;
+      default: 
+        return null;
     }
   };
 
@@ -647,13 +661,24 @@ export default function CycleCounts() {
         {/* Mobile-friendly card list */}
         <div className="flex-1 overflow-auto space-y-2 md:hidden">
           {filteredItems.map((item) => (
-            <Card key={item.id} className={item.varianceType ? "border-amber-300 bg-amber-50/50" : ""}>
+            <Card key={item.id} className={
+              item.mismatchType 
+                ? "border-purple-300 bg-purple-50/50" 
+                : item.varianceType 
+                  ? "border-amber-300 bg-amber-50/50" 
+                  : ""
+            }>
               <CardContent className="p-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="font-mono font-bold text-lg text-blue-600">{item.locationCode}</div>
-                    <div className="text-sm truncate">{item.expectedSku || "(empty)"}</div>
-                    <div className="flex items-center gap-3 mt-2 text-sm">
+                    <div className="text-sm truncate">
+                      {item.mismatchType === "unexpected_found" 
+                        ? <span className="text-amber-700">Found: {item.countedSku}</span>
+                        : (item.expectedSku || "(empty)")
+                      }
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 mt-2 text-sm">
                       <span>Expected: <strong>{item.expectedQty}</strong></span>
                       {item.countedQty !== null && (
                         <span>Counted: <strong>{item.countedQty}</strong></span>
@@ -664,9 +689,20 @@ export default function CycleCounts() {
                         </span>
                       )}
                     </div>
+                    {/* Show linked item indicator */}
+                    {item.relatedItemId && (
+                      <div className="mt-2 text-xs text-purple-600 flex items-center gap-1">
+                        <AlertTriangle className="h-3 w-3" />
+                        Linked to mismatch pair
+                      </div>
+                    )}
+                    {item.varianceNotes && (
+                      <div className="mt-1 text-xs text-muted-foreground truncate">{item.varianceNotes}</div>
+                    )}
                   </div>
                   <div className="flex flex-col items-end gap-2">
                     {getItemStatusBadge(item)}
+                    {getMismatchTypeBadge(item)}
                     {item.status === "pending" && (
                       <Button size="sm" onClick={() => handleCountClick(item)}>
                         Count
@@ -674,7 +710,7 @@ export default function CycleCounts() {
                     )}
                     {item.varianceType && item.status !== "approved" && (
                       <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
-                        Approve
+                        {item.relatedItemId ? "Approve Pair" : "Approve"}
                       </Button>
                     )}
                   </div>

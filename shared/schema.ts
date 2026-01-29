@@ -1096,6 +1096,10 @@ export const cycleCountItems = pgTable("cycle_count_items", {
   // Status
   status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, counted, variance, approved, adjusted
   
+  // Related item for SKU mismatch workflow (links expected→found items)
+  relatedItemId: integer("related_item_id"), // Points to the other half of a mismatch pair
+  mismatchType: varchar("mismatch_type", { length: 20 }), // "expected_missing" or "unexpected_found"
+  
   // Approval workflow
   requiresApproval: integer("requires_approval").notNull().default(0), // 1 if variance exceeds threshold
   approvedBy: varchar("approved_by", { length: 100 }),

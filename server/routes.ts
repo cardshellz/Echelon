@@ -5720,32 +5720,109 @@ export async function registerRoutes(
       // Calculate variance
       const varianceQty = (countedQty ?? 0) - (item.expectedQty ?? 0);
       let varianceType: string | null = null;
+      let createdFoundItem = false;
       
-      if (countedSku && item.expectedSku && countedSku !== item.expectedSku) {
+      // Detect variance type
+      const isSkuMismatch = countedSku && item.expectedSku && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
+      
+      if (isSkuMismatch) {
+        // SKU MISMATCH WORKFLOW: Create TWO linked items
+        // 1. Mark original item as "expected_missing" (expected product not found)
+        // 2. Create NEW item for the "unexpected_found" product
+        
         varianceType = "sku_mismatch";
+        
+        // Update original item as MISSING (expected SKU not found, qty = 0)
+        await storage.updateCycleCountItem(itemId, {
+          countedSku: null, // Not found
+          countedQty: 0, // Zero - it's not there
+          varianceQty: -(item.expectedQty ?? 0), // Full negative variance
+          varianceType: "missing_item",
+          varianceNotes: `Expected ${item.expectedSku} not found. Different SKU (${countedSku}) was in bin. ${notes || ''}`.trim(),
+          status: "variance",
+          requiresApproval: 1,
+          mismatchType: "expected_missing",
+          countedBy: userId,
+          countedAt: new Date(),
+        });
+        
+        // Look up inventory item for the found SKU
+        const foundInventoryResult = await db.execute<{ id: number }>(sql`
+          SELECT id FROM inventory_items WHERE base_sku = ${countedSku} LIMIT 1
+        `);
+        const foundInventoryItemId = foundInventoryResult.rows[0]?.id || null;
+        
+        // Look up catalog product for the found SKU
+        const foundCatalogResult = await db.execute<{ id: number }>(sql`
+          SELECT id FROM catalog_products WHERE sku = ${countedSku} LIMIT 1
+        `);
+        const foundCatalogProductId = foundCatalogResult.rows[0]?.id || null;
+        
+        // Create NEW item for the FOUND product (unexpected item in this bin)
+        const foundItemResult = await db.execute<{ id: number }>(sql`
+          INSERT INTO cycle_count_items (
+            cycle_count_id, warehouse_location_id, inventory_item_id, catalog_product_id,
+            expected_sku, expected_qty, counted_sku, counted_qty,
+            variance_qty, variance_type, variance_notes, status,
+            requires_approval, mismatch_type, related_item_id,
+            counted_by, counted_at, created_at
+          ) VALUES (
+            ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundInventoryItemId}, ${foundCatalogProductId},
+            NULL, 0, ${countedSku}, ${countedQty},
+            ${countedQty}, 'unexpected_item', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
+            1, 'unexpected_found', ${itemId},
+            ${userId}, NOW(), NOW()
+          ) RETURNING id
+        `);
+        
+        const foundItemId = foundItemResult.rows[0]?.id;
+        
+        // Link original item to the found item
+        if (foundItemId) {
+          await storage.updateCycleCountItem(itemId, {
+            relatedItemId: foundItemId,
+          });
+          createdFoundItem = true;
+        }
+        
       } else if (countedQty > 0 && !item.expectedSku) {
         varianceType = "unexpected_item";
-      } else if (countedQty === 0 && item.expectedQty > 0) {
-        varianceType = "missing_item";
-      } else if (varianceQty > 0) {
-        varianceType = "quantity_over";
-      } else if (varianceQty < 0) {
-        varianceType = "quantity_under";
+        await storage.updateCycleCountItem(itemId, {
+          countedSku: countedSku || null,
+          countedQty,
+          varianceQty,
+          varianceType,
+          varianceNotes: notes || null,
+          status: "variance",
+          requiresApproval: 1,
+          mismatchType: "unexpected_found",
+          countedBy: userId,
+          countedAt: new Date(),
+        });
+      } else {
+        // Normal count (same SKU or empty bin)
+        if (countedQty === 0 && item.expectedQty > 0) {
+          varianceType = "missing_item";
+        } else if (varianceQty > 0) {
+          varianceType = "quantity_over";
+        } else if (varianceQty < 0) {
+          varianceType = "quantity_under";
+        }
+        
+        const requiresApproval = Math.abs(varianceQty) > 10;
+        
+        await storage.updateCycleCountItem(itemId, {
+          countedSku: countedSku || null,
+          countedQty,
+          varianceQty,
+          varianceType,
+          varianceNotes: notes || null,
+          status: varianceType ? "variance" : "counted",
+          requiresApproval: requiresApproval ? 1 : 0,
+          countedBy: userId,
+          countedAt: new Date(),
+        });
       }
-      
-      const requiresApproval = Math.abs(varianceQty) > 10 || varianceType === "sku_mismatch";
-      
-      await storage.updateCycleCountItem(itemId, {
-        countedSku: countedSku || null,
-        countedQty,
-        varianceQty,
-        varianceType,
-        varianceNotes: notes || null,
-        status: varianceType ? "variance" : "counted",
-        requiresApproval: requiresApproval ? 1 : 0,
-        countedBy: userId,
-        countedAt: new Date(),
-      });
       
       // Update cycle count progress
       const cycleCount = await storage.getCycleCountById(item.cycleCountId);
@@ -5760,7 +5837,14 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ success: true, varianceType, varianceQty, requiresApproval });
+      res.json({ 
+        success: true, 
+        varianceType, 
+        varianceQty, 
+        requiresApproval: true,
+        skuMismatch: isSkuMismatch,
+        createdFoundItem
+      });
     } catch (error) {
       console.error("Error recording count:", error);
       res.status(500).json({ error: "Failed to record count" });
@@ -5783,16 +5867,25 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No variance to approve" });
       }
       
+      // Track adjustments made for audit response
+      const adjustmentsMade: any[] = [];
+      
       // Apply inventory adjustment if we have an inventory item
-      if (item.inventoryItemId && item.varianceQty !== null) {
+      if (item.inventoryItemId && item.varianceQty !== null && item.varianceQty !== 0) {
         await inventoryService.adjustInventory(
           item.inventoryItemId,
           item.warehouseLocationId,
           item.varianceQty,
           reasonCode || "CYCLE_COUNT",
           userId,
-          notes
+          `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`
         );
+        adjustmentsMade.push({
+          sku: item.expectedSku || item.countedSku,
+          type: item.mismatchType || item.varianceType,
+          qtyChange: item.varianceQty,
+          locationId: item.warehouseLocationId
+        });
       }
       
       // Update item as approved
@@ -5802,6 +5895,79 @@ export async function registerRoutes(
         approvedAt: new Date(),
         varianceReason: reasonCode,
       });
+      
+      // MISMATCH WORKFLOW: If this item has a related item, approve it too
+      if (item.relatedItemId) {
+        const relatedItem = await storage.getCycleCountItemById(item.relatedItemId);
+        
+        if (relatedItem && relatedItem.status !== "approved") {
+          // Apply adjustment for the related item too
+          if (relatedItem.inventoryItemId && relatedItem.varianceQty !== null && relatedItem.varianceQty !== 0) {
+            await inventoryService.adjustInventory(
+              relatedItem.inventoryItemId,
+              relatedItem.warehouseLocationId,
+              relatedItem.varianceQty,
+              reasonCode || "CYCLE_COUNT",
+              userId,
+              `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`
+            );
+            adjustmentsMade.push({
+              sku: relatedItem.expectedSku || relatedItem.countedSku,
+              type: relatedItem.mismatchType || relatedItem.varianceType,
+              qtyChange: relatedItem.varianceQty,
+              locationId: relatedItem.warehouseLocationId
+            });
+          }
+          
+          // Update related item as approved
+          await storage.updateCycleCountItem(relatedItem.id, {
+            status: "approved",
+            approvedBy: userId,
+            approvedAt: new Date(),
+            varianceReason: reasonCode,
+          });
+        }
+      }
+      
+      // Also check if another item points TO this one (reverse relationship)
+      const reverseRelatedResult = await db.execute<{ id: number }>(sql`
+        SELECT id FROM cycle_count_items 
+        WHERE related_item_id = ${itemId} 
+        AND status != 'approved'
+        LIMIT 1
+      `);
+      
+      if (reverseRelatedResult.rows.length > 0) {
+        const reverseItemId = reverseRelatedResult.rows[0].id;
+        const reverseItem = await storage.getCycleCountItemById(reverseItemId);
+        
+        if (reverseItem && reverseItem.status !== "approved") {
+          // Apply adjustment for the reverse-linked item
+          if (reverseItem.inventoryItemId && reverseItem.varianceQty !== null && reverseItem.varianceQty !== 0) {
+            await inventoryService.adjustInventory(
+              reverseItem.inventoryItemId,
+              reverseItem.warehouseLocationId,
+              reverseItem.varianceQty,
+              reasonCode || "CYCLE_COUNT",
+              userId,
+              `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`
+            );
+            adjustmentsMade.push({
+              sku: reverseItem.expectedSku || reverseItem.countedSku,
+              type: reverseItem.mismatchType || reverseItem.varianceType,
+              qtyChange: reverseItem.varianceQty,
+              locationId: reverseItem.warehouseLocationId
+            });
+          }
+          
+          await storage.updateCycleCountItem(reverseItem.id, {
+            status: "approved",
+            approvedBy: userId,
+            approvedAt: new Date(),
+            varianceReason: reasonCode,
+          });
+        }
+      }
       
       // Update cycle count approved count
       const cycleCount = await storage.getCycleCountById(item.cycleCountId);
@@ -5814,7 +5980,11 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ success: true });
+      res.json({ 
+        success: true,
+        adjustmentsMade,
+        linkedItemsApproved: (item.relatedItemId ? 1 : 0) + reverseRelatedResult.rows.length
+      });
     } catch (error) {
       console.error("Error approving variance:", error);
       res.status(500).json({ error: "Failed to approve variance" });
