@@ -134,15 +134,15 @@ export default function Receiving() {
   
   // Download CSV template
   const downloadTemplate = () => {
-    const template = `sku,qty,location
-ABC-123,10,A-01-01-01-01
-XYZ-789,25,B-02-03-02-01
-DEF-456,5,`;
+    const template = `sku,qty,location,damaged_qty,unit_cost,barcode,notes
+ABC-123,100,A-01-01-01-01,0,12.50,123456789012,
+XYZ-789,50,B-02-03-02-01,2,8.99,,2 units damaged in shipping
+DEF-456,25,,,5.00,,Location TBD`;
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'inventory_import_template.csv';
+    a.download = 'receiving_import_template.csv';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -337,9 +337,16 @@ DEF-456,5,`;
     const lines = text.trim().split("\n");
     const header = lines[0].toLowerCase().split(",").map(h => h.trim());
     
+    // Required columns
     const skuIdx = header.findIndex(h => h === "sku" || h === "product_sku");
     const qtyIdx = header.findIndex(h => h === "qty" || h === "quantity" || h === "count");
+    
+    // Optional columns
     const locIdx = header.findIndex(h => h === "location" || h === "bin" || h === "loc");
+    const damagedIdx = header.findIndex(h => h === "damaged_qty" || h === "damaged");
+    const costIdx = header.findIndex(h => h === "unit_cost" || h === "cost" || h === "price");
+    const barcodeIdx = header.findIndex(h => h === "barcode" || h === "upc" || h === "ean");
+    const notesIdx = header.findIndex(h => h === "notes" || h === "note" || h === "comments");
     
     if (skuIdx === -1 || qtyIdx === -1) {
       return { error: "CSV must have 'sku' and 'qty' columns" };
@@ -347,12 +354,34 @@ DEF-456,5,`;
     
     const parsedLines = [];
     for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(",").map(p => p.trim());
+      const line = lines[i];
+      if (!line.trim()) continue;
+      
+      // Handle CSV with quoted fields (simple parser)
+      const parts: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (const char of line) {
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          parts.push(current.trim());
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+      parts.push(current.trim());
+      
       if (parts.length > Math.max(skuIdx, qtyIdx)) {
         parsedLines.push({
           sku: parts[skuIdx],
           qty: parseInt(parts[qtyIdx], 10) || 0,
           location: locIdx >= 0 && parts[locIdx] ? parts[locIdx] : null,
+          damaged_qty: damagedIdx >= 0 && parts[damagedIdx] ? parts[damagedIdx] : null,
+          unit_cost: costIdx >= 0 && parts[costIdx] ? parts[costIdx] : null,
+          barcode: barcodeIdx >= 0 && parts[barcodeIdx] ? parts[barcodeIdx] : null,
+          notes: notesIdx >= 0 && parts[notesIdx] ? parts[notesIdx] : null,
         });
       }
     }

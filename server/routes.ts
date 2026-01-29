@@ -6282,8 +6282,20 @@ export async function registerRoutes(
       const errors: string[] = [];
       const warnings: string[] = [];
       
+      // Pre-fetch warehouse locations for efficient lookup
+      const allWarehouseLocations = await storage.getAllWarehouseLocations();
+      const locationMap = new Map(allWarehouseLocations.map(l => [l.code.toUpperCase(), l]));
+      
+      // Pre-fetch catalog products for efficient lookup
+      const catalogProducts = await storage.getAllCatalogProducts();
+      const catalogBySku = new Map(
+        catalogProducts
+          .filter(p => p.sku)
+          .map(p => [p.sku!.toUpperCase(), p])
+      );
+      
       for (const line of lines) {
-        const { sku, qty, location } = line;
+        const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
         
         if (!sku) {
           errors.push(`Missing SKU in line`);
@@ -6294,7 +6306,9 @@ export async function registerRoutes(
         const variant = await storage.getUomVariantBySku(sku);
         let inventoryItemId = null;
         let uomVariantId = null;
+        let catalogProductId = null;
         let productName = sku;
+        let productBarcode = barcode || null;
         
         if (variant) {
           uomVariantId = variant.id;
@@ -6302,19 +6316,23 @@ export async function registerRoutes(
           productName = variant.name;
         } else {
           // Try to find by catalog product
-          const catalogProducts = await storage.getAllCatalogProducts();
-          const catalog = catalogProducts.find(p => p.sku?.toUpperCase() === sku.toUpperCase());
-          if (catalog && catalog.inventoryItemId) {
-            inventoryItemId = catalog.inventoryItemId;
+          const catalog = catalogBySku.get(sku.toUpperCase());
+          if (catalog) {
+            catalogProductId = catalog.id;
+            if (catalog.inventoryItemId) {
+              inventoryItemId = catalog.inventoryItemId;
+            }
             productName = catalog.title;
+            if (!productBarcode && catalog.barcode) {
+              productBarcode = catalog.barcode;
+            }
           }
         }
         
         // Look up location
         let putawayLocationId = null;
         if (location) {
-          const allLocations = await storage.getAllWarehouseLocations();
-          const loc = allLocations.find(l => l.code.toUpperCase() === location.toUpperCase());
+          const loc = locationMap.get(location.toUpperCase());
           if (loc) {
             putawayLocationId = loc.id;
             
@@ -6334,16 +6352,25 @@ export async function registerRoutes(
           }
         }
         
+        // Parse numeric values
+        const parsedQty = parseInt(qty) || 0;
+        const parsedDamagedQty = parseInt(damaged_qty) || 0;
+        const parsedUnitCost = unit_cost ? Math.round(parseFloat(unit_cost) * 100) : null; // Convert dollars to cents
+        
         linesToCreate.push({
           receivingOrderId: orderId,
           sku: sku.toUpperCase(),
           productName,
-          expectedQty: qty || 0,
-          receivedQty: qty || 0, // For initial load, received = expected
-          damagedQty: 0,
+          barcode: productBarcode,
+          expectedQty: parsedQty,
+          receivedQty: parsedQty, // For initial load, received = expected
+          damagedQty: parsedDamagedQty,
+          unitCost: parsedUnitCost,
           inventoryItemId,
           uomVariantId,
+          catalogProductId,
           putawayLocationId,
+          notes: notes || null,
           status: putawayLocationId ? "complete" : "pending",
         });
       }
