@@ -316,6 +316,8 @@ export default function CycleCounts() {
   const [mobileCountMode, setMobileCountMode] = useState(false);
   const [currentBinIndex, setCurrentBinIndex] = useState(0);
   const [quickCountQty, setQuickCountQty] = useState("");
+  const [differentSkuMode, setDifferentSkuMode] = useState(false);
+  const [foundSku, setFoundSku] = useState("");
 
   if (selectedCount && cycleCountDetail) {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
@@ -328,16 +330,19 @@ export default function CycleCounts() {
     // Quick count submission for mobile
     const handleQuickCount = () => {
       if (!currentItem || quickCountQty === "") return;
+      const skuToSubmit = differentSkuMode ? foundSku : currentItem.expectedSku;
       countMutation.mutate({
         itemId: currentItem.id,
         data: {
-          countedSku: currentItem.expectedSku,
+          countedSku: skuToSubmit || null,
           countedQty: parseInt(quickCountQty) || 0,
-          notes: null,
+          notes: differentSkuMode ? `Found different SKU: ${foundSku}` : null,
         }
       }, {
         onSuccess: () => {
           setQuickCountQty("");
+          setDifferentSkuMode(false);
+          setFoundSku("");
           // Auto-advance to next bin
           if (currentBinIndex < pendingItems.length - 1) {
             setCurrentBinIndex(currentBinIndex + 1);
@@ -464,17 +469,65 @@ export default function CycleCounts() {
               </Button>
             </div>
             
-            {/* Quick match button */}
+            {/* Quick actions */}
+            <div className="flex gap-2">
+              <Button 
+                variant="secondary" 
+                size="lg"
+                className="flex-1 h-12"
+                onClick={() => {
+                  setQuickCountQty(String(currentItem?.expectedQty || 0));
+                }}
+                data-testid="button-match-expected"
+              >
+                Matches ({currentItem?.expectedQty})
+              </Button>
+              <Button 
+                variant={differentSkuMode ? "default" : "outline"}
+                size="lg"
+                className="h-12"
+                onClick={() => {
+                  setDifferentSkuMode(!differentSkuMode);
+                  if (!differentSkuMode) {
+                    setFoundSku("");
+                  }
+                }}
+                data-testid="button-different-sku"
+              >
+                <AlertTriangle className="h-4 w-4 mr-1" />
+                Wrong SKU
+              </Button>
+            </div>
+            
+            {/* Different SKU input */}
+            {differentSkuMode && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                <Label className="text-amber-800">What SKU is actually in this bin?</Label>
+                <Input
+                  value={foundSku}
+                  onChange={(e) => setFoundSku(e.target.value)}
+                  placeholder="Enter or scan actual SKU"
+                  className="mt-2 text-lg"
+                  autoFocus
+                  data-testid="input-found-sku"
+                />
+                <p className="text-xs text-amber-600 mt-2">
+                  This will be flagged as a SKU mismatch for review
+                </p>
+              </div>
+            )}
+            
+            {/* Empty bin option */}
             <Button 
-              variant="secondary" 
-              size="lg"
-              className="h-12"
+              variant="ghost" 
+              size="sm"
+              className="text-muted-foreground"
               onClick={() => {
-                setQuickCountQty(String(currentItem?.expectedQty || 0));
+                setQuickCountQty("0");
               }}
-              data-testid="button-match-expected"
+              data-testid="button-bin-empty"
             >
-              Matches Expected ({currentItem?.expectedQty})
+              Bin is empty
             </Button>
           </div>
         </div>
@@ -794,13 +847,13 @@ export default function CycleCounts() {
   }
 
   return (
-    <div className="flex flex-col h-full p-4 md:p-6 gap-4">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col h-full p-4 md:p-6 gap-4 overflow-hidden">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Cycle Counts</h1>
-          <p className="text-muted-foreground">Monthly inventory reconciliation</p>
+          <h1 className="text-xl md:text-2xl font-bold">Cycle Counts</h1>
+          <p className="text-sm text-muted-foreground">Monthly inventory reconciliation</p>
         </div>
-        <Button onClick={() => setCreateDialogOpen(true)} data-testid="button-new-count">
+        <Button onClick={() => setCreateDialogOpen(true)} data-testid="button-new-count" className="w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" /> New Cycle Count
         </Button>
       </div>
@@ -819,60 +872,113 @@ export default function CycleCounts() {
           </CardContent>
         </Card>
       ) : (
-        <div className="rounded-md border bg-card">
-          <Table>
-            <TableHeader className="bg-muted/40">
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Progress</TableHead>
-                <TableHead className="text-right">Variances</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="w-[150px]"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {cycleCounts.map((count) => (
-                <TableRow key={count.id} className="cursor-pointer" onClick={() => setSelectedCount(count.id)}>
-                  <TableCell className="font-medium">{count.name}</TableCell>
-                  <TableCell>{getStatusBadge(count.status)}</TableCell>
-                  <TableCell className="text-right">
-                    {count.status !== "draft" ? `${count.countedBins} / ${count.totalBins}` : "-"}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {count.varianceCount > 0 ? (
-                      <span className="text-amber-600">{count.varianceCount}</span>
-                    ) : "-"}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {format(new Date(count.createdAt), "MMM d, yyyy")}
-                  </TableCell>
-                  <TableCell>
-                    {count.status === "draft" && (
-                      <Button 
-                        size="sm" 
-                        onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
-                        disabled={initializeMutation.isPending}
-                      >
-                        <Play className="h-4 w-4 mr-1" /> Start
-                      </Button>
-                    )}
-                    {count.status === "in_progress" && (
-                      <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
-                        Continue <ChevronRight className="h-4 w-4 ml-1" />
-                      </Button>
-                    )}
-                    {count.status === "completed" && (
-                      <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
-                        View <ChevronRight className="h-4 w-4 ml-1" />
-                      </Button>
-                    )}
-                  </TableCell>
+        <>
+          {/* Mobile card list */}
+          <div className="flex-1 overflow-auto space-y-3 md:hidden">
+            {cycleCounts.map((count) => (
+              <Card 
+                key={count.id} 
+                className="cursor-pointer active:bg-muted/50"
+                onClick={() => setSelectedCount(count.id)}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold truncate">{count.name}</div>
+                      <div className="text-sm text-muted-foreground">
+                        {format(new Date(count.createdAt), "MMM d, yyyy")}
+                      </div>
+                      {count.status !== "draft" && (
+                        <div className="flex items-center gap-4 mt-2 text-sm">
+                          <span>{count.countedBins}/{count.totalBins} bins</span>
+                          {count.varianceCount > 0 && (
+                            <span className="text-amber-600">{count.varianceCount} variances</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-2">
+                      {getStatusBadge(count.status)}
+                      {count.status === "draft" && (
+                        <Button 
+                          size="sm" 
+                          onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
+                          disabled={initializeMutation.isPending}
+                        >
+                          <Play className="h-4 w-4 mr-1" /> Start
+                        </Button>
+                      )}
+                      {count.status === "in_progress" && (
+                        <Button size="sm">
+                          Continue <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
+                      )}
+                      {count.status === "completed" && (
+                        <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          {/* Desktop table */}
+          <div className="rounded-md border bg-card hidden md:block">
+            <Table>
+              <TableHeader className="bg-muted/40">
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Progress</TableHead>
+                  <TableHead className="text-right">Variances</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead className="w-[150px]"></TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+              </TableHeader>
+              <TableBody>
+                {cycleCounts.map((count) => (
+                  <TableRow key={count.id} className="cursor-pointer" onClick={() => setSelectedCount(count.id)}>
+                    <TableCell className="font-medium">{count.name}</TableCell>
+                    <TableCell>{getStatusBadge(count.status)}</TableCell>
+                    <TableCell className="text-right">
+                      {count.status !== "draft" ? `${count.countedBins} / ${count.totalBins}` : "-"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {count.varianceCount > 0 ? (
+                        <span className="text-amber-600">{count.varianceCount}</span>
+                      ) : "-"}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {format(new Date(count.createdAt), "MMM d, yyyy")}
+                    </TableCell>
+                    <TableCell>
+                      {count.status === "draft" && (
+                        <Button 
+                          size="sm" 
+                          onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
+                          disabled={initializeMutation.isPending}
+                        >
+                          <Play className="h-4 w-4 mr-1" /> Start
+                        </Button>
+                      )}
+                      {count.status === "in_progress" && (
+                        <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
+                          Continue <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
+                      )}
+                      {count.status === "completed" && (
+                        <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
+                          View <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       )}
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
