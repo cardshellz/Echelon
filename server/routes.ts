@@ -6386,6 +6386,8 @@ export async function registerRoutes(
           putawayLocationId,
           notes: notes || null,
           status: putawayLocationId ? "complete" : "pending",
+          receivedBy: req.session?.user?.username || req.session?.user?.email || null,
+          receivedAt: new Date(),
         });
       }
       
