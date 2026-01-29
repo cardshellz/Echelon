@@ -144,11 +144,13 @@ interface VariantLocationLevel {
   variantQty: number;
   onHandBase: number;
   reservedBase: number;
+  pickedBase: number;
   location: {
     id: number;
     code: string;
     name: string | null;
     locationType: string;
+    isPickable: number;
   } | null;
 }
 
@@ -191,34 +193,48 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
 
   return (
     <>
-      {locationLevels.map((locLevel) => (
-        <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
-          <TableCell className="pl-8">
-            <div className="flex items-center gap-2">
-              <MapPin className="h-3 w-3 text-muted-foreground" />
-              <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
-            </div>
-          </TableCell>
-          <TableCell className="text-muted-foreground text-xs">
-            {locLevel.location?.name || "-"}
-          </TableCell>
-          {/* Units/Pkg - skip for location rows, same as parent */}
-          <TableCell></TableCell>
-          {/* Qty at this location */}
-          <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
-          {/* Pickable - show dash, parent has aggregate */}
-          <TableCell className="text-right text-muted-foreground text-xs">-</TableCell>
-          {/* Reserved */}
-          <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase}</TableCell>
-          {/* Available at this location */}
-          <TableCell className="text-right font-mono text-xs">{locLevel.onHandBase - locLevel.reservedBase}</TableCell>
-          {/* Location type badge instead of location count */}
-          <TableCell>
-            <Badge variant="outline" className="text-xs">{locLevel.location?.locationType || "-"}</Badge>
-          </TableCell>
-          <TableCell></TableCell>
-        </TableRow>
-      ))}
+      {locationLevels.map((locLevel) => {
+        const isPickable = locLevel.location?.isPickable === 1;
+        const available = locLevel.onHandBase - locLevel.reservedBase - (locLevel.pickedBase || 0);
+        return (
+          <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
+            <TableCell className="pl-8">
+              <div className="flex items-center gap-2">
+                <MapPin className="h-3 w-3 text-muted-foreground" />
+                <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
+              </div>
+            </TableCell>
+            <TableCell className="text-muted-foreground text-xs">
+              <Badge variant="outline" className="text-xs">{locLevel.location?.locationType || "-"}</Badge>
+            </TableCell>
+            {/* Units/Pkg - skip for location rows */}
+            <TableCell></TableCell>
+            {/* Qty at this location */}
+            <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
+            {/* Pickable indicator */}
+            <TableCell className="text-right font-mono text-xs">
+              {isPickable ? (
+                <span className="text-green-600">{locLevel.onHandBase}</span>
+              ) : (
+                <span className="text-muted-foreground">-</span>
+              )}
+            </TableCell>
+            {/* Reserved */}
+            <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase || 0}</TableCell>
+            {/* Available at this location */}
+            <TableCell className="text-right font-mono text-xs">{available}</TableCell>
+            {/* Pickable status */}
+            <TableCell className="text-center">
+              {isPickable ? (
+                <Badge variant="default" className="text-xs bg-green-600">Pick</Badge>
+              ) : (
+                <Badge variant="secondary" className="text-xs">Bulk</Badge>
+              )}
+            </TableCell>
+            <TableCell></TableCell>
+          </TableRow>
+        );
+      })}
     </>
   );
 }
