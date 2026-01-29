@@ -4040,9 +4040,9 @@ export async function registerRoutes(
         }
 
         try {
-          // Calculate base units
-          const unitsPerVariant = variant?.unitsPerVariant || 1;
-          const baseUnits = quantity * unitsPerVariant;
+          // Both variantQty and onHandBase track the same value (variant count)
+          // This ensures consistency across the system
+          const targetQty = quantity;
 
           // Find existing level or create new one
           const existingLevels = await storage.getInventoryLevelsByItemId(inventoryItem.id);
@@ -4053,23 +4053,23 @@ export async function registerRoutes(
 
           if (existingLevel) {
             // Calculate delta from current value
-            const currentOnHand = existingLevel.onHandBase;
+            const currentQty = existingLevel.onHandBase;
             const currentVarQty = existingLevel.variantQty || 0;
-            const onHandDelta = baseUnits - currentOnHand;
-            const varQtyDelta = quantity - currentVarQty;
+            const qtyDelta = targetQty - currentQty;
+            const varQtyDelta = targetQty - currentVarQty;
 
             await storage.adjustInventoryLevel(existingLevel.id, {
-              onHandBase: onHandDelta,
+              onHandBase: qtyDelta,
               variantQty: varQtyDelta,
             });
           } else {
-            // Create new level
+            // Create new level - both fields track variant count
             await storage.upsertInventoryLevel({
               inventoryItemId: inventoryItem.id,
               warehouseLocationId: warehouseLocation.id,
               variantId: variant?.id || null,
-              variantQty: quantity,
-              onHandBase: baseUnits,
+              variantQty: targetQty,
+              onHandBase: targetQty,
               reservedBase: 0,
               pickedBase: 0,
               packedBase: 0,
@@ -4080,8 +4080,8 @@ export async function registerRoutes(
           // Log the transaction with before/after snapshots
           const baseQtyBefore = existingLevel ? existingLevel.onHandBase : 0;
           const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
-          const baseQtyDelta = baseUnits - baseQtyBefore;
-          const variantQtyDelta = quantity - variantQtyBefore;
+          const baseQtyDelta = targetQty - baseQtyBefore;
+          const variantQtyDelta = targetQty - variantQtyBefore;
 
           await inventoryService.logTransaction({
             inventoryItemId: inventoryItem.id,
@@ -4092,19 +4092,19 @@ export async function registerRoutes(
             baseQtyDelta,
             variantQtyDelta,
             baseQtyBefore,
-            baseQtyAfter: baseUnits,
+            baseQtyAfter: targetQty,
             variantQtyBefore,
-            variantQtyAfter: quantity,
+            variantQtyAfter: targetQty,
             batchId,
             targetState: "on_hand",
             referenceType: "csv_import",
             referenceId: batchId,
-            notes: `CSV import: Set ${sku} at ${locationCode} to ${quantity} units (was ${variantQtyBefore})`,
+            notes: `CSV import: Set ${sku} at ${locationCode} to ${targetQty} units (was ${variantQtyBefore})`,
             userId,
             isImplicit: 0,
           });
 
-          results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${quantity} units (${baseUnits} base units)` });
+          results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${targetQty} units` });
           successCount++;
         } catch (err: any) {
           results.push({ row: rowNum, sku, location: locationCode, status: "error", message: err.message || "Database error" });
@@ -4169,8 +4169,9 @@ export async function registerRoutes(
       const inventoryItemId = targetVariant.inventoryItemId;
       const variantQty = quantity;
       
-      // Calculate base units from variant quantity
-      const baseUnits = variantQty * targetVariant.unitsPerVariant;
+      // Both onHandBase and variantQty track the same value (variant count)
+      // for consistency across the system
+      const baseUnits = variantQty;
       
       // Generate a reference ID if not provided
       const refId = referenceId || `RCV-${Date.now()}`;
@@ -4186,7 +4187,7 @@ export async function registerRoutes(
         variantQty
       );
       
-      res.json({ success: true, baseUnitsReceived: baseUnits, variantQtyReceived: variantQty });
+      res.json({ success: true, qtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
       res.status(500).json({ error: "Failed to receive inventory" });
