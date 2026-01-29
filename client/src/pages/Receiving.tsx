@@ -337,6 +337,19 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
+  const completeAllMutation = useMutation({
+    mutationFn: async (orderId: number) => {
+      const res = await fetch(`/api/receiving/${orderId}/complete-all`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error("Failed to complete all lines");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+    },
+  });
+
   // Filter receipts
   const filteredReceipts = receipts.filter(r => 
     statusFilter === "all" || r.status === statusFilter
@@ -818,14 +831,25 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </>
                   )}
                   {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
-                    <Button 
-                      onClick={() => closeReceiptMutation.mutate(selectedReceipt.id)}
-                      disabled={closeReceiptMutation.isPending}
-                      data-testid="btn-close-receipt"
-                    >
-                      <CheckCircle className="h-4 w-4 mr-2" />
-                      Close & Update Inventory
-                    </Button>
+                    <>
+                      <Button 
+                        variant="outline"
+                        onClick={() => completeAllMutation.mutate(selectedReceipt.id)}
+                        disabled={completeAllMutation.isPending}
+                        data-testid="btn-complete-all"
+                      >
+                        <CheckCircle className="h-4 w-4 mr-2" />
+                        Complete All Lines
+                      </Button>
+                      <Button 
+                        onClick={() => closeReceiptMutation.mutate(selectedReceipt.id)}
+                        disabled={closeReceiptMutation.isPending}
+                        data-testid="btn-close-receipt"
+                      >
+                        <CheckCircle className="h-4 w-4 mr-2" />
+                        Close & Update Inventory
+                      </Button>
+                    </>
                   )}
                 </div>
 

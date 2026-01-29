@@ -6234,6 +6234,32 @@ export async function registerRoutes(
     }
   });
   
+  // Bulk complete all lines in a receiving order
+  app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      const lines = await storage.getReceivingLines(orderId);
+      
+      if (!lines || lines.length === 0) {
+        return res.status(404).json({ error: "No lines found for this order" });
+      }
+      
+      // Update all lines to complete status
+      let updated = 0;
+      for (const line of lines) {
+        if (line.status !== "complete") {
+          await storage.updateReceivingLine(line.id, { status: "complete" });
+          updated++;
+        }
+      }
+      
+      res.json({ message: `Completed ${updated} lines`, updated });
+    } catch (error) {
+      console.error("Error completing all lines:", error);
+      res.status(500).json({ error: "Failed to complete all lines" });
+    }
+  });
+  
   app.delete("/api/receiving/lines/:lineId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const lineId = parseInt(req.params.lineId);
