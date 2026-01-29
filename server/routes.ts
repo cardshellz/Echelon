@@ -6283,9 +6283,12 @@ export async function registerRoutes(
       const errors: string[] = [];
       const warnings: string[] = [];
       
-      // Pre-fetch warehouse locations for efficient lookup
+      // Pre-fetch warehouse locations for efficient lookup - match by code OR name
       const allWarehouseLocations = await storage.getAllWarehouseLocations();
-      const locationMap = new Map(allWarehouseLocations.map(l => [l.code.toUpperCase(), l]));
+      const locationByCode = new Map(allWarehouseLocations.map(l => [l.code.toUpperCase().trim(), l]));
+      const locationByName = new Map(allWarehouseLocations.map(l => [l.name.toUpperCase().trim(), l]));
+      console.log(`[CSV Import] Loaded ${allWarehouseLocations.length} warehouse locations. Sample codes:`, 
+        allWarehouseLocations.slice(0, 5).map(l => l.code).join(', '));
       
       // Pre-fetch catalog products for efficient lookup
       const catalogProducts = await storage.getAllCatalogProducts();
@@ -6330,11 +6333,14 @@ export async function registerRoutes(
           }
         }
         
-        // Look up location
+        // Look up location by code first, then by name as fallback
         let putawayLocationId = null;
         if (location) {
           const cleanLocation = location.trim().toUpperCase();
-          const loc = locationMap.get(cleanLocation);
+          let loc = locationByCode.get(cleanLocation);
+          if (!loc) {
+            loc = locationByName.get(cleanLocation);
+          }
           if (loc) {
             putawayLocationId = loc.id;
             
@@ -6351,8 +6357,7 @@ export async function registerRoutes(
             }
           } else {
             // Log available locations for debugging
-            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found. Available codes:`, 
-              Array.from(locationMap.keys()).slice(0, 10).join(', ') + (locationMap.size > 10 ? '...' : ''));
+            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found in code or name lookup.`);
             warnings.push(`Location "${location}" not found for SKU ${sku}`);
           }
         }
