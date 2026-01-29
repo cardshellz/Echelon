@@ -282,10 +282,22 @@ DEF-456,25,,,5.00,,Location TBD`;
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       setShowCSVImport(false);
       setCsvText("");
-      toast({ 
-        title: "Import complete", 
-        description: `${result.created} lines imported${result.errors?.length ? ` (${result.errors.length} warnings)` : ""}` 
-      });
+      
+      if (result.errors?.length) {
+        console.log("Import warnings:", result.errors);
+        const warningList = result.errors.slice(0, 5).join("\n");
+        const moreCount = result.errors.length > 5 ? `\n...and ${result.errors.length - 5} more` : "";
+        toast({ 
+          title: `Import complete with ${result.errors.length} warnings`, 
+          description: `${result.created} lines imported.\n\nWarnings:\n${warningList}${moreCount}`,
+          duration: 10000,
+        });
+      } else {
+        toast({ 
+          title: "Import complete", 
+          description: `${result.created} lines imported successfully` 
+        });
+      }
     },
   });
 
