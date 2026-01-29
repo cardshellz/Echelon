@@ -2208,11 +2208,8 @@ export async function registerRoutes(
         // Calculate total units from ALL unfulfilled items
         const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
         
-        // Check if any item requires shipping (handle various boolean representations)
-        const hasShippableItems = unfulfilledItems.some(item => {
-          const val = item.requires_shipping;
-          return val === true || val === 1 || val === 't' || val === 'true' || val === 'TRUE';
-        });
+        // Check if any item requires shipping
+        const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
         
         // Enrich ALL unfulfilled items with location data and requiresShipping per item
         const enrichedItems: InsertOrderItem[] = [];
@@ -2232,7 +2229,7 @@ export async function registerRoutes(
             zone: productLocation?.zone || "U",
             imageUrl: productLocation?.imageUrl || null,
             barcode: productLocation?.barcode || null,
-            requiresShipping: (item.requires_shipping === true || item.requires_shipping === 1 || item.requires_shipping === 't' || item.requires_shipping === 'true' || item.requires_shipping === 'TRUE') ? 1 : 0,
+            requiresShipping: item.requires_shipping ? 1 : 0,
           });
         }
         
@@ -2269,36 +2266,6 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error syncing from raw tables:", error);
       res.status(500).json({ error: "Failed to sync from raw tables" });
-    }
-  });
-
-  // Fix orders that have no shippable items - mark them as completed
-  app.post("/api/orders/fix-non-shippable", requirePermission("orders", "manage"), async (req, res) => {
-    try {
-      console.log("Fixing orders with no shippable items...");
-      
-      // Find all ready/in_progress orders where NO items require shipping
-      const result = await db.execute(sql`
-        UPDATE orders o SET
-          status = 'completed',
-          completed_at = COALESCE(o.completed_at, NOW())
-        WHERE o.status IN ('ready', 'in_progress')
-        AND NOT EXISTS (
-          SELECT 1 FROM order_items oi 
-          WHERE oi.order_id = o.id AND oi.requires_shipping = 1
-        )
-        RETURNING o.id, o.order_number
-      `);
-      
-      console.log(`Fixed ${result.rowCount} orders with no shippable items`);
-      res.json({ 
-        success: true, 
-        fixed: result.rowCount,
-        orders: result.rows
-      });
-    } catch (error) {
-      console.error("Error fixing non-shippable orders:", error);
-      res.status(500).json({ error: "Failed to fix non-shippable orders" });
     }
   });
 

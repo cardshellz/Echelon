@@ -85,11 +85,7 @@ export async function syncNewOrders() {
       }
       
       const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
-      // Handle various boolean representations: true, 1, 't', 'true', 'TRUE'
-      const hasShippableItems = unfulfilledItems.some(item => {
-        const val = item.requires_shipping;
-        return val === true || val === 1 || val === 't' || val === 'true' || val === 'TRUE';
-      });
+      const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
       
       const enrichedItems: InsertOrderItem[] = [];
       for (const item of unfulfilledItems) {
@@ -108,7 +104,7 @@ export async function syncNewOrders() {
           zone: productLocation?.zone || "U",
           imageUrl: productLocation?.imageUrl || null,
           barcode: productLocation?.barcode || null,
-          requiresShipping: (item.requires_shipping === true || item.requires_shipping === 1 || item.requires_shipping === 't' || item.requires_shipping === 'true' || item.requires_shipping === 'TRUE') ? 1 : 0,
+          requiresShipping: item.requires_shipping ? 1 : 0,
         });
       }
       
