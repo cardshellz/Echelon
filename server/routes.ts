@@ -5208,7 +5208,7 @@ export async function registerRoutes(
           COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
           COALESCE(SUM(il.picked_base), 0) as total_picked_base,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_qty
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.on_hand_base ELSE 0 END), 0) as pickable_qty
         FROM uom_variants uv
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
         LEFT JOIN inventory_levels il ON il.variant_id = uv.id

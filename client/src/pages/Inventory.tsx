@@ -160,7 +160,7 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
   if (isLoading) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={9} className="py-2 pl-8">
+        <TableCell colSpan={10} className="py-2 pl-8">
           <RefreshCw className="h-4 w-4 animate-spin inline mr-2" />
           Loading locations...
         </TableCell>
@@ -171,7 +171,7 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
   if (isError) {
     return (
       <TableRow className="bg-red-50 dark:bg-red-900/10">
-        <TableCell colSpan={9} className="py-2 pl-8 text-red-600 text-sm">
+        <TableCell colSpan={10} className="py-2 pl-8 text-red-600 text-sm">
           <AlertTriangle className="h-4 w-4 inline mr-2" />
           Failed to load location data
         </TableCell>
@@ -182,7 +182,7 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
   if (locationLevels.length === 0) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={9} className="py-2 pl-8 text-muted-foreground text-sm">
+        <TableCell colSpan={10} className="py-2 pl-8 text-muted-foreground text-sm">
           No stock at any location
         </TableCell>
       </TableRow>
@@ -202,11 +202,17 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
           <TableCell className="text-muted-foreground text-xs">
             {locLevel.location?.name || "-"}
           </TableCell>
-          <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
+          {/* Units/Pkg - skip for location rows, same as parent */}
           <TableCell></TableCell>
-          <TableCell className="text-right font-mono text-xs">{locLevel.onHandBase}</TableCell>
+          {/* Qty at this location */}
+          <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
+          {/* Pickable - show dash, parent has aggregate */}
+          <TableCell className="text-right text-muted-foreground text-xs">-</TableCell>
+          {/* Reserved */}
           <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase}</TableCell>
+          {/* Available at this location */}
           <TableCell className="text-right font-mono text-xs">{locLevel.onHandBase - locLevel.reservedBase}</TableCell>
+          {/* Location type badge instead of location count */}
           <TableCell>
             <Badge variant="outline" className="text-xs">{locLevel.location?.locationType || "-"}</Badge>
           </TableCell>
