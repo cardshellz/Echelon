@@ -983,10 +983,10 @@ export type UserWithPermissions = SafeUser & {
 };
 
 // ============================================
-// APPLICATION SETTINGS
+// ECHELON APPLICATION SETTINGS
 // ============================================
 
-export const appSettings = pgTable("app_settings", {
+export const echelonSettings = pgTable("echelon_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   key: varchar("key", { length: 100 }).notNull().unique(),
   value: text("value"),
@@ -996,13 +996,13 @@ export const appSettings = pgTable("app_settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const insertAppSettingSchema = createInsertSchema(appSettings).omit({
+export const insertEchelonSettingSchema = createInsertSchema(echelonSettings).omit({
   id: true,
   updatedAt: true,
 });
 
-export type InsertAppSetting = z.infer<typeof insertAppSettingSchema>;
-export type AppSetting = typeof appSettings.$inferSelect;
+export type InsertEchelonSetting = z.infer<typeof insertEchelonSettingSchema>;
+export type EchelonSetting = typeof echelonSettings.$inferSelect;
 
 // ============================================
 // CYCLE COUNTS (Inventory Reconciliation)

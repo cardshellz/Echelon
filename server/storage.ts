@@ -28,8 +28,8 @@ import {
   type ChannelFeed,
   type InsertChannelFeed,
   type PickingLog,
-  type AppSetting,
-  type InsertAppSetting,
+  type EchelonSetting,
+  type InsertEchelonSetting,
   type InsertPickingLog,
   type AdjustmentReason,
   type InsertAdjustmentReason,
@@ -81,7 +81,7 @@ import {
   receivingOrders,
   receivingLines,
   generateLocationCode,
-  appSettings
+  echelonSettings
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, or, isNull, isNotNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -358,7 +358,7 @@ export interface IStorage {
   // App Settings
   getAllSettings(): Promise<Record<string, string | null>>;
   getSetting(key: string): Promise<string | null>;
-  upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting>;
+  upsertSetting(key: string, value: string | null, category?: string): Promise<EchelonSetting | null>;
   
   // ============================================
   // CYCLE COUNTS (Inventory Reconciliation)
@@ -2578,9 +2578,9 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
   
-  // App Settings
+  // Echelon Settings
   async getAllSettings(): Promise<Record<string, string | null>> {
-    const settings = await db.select().from(appSettings);
+    const settings = await db.select().from(echelonSettings);
     const result: Record<string, string | null> = {};
     for (const setting of settings) {
       result[setting.key] = setting.value;
@@ -2590,28 +2590,27 @@ export class DatabaseStorage implements IStorage {
   
   async getSetting(key: string): Promise<string | null> {
     try {
-      const result = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+      const result = await db.select().from(echelonSettings).where(eq(echelonSettings.key, key)).limit(1);
       return result[0]?.value ?? null;
     } catch (error) {
-      // Handle case where app_settings table has different structure (legacy table)
-      console.warn(`getSetting failed for key "${key}" - app_settings table may have legacy structure`);
+      console.warn(`getSetting failed for key "${key}" - echelon_settings table may not exist yet`);
       return null;
     }
   }
   
-  async upsertSetting(key: string, value: string | null, category?: string): Promise<AppSetting | null> {
+  async upsertSetting(key: string, value: string | null, category?: string): Promise<EchelonSetting | null> {
     try {
-      const existing = await db.select().from(appSettings).where(eq(appSettings.key, key)).limit(1);
+      const existing = await db.select().from(echelonSettings).where(eq(echelonSettings.key, key)).limit(1);
       
       if (existing.length > 0) {
-        const updated = await db.update(appSettings)
+        const updated = await db.update(echelonSettings)
           .set({ value, updatedAt: new Date() })
-          .where(eq(appSettings.key, key))
+          .where(eq(echelonSettings.key, key))
           .returning();
         return updated[0];
       }
       
-      const inserted = await db.insert(appSettings).values({
+      const inserted = await db.insert(echelonSettings).values({
         key,
         value,
         type: "string",
@@ -2623,7 +2622,7 @@ export class DatabaseStorage implements IStorage {
       }).returning();
       return inserted[0];
     } catch (error) {
-      console.warn(`upsertSetting failed for key "${key}" - app_settings table may have legacy structure`);
+      console.warn(`upsertSetting failed for key "${key}" - echelon_settings table may not exist yet`);
       return null;
     }
   }
