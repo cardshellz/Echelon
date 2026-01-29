@@ -1108,6 +1108,18 @@ export default function WarehouseLocations() {
                 />
               </div>
             </div>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="create-is-pickable"
+                checked={newLocation.isPickable === 1}
+                onCheckedChange={(checked) => setNewLocation({ ...newLocation, isPickable: checked ? 1 : 0 })}
+                data-testid="checkbox-location-pickable"
+              />
+              <Label htmlFor="create-is-pickable" className="text-sm font-normal cursor-pointer">
+                Pickable Location (contributes to available inventory)
+              </Label>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsCreateLocationOpen(false)}>Cancel</Button>
@@ -1255,6 +1267,21 @@ export default function WarehouseLocations() {
                     })}
                   />
                 </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="edit-is-pickable"
+                  checked={editingLocation.isPickable === 1}
+                  onCheckedChange={(checked) => setEditingLocation({ 
+                    ...editingLocation, 
+                    isPickable: checked ? 1 : 0 
+                  })}
+                  data-testid="checkbox-edit-location-pickable"
+                />
+                <Label htmlFor="edit-is-pickable" className="text-sm font-normal cursor-pointer">
+                  Pickable Location (contributes to available inventory)
+                </Label>
               </div>
             </div>
           )}
