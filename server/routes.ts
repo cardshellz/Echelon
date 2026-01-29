@@ -6267,9 +6267,20 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Lines array is required" });
       }
       
+      // Check setting for multiple SKUs per bin
+      const allowMultipleSkusSetting = await storage.getSetting("allow_multiple_skus_per_bin");
+      const allowMultipleSkus = allowMultipleSkusSetting !== "false"; // Default to true
+      
+      // Pre-fetch product locations if we need to validate bin occupancy
+      let existingProductLocations: any[] = [];
+      if (!allowMultipleSkus) {
+        existingProductLocations = await storage.getAllProductLocations();
+      }
+      
       // Lookup SKUs to get inventory item IDs
       const linesToCreate: any[] = [];
       const errors: string[] = [];
+      const warnings: string[] = [];
       
       for (const line of lines) {
         const { sku, qty, location } = line;
@@ -6306,6 +6317,18 @@ export async function registerRoutes(
           const loc = allLocations.find(l => l.code.toUpperCase() === location.toUpperCase());
           if (loc) {
             putawayLocationId = loc.id;
+            
+            // Check if bin is already occupied by a different SKU
+            if (!allowMultipleSkus) {
+              const existingInBin = existingProductLocations.find(
+                pl => pl.location?.toUpperCase() === location.toUpperCase() && 
+                      pl.sku?.toUpperCase() !== sku.toUpperCase()
+              );
+              if (existingInBin) {
+                errors.push(`Bin ${location} already contains SKU ${existingInBin.sku} - cannot add ${sku} (multiple SKUs per bin is disabled)`);
+                continue;
+              }
+            }
           } else {
             errors.push(`Location ${location} not found for SKU ${sku}`);
           }

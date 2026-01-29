@@ -39,6 +39,7 @@ export default function Settings() {
     low_stock_threshold: "10",
     critical_stock_threshold: "5",
     enable_low_stock_alerts: "true",
+    allow_multiple_skus_per_bin: "true",
     picking_batch_size: "20",
     auto_release_delay_minutes: "30",
   });
@@ -303,6 +304,33 @@ export default function Settings() {
                   />
                   <p className="text-sm text-muted-foreground">Items at or below this level are flagged as critical</p>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Bin Management</CardTitle>
+              <CardDescription>Configure how bins are managed in the warehouse</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="allow_multiple_skus_per_bin">Allow Multiple SKUs Per Bin</Label>
+                  <p className="text-sm text-muted-foreground">
+                    When enabled, multiple different products can be stored in the same bin location.
+                    When disabled, each bin can only contain one SKU.
+                  </p>
+                </div>
+                <Switch
+                  id="allow_multiple_skus_per_bin"
+                  checked={formData.allow_multiple_skus_per_bin === "true"}
+                  onCheckedChange={(checked) => 
+                    setFormData({ ...formData, allow_multiple_skus_per_bin: checked ? "true" : "false" })
+                  }
+                  disabled={!canEdit}
+                  data-testid="switch-allow-multiple-skus"
+                />
               </div>
             </CardContent>
           </Card>
