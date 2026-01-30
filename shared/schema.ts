@@ -548,26 +548,40 @@ export const insertAdjustmentReasonSchema = createInsertSchema(adjustmentReasons
 export type InsertAdjustmentReason = z.infer<typeof insertAdjustmentReasonSchema>;
 export type AdjustmentReason = typeof adjustmentReasons.$inferSelect;
 
-// Inventory transactions ledger (audit trail)
+// Inventory transactions ledger (audit trail) - Full WMS
+// Every inventory movement is logged here for complete audit trail
 export const inventoryTransactions = pgTable("inventory_transactions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
   variantId: integer("variant_id").references(() => uomVariants.id),
-  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
-  transactionType: varchar("transaction_type", { length: 30 }).notNull(),
+  
+  // Location tracking - for transfers, both are used; for receive/pick, one is null
+  fromLocationId: integer("from_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
+  toLocationId: integer("to_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
+  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // Legacy - kept for compatibility
+  
+  transactionType: varchar("transaction_type", { length: 30 }).notNull(), // receipt, pick, adjustment, transfer, ship, return
   reasonId: integer("reason_id").references(() => adjustmentReasons.id),
-  baseQtyDelta: integer("base_qty_delta").notNull(), // Positive = add, negative = remove
-  variantQtyDelta: integer("variant_qty_delta"), // Delta in variant units
-  baseQtyBefore: integer("base_qty_before"), // Snapshot: on_hand before this change
-  baseQtyAfter: integer("base_qty_after"), // Snapshot: on_hand after this change
-  variantQtyBefore: integer("variant_qty_before"), // Snapshot: variant qty before
-  variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after
-  batchId: varchar("batch_id", { length: 50 }), // Groups transactions from same operation (e.g., CSV upload)
-  sourceState: varchar("source_state", { length: 20 }), // "on_hand", "reserved", "picked", etc.
-  targetState: varchar("target_state", { length: 20 }), // "reserved", "picked", "shipped", etc.
-  orderId: integer("order_id").references(() => orders.id), // Link to order if applicable
+  
+  // Quantity changes - variant units only (no base units needed for display)
+  variantQtyDelta: integer("variant_qty_delta").notNull().default(0), // Positive = add, negative = remove
+  variantQtyBefore: integer("variant_qty_before"), // Snapshot: variant qty before at location
+  variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after at location
+  baseQtyDelta: integer("base_qty_delta").notNull().default(0), // Legacy - kept for compatibility
+  baseQtyBefore: integer("base_qty_before"), // Legacy
+  baseQtyAfter: integer("base_qty_after"), // Legacy
+  
+  batchId: varchar("batch_id", { length: 50 }), // Groups transactions from same operation
+  sourceState: varchar("source_state", { length: 20 }), // "on_hand", "committed", "picked", etc.
+  targetState: varchar("target_state", { length: 20 }), // "committed", "picked", "shipped", etc.
+  
+  // Reference links - which operation triggered this transaction
+  orderId: integer("order_id").references(() => orders.id),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
-  referenceType: varchar("reference_type", { length: 30 }), // "order", "po", "adjustment", etc.
+  receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id), // Link to receiving
+  cycleCountId: integer("cycle_count_id").references(() => cycleCounts.id), // Link to cycle count
+  
+  referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
   referenceId: varchar("reference_id", { length: 100 }), // External reference ID
   notes: text("notes"),
   isImplicit: integer("is_implicit").notNull().default(0), // 1 = auto-generated, 0 = explicit scan
