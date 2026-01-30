@@ -6498,16 +6498,29 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No lines found for this order" });
       }
       
-      // Update all lines to complete status
+      // Update all lines: set receivedQty = expectedQty and status = complete
       let updated = 0;
       for (const line of lines) {
         if (line.status !== "complete") {
-          await storage.updateReceivingLine(line.id, { status: "complete" });
+          await storage.updateReceivingLine(line.id, { 
+            receivedQty: line.expectedQty || 0,
+            status: "complete" 
+          });
           updated++;
         }
       }
       
-      res.json({ message: `Completed ${updated} lines`, updated });
+      // Update order received totals
+      const updatedLines = await storage.getReceivingLines(orderId);
+      await storage.updateReceivingOrder(orderId, {
+        receivedLineCount: updatedLines.filter(l => l.status === "complete").length,
+        receivedTotalUnits: updatedLines.reduce((sum, l) => sum + (l.receivedQty || 0), 0),
+      });
+      
+      // Return updated order with lines for real-time UI update
+      const order = await storage.getReceivingOrderById(orderId);
+      const vendor = order?.vendorId ? await storage.getVendorById(order.vendorId) : null;
+      res.json({ message: `Completed ${updated} lines`, updated, order: { ...order, lines: updatedLines, vendor } });
     } catch (error) {
       console.error("Error completing all lines:", error);
       res.status(500).json({ error: "Failed to complete all lines" });
