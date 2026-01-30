@@ -5286,7 +5286,7 @@ export async function registerRoutes(
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
         LEFT JOIN inventory_levels il ON il.variant_id = uv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE uv.active = 1 AND uv.hierarchy_level > 1
+        WHERE uv.active = 1
         GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
         ORDER BY uv.sku
       `);
