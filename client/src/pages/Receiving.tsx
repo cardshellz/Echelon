@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { 
@@ -108,6 +110,90 @@ interface WarehouseLocation {
   code: string;
   zone: string | null;
   name: string | null;
+}
+
+function LocationTypeahead({ 
+  locations, 
+  value, 
+  onChange,
+  disabled = false
+}: { 
+  locations: WarehouseLocation[];
+  value: number | null;
+  onChange: (locationId: number | null) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  
+  const selectedLocation = locations.find(l => l.id === value);
+  
+  const filteredLocations = search.length > 0
+    ? locations.filter(l => 
+        l.code.toLowerCase().includes(search.toLowerCase()) ||
+        (l.name && l.name.toLowerCase().includes(search.toLowerCase()))
+      ).slice(0, 15)
+    : locations.slice(0, 15);
+  
+  useEffect(() => {
+    if (open && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [open]);
+  
+  if (disabled) {
+    return <span className="text-sm">{selectedLocation?.code || "-"}</span>;
+  }
+  
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button 
+          variant="outline" 
+          size="sm" 
+          className="w-28 h-8 justify-start text-left font-normal truncate"
+        >
+          {selectedLocation?.code || "Select..."}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-48 p-0" align="start">
+        <div className="p-2 border-b">
+          <Input
+            ref={inputRef}
+            placeholder="Type to search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8"
+          />
+        </div>
+        <ScrollArea className="h-48">
+          <div className="p-1">
+            <button
+              className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-accent cursor-pointer"
+              onClick={() => { onChange(null); setOpen(false); setSearch(""); }}
+            >
+              Clear
+            </button>
+            {filteredLocations.map((loc) => (
+              <button
+                key={loc.id}
+                className={`w-full text-left px-2 py-1.5 text-sm rounded hover:bg-accent cursor-pointer ${loc.id === value ? 'bg-accent' : ''}`}
+                onClick={() => { onChange(loc.id); setOpen(false); setSearch(""); }}
+              >
+                {loc.code}
+              </button>
+            ))}
+            {filteredLocations.length === 0 && search && (
+              <div className="px-2 py-4 text-sm text-muted-foreground text-center">
+                No locations found
+              </div>
+            )}
+          </div>
+        </ScrollArea>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string }> = {
@@ -1043,29 +1129,15 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 )}
                               </TableCell>
                               <TableCell>
-                                {selectedReceipt.status !== "closed" ? (
-                                  <Select 
-                                    value={line.putawayLocationId?.toString() || "none"}
-                                    onValueChange={(v) => updateLineMutation.mutate({
-                                      lineId: line.id,
-                                      updates: { putawayLocationId: v !== "none" ? parseInt(v) : null }
-                                    })}
-                                  >
-                                    <SelectTrigger className="w-32 h-8">
-                                      <SelectValue placeholder="Location" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="none">Select...</SelectItem>
-                                      {locations.map((loc) => (
-                                        <SelectItem key={loc.id} value={loc.id.toString()}>
-                                          {loc.code}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                ) : (
-                                  locations.find(l => l.id === line.putawayLocationId)?.code || "-"
-                                )}
+                                <LocationTypeahead
+                                  locations={locations}
+                                  value={line.putawayLocationId}
+                                  onChange={(locationId) => updateLineMutation.mutate({
+                                    lineId: line.id,
+                                    updates: { putawayLocationId: locationId }
+                                  })}
+                                  disabled={selectedReceipt.status === "closed"}
+                                />
                               </TableCell>
                               <TableCell>
                                 <Badge variant={
