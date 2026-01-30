@@ -234,6 +234,24 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
+  const deleteReceiptMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/receiving/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to delete receipt");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      toast({ title: "Receipt deleted" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
   const createVendorMutation = useMutation({
     mutationFn: async (data: typeof newVendor) => {
       const res = await fetch("/api/vendors", {
@@ -665,9 +683,27 @@ DEF-456,25,,,5.00,,Location TBD`;
                       </TableCell>
                       <TableCell>{format(new Date(receipt.createdAt), "MMM d, yyyy")}</TableCell>
                       <TableCell>
-                        <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
-                          <FileText className="h-4 w-4" />
-                        </Button>
+                        <div className="flex gap-1">
+                          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
+                            <FileText className="h-4 w-4" />
+                          </Button>
+                          {receipt.status !== "closed" && (
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={(e) => { 
+                                e.stopPropagation(); 
+                                if (confirm(`Delete receipt ${receipt.receiptNumber}?`)) {
+                                  deleteReceiptMutation.mutate(receipt.id);
+                                }
+                              }}
+                              disabled={deleteReceiptMutation.isPending}
+                              data-testid={`btn-delete-receipt-${receipt.id}`}
+                            >
+                              <Trash2 className="h-4 w-4 text-red-500" />
+                            </Button>
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))

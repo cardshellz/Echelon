@@ -6488,6 +6488,28 @@ export async function registerRoutes(
     }
   });
   
+  // Delete a receiving order (only if not closed)
+  app.delete("/api/receiving/:orderId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      const order = await storage.getReceivingOrder(orderId);
+      
+      if (!order) {
+        return res.status(404).json({ error: "Receiving order not found" });
+      }
+      
+      if (order.status === "closed") {
+        return res.status(400).json({ error: "Cannot delete a closed receiving order" });
+      }
+      
+      await storage.deleteReceivingOrder(orderId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting receiving order:", error);
+      res.status(500).json({ error: "Failed to delete receiving order" });
+    }
+  });
+  
   // Bulk complete all lines in a receiving order
   app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
