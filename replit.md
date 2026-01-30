@@ -46,10 +46,13 @@ Key tables:
 - `shopify_orders`, `shopify_order_items`: Full Shopify data (billing address, financials, notes, tags, variant info, pricing, properties, **requires_shipping**) - populated by external shellz_club app
 
 **Product Identity Architecture:**
-- `catalog_products.id` is the **internal source of truth** for product identity
+- `catalog_products` is the **single source of truth** for SKU lookup across the system
+- `catalog_products.id` is the internal source of truth for product identity
+- `catalog_products.inventoryItemId` links to inventory_items for quantity tracking
 - `shopifyVariantId` is metadata from Shopify sync, not a structural dependency
 - Products can exist without SKUs (many Shopify products don't have SKUs assigned)
 - All product relationships (locations, analytics) link via `catalogProductId`
+- **Receiving, cycle counts, and SKU search all use catalog_products as the single lookup source**
 
 **Order Routing:**
 - ALL orders go into `orders` table (shipping + non-shipping like memberships)

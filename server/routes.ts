@@ -3871,26 +3871,28 @@ export async function registerRoutes(
       
       const searchPattern = `%${query}%`;
       
-      // Search inventory_items.base_sku
+      // Single source of truth: catalog_products
       const result = await db.execute<{
         sku: string;
         name: string;
         source: string;
+        catalogProductId: number;
         inventoryItemId: number | null;
       }>(sql`
         SELECT 
-          ii.base_sku as sku,
-          ii.name,
-          'inventory' as source,
-          ii.id as "inventoryItemId"
-        FROM inventory_items ii
-        WHERE ii.active = 1
-          AND ii.base_sku IS NOT NULL
+          cp.sku as sku,
+          cp.title as name,
+          'catalog' as source,
+          cp.id as "catalogProductId",
+          cp.inventory_item_id as "inventoryItemId"
+        FROM catalog_products cp
+        WHERE cp.status = 'active'
+          AND cp.sku IS NOT NULL
           AND (
-            LOWER(ii.base_sku) LIKE ${searchPattern} OR
-            LOWER(ii.name) LIKE ${searchPattern}
+            LOWER(cp.sku) LIKE ${searchPattern} OR
+            LOWER(cp.title) LIKE ${searchPattern}
           )
-        ORDER BY ii.base_sku
+        ORDER BY cp.sku
         LIMIT ${limit}
       `);
       
@@ -6598,31 +6600,23 @@ export async function registerRoutes(
           continue;
         }
         
-        // Look up variant by SKU
-        const variant = await storage.getUomVariantBySku(sku);
+        // Single source of truth: catalog_products
+        const catalog = catalogBySku.get(sku.toUpperCase());
         let inventoryItemId = null;
-        let uomVariantId = null;
         let catalogProductId = null;
         let productName = sku;
         let productBarcode = barcode || null;
         
-        if (variant) {
-          uomVariantId = variant.id;
-          inventoryItemId = variant.inventoryItemId;
-          productName = variant.name;
-        } else {
-          // Try to find by catalog product
-          const catalog = catalogBySku.get(sku.toUpperCase());
-          if (catalog) {
-            catalogProductId = catalog.id;
-            if (catalog.inventoryItemId) {
-              inventoryItemId = catalog.inventoryItemId;
-            }
-            productName = catalog.title;
-            if (!productBarcode && catalog.barcode) {
-              productBarcode = catalog.barcode;
-            }
+        if (catalog) {
+          catalogProductId = catalog.id;
+          inventoryItemId = catalog.inventoryItemId || null;
+          productName = catalog.title;
+          if (!productBarcode && (catalog as any).barcode) {
+            productBarcode = (catalog as any).barcode;
           }
+        } else {
+          // SKU not found in catalog - add warning but continue (line will be created without inventory link)
+          warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
         }
         
         // Look up location by code first, then by name as fallback
