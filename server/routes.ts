@@ -5253,17 +5253,20 @@ export async function registerRoutes(
 
   // Get all inventory levels - variant-centric view (storable units: packs, boxes, cases)
   // Groups by variant SKU with aggregated quantities across all locations
+  // Qty = total variant_qty across all locations
+  // Pickable = variant_qty in pickable (forward pick) locations only
+  // Committed = order_items.quantity - picked_quantity for pending orders (not yet picked)
+  // Available = Qty - Committed
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const result = await db.execute<{
+      // Step 1: Get inventory quantities from inventory_levels (variant_qty only, no base units)
+      const inventoryResult = await db.execute<{
         variant_id: number;
         variant_sku: string;
         variant_name: string;
         units_per_variant: number;
         base_sku: string | null;
         total_variant_qty: string;
-        total_reserved_base: string;
-        total_picked_base: string;
         location_count: string;
         pickable_variant_qty: string;
       }>(sql`
@@ -5274,8 +5277,6 @@ export async function registerRoutes(
           uv.units_per_variant,
           ii.base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
-          COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
-          COALESCE(SUM(il.picked_base), 0) as total_picked_base,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
           COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
         FROM uom_variants uv
@@ -5287,31 +5288,52 @@ export async function registerRoutes(
         ORDER BY uv.sku
       `);
       
-      const levels = result.rows.map(row => {
+      // Step 2: Get committed quantities from order_items (orders not yet picked/completed)
+      // Committed = quantity that's on orders waiting to be picked
+      const committedResult = await db.execute<{
+        sku: string;
+        committed_qty: string;
+      }>(sql`
+        SELECT 
+          oi.sku,
+          COALESCE(SUM(oi.quantity - COALESCE(oi.picked_quantity, 0)), 0) as committed_qty
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        WHERE o.status IN ('pending', 'ready', 'assigned', 'picking')
+          AND oi.requires_shipping = 1
+        GROUP BY oi.sku
+      `);
+      
+      // Build a map of SKU -> committed qty
+      const committedBySku = new Map<string, number>();
+      for (const row of committedResult.rows) {
+        committedBySku.set(row.sku, parseInt(row.committed_qty) || 0);
+      }
+      
+      const levels = inventoryResult.rows.map(row => {
         const variantQty = parseInt(row.total_variant_qty) || 0;
         const unitsPerVariant = row.units_per_variant || 1;
         const pickableQty = parseInt(row.pickable_variant_qty) || 0;
+        const sku = row.variant_sku;
         
-        // Convert reserved/picked from base units to variant units
-        const reservedBase = parseInt(row.total_reserved_base) || 0;
-        const pickedBase = parseInt(row.total_picked_base) || 0;
-        const committedVariant = Math.ceil((reservedBase + pickedBase) / unitsPerVariant);
+        // Committed comes from orders, not inventory_levels
+        const committed = committedBySku.get(sku) || 0;
         
         // Available = Qty - Committed (all in variant units)
-        const availableVariant = variantQty - committedVariant;
+        const available = variantQty - committed;
         
         return {
           variantId: row.variant_id,
-          sku: row.variant_sku,
+          sku,
           name: row.variant_name,
           unitsPerVariant,
           baseSku: row.base_sku,
           variantQty,
-          onHandBase: variantQty * unitsPerVariant, // Derived, not from DB
-          reservedBase: committedVariant, // Display as variant units, rename field for clarity
-          pickedBase: 0, // Not used separately in display
-          available: availableVariant,
-          totalPieces: variantQty * unitsPerVariant, // Derived
+          onHandBase: 0, // Not used
+          reservedBase: committed, // This is now "committed" from orders
+          pickedBase: 0, // Not used
+          available,
+          totalPieces: 0, // Not used
           locationCount: parseInt(row.location_count) || 0,
           pickableQty,
         };
