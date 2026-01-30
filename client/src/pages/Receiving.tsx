@@ -48,6 +48,8 @@ import {
   CheckCircle,
   Clock,
   AlertCircle,
+  AlertTriangle,
+  XCircle,
   MapPin,
   Building2
 } from "lucide-react";
@@ -217,6 +219,8 @@ export default function Receiving() {
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
+  const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
+  const [showImportResults, setShowImportResults] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [newLine, setNewLine] = useState({
     sku: "",
@@ -411,14 +415,18 @@ DEF-456,25,,,5.00,,Location TBD`;
       const linesMsg = [createdMsg, updatedMsg].filter(Boolean).join(", ");
       
       if (result.errors?.length || result.warnings?.length) {
-        const allWarnings = [...(result.errors || []), ...(result.warnings || [])];
-        console.log("Import warnings:", allWarnings);
-        const warningList = allWarnings.slice(0, 5).join("\n");
-        const moreCount = allWarnings.length > 5 ? `\n...and ${allWarnings.length - 5} more` : "";
+        // Store results for persistent display
+        setImportResults({
+          errors: result.errors || [],
+          warnings: result.warnings || [],
+          created: result.created || 0,
+          updated: result.updated || 0,
+        });
+        setShowImportResults(true);
         toast({ 
-          title: `Import complete with ${allWarnings.length} warnings`, 
-          description: `${totalProcessed} lines (${linesMsg}).\n\nWarnings:\n${warningList}${moreCount}`,
-          duration: 10000,
+          title: `Import complete with issues`, 
+          description: `${totalProcessed} lines processed. Click to view details.`,
+          duration: 5000,
         });
       } else {
         toast({ 
@@ -1436,6 +1444,78 @@ DEF-456,25,,,5.00,,Location TBD`;
                 Add Line
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import Results Dialog - Persistent error/warning log */}
+      <Dialog open={showImportResults} onOpenChange={setShowImportResults}>
+        <DialogContent className="max-w-2xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {importResults?.errors?.length ? (
+                <XCircle className="h-5 w-5 text-red-500" />
+              ) : (
+                <AlertTriangle className="h-5 w-5 text-yellow-500" />
+              )}
+              Import Results
+            </DialogTitle>
+            <DialogDescription>
+              {importResults?.created || 0} lines created, {importResults?.updated || 0} lines updated
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4 max-h-[50vh] overflow-y-auto">
+            {importResults?.errors && importResults.errors.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="font-medium text-red-600 flex items-center gap-1">
+                  <XCircle className="h-4 w-4" />
+                  Errors ({importResults.errors.length})
+                </h4>
+                <div className="bg-red-50 border border-red-200 rounded-md p-3 space-y-1 text-sm">
+                  {importResults.errors.map((err, i) => (
+                    <div key={i} className="text-red-700">{err}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {importResults?.warnings && importResults.warnings.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="font-medium text-yellow-600 flex items-center gap-1">
+                  <AlertTriangle className="h-4 w-4" />
+                  Warnings ({importResults.warnings.length})
+                </h4>
+                <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 space-y-1 text-sm">
+                  {importResults.warnings.map((warn, i) => (
+                    <div key={i} className="text-yellow-700">{warn}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="flex justify-between">
+            <Button
+              variant="outline"
+              onClick={() => {
+                const allIssues = [
+                  ...(importResults?.errors || []).map(e => `ERROR: ${e}`),
+                  ...(importResults?.warnings || []).map(w => `WARNING: ${w}`),
+                ];
+                const blob = new Blob([allIssues.join('\n')], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `import-issues-${new Date().toISOString().split('T')[0]}.txt`;
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+              data-testid="btn-download-issues"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Download Log
+            </Button>
+            <Button onClick={() => setShowImportResults(false)} data-testid="btn-close-results">
+              Close
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
