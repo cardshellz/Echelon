@@ -1,0 +1,26 @@
+4" dyno=web.1 connect=0ms service=12ms status=500 bytes=39 protocol=http1.1 tls=true tls_version=unknown
+2026-01-30T00:26:21.761804+00:00 app[web.1]: Error fetching cycle count: error: column "related_item_id" does not exist
+2026-01-30T00:26:21.761829+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-30T00:26:21.761830+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-30T00:26:21.761830+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37955
+2026-01-30T00:26:21.761831+00:00 app[web.1]:     at async Kv.getCycleCountItems (/app/dist/index.cjs:130:6430)
+2026-01-30T00:26:21.761831+00:00 app[web.1]:     at async /app/dist/index.cjs:307:451 {
+2026-01-30T00:26:21.761831+00:00 app[web.1]:   length: 116,
+2026-01-30T00:26:21.761832+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-30T00:26:21.761833+00:00 app[web.1]:   code: '42703',
+2026-01-30T00:26:21.761833+00:00 app[web.1]:   detail: undefined,
+2026-01-30T00:26:21.761833+00:00 app[web.1]:   hint: undefined,
+2026-01-30T00:26:21.761833+00:00 app[web.1]:   position: '242',
+2026-01-30T00:26:21.761845+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-30T00:26:21.761846+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-30T00:26:21.761846+00:00 app[web.1]:   where: undefined,
+2026-01-30T00:26:21.761846+00:00 app[web.1]:   schema: undefined,
+2026-01-30T00:26:21.761846+00:00 app[web.1]:   table: undefined,
+2026-01-30T00:26:21.761847+00:00 app[web.1]:   column: undefined,
+2026-01-30T00:26:21.761847+00:00 app[web.1]:   dataType: undefined,
+2026-01-30T00:26:21.761847+00:00 app[web.1]:   constraint: undefined,
+2026-01-30T00:26:21.761848+00:00 app[web.1]:   file: 'parse_relation.c',
+2026-01-30T00:26:21.761848+00:00 app[web.1]:   line: '3781',
+2026-01-30T00:26:21.761848+00:00 app[web.1]:   routine: 'errorMissingColumn'
+2026-01-30T00:26:21.761848+00:00 app[web.1]: }
+2026-01-30T00:26:21.766168+00:00 app[web.1]: 12:26:21 AM [express] GET /api/cycle-counts/2 500 in 10ms :: {"error":"Failed to fetch cycle count"}
