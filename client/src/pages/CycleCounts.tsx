@@ -434,7 +434,6 @@ export default function CycleCounts() {
                       onChange={(e) => setQuickCountQty(e.target.value)}
                       className="h-16 text-3xl text-center font-mono flex-1"
                       placeholder="0"
-                      autoFocus
                       data-testid="input-quick-count"
                     />
                     <Button 
@@ -772,46 +771,107 @@ export default function CycleCounts() {
         </div>
 
         <Dialog open={countDialogOpen} onOpenChange={setCountDialogOpen}>
-          <DialogContent>
+          <DialogContent className="max-w-md">
             <DialogHeader>
-              <DialogTitle>Record Count</DialogTitle>
-              <DialogDescription>
-                Location: {selectedItem?.locationCode} | Expected: {selectedItem?.expectedSku} ({selectedItem?.expectedQty})
-              </DialogDescription>
+              <DialogTitle className="flex items-center gap-2">
+                <MapPin className="h-5 w-5 text-blue-600" />
+                {selectedItem?.locationCode}
+              </DialogTitle>
             </DialogHeader>
+            
+            {/* Expected info - prominent display */}
+            <div className="bg-slate-100 rounded-lg p-4 text-center">
+              <div className="text-sm text-muted-foreground">Expected</div>
+              <div className="font-semibold text-lg">{selectedItem?.expectedSku || "(empty)"}</div>
+              <div className="text-3xl font-bold text-blue-600">{selectedItem?.expectedQty}</div>
+            </div>
+            
             <div className="space-y-4">
+              {/* Quick actions */}
+              <div className="flex gap-2">
+                <Button 
+                  variant="secondary" 
+                  className="flex-1"
+                  onClick={() => setCountForm({ 
+                    ...countForm, 
+                    countedQty: String(selectedItem?.expectedQty || 0) 
+                  })}
+                >
+                  Matches ({selectedItem?.expectedQty})
+                </Button>
+                <Button 
+                  variant="outline"
+                  onClick={() => setCountForm({ ...countForm, countedQty: "0" })}
+                >
+                  Empty
+                </Button>
+              </div>
+              
               <div>
                 <Label>Counted SKU</Label>
                 <Input
                   value={countForm.countedSku}
                   onChange={(e) => setCountForm({ ...countForm, countedSku: e.target.value })}
-                  placeholder="Scan or enter SKU"
+                  placeholder="Scan or enter SKU (leave if same)"
                   data-testid="input-counted-sku"
                 />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Change only if different from expected
+                </p>
               </div>
+              
               <div>
                 <Label>Counted Quantity</Label>
-                <Input
-                  type="number"
-                  value={countForm.countedQty}
-                  onChange={(e) => setCountForm({ ...countForm, countedQty: e.target.value })}
-                  placeholder="Enter quantity"
-                  data-testid="input-counted-qty"
-                />
+                <div className="flex gap-2">
+                  <Button 
+                    variant="outline" 
+                    size="icon"
+                    className="h-10 w-12"
+                    onClick={() => setCountForm({ 
+                      ...countForm, 
+                      countedQty: String(Math.max(0, (parseInt(countForm.countedQty) || 0) - 1)) 
+                    })}
+                  >
+                    -
+                  </Button>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    value={countForm.countedQty}
+                    onChange={(e) => setCountForm({ ...countForm, countedQty: e.target.value })}
+                    placeholder="Qty"
+                    className="text-center text-lg"
+                    data-testid="input-counted-qty"
+                  />
+                  <Button 
+                    variant="outline" 
+                    size="icon"
+                    className="h-10 w-12"
+                    onClick={() => setCountForm({ 
+                      ...countForm, 
+                      countedQty: String((parseInt(countForm.countedQty) || 0) + 1) 
+                    })}
+                  >
+                    +
+                  </Button>
+                </div>
               </div>
+              
               <div>
                 <Label>Notes (optional)</Label>
                 <Textarea
                   value={countForm.notes}
                   onChange={(e) => setCountForm({ ...countForm, notes: e.target.value })}
                   placeholder="Any observations..."
+                  rows={2}
                   data-testid="textarea-notes"
                 />
               </div>
             </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setCountDialogOpen(false)}>Cancel</Button>
+            
+            <DialogFooter className="flex-col gap-2 sm:flex-col">
               <Button 
+                className="w-full"
                 onClick={() => selectedItem && countMutation.mutate({
                   itemId: selectedItem.id,
                   data: {
@@ -820,9 +880,12 @@ export default function CycleCounts() {
                     notes: countForm.notes || null,
                   }
                 })}
-                disabled={countMutation.isPending}
+                disabled={countMutation.isPending || countForm.countedQty === ""}
               >
                 Save Count
+              </Button>
+              <Button variant="outline" className="w-full" onClick={() => setCountDialogOpen(false)}>
+                Cancel
               </Button>
             </DialogFooter>
           </DialogContent>
