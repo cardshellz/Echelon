@@ -1,0 +1,25 @@
+at=info method=POST path="/api/receiving/8/close" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=60270f4a-cda8-b879-cac2-df7a7ed4dd7b fwd="67.20.233.54" dyno=web.1 connect=0ms service=46ms status=500 bytes=43 protocol=http1.1 tls=true tls_version=unknown
+2026-01-30T18:39:25.146861+00:00 app[web.1]: Error closing receiving order: error: column "from_location_id" of relation "inventory_transactions" does not exist
+2026-01-30T18:39:25.146882+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-30T18:39:25.146883+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-30T18:39:25.146883+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37955
+2026-01-30T18:39:25.146883+00:00 app[web.1]:     at async Kv.createInventoryTransaction (/app/dist/index.cjs:86:16727)
+2026-01-30T18:39:25.146884+00:00 app[web.1]:     at async /app/dist/index.cjs:374:7738 {
+2026-01-30T18:39:25.146884+00:00 app[web.1]:   length: 151,
+2026-01-30T18:39:25.146884+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-30T18:39:25.146885+00:00 app[web.1]:   code: '42703',
+2026-01-30T18:39:25.146885+00:00 app[web.1]:   detail: undefined,
+2026-01-30T18:39:25.146885+00:00 app[web.1]:   hint: undefined,
+2026-01-30T18:39:25.146885+00:00 app[web.1]:   position: '80',
+2026-01-30T18:39:25.146886+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-30T18:39:25.146886+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-30T18:39:25.146886+00:00 app[web.1]:   where: undefined,
+2026-01-30T18:39:25.146886+00:00 app[web.1]:   schema: undefined,
+2026-01-30T18:39:25.146887+00:00 app[web.1]:   table: undefined,
+2026-01-30T18:39:25.146887+00:00 app[web.1]:   column: undefined,
+2026-01-30T18:39:25.146887+00:00 app[web.1]:   dataType: undefined,
+2026-01-30T18:39:25.146887+00:00 app[web.1]:   constraint: undefined,
+2026-01-30T18:39:25.146887+00:00 app[web.1]:   file: 'parse_target.c',
+2026-01-30T18:39:25.146888+00:00 app[web.1]:   line: '1278',
+2026-01-30T18:39:25.146888+00:00 app[web.1]:   routine: 'checkInsertTargets'
+2026-01-30T18:39:25.146888+00:00 app[web.1]: }
