@@ -102,6 +102,7 @@ The `inventory_transactions` table is an append-only ledger for complete invento
 - **Reference Links**: Links to `receiving_order_id`, `order_id`, `order_item_id`, `cycle_count_id`
 - **Audit Fields**: `user_id`, `notes`, `batch_id` for grouping related transactions
 - **Usage**: All inventory changes (receiving, picking, adjustments, CSV imports) automatically log transactions
+- **Admin UI**: Inventory History page (`/inventory/history`) with filters for transaction type, date range, search. Requires `inventory:audit` permission (admin-only).
 
 ## External Dependencies
 
