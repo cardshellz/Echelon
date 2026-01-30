@@ -6862,16 +6862,30 @@ export async function registerRoutes(
       if (batchId) filters.batchId = batchId as string;
       if (startDate) filters.startDate = new Date(startDate as string);
       if (endDate) filters.endDate = new Date(endDate as string);
-      if (limit) filters.limit = parseInt(limit as string);
-      if (offset) filters.offset = parseInt(offset as string);
+      filters.limit = limit ? Math.min(parseInt(limit as string), 100) : 50;
+      filters.offset = offset ? parseInt(offset as string) : 0;
       
       const transactions = await storage.getInventoryTransactions(filters);
       
-      // Enrich with related data (locations, items, orders)
-      const allLocations = await storage.getAllWarehouseLocations();
-      const allItems = await storage.getAllInventoryItems();
-      const locationMap = new Map(allLocations.map(l => [l.id, l]));
-      const itemMap = new Map(allItems.map(i => [i.id, i]));
+      // Collect unique IDs for batch lookup
+      const locationIds = new Set<number>();
+      const itemIds = new Set<number>();
+      
+      for (const tx of transactions) {
+        if (tx.fromLocationId) locationIds.add(tx.fromLocationId);
+        if (tx.toLocationId) locationIds.add(tx.toLocationId);
+        if (tx.warehouseLocationId) locationIds.add(tx.warehouseLocationId);
+        if (tx.inventoryItemId) itemIds.add(tx.inventoryItemId);
+      }
+      
+      // Batch fetch only needed data
+      const [allLocations, allItems] = await Promise.all([
+        locationIds.size > 0 ? storage.getAllWarehouseLocations() : [],
+        itemIds.size > 0 ? storage.getAllInventoryItems() : []
+      ]);
+      
+      const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
+      const itemMap = new Map(allItems.filter(i => itemIds.has(i.id)).map(i => [i.id, i]));
       
       const enriched = transactions.map(tx => ({
         ...tx,

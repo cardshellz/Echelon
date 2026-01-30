@@ -115,6 +115,7 @@ export default function InventoryHistory() {
   const limit = 50;
 
   const startDate = subDays(new Date(), parseInt(dateRange));
+  const endDate = new Date();
   
   const { data: transactions = [], isLoading, refetch } = useQuery<InventoryTransaction[]>({
     queryKey: ["/api/inventory/transactions", transactionType, dateRange, page],
@@ -122,6 +123,7 @@ export default function InventoryHistory() {
       const params = new URLSearchParams();
       if (transactionType !== "all") params.set("transactionType", transactionType);
       params.set("startDate", startDate.toISOString());
+      params.set("endDate", endDate.toISOString());
       params.set("limit", limit.toString());
       params.set("offset", (page * limit).toString());
       
