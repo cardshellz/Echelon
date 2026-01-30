@@ -144,6 +144,9 @@ export default function Receiving() {
   const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number; inventoryItemId: number | null}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
   const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const [locationSearch, setLocationSearch] = useState("");
+  const [locationResults, setLocationResults] = useState<WarehouseLocation[]>([]);
+  const [showLocationDropdown, setShowLocationDropdown] = useState(false);
   
   // Download CSV template
   const downloadTemplate = () => {
@@ -347,6 +350,8 @@ DEF-456,25,,,5.00,,Location TBD`;
       });
       setSkuSearch("");
       setSkuResults([]);
+      setLocationSearch("");
+      setLocationResults([]);
       toast({ title: "Line added successfully" });
     },
     onError: (error) => {
@@ -397,6 +402,22 @@ DEF-456,25,,,5.00,,Location TBD`;
       toast({ title: "All lines marked complete" });
     },
   });
+
+  // Location search for add line dialog (local filter, no API call needed)
+  const handleLocationSearch = (query: string) => {
+    setLocationSearch(query);
+    if (query.length < 1) {
+      setLocationResults([]);
+      setShowLocationDropdown(false);
+      return;
+    }
+    const filtered = locations.filter(loc => 
+      loc.code.toLowerCase().includes(query.toLowerCase()) ||
+      (loc.name && loc.name.toLowerCase().includes(query.toLowerCase()))
+    ).slice(0, 20);
+    setLocationResults(filtered);
+    setShowLocationDropdown(filtered.length > 0);
+  };
 
   // Debounced SKU search for add line dialog
   const handleSkuSearch = (query: string) => {
@@ -1166,21 +1187,49 @@ DEF-456,25,,,5.00,,Location TBD`;
 
             <div className="space-y-2">
               <Label>Put-away Location</Label>
-              <Select 
-                value={newLine.putawayLocationId}
-                onValueChange={(v) => setNewLine({ ...newLine, putawayLocationId: v })}
-              >
-                <SelectTrigger data-testid="select-add-line-location">
-                  <SelectValue placeholder="Select location..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="relative">
+                <Input
+                  value={locationSearch}
+                  onChange={(e) => handleLocationSearch(e.target.value)}
+                  onFocus={() => {
+                    if (locationSearch.length > 0 && locationResults.length > 0) {
+                      setShowLocationDropdown(true);
+                    } else if (locationSearch.length === 0) {
+                      const initial = locations.slice(0, 20);
+                      setLocationResults(initial);
+                      setShowLocationDropdown(initial.length > 0);
+                    }
+                  }}
+                  onBlur={() => setTimeout(() => setShowLocationDropdown(false), 200)}
+                  placeholder="Search location by code..."
+                  data-testid="input-add-line-location"
+                />
+                {showLocationDropdown && locationResults.length > 0 && (
+                  <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                    {locationResults.map((loc) => (
+                      <button
+                        key={loc.id}
+                        type="button"
+                        className="w-full px-3 py-2 text-left hover:bg-gray-100 text-sm"
+                        onClick={() => {
+                          setNewLine({ ...newLine, putawayLocationId: loc.id.toString() });
+                          setLocationSearch(loc.code);
+                          setShowLocationDropdown(false);
+                        }}
+                        data-testid={`location-option-${loc.code}`}
+                      >
+                        <div className="font-mono">{loc.code}</div>
+                        {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {newLine.putawayLocationId && !locationSearch && (
+                <div className="text-xs text-muted-foreground">
+                  Selected: {locations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-4">
@@ -1188,6 +1237,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                 setShowAddLineDialog(false);
                 setSkuSearch("");
                 setSkuResults([]);
+                setLocationSearch("");
+                setLocationResults([]);
                 setNewLine({
                   sku: "",
                   productName: "",
