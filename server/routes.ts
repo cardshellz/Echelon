@@ -6370,7 +6370,11 @@ export async function registerRoutes(
         receivedBy: userId,
         receivedDate: new Date(),
       });
-      res.json(updated);
+      
+      // Return order with lines included so UI doesn't lose them
+      const lines = await storage.getReceivingLines(id);
+      const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
+      res.json({ ...updated, lines, vendor });
     } catch (error) {
       console.error("Error opening receiving order:", error);
       res.status(500).json({ error: "Failed to open receiving order" });
