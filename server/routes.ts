@@ -6393,29 +6393,28 @@ export async function registerRoutes(
       let linesReceived = 0;
       
       for (const line of lines) {
-        if (line.receivedQty > 0 && line.inventoryItemId && line.putawayLocationId) {
-          // Get or create inventory level at location
-          let level = await storage.getInventoryLevelByItemAndLocation(line.inventoryItemId, line.putawayLocationId);
+        if (line.receivedQty > 0 && line.uomVariantId && line.putawayLocationId) {
+          // Get or create inventory level at location by variantId (source of truth)
+          let level = await storage.getInventoryLevelByLocationAndVariant(line.putawayLocationId, line.uomVariantId);
           
           const baseQtyBefore = level?.onHandBase || 0;
           const qtyToAdd = line.receivedQty;
           const baseQtyAfter = baseQtyBefore + qtyToAdd;
           
           if (level) {
-            // Update existing level - also set variantId if missing
+            // Update existing level
             await storage.updateInventoryLevel(level.id, {
               onHandBase: baseQtyAfter,
-              variantId: line.uomVariantId || level.variantId,
               variantQty: (level.variantQty || 0) + qtyToAdd,
             });
           } else {
-            // Create new level - include variantId for variant-centric inventory tracking
+            // Create new level - variantId is required, inventoryItemId is legacy
             await storage.createInventoryLevel({
-              inventoryItemId: line.inventoryItemId,
+              inventoryItemId: line.inventoryItemId || 0, // Legacy field, will be removed
               warehouseLocationId: line.putawayLocationId,
               onHandBase: qtyToAdd,
               reservedBase: 0,
-              variantId: line.uomVariantId || undefined,
+              variantId: line.uomVariantId,
               variantQty: qtyToAdd,
             });
           }

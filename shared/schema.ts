@@ -488,11 +488,12 @@ export type InsertUomVariant = z.infer<typeof insertUomVariantSchema>;
 export type UomVariant = typeof uomVariants.$inferSelect;
 
 // Inventory levels per location - tracks both physical variant count and base units
+// variantId is the source of truth (links to sellable SKU), inventoryItemId is legacy
 export const inventoryLevels = pgTable("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
+  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id), // Legacy - will be removed
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
-  variantId: integer("variant_id").references(() => uomVariants.id), // Which variant is stored here
+  variantId: integer("variant_id").notNull().references(() => uomVariants.id), // Source of truth - sellable SKU
   variantQty: integer("variant_qty").notNull().default(0), // Physical count of variant units (e.g., 5 boxes)
   onHandBase: integer("on_hand_base").notNull().default(0), // Derived: variantQty * unitsPerVariant
   reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders (in base units)
