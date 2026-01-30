@@ -3862,10 +3862,17 @@ export async function registerRoutes(
   // Search SKUs for typeahead (used in cycle counts, receiving, etc.)
   app.get("/api/inventory/skus/search", async (req, res) => {
     try {
-      const query = String(req.query.q || "").trim();
+      const query = String(req.query.q || "").trim().toLowerCase();
       const limit = parseInt(String(req.query.limit)) || 20;
       
-      // Search inventory_items.base_sku (primary source) and catalog_products.sku
+      if (!query) {
+        return res.json([]);
+      }
+      
+      const searchPattern = `%${query}%`;
+      const startPattern = `${query}%`;
+      
+      // Search inventory_items.base_sku (primary source)
       const result = await db.execute<{
         sku: string;
         name: string;
@@ -3881,13 +3888,12 @@ export async function registerRoutes(
         WHERE ii.active = 1
           AND ii.base_sku IS NOT NULL
           AND (
-            ${query === ""} OR
-            LOWER(ii.base_sku) LIKE ${`%${query.toLowerCase()}%`} OR
-            LOWER(ii.name) LIKE ${`%${query.toLowerCase()}%`}
+            LOWER(ii.base_sku) LIKE ${searchPattern} OR
+            LOWER(ii.name) LIKE ${searchPattern}
           )
         ORDER BY 
-          CASE WHEN LOWER(ii.base_sku) = ${query.toLowerCase()} THEN 0
-               WHEN LOWER(ii.base_sku) LIKE ${`${query.toLowerCase()}%`} THEN 1
+          CASE WHEN LOWER(ii.base_sku) = ${query} THEN 0
+               WHEN LOWER(ii.base_sku) LIKE ${startPattern} THEN 1
                ELSE 2 END,
           ii.base_sku
         LIMIT ${limit}
