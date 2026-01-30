@@ -1,0 +1,25 @@
+ at=info method=GET path="/api/inventory/skus/search?q=shlz&limit=10" host=cardshellz-echelon-f21ea7da3008.herokuapp.com request_id=714a11ac-070d-ecbd-90ef-b1f2a62630a4 fwd="67.20.233.54" dyno=web.1 connect=0ms service=8ms status=500 bytes=33 protocol=http1.1 tls=true tls_version=unknown
+2026-01-30T02:34:02.618142+00:00 app[web.1]: Error searching SKUs: error: for SELECT DISTINCT, ORDER BY expressions must appear in select list
+2026-01-30T02:34:02.618152+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-30T02:34:02.618152+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-30T02:34:02.618152+00:00 app[web.1]:     at async /app/dist/index.cjs:254:14522 {
+2026-01-30T02:34:02.618152+00:00 app[web.1]:   length: 148,
+2026-01-30T02:34:02.618153+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-30T02:34:02.618153+00:00 app[web.1]:   code: '42P10',
+2026-01-30T02:34:02.618153+00:00 app[web.1]:   detail: undefined,
+2026-01-30T02:34:02.618153+00:00 app[web.1]:   hint: undefined,
+2026-01-30T02:34:02.618154+00:00 app[web.1]:   position: '376',
+2026-01-30T02:34:02.618154+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-30T02:34:02.618154+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-30T02:34:02.618154+00:00 app[web.1]:   where: undefined,
+2026-01-30T02:34:02.618154+00:00 app[web.1]:   schema: undefined,
+2026-01-30T02:34:02.618155+00:00 app[web.1]:   table: undefined,
+2026-01-30T02:34:02.618155+00:00 app[web.1]:   column: undefined,
+2026-01-30T02:34:02.618155+00:00 app[web.1]:   dataType: undefined,
+2026-01-30T02:34:02.618156+00:00 app[web.1]:   constraint: undefined,
+2026-01-30T02:34:02.618156+00:00 app[web.1]:   file: 'parse_clause.c',
+2026-01-30T02:34:02.618156+00:00 app[web.1]:   line: '3033',
+2026-01-30T02:34:02.618156+00:00 app[web.1]:   routine: 'transformDistinctClause'
+2026-01-30T02:34:02.618156+00:00 app[web.1]: }
+2026-01-30T02:34:02.622194+00:00 app[web.1]: 2:34:02 AM [express] GET /api/inventory/skus/search 500 in 6ms :: {"error":"Failed to search SKUs"}
+2026-01-30T02:34:04.605757+00:00 heroku[router]: at=info method=POST path="/api/shopify/webhooks/fulfillments/update" host=cardshellz-echelon-f21ea7da

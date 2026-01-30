@@ -3870,16 +3870,15 @@ export async function registerRoutes(
       }
       
       const searchPattern = `%${query}%`;
-      const startPattern = `${query}%`;
       
-      // Search inventory_items.base_sku (primary source)
+      // Search inventory_items.base_sku
       const result = await db.execute<{
         sku: string;
         name: string;
         source: string;
         inventoryItemId: number | null;
       }>(sql`
-        SELECT DISTINCT
+        SELECT 
           ii.base_sku as sku,
           ii.name,
           'inventory' as source,
@@ -3891,11 +3890,7 @@ export async function registerRoutes(
             LOWER(ii.base_sku) LIKE ${searchPattern} OR
             LOWER(ii.name) LIKE ${searchPattern}
           )
-        ORDER BY 
-          CASE WHEN LOWER(ii.base_sku) = ${query} THEN 0
-               WHEN LOWER(ii.base_sku) LIKE ${startPattern} THEN 1
-               ELSE 2 END,
-          ii.base_sku
+        ORDER BY ii.base_sku
         LIMIT ${limit}
       `);
       
