@@ -5253,13 +5253,22 @@ export async function registerRoutes(
 
   // Get all inventory levels - variant-centric view (storable units: packs, boxes, cases)
   // Groups by variant SKU with aggregated quantities across all locations
-  // Qty = total variant_qty across all locations
-  // Pickable = variant_qty in pickable (forward pick) locations only
-  // Committed = order_items.quantity - picked_quantity for pending orders (not yet picked)
-  // Available = Qty - Committed
+  //
+  // WMS INVENTORY STATES:
+  // =====================
+  // 1. Qty (On Hand) = Total physical inventory across ALL locations (variant_qty)
+  // 2. Pickable = Inventory in forward pick locations only (is_pickable = 1)
+  // 3. Committed = Allocated to orders BEFORE picking (order placed, waiting to be picked)
+  //    - Comes from order_items.quantity where order status = pending/ready/assigned
+  //    - Does NOT include items already being picked or picked
+  // 4. Picked = Items currently being picked or picked but not shipped
+  //    - Comes from order_items.picked_quantity where order not yet completed
+  // 5. Available = Qty - Committed - Picked (what can still be sold)
+  //
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      // Step 1: Get inventory quantities from inventory_levels (variant_qty only, no base units)
+      // Step 1: Get inventory quantities from inventory_levels (variant_qty only)
+      // Pickable = variant_qty where warehouse_locations.is_pickable = 1
       const inventoryResult = await db.execute<{
         variant_id: number;
         variant_sku: string;
@@ -5288,26 +5297,50 @@ export async function registerRoutes(
         ORDER BY uv.sku
       `);
       
-      // Step 2: Get committed quantities from order_items (orders not yet picked/completed)
-      // Committed = quantity that's on orders waiting to be picked
+      // Step 2: Get COMMITTED quantities from order_items
+      // Committed = items on orders that are waiting to be picked (not yet in picking process)
+      // Order statuses: pending, ready, assigned = order placed but not being picked yet
       const committedResult = await db.execute<{
         sku: string;
         committed_qty: string;
       }>(sql`
         SELECT 
           oi.sku,
-          COALESCE(SUM(oi.quantity - COALESCE(oi.picked_quantity, 0)), 0) as committed_qty
+          COALESCE(SUM(oi.quantity), 0) as committed_qty
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
-        WHERE o.status IN ('pending', 'ready', 'assigned', 'picking')
+        WHERE o.status IN ('pending', 'ready', 'assigned')
           AND oi.requires_shipping = 1
+          AND COALESCE(oi.picked_quantity, 0) = 0
         GROUP BY oi.sku
       `);
       
-      // Build a map of SKU -> committed qty
+      // Step 3: Get PICKED quantities from order_items
+      // Picked = items that have been picked but order not yet shipped/completed
+      const pickedResult = await db.execute<{
+        sku: string;
+        picked_qty: string;
+      }>(sql`
+        SELECT 
+          oi.sku,
+          COALESCE(SUM(oi.picked_quantity), 0) as picked_qty
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        WHERE o.status IN ('pending', 'ready', 'assigned', 'picking', 'picked', 'packing')
+          AND oi.requires_shipping = 1
+          AND COALESCE(oi.picked_quantity, 0) > 0
+        GROUP BY oi.sku
+      `);
+      
+      // Build maps of SKU -> qty
       const committedBySku = new Map<string, number>();
       for (const row of committedResult.rows) {
         committedBySku.set(row.sku, parseInt(row.committed_qty) || 0);
+      }
+      
+      const pickedBySku = new Map<string, number>();
+      for (const row of pickedResult.rows) {
+        pickedBySku.set(row.sku, parseInt(row.picked_qty) || 0);
       }
       
       const levels = inventoryResult.rows.map(row => {
@@ -5316,11 +5349,12 @@ export async function registerRoutes(
         const pickableQty = parseInt(row.pickable_variant_qty) || 0;
         const sku = row.variant_sku;
         
-        // Committed comes from orders, not inventory_levels
+        // Get committed and picked from orders
         const committed = committedBySku.get(sku) || 0;
+        const picked = pickedBySku.get(sku) || 0;
         
-        // Available = Qty - Committed (all in variant units)
-        const available = variantQty - committed;
+        // Available = Qty - Committed - Picked
+        const available = variantQty - committed - picked;
         
         return {
           variantId: row.variant_id,
@@ -5329,9 +5363,9 @@ export async function registerRoutes(
           unitsPerVariant,
           baseSku: row.base_sku,
           variantQty,
-          onHandBase: 0, // Not used
-          reservedBase: committed, // This is now "committed" from orders
-          pickedBase: 0, // Not used
+          onHandBase: 0, // Not used - no base units in display
+          reservedBase: committed, // "Committed" for display (field name kept for compatibility)
+          pickedBase: picked, // "Picked" for display
           available,
           totalPieces: 0, // Not used
           locationCount: parseInt(row.location_count) || 0,
