@@ -196,7 +196,7 @@ export interface IStorage {
   getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
   getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined>;
   upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
-  upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
+  upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct> & { uomVariantId?: number }): Promise<CatalogProduct>;
   deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
   
   // UOM Variants
@@ -1571,7 +1571,7 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
+  async upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct> & { uomVariantId?: number }): Promise<CatalogProduct> {
     const existing = await this.getCatalogProductByVariantId(variantId);
     
     if (existing) {
@@ -1580,6 +1580,7 @@ export class DatabaseStorage implements IStorage {
           ...data,
           sku: data.sku?.toUpperCase() || existing.sku,
           shopifyVariantId: variantId,
+          uomVariantId: data.uomVariantId ?? existing.uomVariantId,
           updatedAt: new Date(),
         })
         .where(eq(catalogProducts.id, existing.id))
@@ -1589,6 +1590,7 @@ export class DatabaseStorage implements IStorage {
     
     const result = await db.insert(catalogProducts).values({
       inventoryItemId,
+      uomVariantId: data.uomVariantId ?? null,
       shopifyVariantId: variantId,
       sku: data.sku?.toUpperCase() || null,
       title: data.title || "Untitled Product",

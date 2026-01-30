@@ -747,7 +747,8 @@ export type ChannelReservation = typeof channelReservations.$inferSelect;
 // Catalog products - master listing content (source of truth)
 export const catalogProducts = pgTable("catalog_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }).unique(),
+  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id, { onDelete: "set null" }), // Legacy - being deprecated in favor of uomVariantId
+  uomVariantId: integer("uom_variant_id").references(() => uomVariants.id, { onDelete: "set null" }), // Links to sellable variant (source of truth for inventory)
   shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Primary key for Shopify sync
   sku: varchar("sku", { length: 100 }), // Optional - products may not have SKU yet
   title: varchar("title", { length: 500 }).notNull(),

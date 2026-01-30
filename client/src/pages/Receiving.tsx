@@ -225,9 +225,10 @@ export default function Receiving() {
     putawayLocationId: "",
     catalogProductId: null as number | null,
     inventoryItemId: null as number | null,
+    uomVariantId: null as number | null,
   });
   const [skuSearch, setSkuSearch] = useState("");
-  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number; inventoryItemId: number | null}[]>([]);
+  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number | null; inventoryItemId: number; uomVariantId: number; unitsPerVariant: number}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
   const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const [locationSearch, setLocationSearch] = useState("");
@@ -451,6 +452,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         putawayLocationId: "",
         catalogProductId: null,
         inventoryItemId: null,
+        uomVariantId: null,
       });
       setSkuSearch("");
       setSkuResults([]);
@@ -1294,7 +1296,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
                     {skuResults.map((item) => (
                       <button
-                        key={item.catalogProductId}
+                        key={item.uomVariantId}
                         type="button"
                         className="w-full px-3 py-2 text-left hover:bg-gray-100 text-sm"
                         onClick={() => {
@@ -1304,6 +1306,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                             productName: item.name,
                             catalogProductId: item.catalogProductId,
                             inventoryItemId: item.inventoryItemId,
+                            uomVariantId: item.uomVariantId,
                           });
                           setSkuSearch(item.sku);
                           setShowSkuDropdown(false);
@@ -1401,6 +1404,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   putawayLocationId: "",
                   catalogProductId: null,
                   inventoryItemId: null,
+                  uomVariantId: null,
                 });
               }}>
                 Cancel
@@ -1421,6 +1425,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
                       catalogProductId: newLine.catalogProductId,
                       inventoryItemId: newLine.inventoryItemId,
+                      uomVariantId: newLine.uomVariantId,
                     },
                   });
                 }}

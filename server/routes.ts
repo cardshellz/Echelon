@@ -2050,7 +2050,7 @@ export async function registerRoutes(
           
           // Upsert uom_variant by Shopify VARIANT ID
           const existingVariant = await storage.getUomVariantByShopifyVariantId(variant.variantId);
-          await storage.upsertUomVariantByShopifyVariantId(variant.variantId, inventoryItem.id, {
+          const uomVariant = await storage.upsertUomVariantByShopifyVariantId(variant.variantId, inventoryItem.id, {
             sku: variant.sku,
             name: variantName,
             barcode: variant.barcode,
@@ -2065,6 +2065,7 @@ export async function registerRoutes(
           }
           
           // 3. Upsert catalog_products by variant ID (storefront display, one per variant)
+          // Link to BOTH inventoryItem (legacy) and uomVariant (source of truth for Model A)
           const existingCatalog = await storage.getCatalogProductByVariantId(variant.variantId);
           const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, inventoryItem.id, {
             sku: variant.sku,
@@ -2074,6 +2075,7 @@ export async function registerRoutes(
             category: variant.productType,
             tags: variant.tags,
             status: variant.status,
+            uomVariantId: uomVariant.id, // Link to uom_variant (Model A source of truth)
           });
           
           if (existingCatalog) {
@@ -3860,6 +3862,7 @@ export async function registerRoutes(
   });
 
   // Search SKUs for typeahead (used in cycle counts, receiving, etc.)
+  // Model A architecture: uom_variants is source of truth for sellable SKUs
   app.get("/api/inventory/skus/search", async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
@@ -3871,28 +3874,34 @@ export async function registerRoutes(
       
       const searchPattern = `%${query}%`;
       
-      // Single source of truth: catalog_products
+      // Source of truth: uom_variants (sellable SKUs with inventory_item linkage)
+      // Join with catalog_products to get catalogProductId if available
       const result = await db.execute<{
         sku: string;
         name: string;
         source: string;
-        catalogProductId: number;
-        inventoryItemId: number | null;
+        catalogProductId: number | null;
+        inventoryItemId: number;
+        uomVariantId: number;
+        unitsPerVariant: number;
       }>(sql`
         SELECT 
-          cp.sku as sku,
-          cp.title as name,
-          'catalog' as source,
+          uv.sku as sku,
+          uv.name as name,
+          'uom_variant' as source,
           cp.id as "catalogProductId",
-          cp.inventory_item_id as "inventoryItemId"
-        FROM catalog_products cp
-        WHERE cp.status = 'active'
-          AND cp.sku IS NOT NULL
+          uv.inventory_item_id as "inventoryItemId",
+          uv.id as "uomVariantId",
+          uv.units_per_variant as "unitsPerVariant"
+        FROM uom_variants uv
+        LEFT JOIN catalog_products cp ON cp.sku = uv.sku
+        WHERE uv.active = 1
+          AND uv.sku IS NOT NULL
           AND (
-            LOWER(cp.sku) LIKE ${searchPattern} OR
-            LOWER(cp.title) LIKE ${searchPattern}
+            LOWER(uv.sku) LIKE ${searchPattern} OR
+            LOWER(uv.name) LIKE ${searchPattern}
           )
-        ORDER BY cp.sku
+        ORDER BY uv.sku
         LIMIT ${limit}
       `);
       
@@ -6713,6 +6722,15 @@ export async function registerRoutes(
       );
       console.log(`[CSV Import] Loaded ${catalogProducts.length} catalog products, ${catalogBySku.size} with SKUs`);
       
+      // Pre-fetch uom_variants for efficient lookup (Model A source of truth)
+      const allUomVariants = await storage.getAllUomVariants();
+      const uomVariantBySku = new Map(
+        allUomVariants
+          .filter(v => v.sku)
+          .map(v => [v.sku!.toUpperCase(), v])
+      );
+      console.log(`[CSV Import] Loaded ${allUomVariants.length} uom_variants, ${uomVariantBySku.size} with SKUs`);
+      
       for (const line of lines) {
         const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
         
@@ -6721,27 +6739,45 @@ export async function registerRoutes(
           continue;
         }
         
-        // Single source of truth: catalog_products
+        // Model A source of truth: uom_variants (sellable SKUs with inventory_item linkage)
         const lookupKey = sku.toUpperCase();
+        const uomVariant = uomVariantBySku.get(lookupKey);
         const catalog = catalogBySku.get(lookupKey);
-        let inventoryItemId = null;
-        let catalogProductId = null;
+        
+        let inventoryItemId: number | null = null;
+        let uomVariantId: number | null = null;
+        let catalogProductId: number | null = null;
         let productName = sku;
         let productBarcode = barcode || null;
         
-        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" found=${!!catalog}`);
+        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" uomVariant=${!!uomVariant} catalog=${!!catalog}`);
         
-        if (catalog) {
+        if (uomVariant) {
+          // Found in uom_variants - use this as source of truth
+          uomVariantId = uomVariant.id;
+          inventoryItemId = uomVariant.inventoryItemId;
+          productName = uomVariant.name;
+          if (!productBarcode && uomVariant.barcode) {
+            productBarcode = uomVariant.barcode;
+          }
+          // Also get catalogProductId if exists
+          if (catalog) {
+            catalogProductId = catalog.id;
+          }
+          console.log(`[CSV Import] SKU "${sku}" -> uomVariantId=${uomVariantId}, inventoryItemId=${inventoryItemId}, catalogProductId=${catalogProductId}`);
+        } else if (catalog) {
+          // Fallback to catalog_products (legacy path)
           catalogProductId = catalog.id;
           inventoryItemId = catalog.inventoryItemId || null;
           productName = catalog.title;
-          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, inventoryItemId=${inventoryItemId}, title="${productName}"`);
+          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, inventoryItemId=${inventoryItemId} (legacy path, no uom_variant)`);
           if (!productBarcode && (catalog as any).barcode) {
             productBarcode = (catalog as any).barcode;
           }
+          warnings.push(`SKU ${sku} found in catalog but not in uom_variants - please set up UOM hierarchy`);
         } else {
-          // SKU not found in catalog - add warning but continue (line will be created without inventory link)
-          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in catalog_products`);
+          // SKU not found anywhere - add warning but continue
+          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in uom_variants or catalog_products`);
           warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
         }
         
