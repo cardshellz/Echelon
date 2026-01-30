@@ -480,13 +480,31 @@ DEF-456,25,,,5.00,,Location TBD`;
     onSuccess: (updatedLine) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       if (selectedReceipt && selectedReceipt.lines) {
+        const updatedLines = selectedReceipt.lines.map(line => 
+          line.id === updatedLine.id ? updatedLine : line
+        );
         setSelectedReceipt({
           ...selectedReceipt,
-          lines: selectedReceipt.lines.map(line => 
-            line.id === updatedLine.id ? updatedLine : line
-          )
+          lines: updatedLines
         });
+        
+        // Check if the line was completed
+        if (updatedLine.status === "complete") {
+          // Check if all lines are now complete
+          const allComplete = updatedLines.every(l => l.status === "complete");
+          if (allComplete) {
+            toast({ 
+              title: "All lines complete!", 
+              description: "Receipt is ready to close. Click 'Close & Update Inventory' to finalize.",
+            });
+          } else {
+            toast({ title: "Line marked complete" });
+          }
+        }
       }
+    },
+    onError: () => {
+      toast({ title: "Failed to update line", variant: "destructive" });
     },
   });
 
