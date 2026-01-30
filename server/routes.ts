@@ -5262,7 +5262,6 @@ export async function registerRoutes(
         units_per_variant: number;
         base_sku: string | null;
         total_variant_qty: string;
-        total_on_hand_base: string;
         total_reserved_base: string;
         total_picked_base: string;
         location_count: string;
@@ -5275,7 +5274,6 @@ export async function registerRoutes(
           uv.units_per_variant,
           ii.base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
-          COALESCE(SUM(il.on_hand_base), 0) as total_on_hand_base,
           COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
           COALESCE(SUM(il.picked_base), 0) as total_picked_base,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
@@ -5291,15 +5289,15 @@ export async function registerRoutes(
       
       const levels = result.rows.map(row => {
         const variantQty = parseInt(row.total_variant_qty) || 0;
-        const reservedBase = parseInt(row.total_reserved_base) || 0;
-        const pickedBase = parseInt(row.total_picked_base) || 0;
         const unitsPerVariant = row.units_per_variant || 1;
         const pickableQty = parseInt(row.pickable_variant_qty) || 0;
         
-        // Calculate committed and available in variant units (packages)
-        // committed = reserved + picked, converted to variant units
+        // Convert reserved/picked from base units to variant units
+        const reservedBase = parseInt(row.total_reserved_base) || 0;
+        const pickedBase = parseInt(row.total_picked_base) || 0;
         const committedVariant = Math.ceil((reservedBase + pickedBase) / unitsPerVariant);
-        // available = total variant qty - committed
+        
+        // Available = Qty - Committed (all in variant units)
         const availableVariant = variantQty - committedVariant;
         
         return {
@@ -5309,11 +5307,11 @@ export async function registerRoutes(
           unitsPerVariant,
           baseSku: row.base_sku,
           variantQty,
-          onHandBase: parseInt(row.total_on_hand_base) || 0,
-          reservedBase,
-          pickedBase: pickedBase,
+          onHandBase: variantQty * unitsPerVariant, // Derived, not from DB
+          reservedBase: committedVariant, // Display as variant units, rename field for clarity
+          pickedBase: 0, // Not used separately in display
           available: availableVariant,
-          totalPieces: parseInt(row.total_on_hand_base) || 0,
+          totalPieces: variantQty * unitsPerVariant, // Derived
           locationCount: parseInt(row.location_count) || 0,
           pickableQty,
         };
