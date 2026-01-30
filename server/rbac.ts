@@ -38,6 +38,7 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "inventory", action: "adjust", description: "Make inventory adjustments", category: "inventory" },
   { resource: "inventory", action: "upload", description: "Bulk upload inventory via CSV", category: "inventory" },
   { resource: "inventory", action: "receive", description: "Receive inventory shipments", category: "inventory" },
+  { resource: "inventory", action: "audit", description: "View inventory transaction history and audit logs", category: "inventory" },
   
   // Orders
   { resource: "orders", action: "view", description: "View orders list", category: "orders" },
