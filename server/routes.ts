@@ -3859,6 +3859,47 @@ export async function registerRoutes(
     }
   });
 
+  // Search SKUs for typeahead (used in cycle counts, receiving, etc.)
+  app.get("/api/inventory/skus/search", async (req, res) => {
+    try {
+      const query = String(req.query.q || "").trim();
+      const limit = parseInt(String(req.query.limit)) || 20;
+      
+      // Search inventory_items.base_sku (primary source) and catalog_products.sku
+      const result = await db.execute<{
+        sku: string;
+        name: string;
+        source: string;
+        inventoryItemId: number | null;
+      }>(sql`
+        SELECT DISTINCT
+          ii.base_sku as sku,
+          ii.name,
+          'inventory' as source,
+          ii.id as "inventoryItemId"
+        FROM inventory_items ii
+        WHERE ii.active = 1
+          AND ii.base_sku IS NOT NULL
+          AND (
+            ${query === ""} OR
+            LOWER(ii.base_sku) LIKE ${`%${query.toLowerCase()}%`} OR
+            LOWER(ii.name) LIKE ${`%${query.toLowerCase()}%`}
+          )
+        ORDER BY 
+          CASE WHEN LOWER(ii.base_sku) = ${query.toLowerCase()} THEN 0
+               WHEN LOWER(ii.base_sku) LIKE ${`${query.toLowerCase()}%`} THEN 1
+               ELSE 2 END,
+          ii.base_sku
+        LIMIT ${limit}
+      `);
+      
+      res.json(result.rows);
+    } catch (error) {
+      console.error("Error searching SKUs:", error);
+      res.status(500).json({ error: "Failed to search SKUs" });
+    }
+  });
+
   // Adjustment Reasons API
   app.get("/api/inventory/adjustment-reasons", async (req, res) => {
     try {

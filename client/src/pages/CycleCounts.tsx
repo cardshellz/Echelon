@@ -782,51 +782,41 @@ export default function CycleCounts() {
             {/* Expected info - prominent display */}
             <div className="bg-slate-100 rounded-lg p-4 text-center">
               <div className="text-sm text-muted-foreground">Expected</div>
-              <div className="font-semibold text-lg">{selectedItem?.expectedSku || "(empty)"}</div>
+              <div className="font-semibold text-lg">{selectedItem?.expectedSku || "(empty bin)"}</div>
               <div className="text-3xl font-bold text-blue-600">{selectedItem?.expectedQty}</div>
             </div>
             
             <div className="space-y-4">
-              {/* Quick actions */}
-              <div className="flex gap-2">
-                <Button 
-                  variant="secondary" 
-                  className="flex-1"
-                  onClick={() => setCountForm({ 
-                    ...countForm, 
-                    countedQty: String(selectedItem?.expectedQty || 0) 
-                  })}
-                >
-                  Matches ({selectedItem?.expectedQty})
-                </Button>
-                <Button 
-                  variant="outline"
-                  onClick={() => setCountForm({ ...countForm, countedQty: "0" })}
-                >
-                  Empty
-                </Button>
-              </div>
+              {/* Primary action: Confirm match */}
+              <Button 
+                variant="default" 
+                size="lg"
+                className="w-full h-14 text-lg bg-emerald-600 hover:bg-emerald-700"
+                onClick={() => selectedItem && countMutation.mutate({
+                  itemId: selectedItem.id,
+                  data: {
+                    countedSku: selectedItem.expectedSku,
+                    countedQty: selectedItem.expectedQty,
+                    notes: null,
+                  }
+                })}
+                disabled={countMutation.isPending}
+                data-testid="button-confirm-match"
+              >
+                <Check className="h-5 w-5 mr-2" />
+                Confirm Match (SKU & Qty)
+              </Button>
               
-              <div>
-                <Label>Counted SKU</Label>
-                <Input
-                  value={countForm.countedSku}
-                  onChange={(e) => setCountForm({ ...countForm, countedSku: e.target.value })}
-                  placeholder="Scan or enter SKU (leave if same)"
-                  data-testid="input-counted-sku"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  Change only if different from expected
-                </p>
-              </div>
+              <div className="text-center text-sm text-muted-foreground">— or enter different count —</div>
               
+              {/* Quantity section */}
               <div>
-                <Label>Counted Quantity</Label>
-                <div className="flex gap-2">
+                <Label>Actual Quantity in Bin</Label>
+                <div className="flex gap-2 mt-1">
                   <Button 
                     variant="outline" 
                     size="icon"
-                    className="h-10 w-12"
+                    className="h-12 w-14 text-xl"
                     onClick={() => setCountForm({ 
                       ...countForm, 
                       countedQty: String(Math.max(0, (parseInt(countForm.countedQty) || 0) - 1)) 
@@ -840,13 +830,13 @@ export default function CycleCounts() {
                     value={countForm.countedQty}
                     onChange={(e) => setCountForm({ ...countForm, countedQty: e.target.value })}
                     placeholder="Qty"
-                    className="text-center text-lg"
+                    className="text-center text-xl h-12 flex-1"
                     data-testid="input-counted-qty"
                   />
                   <Button 
                     variant="outline" 
                     size="icon"
-                    className="h-10 w-12"
+                    className="h-12 w-14 text-xl"
                     onClick={() => setCountForm({ 
                       ...countForm, 
                       countedQty: String((parseInt(countForm.countedQty) || 0) + 1) 
@@ -855,8 +845,48 @@ export default function CycleCounts() {
                     +
                   </Button>
                 </div>
+                <div className="flex gap-2 mt-2">
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => setCountForm({ ...countForm, countedQty: "0" })}
+                  >
+                    Bin Empty
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    className="flex-1"
+                    onClick={() => setCountForm({ ...countForm, countedQty: String(selectedItem?.expectedQty || 0) })}
+                  >
+                    Same as Expected
+                  </Button>
+                </div>
               </div>
               
+              {/* SKU section - only show if different */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <Label>Different SKU?</Label>
+                  <span className="text-xs text-muted-foreground">Only if product is different</span>
+                </div>
+                <Input
+                  value={countForm.countedSku === selectedItem?.expectedSku ? "" : countForm.countedSku}
+                  onChange={(e) => setCountForm({ ...countForm, countedSku: e.target.value || selectedItem?.expectedSku || "" })}
+                  placeholder={`Leave blank if same as ${selectedItem?.expectedSku}`}
+                  className="mt-1"
+                  data-testid="input-counted-sku"
+                />
+                {countForm.countedSku && countForm.countedSku !== selectedItem?.expectedSku && (
+                  <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    This will create a SKU mismatch variance
+                  </p>
+                )}
+              </div>
+              
+              {/* Notes */}
               <div>
                 <Label>Notes (optional)</Label>
                 <Textarea
@@ -875,7 +905,7 @@ export default function CycleCounts() {
                 onClick={() => selectedItem && countMutation.mutate({
                   itemId: selectedItem.id,
                   data: {
-                    countedSku: countForm.countedSku || null,
+                    countedSku: countForm.countedSku || selectedItem.expectedSku,
                     countedQty: parseInt(countForm.countedQty) || 0,
                     notes: countForm.notes || null,
                   }
