@@ -115,3 +115,6 @@ The receiving system handles inventory intake from vendors and supports initial 
 - **CSV Bulk Import**: Upload CSV files (format: `sku,qty,location`) for initial inventory load - looks up variants by SKU, creates receiving lines, and assigns warehouse locations
 - **Inventory Updates**: When a receiving order is closed, it creates inventory_transactions for audit trail and updates inventory_levels at the put-away locations
 - **Navigation**: Accessible via Purchasing → Receiving in the sidebar
+
+### Future Refactoring Tasks
+- **Deprecate product_locations for picking**: Currently picking looks up bin locations via `product_locations` table (static assignment). Should refactor to use `inventory_levels` instead - this would pick from bins that actually HAVE stock rather than where products are "assigned." Would make picking smarter and potentially allow deprecating `product_locations` table entirely.
