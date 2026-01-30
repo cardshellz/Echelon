@@ -122,14 +122,15 @@ export class InventoryService {
       reservedBase: baseUnits 
     });
 
+    // Reserve is a state change only, not a physical movement - no variantQtyDelta
     await this.logTransaction({
       inventoryItemId,
       warehouseLocationId, // Legacy
       transactionType: "reserve",
-      variantQtyDelta: baseUnits,
-      baseQtyDelta: baseUnits,
+      variantQtyDelta: 0, // No physical movement
+      baseQtyDelta: baseUnits, // Legacy - tracks reservation amount
       sourceState: "on_hand",
-      targetState: "reserved",
+      targetState: "committed", // Use "committed" not "reserved" per WMS spec
       orderId,
       orderItemId,
       referenceType: "order",
@@ -161,14 +162,15 @@ export class InventoryService {
       await storage.adjustInventoryLevel(levelAtLocation.id, { reservedBase: -baseUnits });
     }
 
+    // Unreserve is a state change only, not a physical movement
     await this.logTransaction({
       inventoryItemId,
       warehouseLocationId, // Legacy
       transactionType: "unreserve",
-      variantQtyDelta: -baseUnits,
-      baseQtyDelta: -baseUnits,
-      sourceState: "reserved",
-      targetState: "on_hand",
+      variantQtyDelta: 0, // No physical movement
+      baseQtyDelta: -baseUnits, // Legacy - tracks released amount
+      sourceState: "committed", // Was "committed" (reserved)
+      targetState: "on_hand", // Back to available
       orderId,
       orderItemId,
       referenceType: "order",
@@ -214,6 +216,9 @@ export class InventoryService {
     const variantQtyBefore = levelAtLocation.variantQty || 0;
     const variantQtyAfter = Math.max(0, variantQtyBefore - baseUnits);
     
+    // sourceState depends on whether we had a reservation (committed) or not (on_hand)
+    const sourceState = reservedToRelease > 0 ? "committed" : "on_hand";
+    
     await this.logTransaction({
       inventoryItemId,
       fromLocationId: warehouseLocationId, // Pick = FROM location
@@ -223,7 +228,7 @@ export class InventoryService {
       variantQtyBefore,
       variantQtyAfter,
       baseQtyDelta: -baseUnits,
-      sourceState: "on_hand",
+      sourceState, // committed (was reserved) or on_hand (immediate pick)
       targetState: "picked",
       orderId,
       referenceType: "order",
@@ -533,14 +538,15 @@ export class InventoryService {
       });
     }
 
+    // Backorder is a demand-only record, no physical movement and no existing stock
     await this.logTransaction({
       inventoryItemId,
       warehouseLocationId, // Legacy
       transactionType: "reserve",
-      variantQtyDelta: baseUnits,
-      baseQtyDelta: baseUnits,
-      sourceState: "backorder",
-      targetState: "backorder",
+      variantQtyDelta: 0, // No physical movement - demand tracking only
+      baseQtyDelta: baseUnits, // Legacy - tracks backorder demand
+      sourceState: "external", // No stock exists - demand from external/future source
+      targetState: "committed", // Committed demand (backordered)
       orderId,
       orderItemId,
       referenceType: "order",

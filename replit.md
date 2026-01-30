@@ -83,6 +83,26 @@ Echelon acts as the source of truth for inventory, managing on-hand and availabl
 ### Picking Logs (Audit Trail)
 A comprehensive, append-only `picking_logs` table captures all picking actions for auditing. It includes timestamps, action types, picker info, order context, item details, quantities, and status snapshots, allowing for querying and generation of order timelines.
 
+### Inventory Transactions Ledger (Full WMS - Phase 1)
+The `inventory_transactions` table is an append-only ledger for complete inventory movement audit trail:
+- **Transaction Types**: `receipt`, `pick`, `adjustment`, `transfer`, `ship`, `return`, `replenish`, `reserve`, `unreserve`, `csv_upload`
+- **Location Tracking**: `from_location_id` (source) and `to_location_id` (destination) for all movements
+  - `null` fromLocationId = external source (receipt, CSV import)
+  - `null` toLocationId = external destination (ship)
+  - Both set = internal transfer/replenish
+- **Quantity Tracking**: `variant_qty_delta` with before/after snapshots
+  - Physical movements (pick, ship, receive) have non-zero variantQtyDelta
+  - State-only changes (reserve, unreserve) have variantQtyDelta=0
+- **State Tracking**: `source_state` and `target_state` using standard states:
+  - `on_hand` - available inventory
+  - `committed` - reserved for orders
+  - `picked` - in picker cart
+  - `shipped` - left the building
+  - `external` - outside the warehouse
+- **Reference Links**: Links to `receiving_order_id`, `order_id`, `order_item_id`, `cycle_count_id`
+- **Audit Fields**: `user_id`, `notes`, `batch_id` for grouping related transactions
+- **Usage**: All inventory changes (receiving, picking, adjustments, CSV imports) automatically log transactions
+
 ## External Dependencies
 
 ### Database
