@@ -6420,7 +6420,7 @@ export async function registerRoutes(
       const orderId = parseInt(req.params.orderId);
       const { sku, productName, expectedQty, inventoryItemId, uomVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
       
-      const line = await storage.createReceivingLine({
+      await storage.createReceivingLine({
         receivingOrderId: orderId,
         sku: sku || null,
         productName: productName || null,
@@ -6443,7 +6443,10 @@ export async function registerRoutes(
         expectedTotalUnits: lines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
       });
       
-      res.status(201).json(line);
+      // Return updated order with lines and vendor (matching GET pattern)
+      const order = await storage.getReceivingOrderById(orderId);
+      const vendor = order?.vendorId ? await storage.getVendorById(order.vendorId) : null;
+      res.status(201).json({ ...order, lines, vendor });
     } catch (error) {
       console.error("Error creating receiving line:", error);
       res.status(500).json({ error: "Failed to create receiving line" });

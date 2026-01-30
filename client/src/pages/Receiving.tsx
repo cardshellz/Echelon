@@ -131,6 +131,19 @@ export default function Receiving() {
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
+  const [showAddLineDialog, setShowAddLineDialog] = useState(false);
+  const [newLine, setNewLine] = useState({
+    sku: "",
+    productName: "",
+    expectedQty: "1",
+    putawayLocationId: "",
+    catalogProductId: null as number | null,
+    inventoryItemId: null as number | null,
+  });
+  const [skuSearch, setSkuSearch] = useState("");
+  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number; inventoryItemId: number | null}[]>([]);
+  const [showSkuDropdown, setShowSkuDropdown] = useState(false);
+  const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   
   // Download CSV template
   const downloadTemplate = () => {
@@ -318,8 +331,30 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to add line");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (updatedOrder) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (updatedOrder && selectedReceipt) {
+        setSelectedReceipt(updatedOrder);
+      }
+      setShowAddLineDialog(false);
+      setNewLine({
+        sku: "",
+        productName: "",
+        expectedQty: "1",
+        putawayLocationId: "",
+        catalogProductId: null,
+        inventoryItemId: null,
+      });
+      setSkuSearch("");
+      setSkuResults([]);
+      toast({ title: "Line added successfully" });
+    },
+    onError: (error) => {
+      toast({ 
+        title: "Failed to add line", 
+        description: error.message,
+        variant: "destructive" 
+      });
     },
   });
 
@@ -362,6 +397,32 @@ DEF-456,25,,,5.00,,Location TBD`;
       toast({ title: "All lines marked complete" });
     },
   });
+
+  // Debounced SKU search for add line dialog
+  const handleSkuSearch = (query: string) => {
+    setSkuSearch(query);
+    if (skuSearchTimeout) {
+      clearTimeout(skuSearchTimeout);
+    }
+    if (query.length < 2) {
+      setSkuResults([]);
+      setShowSkuDropdown(false);
+      return;
+    }
+    const timeout = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(query)}&limit=10`);
+        if (res.ok) {
+          const results = await res.json();
+          setSkuResults(results);
+          setShowSkuDropdown(results.length > 0);
+        }
+      } catch (error) {
+        console.error("SKU search error:", error);
+      }
+    }, 300);
+    setSkuSearchTimeout(timeout);
+  };
 
   // Filter receipts
   const filteredReceipts = receipts.filter(r => 
@@ -868,8 +929,19 @@ DEF-456,25,,,5.00,,Location TBD`;
 
                 {/* Lines table */}
                 <Card>
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 flex flex-row items-center justify-between">
                     <CardTitle className="text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
+                    {selectedReceipt.status !== "closed" && (
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => setShowAddLineDialog(true)}
+                        data-testid="btn-add-line"
+                      >
+                        <Plus className="h-4 w-4 mr-1" />
+                        Add Line
+                      </Button>
+                    )}
                   </CardHeader>
                   <CardContent className="p-0">
                     <Table>
@@ -1020,6 +1092,133 @@ DEF-456,25,,,5.00,,Location TBD`;
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import Lines
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Line Dialog */}
+      <Dialog open={showAddLineDialog} onOpenChange={setShowAddLineDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Line</DialogTitle>
+            <DialogDescription>
+              Add a product line to this receiving order.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>SKU</Label>
+              <div className="relative">
+                <Input
+                  value={skuSearch}
+                  onChange={(e) => handleSkuSearch(e.target.value)}
+                  onFocus={() => skuResults.length > 0 && setShowSkuDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowSkuDropdown(false), 200)}
+                  placeholder="Search by SKU or product name..."
+                  data-testid="input-add-line-sku"
+                />
+                {showSkuDropdown && skuResults.length > 0 && (
+                  <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                    {skuResults.map((item) => (
+                      <button
+                        key={item.catalogProductId}
+                        type="button"
+                        className="w-full px-3 py-2 text-left hover:bg-gray-100 text-sm"
+                        onClick={() => {
+                          setNewLine({
+                            ...newLine,
+                            sku: item.sku,
+                            productName: item.name,
+                            catalogProductId: item.catalogProductId,
+                            inventoryItemId: item.inventoryItemId,
+                          });
+                          setSkuSearch(item.sku);
+                          setShowSkuDropdown(false);
+                        }}
+                        data-testid={`sku-option-${item.sku}`}
+                      >
+                        <div className="font-mono">{item.sku}</div>
+                        <div className="text-xs text-muted-foreground truncate">{item.name}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {newLine.sku && (
+                <div className="text-xs text-muted-foreground">
+                  Selected: {newLine.sku} - {newLine.productName}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label>Expected Qty</Label>
+              <Input
+                type="number"
+                value={newLine.expectedQty}
+                onChange={(e) => setNewLine({ ...newLine, expectedQty: e.target.value })}
+                min="1"
+                data-testid="input-add-line-expected"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Put-away Location</Label>
+              <Select 
+                value={newLine.putawayLocationId}
+                onValueChange={(v) => setNewLine({ ...newLine, putawayLocationId: v })}
+              >
+                <SelectTrigger data-testid="select-add-line-location">
+                  <SelectValue placeholder="Select location..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {locations.map((loc) => (
+                    <SelectItem key={loc.id} value={loc.id.toString()}>
+                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4">
+              <Button variant="outline" onClick={() => {
+                setShowAddLineDialog(false);
+                setSkuSearch("");
+                setSkuResults([]);
+                setNewLine({
+                  sku: "",
+                  productName: "",
+                  expectedQty: "1",
+                  putawayLocationId: "",
+                  catalogProductId: null,
+                  inventoryItemId: null,
+                });
+              }}>
+                Cancel
+              </Button>
+              <Button 
+                onClick={() => {
+                  if (!selectedReceipt || !newLine.sku) return;
+                  addLineMutation.mutate({
+                    orderId: selectedReceipt.id,
+                    line: {
+                      sku: newLine.sku,
+                      productName: newLine.productName,
+                      expectedQty: parseInt(newLine.expectedQty) || 1,
+                      putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
+                      catalogProductId: newLine.catalogProductId,
+                      inventoryItemId: newLine.inventoryItemId,
+                    },
+                  });
+                }}
+                disabled={!newLine.sku || addLineMutation.isPending}
+                data-testid="btn-confirm-add-line"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Add Line
               </Button>
             </div>
           </div>
