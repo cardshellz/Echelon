@@ -6418,14 +6418,14 @@ export async function registerRoutes(
   app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const { sku, productName, expectedQty, inventoryItemId, uomVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
+      const { sku, productName, expectedQty, receivedQty, status, inventoryItemId, uomVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
       
       await storage.createReceivingLine({
         receivingOrderId: orderId,
         sku: sku || null,
         productName: productName || null,
         expectedQty: expectedQty || 0,
-        receivedQty: 0,
+        receivedQty: receivedQty || 0,
         damagedQty: 0,
         inventoryItemId: inventoryItemId || null,
         uomVariantId: uomVariantId || null,
@@ -6433,7 +6433,7 @@ export async function registerRoutes(
         barcode: barcode || null,
         unitCost: unitCost || null,
         putawayLocationId: putawayLocationId || null,
-        status: "pending",
+        status: status || "pending",
       });
       
       // Update order line count

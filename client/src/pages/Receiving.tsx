@@ -1199,7 +1199,7 @@ DEF-456,25,,,5.00,,Location TBD`;
             </div>
 
             <div className="space-y-2">
-              <Label>Expected Qty</Label>
+              <Label>{selectedReceipt?.sourceType === "blind" ? "Quantity" : "Expected Qty"}</Label>
               <Input
                 type="number"
                 value={newLine.expectedQty}
@@ -1207,6 +1207,11 @@ DEF-456,25,,,5.00,,Location TBD`;
                 min="1"
                 data-testid="input-add-line-expected"
               />
+              {selectedReceipt?.sourceType === "blind" && (
+                <div className="text-xs text-muted-foreground">
+                  For initial inventory loads, this is the quantity you're adding to inventory.
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -1277,12 +1282,16 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Button 
                 onClick={() => {
                   if (!selectedReceipt || !newLine.sku) return;
+                  const qty = parseInt(newLine.expectedQty) || 1;
+                  const isBlind = selectedReceipt.sourceType === "blind";
                   addLineMutation.mutate({
                     orderId: selectedReceipt.id,
                     line: {
                       sku: newLine.sku,
                       productName: newLine.productName,
-                      expectedQty: parseInt(newLine.expectedQty) || 1,
+                      expectedQty: qty,
+                      receivedQty: isBlind ? qty : 0,
+                      status: isBlind ? "complete" : "pending",
                       putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
                       catalogProductId: newLine.catalogProductId,
                       inventoryItemId: newLine.inventoryItemId,
