@@ -211,16 +211,12 @@ export interface IStorage {
   
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
-  getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]>;
   getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
-  getInventoryLevelByItemAndLocation(inventoryItemId: number, warehouseLocationId: number): Promise<InventoryLevel | undefined>;
   createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
   updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null>;
-  getTotalOnHandByItemId(inventoryItemId: number, pickableOnly?: boolean): Promise<number>;
-  getTotalReservedByItemId(inventoryItemId: number): Promise<number>;
   getTotalOnHandByVariantId(variantId: number, pickableOnly?: boolean): Promise<number>;
   getTotalReservedByVariantId(variantId: number): Promise<number>;
   
@@ -1715,13 +1711,6 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(inventoryLevels);
   }
 
-  async getInventoryLevelsByItemId(inventoryItemId: number): Promise<InventoryLevel[]> {
-    return await db
-      .select()
-      .from(inventoryLevels)
-      .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
-  }
-
   async getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]> {
     return await db
       .select()
@@ -1736,17 +1725,6 @@ export class DatabaseStorage implements IStorage {
       .where(and(
         eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
         eq(inventoryLevels.variantId, variantId)
-      ));
-    return result[0];
-  }
-
-  async getInventoryLevelByItemAndLocation(inventoryItemId: number, warehouseLocationId: number): Promise<InventoryLevel | undefined> {
-    const result = await db
-      .select()
-      .from(inventoryLevels)
-      .where(and(
-        eq(inventoryLevels.inventoryItemId, inventoryItemId),
-        eq(inventoryLevels.warehouseLocationId, warehouseLocationId)
       ));
     return result[0];
   }
@@ -1831,34 +1809,6 @@ export class DatabaseStorage implements IStorage {
       .where(eq(inventoryLevels.id, id))
       .returning();
     return result[0] || null;
-  }
-
-  async getTotalOnHandByItemId(inventoryItemId: number, pickableOnly: boolean = false): Promise<number> {
-    if (pickableOnly) {
-      const result = await db
-        .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)` })
-        .from(inventoryLevels)
-        .innerJoin(warehouseLocations, eq(inventoryLevels.warehouseLocationId, warehouseLocations.id))
-        .where(and(
-          eq(inventoryLevels.inventoryItemId, inventoryItemId),
-          eq(warehouseLocations.isPickable, 1)
-        ));
-      return result[0]?.total || 0;
-    } else {
-      const result = await db
-        .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)` })
-        .from(inventoryLevels)
-        .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
-      return result[0]?.total || 0;
-    }
-  }
-
-  async getTotalReservedByItemId(inventoryItemId: number): Promise<number> {
-    const result = await db
-      .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)` })
-      .from(inventoryLevels)
-      .where(eq(inventoryLevels.inventoryItemId, inventoryItemId));
-    return result[0]?.total || 0;
   }
 
   async getTotalOnHandByVariantId(variantId: number, pickableOnly: boolean = false): Promise<number> {

@@ -967,9 +967,9 @@ export async function registerRoutes(
             }
           }
           
-          if (inventoryItemId) {
-            // Get pickable locations with stock, prioritize forward pick bins
-            const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+          if (uomVariant) {
+            // Get pickable locations with stock by variantId, prioritize forward pick bins
+            const levels = await storage.getInventoryLevelsByVariantId(uomVariant.id);
             const allLocations = await storage.getAllWarehouseLocations();
             
             // Sort by location type priority: forward_pick > bulk_storage > others
@@ -988,17 +988,17 @@ export async function registerRoutes(
             
             if (pickableLevel) {
               await inventoryService.pickItem(
-                inventoryItemId,
+                uomVariant.inventoryItemId,
                 pickableLevel.warehouseLocationId,
                 baseUnitsToDecrement,
                 item.orderId,
                 req.session.user?.id
               );
-              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of item ${inventoryItemId} from location ${pickableLevel.warehouseLocationId}`);
+              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of variant ${uomVariant.id} from location ${pickableLevel.warehouseLocationId}`);
               
               // Sync to Shopify (async - don't block response)
-              syncInventoryItemToShopify(inventoryItemId, storage).catch(err => 
-                console.warn(`[Inventory] Shopify sync failed for item ${inventoryItemId}:`, err)
+              syncInventoryItemToShopify(uomVariant.inventoryItemId, storage).catch(err => 
+                console.warn(`[Inventory] Shopify sync failed for variant ${uomVariant.id}:`, err)
               );
             }
           }
@@ -3807,11 +3807,11 @@ export async function registerRoutes(
     }
   });
 
-  // Inventory Levels & Adjustments
-  app.get("/api/inventory/levels/:itemId", async (req, res) => {
+  // Inventory Levels & Adjustments - now uses variantId as source of truth
+  app.get("/api/inventory/levels/:variantId", async (req, res) => {
     try {
-      const itemId = parseInt(req.params.itemId);
-      const levels = await storage.getInventoryLevelsByItemId(itemId);
+      const variantId = parseInt(req.params.variantId);
+      const levels = await storage.getInventoryLevelsByVariantId(variantId);
       res.json(levels);
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
@@ -4079,12 +4079,14 @@ export async function registerRoutes(
           // This ensures consistency across the system
           const targetQty = quantity;
 
-          // Find existing level or create new one
-          const existingLevels = await storage.getInventoryLevelsByItemId(inventoryItem.id);
-          const existingLevel = existingLevels.find(l => 
-            l.warehouseLocationId === warehouseLocation.id && 
-            (variant ? l.variantId === variant.id : !l.variantId)
-          );
+          if (!variant) {
+            results.push({ row: rowNum, sku, location: locationCode, status: "error", message: `No variant found for SKU: ${sku}` });
+            errorCount++;
+            continue;
+          }
+
+          // Find existing level by variantId (source of truth)
+          const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocation.id, variant.id);
 
           if (existingLevel) {
             // Calculate delta from current value
@@ -4098,11 +4100,10 @@ export async function registerRoutes(
               variantQty: varQtyDelta,
             });
           } else {
-            // Create new level - both fields track variant count
+            // Create new level - variantId is required
             await storage.upsertInventoryLevel({
-              inventoryItemId: inventoryItem.id,
               warehouseLocationId: warehouseLocation.id,
-              variantId: variant?.id || null,
+              variantId: variant.id,
               variantQty: targetQty,
               onHandBase: targetQty,
               reservedBase: 0,
@@ -5452,25 +5453,40 @@ export async function registerRoutes(
           onHandBase: baseUnits,
         });
       } else {
-        // Use the inventory service to create new inventory level
-        await inventoryService.receiveInventory(
-          variant.inventoryItemId,
-          warehouseLocationId,
-          baseUnits,
-          "MANUAL_ADD",
-          notes || "Stock added via inventory page",
-          userId
-        );
+        // Create or update inventory level directly by variantId
+        const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
         
-        // Update the newly created level with variant info
-        const levels = await storage.getInventoryLevelsByItemId(variant.inventoryItemId);
-        const newLevel = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-        if (newLevel) {
-          await storage.updateInventoryLevel(newLevel.id, {
-            variantId: variantId,
+        if (existingLevel) {
+          // Add to existing level
+          await storage.adjustInventoryLevel(existingLevel.id, {
             variantQty: variantQty,
+            onHandBase: baseUnits,
+          });
+        } else {
+          // Create new level with variantId
+          await storage.createInventoryLevel({
+            variantId: variantId,
+            warehouseLocationId: warehouseLocationId,
+            variantQty: variantQty,
+            onHandBase: baseUnits,
+            reservedBase: 0,
           });
         }
+        
+        // Create transaction for audit trail
+        await storage.createInventoryTransaction({
+          variantId: variantId,
+          inventoryItemId: variant.inventoryItemId,
+          toLocationId: warehouseLocationId,
+          warehouseLocationId: warehouseLocationId,
+          transactionType: "receipt",
+          variantQtyDelta: variantQty,
+          baseQtyDelta: baseUnits,
+          sourceState: "external",
+          targetState: "on_hand",
+          notes: notes || "Stock added via inventory page",
+          userId,
+        });
       }
       
       res.json({ success: true, variantQtyAdded: variantQty, baseUnitsAdded: baseUnits });
@@ -5605,24 +5621,30 @@ export async function registerRoutes(
               results.updated++;
             }
           } else {
-            // Create new inventory level
-            await inventoryService.receiveInventory(
-              variant.inventoryItemId,
-              location.id,
-              baseUnits,
-              "CSV_UPLOAD",
-              "Initial inventory from CSV import",
-              userId
-            );
-            // Update the newly created level with variant info
-            const levels = await storage.getInventoryLevelsByItemId(variant.inventoryItemId);
-            const newLevel = levels.find(l => l.warehouseLocationId === location.id);
-            if (newLevel) {
-              await storage.updateInventoryLevel(newLevel.id, {
-                variantId: variant.id,
-                variantQty: variantQty,
-              });
-            }
+            // Create new inventory level directly with variantId
+            await storage.createInventoryLevel({
+              variantId: variant.id,
+              warehouseLocationId: location.id,
+              variantQty: variantQty,
+              onHandBase: baseUnits,
+              reservedBase: 0,
+            });
+            
+            // Create transaction for audit trail
+            await storage.createInventoryTransaction({
+              variantId: variant.id,
+              inventoryItemId: variant.inventoryItemId,
+              toLocationId: location.id,
+              warehouseLocationId: location.id,
+              transactionType: "csv_upload",
+              variantQtyDelta: variantQty,
+              baseQtyDelta: baseUnits,
+              sourceState: "external",
+              targetState: "on_hand",
+              notes: "Initial inventory from CSV import",
+              userId,
+            });
+            
             results.created++;
           }
           
