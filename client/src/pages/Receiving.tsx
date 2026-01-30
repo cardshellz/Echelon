@@ -245,8 +245,9 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to open receipt");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      setSelectedReceipt(data);
       toast({ title: "Receipt opened for receiving" });
     },
   });
@@ -332,8 +333,16 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to update line");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (updatedLine) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (selectedReceipt && selectedReceipt.lines) {
+        setSelectedReceipt({
+          ...selectedReceipt,
+          lines: selectedReceipt.lines.map(line => 
+            line.id === updatedLine.id ? updatedLine : line
+          )
+        });
+      }
     },
   });
 
@@ -345,8 +354,12 @@ DEF-456,25,,,5.00,,Location TBD`;
       if (!res.ok) throw new Error("Failed to complete all lines");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (data.order) {
+        setSelectedReceipt(data.order);
+      }
+      toast({ title: "All lines marked complete" });
     },
   });
 
