@@ -6851,5 +6851,42 @@ export async function registerRoutes(
     }
   });
 
+  // ===== INVENTORY TRANSACTIONS HISTORY (Audit) =====
+  
+  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), async (req, res) => {
+    try {
+      const { transactionType, startDate, endDate, batchId, limit, offset } = req.query;
+      
+      const filters: any = {};
+      if (transactionType) filters.transactionType = transactionType as string;
+      if (batchId) filters.batchId = batchId as string;
+      if (startDate) filters.startDate = new Date(startDate as string);
+      if (endDate) filters.endDate = new Date(endDate as string);
+      if (limit) filters.limit = parseInt(limit as string);
+      if (offset) filters.offset = parseInt(offset as string);
+      
+      const transactions = await storage.getInventoryTransactions(filters);
+      
+      // Enrich with related data (locations, items, orders)
+      const allLocations = await storage.getAllWarehouseLocations();
+      const allItems = await storage.getAllInventoryItems();
+      const locationMap = new Map(allLocations.map(l => [l.id, l]));
+      const itemMap = new Map(allItems.map(i => [i.id, i]));
+      
+      const enriched = transactions.map(tx => ({
+        ...tx,
+        fromLocation: tx.fromLocationId ? locationMap.get(tx.fromLocationId) : null,
+        toLocation: tx.toLocationId ? locationMap.get(tx.toLocationId) : null,
+        warehouseLocation: tx.warehouseLocationId ? locationMap.get(tx.warehouseLocationId) : null,
+        inventoryItem: itemMap.get(tx.inventoryItemId),
+      }));
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching inventory transactions:", error);
+      res.status(500).json({ error: "Failed to fetch inventory transactions" });
+    }
+  });
+
   return httpServer;
 }

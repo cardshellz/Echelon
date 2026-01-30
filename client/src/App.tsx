@@ -28,6 +28,7 @@ import ProductDetail from "@/pages/ProductDetail";
 import CycleCounts from "@/pages/CycleCounts";
 import ProductCatalog from "@/pages/ProductCatalog";
 import Receiving from "@/pages/Receiving";
+import InventoryHistory from "@/pages/InventoryHistory";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -145,6 +146,9 @@ function Router() {
         </Route>
         <Route path="/receiving">
           <ProtectedRoute component={Receiving} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/inventory/history">
+          <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />
         </Route>
         <Route path="/purchasing/catalog">
           <ProtectedRoute component={ProductCatalog} allowedRoles={["admin", "lead"]} />

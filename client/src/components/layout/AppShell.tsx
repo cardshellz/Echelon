@@ -81,6 +81,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Picking Queue", icon: ClipboardList, href: "/picking" },
     { type: 'link', label: "Picking Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
     { type: 'link', label: "Picking Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
+    { type: 'link', label: "Inventory History", icon: History, href: "/inventory/history", roles: ["admin"] },
     { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
     { type: "separator", label: "Sales Channels", roles: ["admin", "lead"] },
     { type: 'link', label: "Channels", icon: Store, href: "/channels", roles: ["admin", "lead"] },
