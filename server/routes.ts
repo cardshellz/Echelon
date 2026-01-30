@@ -6591,6 +6591,7 @@ export async function registerRoutes(
           .filter(p => p.sku)
           .map(p => [p.sku!.toUpperCase(), p])
       );
+      console.log(`[CSV Import] Loaded ${catalogProducts.length} catalog products, ${catalogBySku.size} with SKUs`);
       
       for (const line of lines) {
         const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
@@ -6601,21 +6602,26 @@ export async function registerRoutes(
         }
         
         // Single source of truth: catalog_products
-        const catalog = catalogBySku.get(sku.toUpperCase());
+        const lookupKey = sku.toUpperCase();
+        const catalog = catalogBySku.get(lookupKey);
         let inventoryItemId = null;
         let catalogProductId = null;
         let productName = sku;
         let productBarcode = barcode || null;
         
+        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" found=${!!catalog}`);
+        
         if (catalog) {
           catalogProductId = catalog.id;
           inventoryItemId = catalog.inventoryItemId || null;
           productName = catalog.title;
+          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, inventoryItemId=${inventoryItemId}, title="${productName}"`);
           if (!productBarcode && (catalog as any).barcode) {
             productBarcode = (catalog as any).barcode;
           }
         } else {
           // SKU not found in catalog - add warning but continue (line will be created without inventory link)
+          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in catalog_products`);
           warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
         }
         
