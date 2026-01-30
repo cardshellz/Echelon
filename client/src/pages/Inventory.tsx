@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   Package, 
@@ -240,6 +241,7 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
 }
 
 export default function Inventory() {
+  const [, navigate] = useLocation();
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItemSummary | null>(null);
@@ -251,8 +253,6 @@ export default function Inventory() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvResults, setCsvResults] = useState<{ row: number; sku: string; location: string; status: string; message: string }[] | null>(null);
   const [csvUploading, setCsvUploading] = useState(false);
-  const [receiveStockOpen, setReceiveStockOpen] = useState(false);
-  const [receiveForm, setReceiveForm] = useState({ variantId: "", locationId: "", quantity: "" });
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -324,23 +324,6 @@ export default function Inventory() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to sync locations", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const receiveStockMutation = useMutation({
-    mutationFn: async (data: { variantId: number; warehouseLocationId: number; quantity: number }) => {
-      const response = await apiRequest("POST", "/api/inventory/receive", data);
-      return response.json();
-    },
-    onSuccess: () => {
-      toast({ title: "Stock received successfully" });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
-      setReceiveStockOpen(false);
-      setReceiveForm({ variantId: "", locationId: "", quantity: "" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Failed to receive stock", description: error.message, variant: "destructive" });
     },
   });
 
@@ -497,7 +480,7 @@ export default function Inventory() {
             <Button variant="outline" size="sm" className="gap-2">
               <Download size={16} /> <span className="hidden sm:inline">Export</span>
             </Button>
-            <Button size="sm" className="gap-2" onClick={() => setReceiveStockOpen(true)} data-testid="button-receive-stock">
+            <Button size="sm" className="gap-2" onClick={() => navigate("/receiving")} data-testid="button-receive-stock">
               <Plus size={16} /> <span className="hidden sm:inline">Receive Stock</span>
             </Button>
           </div>
@@ -912,83 +895,6 @@ export default function Inventory() {
                 {csvUploading ? "Uploading..." : "Upload & Process"}
               </Button>
             )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={receiveStockOpen} onOpenChange={setReceiveStockOpen}>
-        <DialogContent className="w-[95vw] max-w-lg mx-auto">
-          <DialogHeader>
-            <DialogTitle>Receive Stock</DialogTitle>
-            <DialogDescription>
-              Add inventory for a variant at a specific bin location.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="variant">Variant</Label>
-              <Select
-                value={receiveForm.variantId}
-                onValueChange={(value) => setReceiveForm({ ...receiveForm, variantId: value })}
-              >
-                <SelectTrigger className="w-full" data-testid="select-variant">
-                  <SelectValue placeholder="Select a variant..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {variants.filter(v => v.hierarchyLevel > 1).map((v) => (
-                    <SelectItem key={v.id} value={v.id.toString()}>
-                      {v.sku} - {v.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="location">Bin Location</Label>
-              <Select
-                value={receiveForm.locationId}
-                onValueChange={(value) => setReceiveForm({ ...receiveForm, locationId: value })}
-              >
-                <SelectTrigger className="w-full" data-testid="select-location">
-                  <SelectValue placeholder="Select a location..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="quantity">Quantity</Label>
-              <Input
-                id="quantity"
-                type="number"
-                min="1"
-                placeholder="Enter quantity to receive"
-                value={receiveForm.quantity}
-                onChange={(e) => setReceiveForm({ ...receiveForm, quantity: e.target.value })}
-                className="w-full"
-                data-testid="input-receive-quantity"
-              />
-            </div>
-          </div>
-          <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => setReceiveStockOpen(false)} className="w-full sm:w-auto">Cancel</Button>
-            <Button 
-              onClick={() => receiveStockMutation.mutate({
-                variantId: parseInt(receiveForm.variantId),
-                warehouseLocationId: parseInt(receiveForm.locationId),
-                quantity: parseInt(receiveForm.quantity),
-              })}
-              disabled={!receiveForm.variantId || !receiveForm.locationId || !receiveForm.quantity || receiveStockMutation.isPending}
-              className="w-full sm:w-auto"
-              data-testid="button-confirm-receive"
-            >
-              {receiveStockMutation.isPending ? "Receiving..." : "Receive Stock"}
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
