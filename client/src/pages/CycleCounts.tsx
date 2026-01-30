@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useDebounce } from "@/hooks/use-debounce";
 import { 
   ClipboardList, 
   Plus, 
@@ -110,6 +111,11 @@ export default function CycleCounts() {
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
   const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "" });
   const [countForm, setCountForm] = useState({ countedSku: "", countedQty: "", notes: "" });
+  const [skuSearch, setSkuSearch] = useState("");
+  const [skuDropdownOpen, setSkuDropdownOpen] = useState(false);
+  const [unknownSkuMode, setUnknownSkuMode] = useState(false);
+  const debouncedSkuSearch = useDebounce(skuSearch, 300);
+  const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
   
@@ -127,6 +133,27 @@ export default function CycleCounts() {
 
   const { data: adjustmentReasons = [] } = useQuery<AdjustmentReason[]>({
     queryKey: ["/api/inventory/adjustment-reasons"],
+  });
+
+  // SKU search for typeahead
+  interface SkuSearchResult {
+    sku: string;
+    name: string;
+    source: string;
+    inventoryItemId: number | null;
+  }
+  
+  const { data: skuResults = [] } = useQuery<SkuSearchResult[]>({
+    queryKey: ["/api/inventory/skus/search", debouncedSkuSearch],
+    queryFn: async () => {
+      if (!debouncedSkuSearch || debouncedSkuSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(debouncedSkuSearch)}&limit=10`, {
+        credentials: "include",
+      });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedSkuSearch.length >= 2 && skuDropdownOpen,
   });
 
   const createMutation = useMutation({
@@ -318,6 +345,9 @@ export default function CycleCounts() {
       countedQty: "",
       notes: "",
     });
+    setSkuSearch("");
+    setSkuDropdownOpen(false);
+    setUnknownSkuMode(false);
     setCountDialogOpen(true);
   };
 
@@ -865,25 +895,116 @@ export default function CycleCounts() {
                 </div>
               </div>
               
-              {/* SKU section - only show if different */}
+              {/* SKU section - searchable typeahead */}
               <div>
                 <div className="flex items-center justify-between">
-                  <Label>Different SKU?</Label>
-                  <span className="text-xs text-muted-foreground">Only if product is different</span>
+                  <Label>Different SKU in Bin?</Label>
+                  <span className="text-xs text-muted-foreground">Search if different product found</span>
                 </div>
-                <Input
-                  value={countForm.countedSku === selectedItem?.expectedSku ? "" : countForm.countedSku}
-                  onChange={(e) => setCountForm({ ...countForm, countedSku: e.target.value || selectedItem?.expectedSku || "" })}
-                  placeholder={`Leave blank if same as ${selectedItem?.expectedSku}`}
-                  className="mt-1"
-                  data-testid="input-counted-sku"
-                />
-                {countForm.countedSku && countForm.countedSku !== selectedItem?.expectedSku && (
-                  <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
-                    <AlertTriangle className="h-3 w-3" />
-                    This will create a SKU mismatch variance
-                  </p>
-                )}
+                <div className="relative mt-1">
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                      <Input
+                        ref={skuInputRef}
+                        value={skuSearch}
+                        onChange={(e) => {
+                          setSkuSearch(e.target.value);
+                          setSkuDropdownOpen(true);
+                          setUnknownSkuMode(false);
+                        }}
+                        onFocus={() => setSkuDropdownOpen(true)}
+                        onBlur={() => setTimeout(() => setSkuDropdownOpen(false), 200)}
+                        placeholder="Search SKU..."
+                        className="pl-10"
+                        data-testid="input-sku-search"
+                      />
+                      {/* Dropdown */}
+                      {skuDropdownOpen && skuSearch.length >= 2 && (
+                        <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {skuResults.length > 0 ? (
+                            skuResults.map((result) => (
+                              <button
+                                key={result.sku}
+                                type="button"
+                                className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                                onClick={() => {
+                                  setCountForm({ ...countForm, countedSku: result.sku });
+                                  setSkuSearch(result.sku);
+                                  setSkuDropdownOpen(false);
+                                }}
+                              >
+                                <div className="font-mono text-sm font-medium">{result.sku}</div>
+                                <div className="text-xs text-muted-foreground truncate">{result.name}</div>
+                              </button>
+                            ))
+                          ) : (
+                            <div className="px-3 py-4 text-center">
+                              <div className="text-sm text-muted-foreground mb-2">No matching SKUs found</div>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setUnknownSkuMode(true);
+                                  setSkuDropdownOpen(false);
+                                }}
+                              >
+                                <AlertTriangle className="h-3 w-3 mr-1" />
+                                Report Unknown SKU
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {countForm.countedSku && countForm.countedSku !== selectedItem?.expectedSku && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          setCountForm({ ...countForm, countedSku: "" });
+                          setSkuSearch("");
+                          setUnknownSkuMode(false);
+                        }}
+                      >
+                        <XCircle className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                  
+                  {/* Selected different SKU */}
+                  {countForm.countedSku && countForm.countedSku !== selectedItem?.expectedSku && (
+                    <div className="mt-2 p-2 bg-amber-50 border border-amber-200 rounded text-sm">
+                      <div className="flex items-center gap-1 text-amber-700">
+                        <AlertTriangle className="h-3 w-3" />
+                        <span>Found: <strong>{countForm.countedSku}</strong></span>
+                      </div>
+                      <div className="text-xs text-amber-600 mt-1">
+                        This will create a SKU mismatch variance for review
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Unknown SKU mode */}
+                  {unknownSkuMode && (
+                    <div className="mt-2 p-3 bg-rose-50 border border-rose-200 rounded">
+                      <div className="flex items-center gap-1 text-rose-700 font-medium">
+                        <AlertTriangle className="h-4 w-4" />
+                        Unknown SKU Exception
+                      </div>
+                      <p className="text-xs text-rose-600 mt-1">
+                        This SKU is not in the system. Enter the unknown SKU below and it will be routed to a Team Lead for investigation.
+                      </p>
+                      <Input
+                        value={countForm.countedSku}
+                        onChange={(e) => setCountForm({ ...countForm, countedSku: e.target.value })}
+                        placeholder="Enter unknown SKU as shown on product"
+                        className="mt-2"
+                        data-testid="input-unknown-sku"
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
               
               {/* Notes */}
