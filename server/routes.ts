@@ -2012,62 +2012,40 @@ export async function registerRoutes(
       }
       console.log(`Grouped into ${productGroups.size} parent products`);
       
-      let inventoryCreated = 0;
-      let inventoryUpdated = 0;
-      let variantsCreated = 0;
-      let variantsUpdated = 0;
+      let variantsUpdated = 0; // SKU matches found
       let catalogCreated = 0;
       let catalogUpdated = 0;
       let assetsCreated = 0;
+      let skuNotFound = 0;
+      const unmatchedSkus: string[] = [];
       
       for (const [shopifyProductId, variants] of productGroups) {
-        // Use first variant for parent product info (they share product-level data)
-        const firstVariant = variants[0];
+        // Echelon owns inventory - Shopify sync only creates catalog_products
+        // and links to existing uom_variants by SKU match
         
-        // Use the productTitle field directly (no string parsing needed)
-        const productName = firstVariant.productTitle;
-        
-        // 1. Upsert inventory_item by Shopify PRODUCT ID (one per product family)
-        const existingItem = await storage.getInventoryItemByShopifyProductId(shopifyProductId);
-        const inventoryItem = await storage.upsertInventoryItemByProductId(shopifyProductId, {
-          name: productName,
-          description: firstVariant.description,
-          baseUnit: "each",
-          imageUrl: firstVariant.imageUrl,
-          active: firstVariant.status === "active" ? 1 : 0,
-        });
-        
-        if (existingItem) {
-          inventoryUpdated++;
-        } else {
-          inventoryCreated++;
-        }
-        
-        // 2. Create uom_variants for each Shopify variant
         for (const variant of variants) {
-          // Use the full title for the variant (includes product name for clarity)
-          let variantName = variant.title;
+          // Try to find existing uom_variant by SKU (Echelon is source of truth)
+          let uomVariant = null;
+          let inventoryItemId = null;
           
-          // Upsert uom_variant by Shopify VARIANT ID
-          const existingVariant = await storage.getUomVariantByShopifyVariantId(variant.variantId);
-          const uomVariant = await storage.upsertUomVariantByShopifyVariantId(variant.variantId, inventoryItem.id, {
-            sku: variant.sku,
-            name: variantName,
-            barcode: variant.barcode,
-            imageUrl: variant.imageUrl,
-            active: variant.status === "active" ? 1 : 0,
-          });
-          
-          if (existingVariant) {
-            variantsUpdated++;
+          if (variant.sku) {
+            uomVariant = await storage.getUomVariantBySku(variant.sku);
+            if (uomVariant) {
+              inventoryItemId = uomVariant.inventoryItemId;
+              variantsUpdated++; // Found existing match
+            } else {
+              skuNotFound++;
+              unmatchedSkus.push(variant.sku);
+            }
           } else {
-            variantsCreated++;
+            skuNotFound++;
+            unmatchedSkus.push(`(no SKU) ${variant.title}`);
           }
           
-          // 3. Upsert catalog_products by variant ID (storefront display, one per variant)
-          // Link to BOTH inventoryItem (legacy) and uomVariant (source of truth for Model A)
+          // Create/update catalog_product (channel data) - always happens
+          // Links to uom_variant only if SKU match found
           const existingCatalog = await storage.getCatalogProductByVariantId(variant.variantId);
-          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, inventoryItem.id, {
+          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, inventoryItemId, {
             sku: variant.sku,
             title: variant.title,
             description: variant.description,
@@ -2075,7 +2053,7 @@ export async function registerRoutes(
             category: variant.productType,
             tags: variant.tags,
             status: variant.status,
-            uomVariantId: uomVariant.id, // Link to uom_variant (Model A source of truth)
+            uomVariantId: uomVariant?.id || null, // Only link if match found
           });
           
           if (existingCatalog) {
@@ -2106,12 +2084,16 @@ export async function registerRoutes(
         }
       }
       
-      console.log(`Sync complete: inventory ${inventoryCreated} created/${inventoryUpdated} updated, variants ${variantsCreated} created/${variantsUpdated} updated, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
+      console.log(`Sync complete: ${variantsUpdated} SKUs matched, ${skuNotFound} unmatched, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
+      if (unmatchedSkus.length > 0) {
+        console.log(`Unmatched SKUs (need to be created in Echelon first):`, unmatchedSkus.slice(0, 20));
+      }
       
       res.json({
         success: true,
-        inventory: { created: inventoryCreated, updated: inventoryUpdated },
-        variants: { created: variantsCreated, updated: variantsUpdated },
+        skuMatched: variantsUpdated,
+        skuNotFound: skuNotFound,
+        unmatchedSkus: unmatchedSkus.slice(0, 50), // Return first 50 for UI display
         catalog: { created: catalogCreated, updated: catalogUpdated },
         assets: assetsCreated,
         totalProducts: productGroups.size,
