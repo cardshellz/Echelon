@@ -5266,7 +5266,7 @@ export async function registerRoutes(
         total_reserved_base: string;
         total_picked_base: string;
         location_count: string;
-        pickable_qty: string;
+        pickable_variant_qty: string;
       }>(sql`
         SELECT 
           uv.id as variant_id,
@@ -5279,7 +5279,7 @@ export async function registerRoutes(
           COALESCE(SUM(il.reserved_base), 0) as total_reserved_base,
           COALESCE(SUM(il.picked_base), 0) as total_picked_base,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.on_hand_base ELSE 0 END), 0) as pickable_qty
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
         FROM uom_variants uv
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
         LEFT JOIN inventory_levels il ON il.variant_id = uv.id
@@ -5289,21 +5289,35 @@ export async function registerRoutes(
         ORDER BY uv.sku
       `);
       
-      const levels = result.rows.map(row => ({
-        variantId: row.variant_id,
-        sku: row.variant_sku,
-        name: row.variant_name,
-        unitsPerVariant: row.units_per_variant,
-        baseSku: row.base_sku,
-        variantQty: parseInt(row.total_variant_qty) || 0,
-        onHandBase: parseInt(row.total_on_hand_base) || 0,
-        reservedBase: parseInt(row.total_reserved_base) || 0,
-        pickedBase: parseInt(row.total_picked_base) || 0,
-        available: (parseInt(row.total_on_hand_base) || 0) - (parseInt(row.total_reserved_base) || 0) - (parseInt(row.total_picked_base) || 0),
-        totalPieces: parseInt(row.total_on_hand_base) || 0,
-        locationCount: parseInt(row.location_count) || 0,
-        pickableQty: parseInt(row.pickable_qty) || 0,
-      }));
+      const levels = result.rows.map(row => {
+        const variantQty = parseInt(row.total_variant_qty) || 0;
+        const reservedBase = parseInt(row.total_reserved_base) || 0;
+        const pickedBase = parseInt(row.total_picked_base) || 0;
+        const unitsPerVariant = row.units_per_variant || 1;
+        const pickableQty = parseInt(row.pickable_variant_qty) || 0;
+        
+        // Calculate committed and available in variant units (packages)
+        // committed = reserved + picked, converted to variant units
+        const committedVariant = Math.ceil((reservedBase + pickedBase) / unitsPerVariant);
+        // available = total variant qty - committed
+        const availableVariant = variantQty - committedVariant;
+        
+        return {
+          variantId: row.variant_id,
+          sku: row.variant_sku,
+          name: row.variant_name,
+          unitsPerVariant,
+          baseSku: row.base_sku,
+          variantQty,
+          onHandBase: parseInt(row.total_on_hand_base) || 0,
+          reservedBase,
+          pickedBase: pickedBase,
+          available: availableVariant,
+          totalPieces: parseInt(row.total_on_hand_base) || 0,
+          locationCount: parseInt(row.location_count) || 0,
+          pickableQty,
+        };
+      });
       
       res.json(levels);
     } catch (error) {
