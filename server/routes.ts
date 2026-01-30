@@ -4127,19 +4127,22 @@ export async function registerRoutes(
           const baseQtyDelta = targetQty - baseQtyBefore;
           const variantQtyDelta = targetQty - variantQtyBefore;
 
+          // Log with Full WMS fields
           await inventoryService.logTransaction({
             inventoryItemId: inventoryItem.id,
-            warehouseLocationId: warehouseLocation.id,
+            toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
+            warehouseLocationId: warehouseLocation.id, // Legacy
             variantId: variant?.id,
             transactionType: "csv_upload",
             reasonId: csvReason?.id,
-            baseQtyDelta,
             variantQtyDelta,
-            baseQtyBefore,
-            baseQtyAfter: targetQty,
             variantQtyBefore,
             variantQtyAfter: targetQty,
+            baseQtyDelta,
+            baseQtyBefore,
+            baseQtyAfter: targetQty,
             batchId,
+            sourceState: "external",
             targetState: "on_hand",
             referenceType: "csv_import",
             referenceId: batchId,
@@ -6422,16 +6425,23 @@ export async function registerRoutes(
             });
           }
           
-          // Create transaction record
+          // Create transaction record with Full WMS fields
           await storage.createInventoryTransaction({
             inventoryItemId: line.inventoryItemId,
             variantId: line.uomVariantId || null,
-            warehouseLocationId: line.putawayLocationId,
-            transactionType: "receive",
+            toLocationId: line.putawayLocationId, // Receive = TO location
+            warehouseLocationId: line.putawayLocationId, // Legacy compatibility
+            transactionType: "receipt",
+            variantQtyDelta: qtyToAdd,
+            variantQtyBefore: level?.variantQty || 0,
+            variantQtyAfter: (level?.variantQty || 0) + qtyToAdd,
             baseQtyDelta: qtyToAdd,
             baseQtyBefore,
             baseQtyAfter,
             batchId,
+            sourceState: "external", // Coming from outside
+            targetState: "on_hand", // Now on hand
+            receivingOrderId: id, // Link to receiving order
             referenceType: "receiving",
             referenceId: order.receiptNumber,
             notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,

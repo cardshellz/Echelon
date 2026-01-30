@@ -124,8 +124,9 @@ export class InventoryService {
 
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      warehouseLocationId, // Legacy
       transactionType: "reserve",
+      variantQtyDelta: baseUnits,
       baseQtyDelta: baseUnits,
       sourceState: "on_hand",
       targetState: "reserved",
@@ -162,8 +163,9 @@ export class InventoryService {
 
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      warehouseLocationId, // Legacy
       transactionType: "unreserve",
+      variantQtyDelta: -baseUnits,
       baseQtyDelta: -baseUnits,
       sourceState: "reserved",
       targetState: "on_hand",
@@ -208,10 +210,18 @@ export class InventoryService {
       reservedBase: -reservedToRelease
     });
 
+    // Log transaction with Full WMS fields
+    const variantQtyBefore = levelAtLocation.variantQty || 0;
+    const variantQtyAfter = Math.max(0, variantQtyBefore - baseUnits);
+    
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      fromLocationId: warehouseLocationId, // Pick = FROM location
+      warehouseLocationId, // Legacy compatibility
       transactionType: "pick",
+      variantQtyDelta: -baseUnits,
+      variantQtyBefore,
+      variantQtyAfter,
       baseQtyDelta: -baseUnits,
       sourceState: "on_hand",
       targetState: "picked",
@@ -239,6 +249,8 @@ export class InventoryService {
     const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
     
+    const variantQtyBefore = levelAtLocation?.variantQty || 0;
+    
     if (levelAtLocation) {
       // Delta: subtract from picked (negative delta)
       await storage.adjustInventoryLevel(levelAtLocation.id, { pickedBase: -baseUnits });
@@ -246,8 +258,12 @@ export class InventoryService {
 
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      fromLocationId: warehouseLocationId, // Ship = FROM location (items leave)
+      warehouseLocationId, // Legacy compatibility
       transactionType: "ship",
+      variantQtyDelta: -baseUnits,
+      variantQtyBefore,
+      variantQtyAfter: Math.max(0, variantQtyBefore - baseUnits),
       baseQtyDelta: -baseUnits,
       sourceState: "picked",
       targetState: "shipped",
@@ -300,12 +316,20 @@ export class InventoryService {
       });
     }
 
+    const variantQtyBefore = levelAtLocation?.variantQty || 0;
+    const variantQtyDelta = variantQty || baseUnits;
+    
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      toLocationId: warehouseLocationId, // Receive = TO location
+      warehouseLocationId, // Legacy compatibility
       variantId: variantId || undefined,
       transactionType: "receipt",
+      variantQtyDelta,
+      variantQtyBefore,
+      variantQtyAfter: variantQtyBefore + variantQtyDelta,
       baseQtyDelta: baseUnits,
+      sourceState: "external",
       targetState: "on_hand",
       referenceType: "po",
       referenceId,
@@ -344,10 +368,18 @@ export class InventoryService {
       });
     }
 
+    const variantQtyBefore = levelAtLocation?.variantQty || 0;
+    const variantQtyAfter = Math.max(0, variantQtyBefore + baseUnitsDelta);
+    
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      fromLocationId: baseUnitsDelta < 0 ? warehouseLocationId : undefined, // Negative = taking from
+      toLocationId: baseUnitsDelta > 0 ? warehouseLocationId : undefined, // Positive = adding to
+      warehouseLocationId, // Legacy compatibility
       transactionType: "adjustment",
+      variantQtyDelta: baseUnitsDelta,
+      variantQtyBefore,
+      variantQtyAfter,
       baseQtyDelta: baseUnitsDelta,
       sourceState: "on_hand",
       targetState: "on_hand",
@@ -436,11 +468,14 @@ export class InventoryService {
       });
     }
 
-    // Log the replenishment transaction
+    // Log the replenishment transaction with Full WMS fields
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId: targetLocationId,
+      fromLocationId: parentLocationId, // Source location
+      toLocationId: targetLocationId, // Destination location
+      warehouseLocationId: targetLocationId, // Legacy
       transactionType: "replenish",
+      variantQtyDelta: replenishAmount,
       baseQtyDelta: replenishAmount,
       sourceState: "on_hand",
       targetState: "on_hand",
@@ -500,8 +535,9 @@ export class InventoryService {
 
     await this.logTransaction({
       inventoryItemId,
-      warehouseLocationId,
+      warehouseLocationId, // Legacy
       transactionType: "reserve",
+      variantQtyDelta: baseUnits,
       baseQtyDelta: baseUnits,
       sourceState: "backorder",
       targetState: "backorder",
@@ -585,9 +621,9 @@ export class InventoryService {
   }
 
   /**
-   * Log an inventory transaction
+   * Log an inventory transaction - public for use in routes.ts
    */
-  private async logTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
+  async logTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
     return await storage.createInventoryTransaction(transaction);
   }
 }
