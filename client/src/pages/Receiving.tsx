@@ -974,12 +974,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                           <TableHead>Received</TableHead>
                           <TableHead>Location</TableHead>
                           <TableHead>Status</TableHead>
+                          {selectedReceipt.status !== "closed" && <TableHead></TableHead>}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {(!selectedReceipt.lines || selectedReceipt.lines.length === 0) ? (
                           <TableRow>
-                            <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
                               No lines yet. Import CSV or add lines manually.
                             </TableCell>
                           </TableRow>
@@ -1040,6 +1041,29 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   {line.status}
                                 </Badge>
                               </TableCell>
+                              {selectedReceipt.status !== "closed" && (
+                                <TableCell>
+                                  {line.status !== "complete" ? (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => updateLineMutation.mutate({
+                                        lineId: line.id,
+                                        updates: { 
+                                          receivedQty: line.expectedQty || 0,
+                                          status: "complete" 
+                                        }
+                                      })}
+                                      disabled={updateLineMutation.isPending}
+                                      data-testid={`btn-complete-line-${line.id}`}
+                                    >
+                                      <Check className="h-4 w-4" />
+                                    </Button>
+                                  ) : (
+                                    <Check className="h-4 w-4 text-green-600" />
+                                  )}
+                                </TableCell>
+                              )}
                             </TableRow>
                           ))
                         )}
