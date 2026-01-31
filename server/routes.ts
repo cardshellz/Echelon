@@ -6177,6 +6177,10 @@ export async function registerRoutes(
         const allowedTypes = cycleCount.locationTypeFilter.split(",").map(t => t.trim());
         locations = locations.filter(l => allowedTypes.includes(l.locationType));
       }
+      if (cycleCount.binTypeFilter) {
+        const allowedBinTypes = cycleCount.binTypeFilter.split(",").map(t => t.trim());
+        locations = locations.filter(l => allowedBinTypes.includes(l.binType));
+      }
       
       // For each location, get current inventory and create count items
       const items: any[] = [];

@@ -109,13 +109,20 @@ export default function CycleCounts() {
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
-  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", locationTypes: [] as string[] });
+  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
     { value: "forward_pick", label: "Forward Pick" },
     { value: "bulk_storage", label: "Bulk Storage" },
     { value: "overflow", label: "Overflow" },
     { value: "receiving", label: "Receiving" },
     { value: "staging", label: "Staging" },
+  ];
+  const binTypeOptions = [
+    { value: "bin", label: "Bin" },
+    { value: "pallet", label: "Pallet" },
+    { value: "carton_flow", label: "Carton Flow" },
+    { value: "bulk_reserve", label: "Bulk Reserve" },
+    { value: "shelf", label: "Shelf" },
   ];
   const [countForm, setCountForm] = useState({ countedSku: "", countedQty: "", notes: "" });
   const [skuSearch, setSkuSearch] = useState("");
@@ -178,7 +185,7 @@ export default function CycleCounts() {
       toast({ title: "Cycle count created" });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       setCreateDialogOpen(false);
-      setNewCountForm({ name: "", description: "", zoneFilter: "", locationTypes: [] });
+      setNewCountForm({ name: "", description: "", zoneFilter: "", locationTypes: [], binTypes: [] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
@@ -1286,7 +1293,7 @@ export default function CycleCounts() {
               />
             </div>
             <div>
-              <Label>Location Types (select which bin types to count)</Label>
+              <Label>Location Purpose (where inventory is used)</Label>
               <div className="grid grid-cols-2 gap-2 mt-2">
                 {locationTypeOptions.map((type) => (
                   <label key={type.value} className="flex items-center gap-2 cursor-pointer">
@@ -1307,7 +1314,31 @@ export default function CycleCounts() {
                   </label>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all bin types</p>
+              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all purposes</p>
+            </div>
+            <div>
+              <Label>Storage Type (physical container type)</Label>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                {binTypeOptions.map((type) => (
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newCountForm.binTypes.includes(type.value)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setNewCountForm({ ...newCountForm, binTypes: [...newCountForm.binTypes, type.value] });
+                        } else {
+                          setNewCountForm({ ...newCountForm, binTypes: newCountForm.binTypes.filter(t => t !== type.value) });
+                        }
+                      }}
+                      className="h-4 w-4"
+                      data-testid={`checkbox-bin-type-${type.value}`}
+                    />
+                    <span className="text-sm">{type.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all storage types</p>
             </div>
           </div>
           <DialogFooter>
@@ -1318,6 +1349,7 @@ export default function CycleCounts() {
                 description: newCountForm.description || undefined,
                 zoneFilter: newCountForm.zoneFilter || undefined,
                 locationTypeFilter: newCountForm.locationTypes.length > 0 ? newCountForm.locationTypes.join(",") : undefined,
+                binTypeFilter: newCountForm.binTypes.length > 0 ? newCountForm.binTypes.join(",") : undefined,
               })}
               disabled={createMutation.isPending || !newCountForm.name}
             >

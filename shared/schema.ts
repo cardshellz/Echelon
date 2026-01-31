@@ -407,6 +407,7 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   
   // Location metadata
   locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"), // forward_pick, bulk_storage, receiving, packing, shipping
+  binType: varchar("bin_type", { length: 30 }).notNull().default("bin"), // bin, pallet, carton_flow, bulk_reserve, shelf
   isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
   pickSequence: integer("pick_sequence"), // Walk order for optimized picking (null = not sequenced)
   
@@ -1127,6 +1128,7 @@ export const cycleCounts = pgTable("cycle_counts", {
   warehouseId: integer("warehouse_id").references(() => warehouses.id),
   zoneFilter: varchar("zone_filter", { length: 20 }), // Optional: limit to specific zone
   locationTypeFilter: text("location_type_filter"), // Optional: comma-separated list of location types to include
+  binTypeFilter: text("bin_type_filter"), // Optional: comma-separated list of bin types to include (bin, pallet, carton_flow, etc.)
   assignedTo: varchar("assigned_to", { length: 100 }), // User assigned to count
   totalBins: integer("total_bins").notNull().default(0),
   countedBins: integer("counted_bins").notNull().default(0),
