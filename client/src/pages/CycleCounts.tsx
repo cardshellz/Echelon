@@ -109,7 +109,14 @@ export default function CycleCounts() {
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
-  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "" });
+  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", locationTypes: [] as string[] });
+  const locationTypeOptions = [
+    { value: "forward_pick", label: "Forward Pick" },
+    { value: "bulk_storage", label: "Bulk Storage" },
+    { value: "overflow", label: "Overflow" },
+    { value: "receiving", label: "Receiving" },
+    { value: "staging", label: "Staging" },
+  ];
   const [countForm, setCountForm] = useState({ countedSku: "", countedQty: "", notes: "" });
   const [skuSearch, setSkuSearch] = useState("");
   const [skuDropdownOpen, setSkuDropdownOpen] = useState(false);
@@ -171,7 +178,7 @@ export default function CycleCounts() {
       toast({ title: "Cycle count created" });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       setCreateDialogOpen(false);
-      setNewCountForm({ name: "", description: "", zoneFilter: "" });
+      setNewCountForm({ name: "", description: "", zoneFilter: "", locationTypes: [] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
@@ -1278,6 +1285,30 @@ export default function CycleCounts() {
                 data-testid="input-zone-filter"
               />
             </div>
+            <div>
+              <Label>Location Types (select which bin types to count)</Label>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                {locationTypeOptions.map((type) => (
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newCountForm.locationTypes.includes(type.value)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setNewCountForm({ ...newCountForm, locationTypes: [...newCountForm.locationTypes, type.value] });
+                        } else {
+                          setNewCountForm({ ...newCountForm, locationTypes: newCountForm.locationTypes.filter(t => t !== type.value) });
+                        }
+                      }}
+                      className="h-4 w-4"
+                      data-testid={`checkbox-location-type-${type.value}`}
+                    />
+                    <span className="text-sm">{type.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all bin types</p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
@@ -1286,6 +1317,7 @@ export default function CycleCounts() {
                 name: newCountForm.name,
                 description: newCountForm.description || undefined,
                 zoneFilter: newCountForm.zoneFilter || undefined,
+                locationTypeFilter: newCountForm.locationTypes.length > 0 ? newCountForm.locationTypes.join(",") : undefined,
               })}
               disabled={createMutation.isPending || !newCountForm.name}
             >

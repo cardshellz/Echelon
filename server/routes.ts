@@ -6165,13 +6165,17 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Can only initialize draft cycle counts" });
       }
       
-      // Get all warehouse locations (filtered by zone if specified)
+      // Get all warehouse locations (filtered by zone, warehouse, and location type if specified)
       let locations = await storage.getAllWarehouseLocations();
       if (cycleCount.zoneFilter) {
         locations = locations.filter(l => l.zone === cycleCount.zoneFilter);
       }
       if (cycleCount.warehouseId) {
         locations = locations.filter(l => l.warehouseId === cycleCount.warehouseId);
+      }
+      if (cycleCount.locationTypeFilter) {
+        const allowedTypes = cycleCount.locationTypeFilter.split(",").map(t => t.trim());
+        locations = locations.filter(l => allowedTypes.includes(l.locationType));
       }
       
       // For each location, get current inventory and create count items
