@@ -64,8 +64,10 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
 
   const allNavItems: NavItem[] = [
     { type: 'link', label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
-    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
+    { type: "separator", label: "Catalog", roles: ["admin", "lead"] },
     { type: 'link', label: "Products", icon: Package, href: "/products", roles: ["admin", "lead"] },
+    { type: 'link', label: "Variants", icon: Layers, href: "/variants", roles: ["admin", "lead"] },
+    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
     { type: 'link', label: "Inventory (WMS)", icon: Box, href: "/inventory", roles: ["admin", "lead"] },
     { type: 'link', label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", roles: ["admin", "lead"] },
     { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },

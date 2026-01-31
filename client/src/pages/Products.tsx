@@ -30,7 +30,7 @@ import {
 interface ProductVariant {
   id: number;
   productId: number;
-  sku: string;
+  sku: string | null;
   name: string;
   unitsPerVariant: number;
   hierarchyLevel: number;
@@ -39,24 +39,24 @@ interface ProductVariant {
   shopifyVariantId: string | null;
   costCents: number | null;
   weightGrams: number | null;
-  isActive: boolean;
+  imageUrl: string | null;
+  active: number;
   createdAt: string;
   updatedAt: string;
 }
 
 interface Product {
   id: number;
-  sku: string;
+  sku: string | null;
   name: string;
   description: string | null;
   baseUnit: string;
   category: string | null;
   brand: string | null;
   imageUrl: string | null;
-  costCents: number | null;
-  weightGrams: number | null;
+  costPerUnit: number | null;
   shopifyProductId: string | null;
-  isActive: boolean;
+  active: number;
   createdAt: string;
   updatedAt: string;
   variants: ProductVariant[];
@@ -77,7 +77,7 @@ export default function Products() {
 
   const syncMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/shopify/sync", { method: "POST" });
+      const res = await fetch("/api/shopify/sync-products", { method: "POST" });
       if (!res.ok) throw new Error("Sync failed");
       return res.json();
     },
@@ -85,7 +85,7 @@ export default function Products() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ 
         title: "Sync Complete", 
-        description: `Synced ${data.total} products (${data.inventory?.created || 0} new, ${data.inventory?.updated || 0} updated)` 
+        description: `Products: ${data.products?.created || 0} created, ${data.products?.updated || 0} updated. Variants: ${data.variants?.created || 0} created, ${data.variants?.updated || 0} updated.` 
       });
     },
     onError: () => {
@@ -97,11 +97,11 @@ export default function Products() {
     const matchesSearch = searchQuery === "" || 
       product.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       product.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      product.variants.some(v => v.sku?.toLowerCase().includes(searchQuery.toLowerCase()));
+      product.variants?.some(v => v.sku?.toLowerCase().includes(searchQuery.toLowerCase()));
     
     const matchesStatus = statusFilter === "all" || 
-      (statusFilter === "active" && product.isActive) ||
-      (statusFilter === "inactive" && !product.isActive);
+      (statusFilter === "active" && product.active === 1) ||
+      (statusFilter === "inactive" && product.active === 0);
     
     const matchesCategory = categoryFilter === "all" || 
       product.category === categoryFilter;
@@ -116,8 +116,8 @@ export default function Products() {
 
   const stats = {
     total: products.length,
-    active: products.filter(p => p.isActive).length,
-    variants: products.reduce((acc, p) => acc + p.variants.length, 0),
+    active: products.filter(p => p.active === 1).length,
+    variants: products.reduce((acc, p) => acc + (p.variants?.length || 0), 0),
   };
 
   return (
@@ -260,10 +260,10 @@ export default function Products() {
                 </div>
                 <div className="space-y-1">
                   <p className="font-medium line-clamp-2">{product.name}</p>
-                  <p className="text-sm text-muted-foreground font-mono">{product.sku}</p>
+                  <p className="text-sm text-muted-foreground font-mono">{product.sku || '-'}</p>
                   <div className="flex gap-1 flex-wrap">
-                    <Badge variant={product.isActive ? "default" : "secondary"}>
-                      {product.isActive ? "Active" : "Inactive"}
+                    <Badge variant={product.active === 1 ? "default" : "secondary"}>
+                      {product.active === 1 ? "Active" : "Inactive"}
                     </Badge>
                   </div>
                 </div>
@@ -313,11 +313,11 @@ export default function Products() {
                       )}
                     </div>
                   </TableCell>
-                  <TableCell className="font-mono text-sm">{product.sku}</TableCell>
+                  <TableCell className="font-mono text-sm">{product.sku || '-'}</TableCell>
                   <TableCell>{product.category || "-"}</TableCell>
                   <TableCell>
-                    <Badge variant={product.isActive ? "default" : "secondary"}>
-                      {product.isActive ? "Active" : "Inactive"}
+                    <Badge variant={product.active === 1 ? "default" : "secondary"}>
+                      {product.active === 1 ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   <TableCell>

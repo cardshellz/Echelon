@@ -449,6 +449,7 @@ export const products = pgTable("products", {
   baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"), // "each", "piece", "unit"
   costPerUnit: integer("cost_per_unit"), // Default cost in cents
   imageUrl: text("image_url"),
+  shopifyProductId: varchar("shopify_product_id", { length: 100 }), // Shopify product ID for sync
   active: integer("active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -478,6 +479,7 @@ export const productVariants = pgTable("product_variants", {
   costCents: integer("cost_cents"), // Cost in cents for this variant
   weightGrams: integer("weight_grams"), // Weight for shipping
   imageUrl: text("image_url"),
+  shopifyVariantId: varchar("shopify_variant_id", { length: 100 }), // Shopify variant ID for sync
   active: integer("active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -2108,6 +2108,260 @@ export async function registerRoutes(
     }
   });
 
+  // NEW: Sync Shopify variants to products/product_variants tables
+  // Parses SKU pattern: BASE-SKU-P50, BASE-SKU-C700 etc.
+  // P = Pack, B = Box, C = Case, number = units per variant
+  app.post("/api/shopify/sync-products", async (req, res) => {
+    try {
+      console.log("Starting Shopify product sync to new products/product_variants tables...");
+      
+      const shopifyProducts = await fetchShopifyCatalogProducts();
+      console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
+      
+      // SKU parsing pattern: BASE-SKU-[P|B|C]### 
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      
+      // Group by parsed base SKU
+      const baseSkuMap: Record<string, {
+        baseSku: string;
+        baseName: string;
+        shopifyProductId: number;
+        vendor: string | null;
+        productType: string | null;
+        description: string | null;
+        imageUrl: string | null;
+        variants: Array<{
+          sku: string;
+          name: string;
+          type: string;
+          unitsPerVariant: number;
+          shopifyVariantId: number;
+          barcode: string | null;
+          imageUrl: string | null;
+        }>;
+      }> = {};
+      
+      // Variants without the -P/-B/-C suffix (treated as single units)
+      const standaloneVariants: Array<{
+        sku: string;
+        name: string;
+        shopifyProductId: number;
+        shopifyVariantId: number;
+        vendor: string | null;
+        productType: string | null;
+        description: string | null;
+        barcode: string | null;
+        imageUrl: string | null;
+      }> = [];
+      
+      for (const variant of shopifyProducts) {
+        if (!variant.sku) continue; // Skip variants without SKU
+        
+        const match = variant.sku.match(variantPattern);
+        
+        if (match) {
+          const baseSku = match[1];
+          const variantType = match[2].toUpperCase();
+          const unitsPerVariant = parseInt(match[3], 10);
+          
+          if (!baseSkuMap[baseSku]) {
+            // Extract base name (remove variant suffix from title)
+            let baseName = variant.productTitle || variant.title;
+            const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case)\s+of\s+\d+.*/i);
+            if (packMatch) {
+              baseName = baseName.substring(0, packMatch.index).trim();
+            }
+            
+            baseSkuMap[baseSku] = {
+              baseSku,
+              baseName,
+              shopifyProductId: variant.shopifyProductId,
+              vendor: variant.vendor,
+              productType: variant.productType,
+              description: variant.description,
+              imageUrl: variant.imageUrl,
+              variants: []
+            };
+          }
+          
+          baseSkuMap[baseSku].variants.push({
+            sku: variant.sku,
+            name: variant.variantTitle || `${variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case'} of ${unitsPerVariant}`,
+            type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
+            unitsPerVariant,
+            shopifyVariantId: variant.variantId,
+            barcode: variant.barcode,
+            imageUrl: variant.imageUrl
+          });
+        } else {
+          // No variant pattern - treat as standalone single unit
+          standaloneVariants.push({
+            sku: variant.sku,
+            name: variant.title,
+            shopifyProductId: variant.shopifyProductId,
+            shopifyVariantId: variant.variantId,
+            vendor: variant.vendor,
+            productType: variant.productType,
+            description: variant.description,
+            barcode: variant.barcode,
+            imageUrl: variant.imageUrl
+          });
+        }
+      }
+      
+      console.log(`Parsed: ${Object.keys(baseSkuMap).length} base SKUs with variants, ${standaloneVariants.length} standalone`);
+      
+      let productsCreated = 0;
+      let productsUpdated = 0;
+      let variantsCreated = 0;
+      let variantsUpdated = 0;
+      
+      // Process base SKUs with variants
+      for (const [baseSku, data] of Object.entries(baseSkuMap)) {
+        // Find or create product
+        let product = await storage.getProductBySku(baseSku);
+        
+        if (product) {
+          // Update existing product
+          await storage.updateProduct(product.id, {
+            name: data.baseName,
+            category: data.productType,
+            brand: data.vendor,
+            description: data.description,
+            imageUrl: data.imageUrl,
+            shopifyProductId: String(data.shopifyProductId),
+          });
+          productsUpdated++;
+        } else {
+          // Create new product
+          product = await storage.createProduct({
+            sku: baseSku,
+            name: data.baseName,
+            category: data.productType,
+            brand: data.vendor,
+            description: data.description,
+            imageUrl: data.imageUrl,
+            shopifyProductId: String(data.shopifyProductId),
+            baseUnit: 'EA',
+            active: 1,
+          });
+          productsCreated++;
+        }
+        
+        // Process variants
+        for (const v of data.variants) {
+          // Determine hierarchy level: Pack=1, Box=2, Case=3
+          const hierarchyLevel = v.type === 'Pack' ? 1 : v.type === 'Box' ? 2 : 3;
+          
+          let variant = await storage.getProductVariantBySku(v.sku);
+          
+          if (variant) {
+            // Update existing variant
+            await storage.updateProductVariant(variant.id, {
+              name: v.name,
+              unitsPerVariant: v.unitsPerVariant,
+              hierarchyLevel,
+              barcode: v.barcode,
+              shopifyVariantId: String(v.shopifyVariantId),
+              imageUrl: v.imageUrl,
+            });
+            variantsUpdated++;
+          } else {
+            // Create new variant
+            await storage.createProductVariant({
+              productId: product.id,
+              sku: v.sku,
+              name: v.name,
+              unitsPerVariant: v.unitsPerVariant,
+              hierarchyLevel,
+              barcode: v.barcode,
+              shopifyVariantId: String(v.shopifyVariantId),
+              imageUrl: v.imageUrl,
+              active: 1,
+            });
+            variantsCreated++;
+          }
+        }
+      }
+      
+      // Process standalone variants (no -P/-B/-C suffix)
+      for (const sv of standaloneVariants) {
+        // Create product with same SKU as variant
+        let product = await storage.getProductBySku(sv.sku);
+        
+        if (product) {
+          await storage.updateProduct(product.id, {
+            name: sv.name,
+            category: sv.productType,
+            brand: sv.vendor,
+            description: sv.description,
+            imageUrl: sv.imageUrl,
+            shopifyProductId: String(sv.shopifyProductId),
+          });
+          productsUpdated++;
+        } else {
+          product = await storage.createProduct({
+            sku: sv.sku,
+            name: sv.name,
+            category: sv.productType,
+            brand: sv.vendor,
+            description: sv.description,
+            imageUrl: sv.imageUrl,
+            shopifyProductId: String(sv.shopifyProductId),
+            baseUnit: 'EA',
+            active: 1,
+          });
+          productsCreated++;
+        }
+        
+        // Create/update default variant (1:1 ratio)
+        let variant = await storage.getProductVariantBySku(sv.sku);
+        
+        if (variant) {
+          await storage.updateProductVariant(variant.id, {
+            name: 'Each',
+            unitsPerVariant: 1,
+            hierarchyLevel: 1,
+            barcode: sv.barcode,
+            shopifyVariantId: String(sv.shopifyVariantId),
+            imageUrl: sv.imageUrl,
+          });
+          variantsUpdated++;
+        } else {
+          await storage.createProductVariant({
+            productId: product.id,
+            sku: sv.sku,
+            name: 'Each',
+            unitsPerVariant: 1,
+            hierarchyLevel: 1,
+            barcode: sv.barcode,
+            shopifyVariantId: String(sv.shopifyVariantId),
+            imageUrl: sv.imageUrl,
+            active: 1,
+          });
+          variantsCreated++;
+        }
+      }
+      
+      console.log(`Sync complete: products ${productsCreated} created/${productsUpdated} updated, variants ${variantsCreated} created/${variantsUpdated} updated`);
+      
+      res.json({
+        success: true,
+        products: { created: productsCreated, updated: productsUpdated },
+        variants: { created: variantsCreated, updated: variantsUpdated },
+        baseSkusWithVariants: Object.keys(baseSkuMap).length,
+        standaloneProducts: standaloneVariants.length,
+        totalShopifyVariants: shopifyProducts.length,
+      });
+    } catch (error: any) {
+      console.error("Shopify product sync error:", error);
+      res.status(500).json({ 
+        error: "Failed to sync products from Shopify",
+        message: error.message 
+      });
+    }
+  });
+
   // Sync from shopify_orders/shopify_order_items tables to operational orders/order_items
   // This reads from the raw Shopify tables and extracts operational subset
   app.post("/api/shopify/sync-from-raw-tables", async (req, res) => {
@@ -3240,6 +3494,16 @@ export async function registerRoutes(
   // ============================================================================
   // Product Variants API
   // ============================================================================
+  app.get("/api/product-variants", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const variants = await storage.getAllProductVariants();
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching all variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
   app.get("/api/products/:productId/variants", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
