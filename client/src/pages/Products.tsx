@@ -44,7 +44,7 @@ interface ProductVariant {
   costCents: number | null;
   weightGrams: number | null;
   imageUrl: string | null;
-  active: number;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -60,7 +60,7 @@ interface Product {
   imageUrl: string | null;
   costPerUnit: number | null;
   shopifyProductId: string | null;
-  active: number;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
   variants: ProductVariant[];
@@ -141,8 +141,8 @@ export default function Products() {
       product.variants?.some(v => v.sku?.toLowerCase().includes(searchQuery.toLowerCase()));
     
     const matchesStatus = statusFilter === "all" || 
-      (statusFilter === "active" && product.active === 1) ||
-      (statusFilter === "inactive" && product.active === 0);
+      (statusFilter === "active" && product.isActive) ||
+      (statusFilter === "inactive" && !product.isActive);
     
     const matchesCategory = categoryFilter === "all" || 
       product.category === categoryFilter;
@@ -157,7 +157,7 @@ export default function Products() {
 
   const stats = {
     total: products.length,
-    active: products.filter(p => p.active === 1).length,
+    active: products.filter(p => p.isActive).length,
     variants: products.reduce((acc, p) => acc + (p.variants?.length || 0), 0),
   };
 
@@ -307,8 +307,8 @@ export default function Products() {
                   <p className="font-medium line-clamp-2">{product.name}</p>
                   <p className="text-sm text-muted-foreground font-mono">{product.sku || '-'}</p>
                   <div className="flex gap-1 flex-wrap">
-                    <Badge variant={product.active === 1 ? "default" : "secondary"}>
-                      {product.active === 1 ? "Active" : "Inactive"}
+                    <Badge variant={product.isActive ? "default" : "secondary"}>
+                      {product.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </div>
                 </div>
@@ -361,8 +361,8 @@ export default function Products() {
                   <TableCell className="font-mono text-sm">{product.sku || '-'}</TableCell>
                   <TableCell>{product.category || "-"}</TableCell>
                   <TableCell>
-                    <Badge variant={product.active === 1 ? "default" : "secondary"}>
-                      {product.active === 1 ? "Active" : "Inactive"}
+                    <Badge variant={product.isActive ? "default" : "secondary"}>
+                      {product.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   <TableCell>

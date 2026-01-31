@@ -23,7 +23,7 @@ interface Product {
   name: string;
   category: string | null;
   brand: string | null;
-  active: number;
+  isActive: boolean;
 }
 
 interface ProductVariant {
@@ -35,7 +35,7 @@ interface ProductVariant {
   hierarchyLevel: number;
   barcode: string | null;
   shopifyVariantId: string | null;
-  active: number;
+  isActive: boolean;
 }
 
 export default function Variants() {
@@ -49,13 +49,13 @@ export default function Variants() {
 
   const { data: products = [] } = useQuery<Product[]>({
     queryKey: ["/api/products"],
-    select: (data) => data.map(p => ({ 
+    select: (data) => data.map((p: any) => ({ 
       id: p.id, 
       sku: p.sku, 
       name: p.name, 
       category: p.category, 
       brand: p.brand, 
-      active: p.active 
+      isActive: p.isActive 
     })),
   });
 
@@ -232,8 +232,8 @@ export default function Variants() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={variant.active === 1 ? "default" : "secondary"}>
-                      {variant.active === 1 ? "Active" : "Inactive"}
+                    <Badge variant={variant.isActive ? "default" : "secondary"}>
+                      {variant.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   <TableCell>

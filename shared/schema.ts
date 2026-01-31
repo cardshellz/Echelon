@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -450,7 +450,7 @@ export const products = pgTable("products", {
   costPerUnit: integer("cost_per_unit"), // Default cost in cents
   imageUrl: text("image_url"),
   shopifyProductId: varchar("shopify_product_id", { length: 100 }), // Shopify product ID for sync
-  active: integer("active").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -480,7 +480,7 @@ export const productVariants = pgTable("product_variants", {
   weightGrams: integer("weight_grams"), // Weight for shipping
   imageUrl: text("image_url"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }), // Shopify variant ID for sync
-  active: integer("active").notNull().default(1),
+  isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
