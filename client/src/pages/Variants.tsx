@@ -46,6 +46,21 @@ export default function Variants() {
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [createProductDialogOpen, setCreateProductDialogOpen] = useState(false);
+  const [newVariant, setNewVariant] = useState({
+    productId: "",
+    sku: "",
+    name: "",
+    unitsPerVariant: 1,
+    hierarchyLevel: 1,
+    barcode: "",
+  });
+  const [newProduct, setNewProduct] = useState({
+    name: "",
+    sku: "",
+    baseUnit: "piece",
+  });
 
   const { data: products = [] } = useQuery<Product[]>({
     queryKey: ["/api/products"],
@@ -83,6 +98,60 @@ export default function Variants() {
     },
     onError: () => {
       toast({ title: "Failed to link variant", variant: "destructive" });
+    },
+  });
+
+  const createVariantMutation = useMutation({
+    mutationFn: async (data: typeof newVariant) => {
+      const res = await fetch(`/api/products/${data.productId}/variants`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sku: data.sku || null,
+          name: data.name,
+          unitsPerVariant: data.unitsPerVariant,
+          hierarchyLevel: data.hierarchyLevel,
+          barcode: data.barcode || null,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create variant");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({ title: "Variant created successfully" });
+      setCreateDialogOpen(false);
+      setNewVariant({ productId: "", sku: "", name: "", unitsPerVariant: 1, hierarchyLevel: 1, barcode: "" });
+    },
+    onError: () => {
+      toast({ title: "Failed to create variant", variant: "destructive" });
+    },
+  });
+
+  const createProductMutation = useMutation({
+    mutationFn: async (data: typeof newProduct) => {
+      const res = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: data.name,
+          sku: data.sku || null,
+          baseUnit: data.baseUnit,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create product");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({ title: "Product created successfully" });
+      setCreateProductDialogOpen(false);
+      setNewProduct({ name: "", sku: "", baseUnit: "piece" });
+      setNewVariant({ ...newVariant, productId: data.id.toString() });
+    },
+    onError: () => {
+      toast({ title: "Failed to create product", variant: "destructive" });
     },
   });
 
@@ -135,6 +204,10 @@ export default function Variants() {
             Manage sellable SKUs and link them to products
           </p>
         </div>
+        <Button onClick={() => setCreateDialogOpen(true)} data-testid="btn-add-variant">
+          <Plus className="h-4 w-4 mr-2" />
+          Add Variant
+        </Button>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
@@ -305,6 +378,170 @@ export default function Variants() {
               disabled={!selectedProductId || linkMutation.isPending}
             >
               {linkMutation.isPending ? "Linking..." : "Link Variant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add New Variant</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Parent Product *</Label>
+              <div className="flex gap-2">
+                <Select 
+                  value={newVariant.productId} 
+                  onValueChange={(val) => setNewVariant({ ...newVariant, productId: val })}
+                >
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Select a product..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {products.map((product) => (
+                      <SelectItem key={product.id} value={product.id.toString()}>
+                        {product.sku ? `${product.sku} - ` : ''}{product.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button 
+                  variant="outline" 
+                  size="icon"
+                  onClick={() => setCreateProductDialogOpen(true)}
+                  title="Create new product"
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="variant-sku">SKU</Label>
+                <Input
+                  id="variant-sku"
+                  value={newVariant.sku}
+                  onChange={(e) => setNewVariant({ ...newVariant, sku: e.target.value })}
+                  placeholder="e.g., ARM-ENV-SGL-P50"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="variant-barcode">Barcode</Label>
+                <Input
+                  id="variant-barcode"
+                  value={newVariant.barcode}
+                  onChange={(e) => setNewVariant({ ...newVariant, barcode: e.target.value })}
+                  placeholder="UPC/EAN"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="variant-name">Name *</Label>
+              <Input
+                id="variant-name"
+                value={newVariant.name}
+                onChange={(e) => setNewVariant({ ...newVariant, name: e.target.value })}
+                placeholder="e.g., Pack of 50"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="variant-units">Units per Variant</Label>
+                <Input
+                  id="variant-units"
+                  type="number"
+                  min={1}
+                  value={newVariant.unitsPerVariant}
+                  onChange={(e) => setNewVariant({ ...newVariant, unitsPerVariant: parseInt(e.target.value) || 1 })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Type</Label>
+                <Select 
+                  value={newVariant.hierarchyLevel.toString()} 
+                  onValueChange={(val) => setNewVariant({ ...newVariant, hierarchyLevel: parseInt(val) })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">Pack</SelectItem>
+                    <SelectItem value="2">Box</SelectItem>
+                    <SelectItem value="3">Case</SelectItem>
+                    <SelectItem value="4">Pallet</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => createVariantMutation.mutate(newVariant)}
+              disabled={!newVariant.productId || !newVariant.name || createVariantMutation.isPending}
+            >
+              {createVariantMutation.isPending ? "Creating..." : "Create Variant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createProductDialogOpen} onOpenChange={setCreateProductDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Create New Product</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="new-product-name">Name *</Label>
+              <Input
+                id="new-product-name"
+                value={newProduct.name}
+                onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                placeholder="Product name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="new-product-sku">SKU</Label>
+              <Input
+                id="new-product-sku"
+                value={newProduct.sku}
+                onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value })}
+                placeholder="e.g., ARM-ENV-SGL"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Base Unit</Label>
+              <Select 
+                value={newProduct.baseUnit} 
+                onValueChange={(val) => setNewProduct({ ...newProduct, baseUnit: val })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="piece">Piece</SelectItem>
+                  <SelectItem value="pack">Pack</SelectItem>
+                  <SelectItem value="box">Box</SelectItem>
+                  <SelectItem value="case">Case</SelectItem>
+                  <SelectItem value="pallet">Pallet</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateProductDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => createProductMutation.mutate(newProduct)}
+              disabled={!newProduct.name || createProductMutation.isPending}
+            >
+              {createProductMutation.isPending ? "Creating..." : "Create & Select"}
             </Button>
           </DialogFooter>
         </DialogContent>
