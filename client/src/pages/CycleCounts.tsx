@@ -612,6 +612,17 @@ export default function CycleCounts() {
         
         {/* Action buttons row */}
         <div className="flex flex-wrap gap-2">
+          {cycleCountDetail.status === "draft" && (
+            <Button 
+              size="lg" 
+              className="flex-1 md:flex-none"
+              onClick={() => initializeMutation.mutate(selectedCount)}
+              disabled={initializeMutation.isPending}
+              data-testid="button-initialize-count"
+            >
+              <Play className="h-4 w-4 mr-2" /> {initializeMutation.isPending ? "Initializing..." : "Initialize Count"}
+            </Button>
+          )}
           {cycleCountDetail.status === "in_progress" && pendingCount > 0 && (
             <Button 
               size="lg" 
