@@ -6179,20 +6179,22 @@ export async function registerRoutes(
       
       for (const location of locations) {
         // Get inventory levels at this location with actual stock
-        // Primary path: inventory_items.base_sku (always populated)
-        // Fallback: catalog_products.sku via inventory_item_id link
+        // Join to uom_variants for the sellable SKU (source of truth)
         const result = await db.execute<{
-          inventory_item_id: number;
+          variant_id: number;
+          inventory_item_id: number | null;
           variant_qty: number;
           catalog_product_id: number | null;
           sku: string | null;
         }>(sql`
           SELECT 
+            il.variant_id,
             il.inventory_item_id,
             il.variant_qty,
             cp.id as catalog_product_id,
-            COALESCE(cp.sku, ii.base_sku) as sku
+            COALESCE(uv.sku, cp.sku, ii.base_sku) as sku
           FROM inventory_levels il
+          LEFT JOIN uom_variants uv ON il.variant_id = uv.id
           LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
           LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
           WHERE il.warehouse_location_id = ${location.id}
