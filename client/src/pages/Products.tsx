@@ -27,26 +27,39 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+interface ProductVariant {
+  id: number;
+  productId: number;
+  sku: string;
+  name: string;
+  unitsPerVariant: number;
+  hierarchyLevel: number;
+  parentVariantId: number | null;
+  barcode: string | null;
+  shopifyVariantId: string | null;
+  costCents: number | null;
+  weightGrams: number | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface Product {
   id: number;
-  baseSku: string;
+  sku: string;
   name: string;
+  description: string | null;
+  baseUnit: string;
+  category: string | null;
+  brand: string | null;
   imageUrl: string | null;
-  active: number;
-  catalogProduct: {
-    id: number;
-    title: string;
-    status: string;
-    category: string | null;
-    brand: string | null;
-  } | null;
-  variantCount: number;
-  variants: Array<{
-    id: number;
-    sku: string;
-    name: string;
-    unitsPerVariant: number;
-  }>;
+  costCents: number | null;
+  weightGrams: number | null;
+  shopifyProductId: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  variants: ProductVariant[];
 }
 
 export default function Products() {
@@ -83,30 +96,28 @@ export default function Products() {
   const filteredProducts = products.filter(product => {
     const matchesSearch = searchQuery === "" || 
       product.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      product.baseSku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      product.catalogProduct?.title?.toLowerCase().includes(searchQuery.toLowerCase());
+      product.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.variants.some(v => v.sku?.toLowerCase().includes(searchQuery.toLowerCase()));
     
     const matchesStatus = statusFilter === "all" || 
-      (statusFilter === "active" && product.active === 1) ||
-      (statusFilter === "inactive" && product.active === 0) ||
-      (statusFilter === "has_catalog" && product.catalogProduct) ||
-      (statusFilter === "no_catalog" && !product.catalogProduct);
+      (statusFilter === "active" && product.isActive) ||
+      (statusFilter === "inactive" && !product.isActive);
     
     const matchesCategory = categoryFilter === "all" || 
-      product.catalogProduct?.category === categoryFilter;
+      product.category === categoryFilter;
     
     return matchesSearch && matchesStatus && matchesCategory;
   });
 
   const categories = Array.from(new Set(products
-    .map(p => p.catalogProduct?.category)
+    .map(p => p.category)
     .filter((c): c is string => Boolean(c))
   ));
 
   const stats = {
     total: products.length,
-    active: products.filter(p => p.active === 1).length,
-    withCatalog: products.filter(p => p.catalogProduct).length,
+    active: products.filter(p => p.isActive).length,
+    variants: products.reduce((acc, p) => acc + p.variants.length, 0),
   };
 
   return (
@@ -149,8 +160,8 @@ export default function Products() {
         </Card>
         <Card>
           <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.withCatalog}</div>
-            <div className="text-sm text-muted-foreground">With Catalog Data</div>
+            <div className="text-2xl font-bold">{stats.variants}</div>
+            <div className="text-sm text-muted-foreground">Variants</div>
           </CardContent>
         </Card>
       </div>
@@ -175,8 +186,6 @@ export default function Products() {
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="active">Active</SelectItem>
               <SelectItem value="inactive">Inactive</SelectItem>
-              <SelectItem value="has_catalog">Has Catalog</SelectItem>
-              <SelectItem value="no_catalog">No Catalog</SelectItem>
             </SelectContent>
           </Select>
           {categories.length > 0 && (
@@ -250,11 +259,11 @@ export default function Products() {
                   )}
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium line-clamp-2">{product.catalogProduct?.title || product.name}</p>
-                  <p className="text-sm text-muted-foreground font-mono">{product.baseSku}</p>
+                  <p className="font-medium line-clamp-2">{product.name}</p>
+                  <p className="text-sm text-muted-foreground font-mono">{product.sku}</p>
                   <div className="flex gap-1 flex-wrap">
-                    <Badge variant={product.active ? "default" : "secondary"}>
-                      {product.active ? "Active" : "Inactive"}
+                    <Badge variant={product.isActive ? "default" : "secondary"}>
+                      {product.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </div>
                 </div>
@@ -298,17 +307,17 @@ export default function Products() {
                   </TableCell>
                   <TableCell>
                     <div>
-                      <p className="font-medium">{product.catalogProduct?.title || product.name}</p>
-                      {product.catalogProduct?.brand && (
-                        <p className="text-sm text-muted-foreground">{product.catalogProduct.brand}</p>
+                      <p className="font-medium">{product.name}</p>
+                      {product.brand && (
+                        <p className="text-sm text-muted-foreground">{product.brand}</p>
                       )}
                     </div>
                   </TableCell>
-                  <TableCell className="font-mono text-sm">{product.baseSku}</TableCell>
-                  <TableCell>{product.catalogProduct?.category || "-"}</TableCell>
+                  <TableCell className="font-mono text-sm">{product.sku}</TableCell>
+                  <TableCell>{product.category || "-"}</TableCell>
                   <TableCell>
-                    <Badge variant={product.active ? "default" : "secondary"}>
-                      {product.active ? "Active" : "Inactive"}
+                    <Badge variant={product.isActive ? "default" : "secondary"}>
+                      {product.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </TableCell>
                   <TableCell>
