@@ -104,6 +104,8 @@ export default function WarehouseLocations() {
   const [assignIsPrimary, setAssignIsPrimary] = useState(true);
   const [movingProduct, setMovingProduct] = useState<ProductInBin | null>(null);
   const [moveTargetLocationId, setMoveTargetLocationId] = useState<string>("");
+  const [reassignLocationSearch, setReassignLocationSearch] = useState("");
+  const [reassignLocationOpen, setReassignLocationOpen] = useState(false);
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -200,6 +202,17 @@ export default function WarehouseLocations() {
         } else {
           map.set(pl.warehouseLocationId, pl.sku);
         }
+      }
+    }
+    return map;
+  }, [allProductLocations]);
+
+  // Count products per location for display
+  const productCountByLocationId = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const pl of allProductLocations) {
+      if (pl.warehouseLocationId) {
+        map.set(pl.warehouseLocationId, (map.get(pl.warehouseLocationId) || 0) + 1);
       }
     }
     return map;
@@ -1503,8 +1516,14 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
       </Dialog>
 
       {/* Bulk Reassign Dialog */}
-      <Dialog open={isReassignOpen} onOpenChange={setIsReassignOpen}>
-        <DialogContent>
+      <Dialog open={isReassignOpen} onOpenChange={(open) => {
+        setIsReassignOpen(open);
+        if (!open) {
+          setTargetLocationId("");
+          setReassignLocationSearch("");
+        }
+      }}>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Move Products to New Location</DialogTitle>
           </DialogHeader>
@@ -1515,34 +1534,102 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
             </p>
             <div>
               <Label>Target Location (Holding Bin)</Label>
-              <Select value={targetLocationId} onValueChange={setTargetLocationId}>
-                <SelectTrigger data-testid="select-target-location">
-                  <SelectValue placeholder="Select destination location..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations
-                    .filter(loc => !selectedIds.has(loc.id))
-                    .sort((a, b) => {
-                      // Sort staging locations first
-                      if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
-                      if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
-                      return a.code.localeCompare(b.code);
-                    })
-                    .map(loc => (
-                      <SelectItem key={loc.id} value={loc.id.toString()}>
-                        {loc.code} {loc.locationType === 'staging' && '(Staging/Holding)'} - {loc.locationType}
-                      </SelectItem>
-                    ))
-                  }
-                </SelectContent>
-              </Select>
+              <Popover open={reassignLocationOpen} onOpenChange={setReassignLocationOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={reassignLocationOpen}
+                    className="w-full justify-between mt-1"
+                    data-testid="select-target-location"
+                  >
+                    {targetLocationId
+                      ? (() => {
+                          const loc = locations.find(l => l.id.toString() === targetLocationId);
+                          const count = productCountByLocationId.get(parseInt(targetLocationId)) || 0;
+                          return loc ? `${loc.code} ${count > 0 ? `(${count} SKUs)` : '(Empty)'}` : "Select...";
+                        })()
+                      : "Search for location..."}
+                    <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[400px] p-0" align="start">
+                  <Command>
+                    <CommandInput
+                      placeholder="Search by bin code..."
+                      value={reassignLocationSearch}
+                      onValueChange={setReassignLocationSearch}
+                      data-testid="input-reassign-location-search"
+                    />
+                    <CommandList>
+                      <CommandEmpty>No locations found.</CommandEmpty>
+                      <CommandGroup>
+                        {locations
+                          .filter(loc => !selectedIds.has(loc.id))
+                          .filter(loc => 
+                            loc.code.toLowerCase().includes(reassignLocationSearch.toLowerCase()) ||
+                            (loc.zone && loc.zone.toLowerCase().includes(reassignLocationSearch.toLowerCase()))
+                          )
+                          .sort((a, b) => {
+                            // Sort staging locations first, then empty bins
+                            if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
+                            if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
+                            const aCount = productCountByLocationId.get(a.id) || 0;
+                            const bCount = productCountByLocationId.get(b.id) || 0;
+                            if (aCount === 0 && bCount > 0) return -1;
+                            if (aCount > 0 && bCount === 0) return 1;
+                            return a.code.localeCompare(b.code);
+                          })
+                          .slice(0, 50)
+                          .map(loc => {
+                            const count = productCountByLocationId.get(loc.id) || 0;
+                            const skus = skuByLocationId.get(loc.id);
+                            return (
+                              <CommandItem
+                                key={loc.id}
+                                value={`${loc.code} ${loc.zone || ''}`}
+                                onSelect={() => {
+                                  setTargetLocationId(loc.id.toString());
+                                  setReassignLocationOpen(false);
+                                }}
+                                className="flex justify-between items-center"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-medium">{loc.code}</div>
+                                  <div className="text-xs text-muted-foreground truncate">
+                                    {loc.locationType.replace('_', ' ')}
+                                    {loc.zone && ` • Zone ${loc.zone}`}
+                                  </div>
+                                </div>
+                                <div className="text-right ml-2">
+                                  {count === 0 ? (
+                                    <Badge variant="outline" className="text-xs bg-green-50 text-green-700 border-green-200">Empty</Badge>
+                                  ) : (
+                                    <div>
+                                      <Badge variant="secondary" className="text-xs">{count} SKU{count > 1 ? 's' : ''}</Badge>
+                                      {skus && (
+                                        <div className="text-xs text-muted-foreground mt-0.5 max-w-[120px] truncate">
+                                          {skus}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              </CommandItem>
+                            );
+                          })}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
               <p className="text-xs text-muted-foreground mt-1">
-                Tip: Create a staging location to use as a holding bin for products awaiting reassignment.
+                Tip: Empty bins are shown first. Create a staging location for products awaiting reassignment.
               </p>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); }}>
+            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); setReassignLocationSearch(""); }}>
               Cancel
             </Button>
             <Button 
