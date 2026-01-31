@@ -41,7 +41,6 @@ interface ProductVariant {
   parentVariantId: number | null;
   barcode: string | null;
   shopifyVariantId: string | null;
-  costCents: number | null;
   weightGrams: number | null;
   imageUrl: string | null;
   isActive: boolean;
@@ -58,7 +57,6 @@ interface Product {
   category: string | null;
   brand: string | null;
   imageUrl: string | null;
-  costPerUnit: number | null;
   shopifyProductId: string | null;
   isActive: boolean;
   createdAt: string;
@@ -81,7 +79,7 @@ export default function Products() {
     description: "",
     category: "",
     brand: "",
-    baseUnit: "each",
+    baseUnit: "piece",
   });
 
   const { data: products = [], isLoading, refetch } = useQuery<Product[]>({
@@ -127,7 +125,7 @@ export default function Products() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ title: "Product created successfully" });
       setCreateDialogOpen(false);
-      setNewProduct({ name: "", sku: "", description: "", category: "", brand: "", baseUnit: "each" });
+      setNewProduct({ name: "", sku: "", description: "", category: "", brand: "", baseUnit: "piece" });
     },
     onError: () => {
       toast({ title: "Failed to create product", variant: "destructive" });
@@ -324,6 +322,7 @@ export default function Products() {
                 <TableHead className="w-12"></TableHead>
                 <TableHead>Product</TableHead>
                 <TableHead>SKU</TableHead>
+                <TableHead>Unit</TableHead>
                 <TableHead>Category</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="w-12"></TableHead>
@@ -359,6 +358,7 @@ export default function Products() {
                     </div>
                   </TableCell>
                   <TableCell className="font-mono text-sm">{product.sku || '-'}</TableCell>
+                  <TableCell className="capitalize">{product.baseUnit || 'piece'}</TableCell>
                   <TableCell>{product.category || "-"}</TableCell>
                   <TableCell>
                     <Badge variant={product.isActive ? "default" : "secondary"}>
@@ -448,9 +448,11 @@ export default function Products() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="each">Each</SelectItem>
                   <SelectItem value="piece">Piece</SelectItem>
-                  <SelectItem value="unit">Unit</SelectItem>
+                  <SelectItem value="pack">Pack</SelectItem>
+                  <SelectItem value="box">Box</SelectItem>
+                  <SelectItem value="case">Case</SelectItem>
+                  <SelectItem value="pallet">Pallet</SelectItem>
                 </SelectContent>
               </Select>
             </div>

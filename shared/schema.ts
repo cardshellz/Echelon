@@ -446,8 +446,7 @@ export const products = pgTable("products", {
   description: text("description"),
   category: varchar("category", { length: 100 }), // Product category
   brand: varchar("brand", { length: 100 }), // Brand name
-  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"), // "each", "piece", "unit"
-  costPerUnit: integer("cost_per_unit"), // Default cost in cents
+  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("piece"), // piece, pack, box, case, pallet
   imageUrl: text("image_url"),
   shopifyProductId: varchar("shopify_product_id", { length: 100 }), // Shopify product ID for sync
   isActive: boolean("is_active").notNull().default(true),
@@ -476,7 +475,6 @@ export const productVariants = pgTable("product_variants", {
   hierarchyLevel: integer("hierarchy_level").notNull().default(1), // 1=smallest, 2, 3, 4=largest
   parentVariantId: integer("parent_variant_id"), // For replenishment chain
   barcode: varchar("barcode", { length: 100 }),
-  costCents: integer("cost_cents"), // Cost in cents for this variant
   weightGrams: integer("weight_grams"), // Weight for shipping
   imageUrl: text("image_url"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }), // Shopify variant ID for sync
