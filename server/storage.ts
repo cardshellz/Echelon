@@ -424,6 +424,8 @@ export interface IStorage {
   createReplenTask(data: InsertReplenTask): Promise<ReplenTask>;
   updateReplenTask(id: number, updates: Partial<InsertReplenTask>): Promise<ReplenTask | null>;
   deleteReplenTask(id: number): Promise<boolean>;
+  getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]>;
+  getActiveReplenRules(): Promise<ReplenRule[]>;
   
   // Vendors
   getAllVendors(): Promise<Vendor[]>;
@@ -3088,6 +3090,24 @@ export class DatabaseStorage implements IStorage {
   async deleteReplenTask(id: number): Promise<boolean> {
     const result = await db.delete(replenTasks).where(eq(replenTasks.id, id));
     return (result.rowCount ?? 0) > 0;
+  }
+  
+  async getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]> {
+    return await db.select().from(replenTasks)
+      .where(and(
+        eq(replenTasks.toLocationId, toLocationId),
+        or(
+          eq(replenTasks.status, "pending"),
+          eq(replenTasks.status, "assigned"),
+          eq(replenTasks.status, "in_progress")
+        )
+      ));
+  }
+  
+  async getActiveReplenRules(): Promise<ReplenRule[]> {
+    return await db.select().from(replenRules)
+      .where(eq(replenRules.isActive, 1))
+      .orderBy(asc(replenRules.priority));
   }
 }
 

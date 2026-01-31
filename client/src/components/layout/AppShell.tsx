@@ -27,7 +27,8 @@ import {
   Building2,
   Cog,
   ShoppingBag,
-  Layers
+  Layers,
+  RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -71,6 +72,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: 'link', label: "Inventory (WMS)", icon: Box, href: "/inventory", roles: ["admin", "lead"] },
     { type: 'link', label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", roles: ["admin", "lead"] },
     { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
+    { type: 'link', label: "Replenishment", icon: RefreshCw, href: "/replenishment", roles: ["admin", "lead"] },
     { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },
     { type: "separator", label: "Purchasing", roles: ["admin", "lead"] },
     { type: 'link', label: "Receiving", icon: Truck, href: "/receiving", roles: ["admin", "lead"] },

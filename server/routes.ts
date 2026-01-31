@@ -7840,6 +7840,120 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to delete replen task" });
     }
   });
+  
+  app.post("/api/replen/generate", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const rules = await storage.getActiveReplenRules();
+      const inventoryLevels = await storage.getAllInventoryLevels();
+      const locations = await storage.getAllWarehouseLocations();
+      const catalogProducts = await storage.getAllCatalogProducts();
+      
+      const locationMap = new Map(locations.map(l => [l.id, l]));
+      const productMap = new Map(catalogProducts.map(p => [p.id, p]));
+      
+      const inventoryByLocationAndProduct = new Map<string, number>();
+      const inventoryByLocation = new Map<number, number>();
+      
+      for (const level of inventoryLevels) {
+        const qty = level.variantQty || 0;
+        
+        inventoryByLocation.set(
+          level.warehouseLocationId, 
+          (inventoryByLocation.get(level.warehouseLocationId) || 0) + qty
+        );
+        
+        if (level.catalogProductId) {
+          const key = `${level.warehouseLocationId}-${level.catalogProductId}`;
+          inventoryByLocationAndProduct.set(
+            key, 
+            (inventoryByLocationAndProduct.get(key) || 0) + qty
+          );
+        }
+      }
+      
+      const tasksCreated: any[] = [];
+      const skipped: any[] = [];
+      
+      for (const rule of rules) {
+        let currentQty: number;
+        
+        if (rule.catalogProductId) {
+          const key = `${rule.pickLocationId}-${rule.catalogProductId}`;
+          currentQty = inventoryByLocationAndProduct.get(key) || 0;
+        } else {
+          currentQty = inventoryByLocation.get(rule.pickLocationId) || 0;
+        }
+        
+        if (currentQty < rule.minQty) {
+          const pendingTasks = await storage.getPendingReplenTasksForLocation(rule.pickLocationId);
+          
+          const existingTaskForRule = pendingTasks.find(t => 
+            t.replenRuleId === rule.id || 
+            (t.catalogProductId === rule.catalogProductId && t.toLocationId === rule.pickLocationId)
+          );
+          
+          if (existingTaskForRule) {
+            const product = rule.catalogProductId ? productMap.get(rule.catalogProductId) : null;
+            skipped.push({
+              ruleId: rule.id,
+              pickLocationId: rule.pickLocationId,
+              product: product?.sku || product?.title || "All",
+              reason: "pending_task_exists",
+              currentQty,
+              minQty: rule.minQty,
+            });
+            continue;
+          }
+          
+          const qtyNeeded = Math.max(0, rule.maxQty - currentQty);
+          
+          if (qtyNeeded <= 0) {
+            continue;
+          }
+          
+          const task = await storage.createReplenTask({
+            replenRuleId: rule.id,
+            fromLocationId: rule.sourceLocationId,
+            toLocationId: rule.pickLocationId,
+            catalogProductId: rule.catalogProductId || null,
+            sourceUomVariantId: rule.sourceUomVariantId || null,
+            targetUomVariantId: rule.pickUomVariantId || null,
+            qtySourceUnits: 1,
+            qtyTargetUnits: qtyNeeded,
+            qtyCompleted: 0,
+            status: "pending",
+            priority: rule.priority,
+            triggeredBy: "min_max",
+            assignedTo: null,
+            notes: `Auto-generated: current qty ${currentQty} < min ${rule.minQty}`,
+          });
+          
+          const product = rule.catalogProductId ? productMap.get(rule.catalogProductId) : null;
+          tasksCreated.push({
+            taskId: task.id,
+            ruleId: rule.id,
+            pickLocation: locationMap.get(rule.pickLocationId)?.code,
+            sourceLocation: locationMap.get(rule.sourceLocationId)?.code,
+            product: product?.sku || product?.title || "All",
+            currentQty,
+            minQty: rule.minQty,
+            qtyToReplen: qtyNeeded,
+          });
+        }
+      }
+      
+      res.json({
+        success: true,
+        rulesEvaluated: rules.length,
+        tasksCreated: tasksCreated.length,
+        skipped: skipped.length,
+        details: { tasksCreated, skipped },
+      });
+    } catch (error) {
+      console.error("Error generating replen tasks:", error);
+      res.status(500).json({ error: "Failed to generate replen tasks" });
+    }
+  });
 
   return httpServer;
 }
