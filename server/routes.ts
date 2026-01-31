@@ -3144,6 +3144,155 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================================
+  // Products API (Master Catalog)
+  // ============================================================================
+  app.get("/api/products", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const allProducts = await storage.getAllProducts();
+      // Include variants for each product
+      const productsWithVariants = await Promise.all(
+        allProducts.map(async (product) => {
+          const variants = await storage.getProductVariantsByProductId(product.id);
+          return { ...product, variants };
+        })
+      );
+      res.json(productsWithVariants);
+    } catch (error) {
+      console.error("Error fetching products:", error);
+      res.status(500).json({ error: "Failed to fetch products" });
+    }
+  });
+
+  app.get("/api/products/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const product = await storage.getProductById(id);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      const variants = await storage.getProductVariantsByProductId(id);
+      res.json({ ...product, variants });
+    } catch (error) {
+      console.error("Error fetching product:", error);
+      res.status(500).json({ error: "Failed to fetch product" });
+    }
+  });
+
+  app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const { variants, ...productData } = req.body;
+      const product = await storage.createProduct(productData);
+      
+      // Create variants if provided
+      if (variants && Array.isArray(variants)) {
+        for (const variant of variants) {
+          await storage.createProductVariant({
+            ...variant,
+            productId: product.id,
+          });
+        }
+      }
+      
+      const createdVariants = await storage.getProductVariantsByProductId(product.id);
+      res.json({ ...product, variants: createdVariants });
+    } catch (error) {
+      console.error("Error creating product:", error);
+      res.status(500).json({ error: "Failed to create product" });
+    }
+  });
+
+  app.put("/api/products/:id", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { variants, ...updates } = req.body;
+      const product = await storage.updateProduct(id, updates);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      const existingVariants = await storage.getProductVariantsByProductId(id);
+      res.json({ ...product, variants: existingVariants });
+    } catch (error) {
+      console.error("Error updating product:", error);
+      res.status(500).json({ error: "Failed to update product" });
+    }
+  });
+
+  app.delete("/api/products/:id", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      // First delete all variants
+      const variants = await storage.getProductVariantsByProductId(id);
+      for (const variant of variants) {
+        await storage.deleteProductVariant(variant.id);
+      }
+      const success = await storage.deleteProduct(id);
+      if (!success) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting product:", error);
+      res.status(500).json({ error: "Failed to delete product" });
+    }
+  });
+
+  // ============================================================================
+  // Product Variants API
+  // ============================================================================
+  app.get("/api/products/:productId/variants", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const variants = await storage.getProductVariantsByProductId(productId);
+      res.json(variants);
+    } catch (error) {
+      console.error("Error fetching variants:", error);
+      res.status(500).json({ error: "Failed to fetch variants" });
+    }
+  });
+
+  app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const variant = await storage.createProductVariant({
+        ...req.body,
+        productId,
+      });
+      res.json(variant);
+    } catch (error) {
+      console.error("Error creating variant:", error);
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
+  app.put("/api/product-variants/:id", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const variant = await storage.updateProductVariant(id, req.body);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      res.json(variant);
+    } catch (error) {
+      console.error("Error updating variant:", error);
+      res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  app.delete("/api/product-variants/:id", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await storage.deleteProductVariant(id);
+      if (!success) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting variant:", error);
+      res.status(500).json({ error: "Failed to delete variant" });
+    }
+  });
+
   // Warehouse Locations (hierarchical)
   app.get("/api/warehouse/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {

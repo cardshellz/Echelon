@@ -17,6 +17,10 @@ import {
   type InsertWarehouseLocation,
   type WarehouseZone,
   type InsertWarehouseZone,
+  type Product,
+  type InsertProduct,
+  type ProductVariant,
+  type InsertProductVariant,
   type InventoryItem,
   type InsertInventoryItem,
   type UomVariant,
@@ -62,6 +66,8 @@ import {
   warehouses,
   warehouseLocations,
   warehouseZones,
+  products,
+  productVariants,
   inventoryItems,
   uomVariants,
   inventoryLevels,
@@ -179,7 +185,24 @@ export interface IStorage {
   createCatalogAsset(asset: InsertCatalogAsset): Promise<CatalogAsset>;
   deleteCatalogAsset(id: number): Promise<boolean>;
   
-  // Inventory Items (Master SKUs)
+  // Products (Master Catalog - NEW)
+  getAllProducts(): Promise<Product[]>;
+  getProductById(id: number): Promise<Product | undefined>;
+  getProductBySku(sku: string): Promise<Product | undefined>;
+  createProduct(product: InsertProduct): Promise<Product>;
+  updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product | null>;
+  deleteProduct(id: number): Promise<boolean>;
+  
+  // Product Variants (Sellable SKUs - NEW)
+  getAllProductVariants(): Promise<ProductVariant[]>;
+  getProductVariantById(id: number): Promise<ProductVariant | undefined>;
+  getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
+  getProductVariantsByProductId(productId: number): Promise<ProductVariant[]>;
+  createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
+  updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
+  deleteProductVariant(id: number): Promise<boolean>;
+  
+  // Inventory Items (LEGACY - Master SKUs)
   getAllInventoryItems(): Promise<InventoryItem[]>;
   getInventoryItemById(id: number): Promise<InventoryItem | undefined>;
   getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
@@ -1359,7 +1382,87 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  // Inventory Items (Master SKUs)
+  // ============================================================================
+  // Products (Master Catalog - NEW)
+  // ============================================================================
+  async getAllProducts(): Promise<Product[]> {
+    return await db.select().from(products).orderBy(asc(products.name));
+  }
+
+  async getProductById(id: number): Promise<Product | undefined> {
+    const result = await db.select().from(products).where(eq(products.id, id));
+    return result[0];
+  }
+
+  async getProductBySku(sku: string): Promise<Product | undefined> {
+    const result = await db.select().from(products)
+      .where(eq(products.sku, sku.toUpperCase()));
+    return result[0];
+  }
+
+  async createProduct(product: InsertProduct): Promise<Product> {
+    const result = await db.insert(products).values(product).returning();
+    return result[0];
+  }
+
+  async updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product | null> {
+    const result = await db.update(products)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(products.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteProduct(id: number): Promise<boolean> {
+    const result = await db.delete(products).where(eq(products.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ============================================================================
+  // Product Variants (Sellable SKUs - NEW)
+  // ============================================================================
+  async getAllProductVariants(): Promise<ProductVariant[]> {
+    return await db.select().from(productVariants).orderBy(asc(productVariants.sku));
+  }
+
+  async getProductVariantById(id: number): Promise<ProductVariant | undefined> {
+    const result = await db.select().from(productVariants).where(eq(productVariants.id, id));
+    return result[0];
+  }
+
+  async getProductVariantBySku(sku: string): Promise<ProductVariant | undefined> {
+    const result = await db.select().from(productVariants)
+      .where(eq(productVariants.sku, sku.toUpperCase()));
+    return result[0];
+  }
+
+  async getProductVariantsByProductId(productId: number): Promise<ProductVariant[]> {
+    return await db.select().from(productVariants)
+      .where(eq(productVariants.productId, productId))
+      .orderBy(asc(productVariants.hierarchyLevel));
+  }
+
+  async createProductVariant(variant: InsertProductVariant): Promise<ProductVariant> {
+    const result = await db.insert(productVariants).values(variant).returning();
+    return result[0];
+  }
+
+  async updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null> {
+    const result = await db.update(productVariants)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(productVariants.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteProductVariant(id: number): Promise<boolean> {
+    const result = await db.delete(productVariants).where(eq(productVariants.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ============================================================================
+  // Inventory Items (LEGACY - Master SKUs)
+  // ============================================================================
   async getAllInventoryItems(): Promise<InventoryItem[]> {
     return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
   }
