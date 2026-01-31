@@ -747,8 +747,9 @@ export class DatabaseStorage implements IStorage {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     // Use raw SQL to JOIN with shopify_orders and exclude fulfilled
+    // Get customer name from shopify_orders as fallback
     const orderList = await db.execute(sql`
-      SELECT o.*
+      SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), s.customer_name) as resolved_customer_name
       FROM orders o
       LEFT JOIN shopify_orders s ON o.source_table_id = s.id
       WHERE (
@@ -769,7 +770,7 @@ export class DatabaseStorage implements IStorage {
       sourceTableId: row.source_table_id,
       shopifyOrderId: row.shopify_order_id,
       orderNumber: row.order_number,
-      customerName: row.customer_name,
+      customerName: row.resolved_customer_name || row.customer_name,
       customerEmail: row.customer_email,
       shippingAddress: row.shipping_address,
       shippingCity: row.shipping_city,
