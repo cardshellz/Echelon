@@ -7584,5 +7584,262 @@ export async function registerRoutes(
     }
   });
 
+  // ===== REPLENISHMENT API =====
+  
+  app.get("/api/replen/rules", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const rules = await storage.getAllReplenRules();
+      
+      const locationIds = new Set<number>();
+      const productIds = new Set<number>();
+      for (const rule of rules) {
+        locationIds.add(rule.pickLocationId);
+        locationIds.add(rule.sourceLocationId);
+        if (rule.catalogProductId) productIds.add(rule.catalogProductId);
+      }
+      
+      const [allLocations, allProducts] = await Promise.all([
+        storage.getAllWarehouseLocations(),
+        storage.getAllCatalogProducts(),
+      ]);
+      
+      const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
+      const productMap = new Map(allProducts.filter(p => productIds.has(p.id)).map(p => [p.id, p]));
+      
+      const enriched = rules.map(rule => ({
+        ...rule,
+        pickLocation: locationMap.get(rule.pickLocationId),
+        sourceLocation: locationMap.get(rule.sourceLocationId),
+        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+      }));
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching replen rules:", error);
+      res.status(500).json({ error: "Failed to fetch replen rules" });
+    }
+  });
+  
+  app.get("/api/replen/rules/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const rule = await storage.getReplenRuleById(id);
+      if (!rule) {
+        return res.status(404).json({ error: "Replen rule not found" });
+      }
+      
+      const [allLocations, allProducts] = await Promise.all([
+        storage.getAllWarehouseLocations(),
+        storage.getAllCatalogProducts(),
+      ]);
+      
+      const locationMap = new Map(allLocations.map(l => [l.id, l]));
+      const productMap = new Map(allProducts.map(p => [p.id, p]));
+      
+      const enriched = {
+        ...rule,
+        pickLocation: locationMap.get(rule.pickLocationId),
+        sourceLocation: locationMap.get(rule.sourceLocationId),
+        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+      };
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching replen rule:", error);
+      res.status(500).json({ error: "Failed to fetch replen rule" });
+    }
+  });
+  
+  app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { pickLocationId, sourceLocationId, catalogProductId, pickUomVariantId, sourceUomVariantId, minQty, maxQty, replenMethod, priority } = req.body;
+      
+      if (!pickLocationId || !sourceLocationId) {
+        return res.status(400).json({ error: "pickLocationId and sourceLocationId are required" });
+      }
+      
+      const rule = await storage.createReplenRule({
+        pickLocationId,
+        sourceLocationId,
+        catalogProductId: catalogProductId || null,
+        pickUomVariantId: pickUomVariantId || null,
+        sourceUomVariantId: sourceUomVariantId || null,
+        minQty: minQty || 10,
+        maxQty: maxQty || 50,
+        replenMethod: replenMethod || "case_break",
+        priority: priority || 5,
+        isActive: 1,
+      });
+      
+      res.status(201).json(rule);
+    } catch (error) {
+      console.error("Error creating replen rule:", error);
+      res.status(500).json({ error: "Failed to create replen rule" });
+    }
+  });
+  
+  app.patch("/api/replen/rules/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      const rule = await storage.updateReplenRule(id, updates);
+      if (!rule) {
+        return res.status(404).json({ error: "Replen rule not found" });
+      }
+      res.json(rule);
+    } catch (error) {
+      console.error("Error updating replen rule:", error);
+      res.status(500).json({ error: "Failed to update replen rule" });
+    }
+  });
+  
+  app.delete("/api/replen/rules/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteReplenRule(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Replen rule not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting replen rule:", error);
+      res.status(500).json({ error: "Failed to delete replen rule" });
+    }
+  });
+  
+  // Replen Tasks
+  app.get("/api/replen/tasks", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const status = req.query.status as string | undefined;
+      const assignedTo = req.query.assignedTo as string | undefined;
+      
+      const tasks = await storage.getAllReplenTasks({ status, assignedTo });
+      
+      const locationIds = new Set<number>();
+      const productIds = new Set<number>();
+      for (const task of tasks) {
+        locationIds.add(task.fromLocationId);
+        locationIds.add(task.toLocationId);
+        if (task.catalogProductId) productIds.add(task.catalogProductId);
+      }
+      
+      const [allLocations, allProducts] = await Promise.all([
+        storage.getAllWarehouseLocations(),
+        storage.getAllCatalogProducts(),
+      ]);
+      
+      const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
+      const productMap = new Map(allProducts.filter(p => productIds.has(p.id)).map(p => [p.id, p]));
+      
+      const enriched = tasks.map(task => ({
+        ...task,
+        fromLocation: locationMap.get(task.fromLocationId),
+        toLocation: locationMap.get(task.toLocationId),
+        catalogProduct: task.catalogProductId ? productMap.get(task.catalogProductId) : null,
+      }));
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching replen tasks:", error);
+      res.status(500).json({ error: "Failed to fetch replen tasks" });
+    }
+  });
+  
+  app.get("/api/replen/tasks/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const task = await storage.getReplenTaskById(id);
+      if (!task) {
+        return res.status(404).json({ error: "Replen task not found" });
+      }
+      
+      const [allLocations, allProducts] = await Promise.all([
+        storage.getAllWarehouseLocations(),
+        storage.getAllCatalogProducts(),
+      ]);
+      
+      const locationMap = new Map(allLocations.map(l => [l.id, l]));
+      const productMap = new Map(allProducts.map(p => [p.id, p]));
+      
+      const enriched = {
+        ...task,
+        fromLocation: locationMap.get(task.fromLocationId),
+        toLocation: locationMap.get(task.toLocationId),
+        catalogProduct: task.catalogProductId ? productMap.get(task.catalogProductId) : null,
+      };
+      
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching replen task:", error);
+      res.status(500).json({ error: "Failed to fetch replen task" });
+    }
+  });
+  
+  app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceUomVariantId, targetUomVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes } = req.body;
+      
+      if (!fromLocationId || !toLocationId || !qtyTargetUnits) {
+        return res.status(400).json({ error: "fromLocationId, toLocationId, and qtyTargetUnits are required" });
+      }
+      
+      const task = await storage.createReplenTask({
+        replenRuleId: replenRuleId || null,
+        fromLocationId,
+        toLocationId,
+        catalogProductId: catalogProductId || null,
+        sourceUomVariantId: sourceUomVariantId || null,
+        targetUomVariantId: targetUomVariantId || null,
+        qtySourceUnits: qtySourceUnits || 1,
+        qtyTargetUnits,
+        qtyCompleted: 0,
+        status: "pending",
+        priority: priority || 5,
+        triggeredBy: triggeredBy || "manual",
+        assignedTo: assignedTo || null,
+        notes: notes || null,
+      });
+      
+      res.status(201).json(task);
+    } catch (error) {
+      console.error("Error creating replen task:", error);
+      res.status(500).json({ error: "Failed to create replen task" });
+    }
+  });
+  
+  app.patch("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates = req.body;
+      
+      if (updates.status === "completed") {
+        updates.completedAt = new Date();
+      }
+      
+      const task = await storage.updateReplenTask(id, updates);
+      if (!task) {
+        return res.status(404).json({ error: "Replen task not found" });
+      }
+      res.json(task);
+    } catch (error) {
+      console.error("Error updating replen task:", error);
+      res.status(500).json({ error: "Failed to update replen task" });
+    }
+  });
+  
+  app.delete("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteReplenTask(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Replen task not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting replen task:", error);
+      res.status(500).json({ error: "Failed to delete replen task" });
+    }
+  });
+
   return httpServer;
 }

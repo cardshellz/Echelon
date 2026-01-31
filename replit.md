@@ -140,5 +140,23 @@ The receiving system handles inventory intake from vendors and supports initial 
 - **Inventory Updates**: When a receiving order is closed, it creates inventory_transactions for audit trail and updates inventory_levels at the put-away locations
 - **Navigation**: Accessible via Purchasing → Receiving in the sidebar
 
+### Replenishment Subsystem
+The replenishment system automates inventory flow from bulk storage to forward pick locations:
+- **Replen Rules** (`replen_rules` table): Defines the relationship between pick bins and their source bulk locations
+  - `pickLocationId`: Forward pick bin that needs replenishment
+  - `sourceLocationId`: Bulk storage location that supplies the pick bin
+  - `catalogProductId`: Optional product-specific rule (null = location-based rule)
+  - `minQty/maxQty`: Trigger thresholds - replen when qty drops below min, fill up to max
+  - `replenMethod`: `case_break` (break cases into eaches), `full_case`, `pallet_drop`
+  - `pickUomVariantId/sourceUomVariantId`: UOM conversion support (e.g., pick eaches from cases)
+- **Replen Tasks** (`replen_tasks` table): Work queue for warehouse workers
+  - `fromLocationId/toLocationId`: Source and destination for the move
+  - `qtySourceUnits/qtyTargetUnits`: Case-break support (pick 1 case → put 12 eaches)
+  - `qtyCompleted`: Actual eaches put (for partial completions)
+  - `status`: pending → assigned → in_progress → completed
+  - `triggeredBy`: min_max, wave, manual, stockout
+- **API Endpoints**: Full CRUD at `/api/replen/rules` and `/api/replen/tasks`
+- **Future**: Auto-generation of replen tasks when pick bin qty drops below minQty
+
 ### Future Refactoring Tasks
 - **Deprecate product_locations for picking**: Currently picking looks up bin locations via `product_locations` table (static assignment). Should refactor to use `inventory_levels` instead - this would pick from bins that actually HAVE stock rather than where products are "assigned." Would make picking smarter and potentially allow deprecating `product_locations` table entirely.

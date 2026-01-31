@@ -59,6 +59,10 @@ import {
   type InsertReceivingOrder,
   type ReceivingLine,
   type InsertReceivingLine,
+  type ReplenRule,
+  type InsertReplenRule,
+  type ReplenTask,
+  type InsertReplenTask,
   users,
   productLocations,
   orders,
@@ -86,6 +90,8 @@ import {
   vendors,
   receivingOrders,
   receivingLines,
+  replenRules,
+  replenTasks,
   generateLocationCode,
   echelonSettings
 } from "@shared/schema";
@@ -400,6 +406,24 @@ export interface IStorage {
   updateCycleCountItem(id: number, updates: Partial<InsertCycleCountItem>): Promise<CycleCountItem | null>;
   deleteCycleCountItem(id: number): Promise<boolean>;
   bulkCreateCycleCountItems(items: InsertCycleCountItem[]): Promise<CycleCountItem[]>;
+  
+  // ============================================
+  // REPLENISHMENT
+  // ============================================
+  getAllReplenRules(): Promise<ReplenRule[]>;
+  getReplenRuleById(id: number): Promise<ReplenRule | undefined>;
+  getReplenRulesForLocation(pickLocationId: number): Promise<ReplenRule[]>;
+  getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]>;
+  createReplenRule(data: InsertReplenRule): Promise<ReplenRule>;
+  updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
+  deleteReplenRule(id: number): Promise<boolean>;
+  
+  // Replen Tasks
+  getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]>;
+  getReplenTaskById(id: number): Promise<ReplenTask | undefined>;
+  createReplenTask(data: InsertReplenTask): Promise<ReplenTask>;
+  updateReplenTask(id: number, updates: Partial<InsertReplenTask>): Promise<ReplenTask | null>;
+  deleteReplenTask(id: number): Promise<boolean>;
   
   // Vendors
   getAllVendors(): Promise<Vendor[]>;
@@ -2973,6 +2997,97 @@ export class DatabaseStorage implements IStorage {
   async bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]> {
     if (lines.length === 0) return [];
     return await db.insert(receivingLines).values(lines).returning();
+  }
+
+  // ============================================
+  // REPLENISHMENT
+  // ============================================
+  
+  async getAllReplenRules(): Promise<ReplenRule[]> {
+    return await db.select().from(replenRules).orderBy(asc(replenRules.priority));
+  }
+  
+  async getReplenRuleById(id: number): Promise<ReplenRule | undefined> {
+    const result = await db.select().from(replenRules).where(eq(replenRules.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async getReplenRulesForLocation(pickLocationId: number): Promise<ReplenRule[]> {
+    return await db.select().from(replenRules)
+      .where(and(
+        eq(replenRules.pickLocationId, pickLocationId),
+        eq(replenRules.isActive, 1)
+      ))
+      .orderBy(asc(replenRules.priority));
+  }
+  
+  async getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]> {
+    return await db.select().from(replenRules)
+      .where(and(
+        eq(replenRules.catalogProductId, catalogProductId),
+        eq(replenRules.isActive, 1)
+      ))
+      .orderBy(asc(replenRules.priority));
+  }
+  
+  async createReplenRule(data: InsertReplenRule): Promise<ReplenRule> {
+    const result = await db.insert(replenRules).values(data).returning();
+    return result[0];
+  }
+  
+  async updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null> {
+    const result = await db.update(replenRules)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(replenRules.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteReplenRule(id: number): Promise<boolean> {
+    const result = await db.delete(replenRules).where(eq(replenRules.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+  
+  // Replen Tasks
+  async getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]> {
+    let query = db.select().from(replenTasks);
+    
+    const conditions = [];
+    if (filters?.status) {
+      conditions.push(eq(replenTasks.status, filters.status));
+    }
+    if (filters?.assignedTo) {
+      conditions.push(eq(replenTasks.assignedTo, filters.assignedTo));
+    }
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    
+    return await query.orderBy(asc(replenTasks.priority), desc(replenTasks.createdAt));
+  }
+  
+  async getReplenTaskById(id: number): Promise<ReplenTask | undefined> {
+    const result = await db.select().from(replenTasks).where(eq(replenTasks.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async createReplenTask(data: InsertReplenTask): Promise<ReplenTask> {
+    const result = await db.insert(replenTasks).values(data).returning();
+    return result[0];
+  }
+  
+  async updateReplenTask(id: number, updates: Partial<InsertReplenTask>): Promise<ReplenTask | null> {
+    const result = await db.update(replenTasks)
+      .set(updates)
+      .where(eq(replenTasks.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteReplenTask(id: number): Promise<boolean> {
+    const result = await db.delete(replenTasks).where(eq(replenTasks.id, id));
+    return (result.rowCount ?? 0) > 0;
   }
 }
 

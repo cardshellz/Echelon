@@ -659,6 +659,76 @@ export const insertInventoryTransactionSchema = createInsertSchema(inventoryTran
 export type InsertInventoryTransaction = z.infer<typeof insertInventoryTransactionSchema>;
 export type InventoryTransaction = typeof inventoryTransactions.$inferSelect;
 
+// Replenishment method types
+export const replenMethodEnum = ["case_break", "full_case", "pallet_drop", "manual"] as const;
+export type ReplenMethod = typeof replenMethodEnum[number];
+
+// Replenishment trigger types
+export const replenTriggerEnum = ["min_max", "wave", "manual", "stockout"] as const;
+export type ReplenTrigger = typeof replenTriggerEnum[number];
+
+// Replenishment task status workflow
+export const replenTaskStatusEnum = ["pending", "assigned", "in_progress", "completed", "cancelled", "blocked"] as const;
+export type ReplenTaskStatus = typeof replenTaskStatusEnum[number];
+
+// Replenishment rules - links pick locations to their source bulk locations
+export const replenRules = pgTable("replen_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  pickLocationId: integer("pick_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
+  sourceLocationId: integer("source_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
+  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
+  pickUomVariantId: integer("pick_uom_variant_id").references(() => uomVariants.id), // The each/unit variant in pick bin
+  sourceUomVariantId: integer("source_uom_variant_id").references(() => uomVariants.id), // The case/pack variant in source
+  minQty: integer("min_qty").notNull().default(10), // Trigger replen when qty drops below this
+  maxQty: integer("max_qty").notNull().default(50), // Fill up to this qty
+  replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
+  priority: integer("priority").notNull().default(5), // 1 = highest priority
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReplenRuleSchema = createInsertSchema(replenRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReplenRule = z.infer<typeof insertReplenRuleSchema>;
+export type ReplenRule = typeof replenRules.$inferSelect;
+
+// Replenishment tasks - work queue for warehouse workers
+export const replenTasks = pgTable("replen_tasks", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  replenRuleId: integer("replen_rule_id").references(() => replenRules.id),
+  fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),
+  toLocationId: integer("to_location_id").notNull().references(() => warehouseLocations.id),
+  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
+  sourceUomVariantId: integer("source_uom_variant_id").references(() => uomVariants.id), // What to pick (case)
+  targetUomVariantId: integer("target_uom_variant_id").references(() => uomVariants.id), // What to put (eaches)
+  qtySourceUnits: integer("qty_source_units").notNull().default(1), // How many cases to pick
+  qtyTargetUnits: integer("qty_target_units").notNull(), // How many eaches to put (after conversion)
+  qtyCompleted: integer("qty_completed").notNull().default(0), // Eaches actually put
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  priority: integer("priority").notNull().default(5),
+  triggeredBy: varchar("triggered_by", { length: 20 }).notNull().default("min_max"), // min_max, wave, manual, stockout
+  createdBy: varchar("created_by", { length: 100 }),
+  assignedTo: varchar("assigned_to", { length: 100 }),
+  assignedAt: timestamp("assigned_at"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertReplenTaskSchema = createInsertSchema(replenTasks).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertReplenTask = z.infer<typeof insertReplenTaskSchema>;
+export type ReplenTask = typeof replenTasks.$inferSelect;
+
 // Channel feeds - maps variants to external channel IDs (Shopify, future marketplaces)
 export const channelTypeEnum = ["shopify", "amazon", "ebay", "wholesale"] as const;
 export type ChannelType = typeof channelTypeEnum[number];
