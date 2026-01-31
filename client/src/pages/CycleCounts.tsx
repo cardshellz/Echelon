@@ -1159,7 +1159,7 @@ export default function CycleCounts() {
                         </Button>
                       )}
                       {count.status === "in_progress" && (
-                        <Button size="sm">
+                        <Button size="sm" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
                           Continue <ChevronRight className="h-4 w-4 ml-1" />
                         </Button>
                       )}
