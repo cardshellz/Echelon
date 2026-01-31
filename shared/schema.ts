@@ -436,16 +436,76 @@ export const insertWarehouseLocationSchema = createInsertSchema(warehouseLocatio
 export type InsertWarehouseLocation = z.infer<typeof insertWarehouseLocationSchema>;
 export type WarehouseLocation = typeof warehouseLocations.$inferSelect;
 
-// Master inventory items (base SKU level)
-export const inventoryItems = pgTable("inventory_items", {
+// ============================================================================
+// PRODUCTS - Master product catalog (source of truth for product identity)
+// ============================================================================
+export const products = pgTable("products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  baseSku: varchar("base_sku", { length: 100 }), // e.g., "EG-STD-SLV" - optional, not unique since variant_id is primary identifier
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Shopify variant ID - primary key for syncing
-  shopifyProductId: bigint("shopify_product_id", { mode: "number" }), // Shopify product ID
+  sku: varchar("sku", { length: 100 }), // Base SKU for the product family
   name: text("name").notNull(),
   description: text("description"),
-  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"), // "each", "unit", etc.
-  costPerUnit: integer("cost_per_unit"), // Cost in cents
+  category: varchar("category", { length: 100 }), // Product category
+  brand: varchar("brand", { length: 100 }), // Brand name
+  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"), // "each", "piece", "unit"
+  costPerUnit: integer("cost_per_unit"), // Default cost in cents
+  imageUrl: text("image_url"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertProductSchema = createInsertSchema(products).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertProduct = z.infer<typeof insertProductSchema>;
+export type Product = typeof products.$inferSelect;
+
+// ============================================================================
+// PRODUCT VARIANTS - Sellable/purchasable SKUs with pack sizes
+// ============================================================================
+export const productVariants = pgTable("product_variants", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productId: integer("product_id").notNull().references(() => products.id),
+  sku: varchar("sku", { length: 100 }), // Unique SKU for this variant
+  name: text("name").notNull(), // "Easy Glide Sleeves - Pack of 100"
+  unitsPerVariant: integer("units_per_variant").notNull().default(1), // Conversion to base unit
+  hierarchyLevel: integer("hierarchy_level").notNull().default(1), // 1=smallest, 2, 3, 4=largest
+  parentVariantId: integer("parent_variant_id"), // For replenishment chain
+  barcode: varchar("barcode", { length: 100 }),
+  costCents: integer("cost_cents"), // Cost in cents for this variant
+  weightGrams: integer("weight_grams"), // Weight for shipping
+  imageUrl: text("image_url"),
+  active: integer("active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertProductVariantSchema = createInsertSchema(productVariants).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertProductVariant = z.infer<typeof insertProductVariantSchema>;
+export type ProductVariant = typeof productVariants.$inferSelect;
+
+// ============================================================================
+// LEGACY TABLES - Keep for backward compatibility during migration
+// ============================================================================
+
+// Master inventory items (LEGACY - use products instead)
+export const inventoryItems = pgTable("inventory_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  baseSku: varchar("base_sku", { length: 100 }),
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(),
+  shopifyProductId: bigint("shopify_product_id", { mode: "number" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"),
+  costPerUnit: integer("cost_per_unit"),
   imageUrl: text("image_url"),
   active: integer("active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -461,16 +521,16 @@ export const insertInventoryItemSchema = createInsertSchema(inventoryItems).omit
 export type InsertInventoryItem = z.infer<typeof insertInventoryItemSchema>;
 export type InventoryItem = typeof inventoryItems.$inferSelect;
 
-// UOM Variants - sellable SKUs at different pack levels
+// UOM Variants (LEGACY - use productVariants instead)
 export const uomVariants = pgTable("uom_variants", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  sku: varchar("sku", { length: 100 }), // e.g., "EG-STD-SLV-P100" - optional, not all Shopify variants have SKUs
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Shopify variant ID - primary key for syncing
+  sku: varchar("sku", { length: 100 }),
+  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(),
   inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
-  name: text("name").notNull(), // "Easy Glide Sleeves - Pack of 100"
-  unitsPerVariant: integer("units_per_variant").notNull().default(1), // 100 for P100, 500 for B500, etc.
-  hierarchyLevel: integer("hierarchy_level").notNull().default(1), // 1=smallest, 2, 3, 4=largest
-  parentVariantId: integer("parent_variant_id"), // For replenishment chain (P1 <- B25 <- C250)
+  name: text("name").notNull(),
+  unitsPerVariant: integer("units_per_variant").notNull().default(1),
+  hierarchyLevel: integer("hierarchy_level").notNull().default(1),
+  parentVariantId: integer("parent_variant_id"),
   barcode: varchar("barcode", { length: 100 }),
   imageUrl: text("image_url"),
   active: integer("active").notNull().default(1),
