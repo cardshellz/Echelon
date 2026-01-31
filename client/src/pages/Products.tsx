@@ -9,6 +9,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { 
   Package, 
   Search, 
@@ -18,7 +21,8 @@ import {
   Filter,
   ChevronRight,
   Image as ImageIcon,
-  MoreVertical
+  MoreVertical,
+  Plus
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -70,6 +74,15 @@ export default function Products() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [newProduct, setNewProduct] = useState({
+    name: "",
+    sku: "",
+    description: "",
+    category: "",
+    brand: "",
+    baseUnit: "each",
+  });
 
   const { data: products = [], isLoading, refetch } = useQuery<Product[]>({
     queryKey: ["/api/products"],
@@ -90,6 +103,34 @@ export default function Products() {
     },
     onError: () => {
       toast({ title: "Sync Failed", variant: "destructive" });
+    },
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (data: typeof newProduct) => {
+      const res = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: data.name,
+          sku: data.sku || null,
+          description: data.description || null,
+          category: data.category || null,
+          brand: data.brand || null,
+          baseUnit: data.baseUnit,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create product");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      toast({ title: "Product created successfully" });
+      setCreateDialogOpen(false);
+      setNewProduct({ name: "", sku: "", description: "", category: "", brand: "", baseUnit: "each" });
+    },
+    onError: () => {
+      toast({ title: "Failed to create product", variant: "destructive" });
     },
   });
 
@@ -141,6 +182,10 @@ export default function Products() {
           >
             <RefreshCw className={`h-4 w-4 mr-2 ${syncMutation.isPending ? "animate-spin" : ""}`} />
             {syncMutation.isPending ? "Syncing..." : "Sync from Shopify"}
+          </Button>
+          <Button onClick={() => setCreateDialogOpen(true)} data-testid="btn-add-product">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Product
           </Button>
         </div>
       </div>
@@ -333,6 +378,97 @@ export default function Products() {
       <div className="text-sm text-muted-foreground">
         Showing {filteredProducts.length} of {products.length} products
       </div>
+
+      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add New Product</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="product-name">Name *</Label>
+              <Input
+                id="product-name"
+                value={newProduct.name}
+                onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                placeholder="Product name"
+                data-testid="input-product-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="product-sku">SKU</Label>
+              <Input
+                id="product-sku"
+                value={newProduct.sku}
+                onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value })}
+                placeholder="e.g., ARM-ENV-SGL"
+                data-testid="input-product-sku"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="product-description">Description</Label>
+              <Textarea
+                id="product-description"
+                value={newProduct.description}
+                onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
+                placeholder="Product description"
+                rows={3}
+                data-testid="input-product-description"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="product-category">Category</Label>
+                <Input
+                  id="product-category"
+                  value={newProduct.category}
+                  onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
+                  placeholder="e.g., Envelopes"
+                  data-testid="input-product-category"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="product-brand">Brand</Label>
+                <Input
+                  id="product-brand"
+                  value={newProduct.brand}
+                  onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })}
+                  placeholder="e.g., Armor"
+                  data-testid="input-product-brand"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="product-unit">Base Unit</Label>
+              <Select
+                value={newProduct.baseUnit}
+                onValueChange={(val) => setNewProduct({ ...newProduct, baseUnit: val })}
+              >
+                <SelectTrigger id="product-unit" data-testid="select-product-unit">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="each">Each</SelectItem>
+                  <SelectItem value="piece">Piece</SelectItem>
+                  <SelectItem value="unit">Unit</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => createMutation.mutate(newProduct)}
+              disabled={!newProduct.name || createMutation.isPending}
+              data-testid="btn-save-product"
+            >
+              {createMutation.isPending ? "Creating..." : "Create Product"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
