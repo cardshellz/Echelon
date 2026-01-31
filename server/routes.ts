@@ -507,6 +507,69 @@ export async function registerRoutes(
     }
   });
 
+  // Move a product location to a different warehouse bin
+  app.post("/api/locations/:id/move", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { targetWarehouseLocationId, notes } = req.body;
+      
+      if (!targetWarehouseLocationId) {
+        return res.status(400).json({ error: "Target location is required" });
+      }
+      
+      // Get the product location being moved
+      const productLocation = await storage.getProductLocationById(id);
+      if (!productLocation) {
+        return res.status(404).json({ error: "Product location not found" });
+      }
+      
+      // Get target warehouse location details
+      const targetLocation = await storage.getWarehouseLocationById(parseInt(targetWarehouseLocationId));
+      if (!targetLocation) {
+        return res.status(404).json({ error: "Target warehouse location not found" });
+      }
+      
+      // Get source warehouse location for audit
+      const sourceLocation = productLocation.warehouseLocationId 
+        ? await storage.getWarehouseLocationById(productLocation.warehouseLocationId)
+        : null;
+      
+      // Update the product location
+      const updated = await storage.updateProductLocation(id, {
+        warehouseLocationId: parseInt(targetWarehouseLocationId),
+        location: targetLocation.code,
+        zone: targetLocation.zone || 'U'
+      });
+      
+      // Log the move as an inventory transaction (transfer type)
+      if (productLocation.catalogProductId) {
+        const userId = req.session?.user?.id || 'system';
+        await db.insert(inventoryTransactions).values({
+          variantId: null,
+          uomVariantId: null,
+          fromLocationId: sourceLocation?.id || null,
+          toLocationId: targetLocation.id,
+          transactionType: 'transfer',
+          sourceState: 'on_hand',
+          targetState: 'on_hand',
+          variantQtyDelta: 0, // Location change only, not quantity
+          notes: notes || `Moved SKU ${productLocation.sku} from ${sourceLocation?.code || 'unassigned'} to ${targetLocation.code}`,
+          userId,
+          batchId: `move-${Date.now()}`
+        });
+      }
+      
+      res.json({ 
+        success: true, 
+        message: `Moved ${productLocation.sku} to ${targetLocation.code}`,
+        productLocation: updated
+      });
+    } catch (error: any) {
+      console.error("Error moving product location:", error);
+      res.status(500).json({ error: error.message || "Failed to move product" });
+    }
+  });
+
   // CSV Export - Download all locations as CSV using papaparse
   app.get("/api/locations/export/csv", async (req, res) => {
     try {
@@ -6484,6 +6547,74 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error recording count:", error);
       res.status(500).json({ error: "Failed to record count" });
+    }
+  });
+
+  // Add unexpected/extra item found during cycle count
+  app.post("/api/cycle-counts/:id/add-found-item", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const userId = req.session.user?.id;
+      const { sku, quantity, warehouseLocationId, notes } = req.body;
+      
+      if (!sku || quantity === undefined || !warehouseLocationId) {
+        return res.status(400).json({ error: "SKU, quantity, and location are required" });
+      }
+      
+      const cycleCount = await storage.getCycleCountById(id);
+      if (!cycleCount) {
+        return res.status(404).json({ error: "Cycle count not found" });
+      }
+      
+      // Validate cycle count is in progress
+      if (cycleCount.status !== "in_progress") {
+        return res.status(400).json({ error: "Can only add items to in-progress cycle counts" });
+      }
+      
+      // Look up inventory item and catalog product for the found SKU
+      const inventoryResult = await db.execute<{ id: number }>(sql`
+        SELECT id FROM inventory_items WHERE base_sku = ${sku} LIMIT 1
+      `);
+      const inventoryItemId = inventoryResult.rows[0]?.id || null;
+      
+      const catalogResult = await db.execute<{ id: number }>(sql`
+        SELECT id FROM catalog_products WHERE sku = ${sku} LIMIT 1
+      `);
+      const catalogProductId = catalogResult.rows[0]?.id || null;
+      
+      // Create new item for the unexpected found product
+      const result = await db.execute<{ id: number }>(sql`
+        INSERT INTO cycle_count_items (
+          cycle_count_id, warehouse_location_id, inventory_item_id, catalog_product_id,
+          expected_sku, expected_qty, counted_sku, counted_qty,
+          variance_qty, variance_type, variance_notes, status,
+          requires_approval, mismatch_type,
+          counted_by, counted_at, created_at
+        ) VALUES (
+          ${id}, ${warehouseLocationId}, ${inventoryItemId}, ${catalogProductId},
+          NULL, 0, ${sku}, ${quantity},
+          ${quantity}, 'unexpected_item', ${notes || `Unexpected item found during count: ${sku} x ${quantity}`}, 'variance',
+          1, 'unexpected_found',
+          ${userId}, NOW(), NOW()
+        ) RETURNING id
+      `);
+      
+      // Update cycle count variance count - recompute from fresh data after insert
+      const allItemsAfterInsert = await storage.getCycleCountItems(id);
+      const varianceCount = allItemsAfterInsert.filter(i => i.varianceType).length;
+      
+      await storage.updateCycleCount(id, {
+        varianceCount,
+      });
+      
+      res.json({ 
+        success: true, 
+        itemId: result.rows[0]?.id,
+        message: `Added unexpected item: ${sku} x ${quantity}` 
+      });
+    } catch (error) {
+      console.error("Error adding found item:", error);
+      res.status(500).json({ error: "Failed to add found item" });
     }
   });
 

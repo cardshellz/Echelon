@@ -102,6 +102,8 @@ export default function WarehouseLocations() {
   const [productSearchQuery, setProductSearchQuery] = useState("");
   const [assignLocationType, setAssignLocationType] = useState("forward_pick");
   const [assignIsPrimary, setAssignIsPrimary] = useState(true);
+  const [movingProduct, setMovingProduct] = useState<ProductInBin | null>(null);
+  const [moveTargetLocationId, setMoveTargetLocationId] = useState<string>("");
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -415,6 +417,33 @@ export default function WarehouseLocations() {
       refetchProductsInBin();
       queryClient.invalidateQueries({ queryKey: ["locations"] });
       toast({ title: "Product removed from location" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const moveProductMutation = useMutation({
+    mutationFn: async ({ productLocationId, targetWarehouseLocationId }: { productLocationId: number; targetWarehouseLocationId: number }) => {
+      const res = await fetch(`/api/locations/${productLocationId}/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ targetWarehouseLocationId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to move product");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      refetchProductsInBin();
+      queryClient.invalidateQueries({ queryKey: ["/api/locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
+      setMovingProduct(null);
+      setMoveTargetLocationId("");
+      toast({ title: data.message || "Product moved successfully" });
     },
     onError: (error: Error) => {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -1571,14 +1600,24 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                             </div>
                           </div>
                         </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => removeProductFromLocationMutation.mutate(product.id)}
-                          disabled={removeProductFromLocationMutation.isPending}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
+                        <div className="flex gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setMovingProduct(product)}
+                            data-testid={`btn-move-product-${product.id}`}
+                          >
+                            <MoveRight className="h-4 w-4 text-blue-500" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => removeProductFromLocationMutation.mutate(product.id)}
+                            disabled={removeProductFromLocationMutation.isPending}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1697,6 +1736,69 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
             >
               <Package className="h-4 w-4 mr-2" />
               {assignProductMutation.isPending ? "Setting..." : "Set Primary"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Move SKU Dialog */}
+      <Dialog open={!!movingProduct} onOpenChange={(open) => {
+        if (!open) {
+          setMovingProduct(null);
+          setMoveTargetLocationId("");
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <MoveRight className="h-5 w-5" />
+              Move SKU to New Location
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="bg-muted/50 rounded-md p-3">
+              <p className="text-sm font-medium">{movingProduct?.name}</p>
+              <p className="text-xs text-muted-foreground">SKU: {movingProduct?.sku || 'N/A'}</p>
+              <p className="text-xs text-muted-foreground">Current: {assigningToLocation?.code}</p>
+            </div>
+            <div>
+              <Label>Move to Location</Label>
+              <Select value={moveTargetLocationId} onValueChange={setMoveTargetLocationId}>
+                <SelectTrigger data-testid="select-move-target">
+                  <SelectValue placeholder="Select destination bin..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {locations
+                    .filter(loc => loc.id !== assigningToLocation?.id)
+                    .sort((a, b) => a.code.localeCompare(b.code))
+                    .map(loc => (
+                      <SelectItem key={loc.id} value={loc.id.toString()}>
+                        {loc.code} - {loc.locationType.replace('_', ' ')}
+                      </SelectItem>
+                    ))
+                  }
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setMovingProduct(null); setMoveTargetLocationId(""); }}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (movingProduct && moveTargetLocationId) {
+                  moveProductMutation.mutate({
+                    productLocationId: movingProduct.id,
+                    targetWarehouseLocationId: parseInt(moveTargetLocationId)
+                  });
+                }
+              }}
+              disabled={!moveTargetLocationId || moveProductMutation.isPending}
+              data-testid="btn-confirm-move"
+            >
+              <MoveRight className="h-4 w-4 mr-2" />
+              {moveProductMutation.isPending ? "Moving..." : "Move SKU"}
             </Button>
           </DialogFooter>
         </DialogContent>

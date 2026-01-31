@@ -129,6 +129,8 @@ export default function CycleCounts() {
   const [skuDropdownOpen, setSkuDropdownOpen] = useState(false);
   const [unknownSkuMode, setUnknownSkuMode] = useState(false);
   const debouncedSkuSearch = useDebounce(skuSearch, 300);
+  const [addFoundItemMode, setAddFoundItemMode] = useState(false);
+  const [foundItemForm, setFoundItemForm] = useState({ sku: "", quantity: "" });
   const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
@@ -233,6 +235,31 @@ export default function CycleCounts() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to record", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const addFoundItemMutation = useMutation({
+    mutationFn: async ({ sku, quantity, warehouseLocationId }: { sku: string; quantity: number; warehouseLocationId: number }) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/add-found-item`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ sku, quantity, warehouseLocationId }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to add item");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Unexpected item recorded", description: data.message });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      setAddFoundItemMode(false);
+      setFoundItemForm({ sku: "", quantity: "" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to add item", description: error.message, variant: "destructive" });
     },
   });
 
@@ -574,6 +601,71 @@ export default function CycleCounts() {
               </div>
             )}
             
+            {/* Add unexpected item found */}
+            {addFoundItemMode ? (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
+                <Label className="text-blue-800">Add Unexpected Item Found in This Bin</Label>
+                <Input
+                  value={foundItemForm.sku}
+                  onChange={(e) => setFoundItemForm({ ...foundItemForm, sku: e.target.value })}
+                  placeholder="Enter or scan SKU"
+                  className="text-lg"
+                  autoFocus
+                  data-testid="input-add-found-sku"
+                />
+                <Input
+                  type="number"
+                  value={foundItemForm.quantity}
+                  onChange={(e) => setFoundItemForm({ ...foundItemForm, quantity: e.target.value })}
+                  placeholder="Quantity"
+                  className="text-lg"
+                  data-testid="input-add-found-qty"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setAddFoundItemMode(false);
+                      setFoundItemForm({ sku: "", quantity: "" });
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (currentItem && foundItemForm.sku && foundItemForm.quantity) {
+                        addFoundItemMutation.mutate({
+                          sku: foundItemForm.sku,
+                          quantity: parseInt(foundItemForm.quantity),
+                          warehouseLocationId: currentItem.warehouseLocationId,
+                        });
+                      }
+                    }}
+                    disabled={!foundItemForm.sku || !foundItemForm.quantity || addFoundItemMutation.isPending}
+                    data-testid="btn-submit-found-item"
+                  >
+                    {addFoundItemMutation.isPending ? "Adding..." : "Add Item"}
+                  </Button>
+                </div>
+                <p className="text-xs text-blue-600">
+                  Use this when you find extra items that weren't expected
+                </p>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-blue-600 border-blue-200"
+                onClick={() => setAddFoundItemMode(true)}
+                data-testid="btn-add-found-item"
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Found Extra Item
+              </Button>
+            )}
+
             {/* Empty bin option */}
             <Button 
               variant="ghost" 
