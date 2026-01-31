@@ -253,6 +253,88 @@ export default function Inventory() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvResults, setCsvResults] = useState<{ row: number; sku: string; location: string; status: string; message: string }[] | null>(null);
   const [csvUploading, setCsvUploading] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportFilters, setExportFilters] = useState({
+    locationTypes: [] as string[],
+    binTypes: [] as string[],
+    zone: "",
+  });
+  const [exporting, setExporting] = useState(false);
+  
+  const locationTypeOptions = [
+    { value: "forward_pick", label: "Forward Pick" },
+    { value: "bulk_storage", label: "Bulk Storage" },
+    { value: "overflow", label: "Overflow" },
+    { value: "receiving", label: "Receiving" },
+    { value: "staging", label: "Staging" },
+  ];
+  const binTypeOptions = [
+    { value: "bin", label: "Bin" },
+    { value: "pallet", label: "Pallet" },
+    { value: "carton_flow", label: "Carton Flow" },
+    { value: "bulk_reserve", label: "Bulk Reserve" },
+    { value: "shelf", label: "Shelf" },
+  ];
+  
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (exportFilters.locationTypes.length > 0) {
+        params.set("locationType", exportFilters.locationTypes.join(","));
+      }
+      if (exportFilters.binTypes.length > 0) {
+        params.set("binType", exportFilters.binTypes.join(","));
+      }
+      if (exportFilters.zone) {
+        params.set("zone", exportFilters.zone);
+      }
+      
+      const response = await fetch(`/api/inventory/export?${params.toString()}`);
+      if (!response.ok) throw new Error("Export failed");
+      
+      const data = await response.json();
+      
+      // Convert to CSV
+      const headers = ["SKU", "Variant Name", "Base SKU", "Item Name", "Location", "Zone", "Location Type", "Bin Type", "Pickable", "Variant Qty", "On Hand", "Reserved", "Picked", "Available"];
+      const csvRows = [headers.join(",")];
+      
+      for (const row of data) {
+        csvRows.push([
+          `"${row.sku || ''}"`,
+          `"${row.variantName || ''}"`,
+          `"${row.baseSku || ''}"`,
+          `"${row.itemName || ''}"`,
+          `"${row.locationCode || ''}"`,
+          `"${row.zone || ''}"`,
+          `"${row.locationType || ''}"`,
+          `"${row.binType || ''}"`,
+          row.isPickable ? "Yes" : "No",
+          row.variantQty,
+          row.onHandBase,
+          row.reservedBase,
+          row.pickedBase,
+          row.availableBase,
+        ].join(","));
+      }
+      
+      const csvContent = csvRows.join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inventory-export-${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      toast({ title: "Export complete", description: `${data.length} records exported` });
+      setExportDialogOpen(false);
+    } catch (error) {
+      toast({ title: "Export failed", variant: "destructive" });
+    } finally {
+      setExporting(false);
+    }
+  };
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -477,7 +559,7 @@ export default function Inventory() {
             <Button variant="outline" size="sm" className="gap-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
               <Upload size={16} /> <span className="hidden sm:inline">Upload CSV</span>
             </Button>
-            <Button variant="outline" size="sm" className="gap-2">
+            <Button variant="outline" size="sm" className="gap-2" onClick={() => setExportDialogOpen(true)} data-testid="button-export">
               <Download size={16} /> <span className="hidden sm:inline">Export</span>
             </Button>
             <Button size="sm" className="gap-2" onClick={() => navigate("/receiving")} data-testid="button-receive-stock">
@@ -895,6 +977,78 @@ export default function Inventory() {
                 {csvUploading ? "Uploading..." : "Upload & Process"}
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Export Inventory</DialogTitle>
+            <DialogDescription>
+              Export inventory data to CSV. Filter by location type, storage type, or zone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Location Purpose (optional filter)</Label>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                {locationTypeOptions.map((type) => (
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={exportFilters.locationTypes.includes(type.value)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setExportFilters({ ...exportFilters, locationTypes: [...exportFilters.locationTypes, type.value] });
+                        } else {
+                          setExportFilters({ ...exportFilters, locationTypes: exportFilters.locationTypes.filter(t => t !== type.value) });
+                        }
+                      }}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-sm">{type.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label>Storage Type (optional filter)</Label>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                {binTypeOptions.map((type) => (
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={exportFilters.binTypes.includes(type.value)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setExportFilters({ ...exportFilters, binTypes: [...exportFilters.binTypes, type.value] });
+                        } else {
+                          setExportFilters({ ...exportFilters, binTypes: exportFilters.binTypes.filter(t => t !== type.value) });
+                        }
+                      }}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-sm">{type.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label>Zone (optional)</Label>
+              <Input
+                value={exportFilters.zone}
+                onChange={(e) => setExportFilters({ ...exportFilters, zone: e.target.value })}
+                placeholder="e.g., A, B, BULK"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">Leave filters empty to export all inventory with stock.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleExport} disabled={exporting}>
+              {exporting ? "Exporting..." : "Export CSV"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

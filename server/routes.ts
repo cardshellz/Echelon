@@ -5837,6 +5837,91 @@ export async function registerRoutes(
     }
   });
 
+  // Export all inventory with location details for CSV download
+  app.get("/api/inventory/export", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { locationType, binType, zone } = req.query;
+      
+      let query = sql`
+        SELECT 
+          uv.sku,
+          uv.name as variant_name,
+          ii.base_sku,
+          ii.name as item_name,
+          wl.code as location_code,
+          wl.zone,
+          wl.location_type,
+          wl.bin_type,
+          wl.is_pickable,
+          il.variant_qty,
+          il.on_hand_base,
+          il.reserved_base,
+          il.picked_base,
+          (il.on_hand_base - il.reserved_base - il.picked_base) as available_base
+        FROM inventory_levels il
+        JOIN uom_variants uv ON il.variant_id = uv.id
+        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.variant_qty > 0
+        ORDER BY wl.code, uv.sku
+      `;
+      
+      const result = await db.execute<{
+        sku: string;
+        variant_name: string;
+        base_sku: string | null;
+        item_name: string | null;
+        location_code: string | null;
+        zone: string | null;
+        location_type: string | null;
+        bin_type: string | null;
+        is_pickable: number | null;
+        variant_qty: number;
+        on_hand_base: number;
+        reserved_base: number;
+        picked_base: number;
+        available_base: number;
+      }>(query);
+      
+      let rows = result.rows;
+      
+      // Apply filters in JavaScript (simpler than dynamic SQL)
+      if (locationType && typeof locationType === 'string') {
+        const types = locationType.split(',');
+        rows = rows.filter(r => r.location_type && types.includes(r.location_type));
+      }
+      if (binType && typeof binType === 'string') {
+        const types = binType.split(',');
+        rows = rows.filter(r => r.bin_type && types.includes(r.bin_type));
+      }
+      if (zone && typeof zone === 'string') {
+        rows = rows.filter(r => r.zone === zone);
+      }
+      
+      const exportData = rows.map(row => ({
+        sku: row.sku,
+        variantName: row.variant_name,
+        baseSku: row.base_sku,
+        itemName: row.item_name,
+        locationCode: row.location_code,
+        zone: row.zone,
+        locationType: row.location_type,
+        binType: row.bin_type,
+        isPickable: row.is_pickable === 1,
+        variantQty: row.variant_qty,
+        onHandBase: row.on_hand_base,
+        reservedBase: row.reserved_base,
+        pickedBase: row.picked_base,
+        availableBase: row.available_base,
+      }));
+      
+      res.json(exportData);
+    } catch (error) {
+      console.error("Error exporting inventory:", error);
+      res.status(500).json({ error: "Failed to export inventory" });
+    }
+  });
+
   // Add inventory to a bin (simplified receipt) - variant-centric
   app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
