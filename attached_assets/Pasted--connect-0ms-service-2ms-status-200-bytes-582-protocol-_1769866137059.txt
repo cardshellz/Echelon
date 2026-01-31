@@ -1,0 +1,28 @@
+ connect=0ms service=2ms status=200 bytes=582 protocol=http1.1 tls=true tls_version=unknown
+2026-01-31T13:28:14.502198+00:00 app[web.1]: Fetched 287 variants from Shopify
+2026-01-31T13:28:14.503222+00:00 app[web.1]: Parsed: 97 base SKUs with variants, 1 standalone
+2026-01-31T13:28:14.506553+00:00 app[web.1]: Shopify product sync error: error: column "cost_per_unit" does not exist
+2026-01-31T13:28:14.506554+00:00 app[web.1]:     at /app/dist/index.cjs:70:13330
+2026-01-31T13:28:14.506554+00:00 app[web.1]:     at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+2026-01-31T13:28:14.506555+00:00 app[web.1]:     at async /app/dist/index.cjs:76:37957
+2026-01-31T13:28:14.506555+00:00 app[web.1]:     at async t0.getProductBySku (/app/dist/index.cjs:86:8903)
+2026-01-31T13:28:14.506555+00:00 app[web.1]:     at async /app/dist/index.cjs:172:25825 {
+2026-01-31T13:28:14.506556+00:00 app[web.1]:   length: 113,
+2026-01-31T13:28:14.506556+00:00 app[web.1]:   severity: 'ERROR',
+2026-01-31T13:28:14.506556+00:00 app[web.1]:   code: '42703',
+2026-01-31T13:28:14.506557+00:00 app[web.1]:   detail: undefined,
+2026-01-31T13:28:14.506557+00:00 app[web.1]:   hint: undefined,
+2026-01-31T13:28:14.506557+00:00 app[web.1]:   position: '78',
+2026-01-31T13:28:14.506557+00:00 app[web.1]:   internalPosition: undefined,
+2026-01-31T13:28:14.506558+00:00 app[web.1]:   internalQuery: undefined,
+2026-01-31T13:28:14.506558+00:00 app[web.1]:   where: undefined,
+2026-01-31T13:28:14.506558+00:00 app[web.1]:   schema: undefined,
+2026-01-31T13:28:14.506558+00:00 app[web.1]:   table: undefined,
+2026-01-31T13:28:14.506558+00:00 app[web.1]:   column: undefined,
+2026-01-31T13:28:14.506559+00:00 app[web.1]:   dataType: undefined,
+2026-01-31T13:28:14.506559+00:00 app[web.1]:   constraint: undefined,
+2026-01-31T13:28:14.506559+00:00 app[web.1]:   file: 'parse_relation.c',
+2026-01-31T13:28:14.506559+00:00 app[web.1]:   line: '3781',
+2026-01-31T13:28:14.506559+00:00 app[web.1]:   routine: 'errorMissingColumn'
+2026-01-31T13:28:14.506559+00:00 app[web.1]: }
+2026-01-31T13:28:14.510823+00:00 app[web.1]: 1:28:14 PM [express] POST /api/shopify/sync-products 500 in 388ms :: {"error":"Failed to sync products from Shopify","message":"column \"cost_per_unit\" does not exist"}
