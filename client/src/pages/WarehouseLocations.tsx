@@ -643,7 +643,7 @@ export default function WarehouseLocations() {
             Bin Locations
           </h1>
           <p className="text-muted-foreground">
-            Manage your warehouse bins and assign products
+            Manage your warehouse bins and set primary SKU slotting
           </p>
         </div>
       </div>
@@ -820,7 +820,7 @@ export default function WarehouseLocations() {
                   )}
                   <TableHead>Warehouse</TableHead>
                   <TableHead>Location Code</TableHead>
-                  <TableHead>SKU</TableHead>
+                  <TableHead>Primary SKU</TableHead>
                   <TableHead>Zone</TableHead>
                   <TableHead>Aisle</TableHead>
                   <TableHead>Bay</TableHead>
@@ -878,7 +878,7 @@ export default function WarehouseLocations() {
                                 setAssigningToLocation(loc);
                                 setIsAssignProductsOpen(true);
                               }}
-                              title="Assign Products"
+                              title="Set Primary SKU"
                               data-testid={`btn-assign-products-${loc.id}`}
                             >
                               <Package className="h-4 w-4" />
@@ -1531,7 +1531,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
         </DialogContent>
       </Dialog>
 
-      {/* Assign Products to Bin Dialog */}
+      {/* Set Primary SKU for Bin Dialog */}
       <Dialog open={isAssignProductsOpen} onOpenChange={(open) => {
         setIsAssignProductsOpen(open);
         if (!open) {
@@ -1546,7 +1546,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <MapPin className="h-5 w-5" />
-              Assign Products to {assigningToLocation?.code}
+              Set Primary SKU for {assigningToLocation?.code}
             </DialogTitle>
           </DialogHeader>
           
@@ -1696,7 +1696,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
               data-testid="btn-assign-product"
             >
               <Package className="h-4 w-4 mr-2" />
-              {assignProductMutation.isPending ? "Assigning..." : "Assign Product"}
+              {assignProductMutation.isPending ? "Setting..." : "Set Primary"}
             </Button>
           </DialogFooter>
         </DialogContent>

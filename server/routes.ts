@@ -650,25 +650,25 @@ export async function registerRoutes(
           // Only update items that haven't been picked yet
           if (item.status !== "pending") continue;
           
-          // Look up current location from product_locations by SKU
-          const productLocation = await storage.getProductLocationBySku(item.sku);
+          // Look up current location from inventory_levels (where stock actually is)
+          const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           
-          if (!productLocation) continue;
+          if (!binLocation) continue;
           
           // Check if location/zone needs updating
           const needsUpdate = 
-            item.location !== productLocation.location ||
-            item.zone !== productLocation.zone ||
-            item.barcode !== productLocation.barcode ||
-            item.imageUrl !== productLocation.imageUrl;
+            item.location !== binLocation.location ||
+            item.zone !== binLocation.zone ||
+            item.barcode !== binLocation.barcode ||
+            item.imageUrl !== binLocation.imageUrl;
           
           if (needsUpdate) {
             await storage.updateOrderItemLocation(
               item.id, 
-              productLocation.location, 
-              productLocation.zone,
-              productLocation.barcode || null,
-              productLocation.imageUrl || null
+              binLocation.location, 
+              binLocation.zone,
+              binLocation.barcode || null,
+              binLocation.imageUrl || null
             );
             updated++;
           }
@@ -2456,10 +2456,10 @@ export async function registerRoutes(
         // Check if any item requires shipping
         const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
         
-        // Enrich ALL unfulfilled items with location data and requiresShipping per item
+        // Enrich ALL unfulfilled items with location data from inventory_levels (where stock actually is)
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of unfulfilledItems) {
-          const productLocation = await storage.getProductLocationBySku(item.sku || '');
+          const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           enrichedItems.push({
             orderId: 0,
             shopifyLineItemId: item.shopify_line_item_id,
@@ -2470,10 +2470,10 @@ export async function registerRoutes(
             pickedQuantity: 0,
             fulfilledQuantity: 0,
             status: "pending",
-            location: productLocation?.location || "UNASSIGNED",
-            zone: productLocation?.zone || "U",
-            imageUrl: productLocation?.imageUrl || null,
-            barcode: productLocation?.barcode || null,
+            location: binLocation?.location || "UNASSIGNED",
+            zone: binLocation?.zone || "U",
+            imageUrl: binLocation?.imageUrl || null,
+            barcode: binLocation?.barcode || null,
             requiresShipping: item.requires_shipping ? 1 : 0,
           });
         }
@@ -2892,28 +2892,28 @@ export async function registerRoutes(
         // Only update items that haven't been picked yet
         if (item.status !== "pending") continue;
         
-        // Look up current location from product_locations by SKU
-        const productLocation = await storage.getProductLocationBySku(item.sku);
+        // Look up current location from inventory_levels (where stock actually is)
+        const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
         
-        if (!productLocation) continue;
+        if (!binLocation) continue;
         
         // Check if location/zone needs updating
         const needsUpdate = 
-          item.location !== productLocation.location ||
-          item.zone !== productLocation.zone ||
-          item.barcode !== productLocation.barcode ||
-          item.imageUrl !== productLocation.imageUrl;
+          item.location !== binLocation.location ||
+          item.zone !== binLocation.zone ||
+          item.barcode !== binLocation.barcode ||
+          item.imageUrl !== binLocation.imageUrl;
         
         if (needsUpdate) {
           await storage.updateOrderItemLocation(
             item.id, 
-            productLocation.location, 
-            productLocation.zone,
-            productLocation.barcode || null,
-            productLocation.imageUrl || null
+            binLocation.location, 
+            binLocation.zone,
+            binLocation.barcode || null,
+            binLocation.imageUrl || null
           );
           updated++;
-          console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${productLocation.location}`);
+          console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${binLocation.location}`);
         }
       }
     }

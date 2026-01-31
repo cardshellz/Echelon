@@ -89,7 +89,8 @@ export async function syncNewOrders() {
       
       const enrichedItems: InsertOrderItem[] = [];
       for (const item of unfulfilledItems) {
-        const productLocation = await storage.getProductLocationBySku(item.sku || '');
+        // Look up bin location from inventory_levels (where stock actually is)
+        const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
         enrichedItems.push({
           orderId: 0,
           shopifyLineItemId: item.shopify_line_item_id,
@@ -100,10 +101,10 @@ export async function syncNewOrders() {
           pickedQuantity: 0,
           fulfilledQuantity: 0,
           status: "pending",
-          location: productLocation?.location || "UNASSIGNED",
-          zone: productLocation?.zone || "U",
-          imageUrl: productLocation?.imageUrl || null,
-          barcode: productLocation?.barcode || null,
+          location: binLocation?.location || "UNASSIGNED",
+          zone: binLocation?.zone || "U",
+          imageUrl: binLocation?.imageUrl || null,
+          barcode: binLocation?.barcode || null,
           requiresShipping: item.requires_shipping ? 1 : 0,
         });
       }

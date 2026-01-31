@@ -104,6 +104,7 @@ export interface IStorage {
   getAllProductLocations(): Promise<ProductLocation[]>;
   getProductLocationById(id: number): Promise<ProductLocation | undefined>;
   getProductLocationBySku(sku: string): Promise<ProductLocation | undefined>;
+  getBinLocationFromInventoryBySku(sku: string): Promise<{ location: string; zone: string; barcode: string | null; imageUrl: string | null } | undefined>;
   createProductLocation(location: InsertProductLocation): Promise<ProductLocation>;
   updateProductLocation(id: number, location: UpdateProductLocation): Promise<ProductLocation | undefined>;
   deleteProductLocation(id: number): Promise<boolean>;
@@ -487,6 +488,47 @@ export class DatabaseStorage implements IStorage {
   async getProductLocationBySku(sku: string): Promise<ProductLocation | undefined> {
     const result = await db.select().from(productLocations).where(eq(productLocations.sku, sku.toUpperCase()));
     return result[0];
+  }
+
+  // NEW: Get bin location from inventory_levels instead of product_locations
+  // Returns location data for picking based on where inventory actually exists
+  async getBinLocationFromInventoryBySku(sku: string): Promise<{
+    location: string;
+    zone: string;
+    barcode: string | null;
+    imageUrl: string | null;
+  } | undefined> {
+    // Look up variant by SKU, then find any inventory level for that variant
+    const result = await db.execute<{
+      location_code: string;
+      zone: string | null;
+      barcode: string | null;
+      image_url: string | null;
+    }>(sql`
+      SELECT 
+        wl.code as location_code,
+        wl.zone,
+        cp.shopify_barcode as barcode,
+        cp.image_url
+      FROM uom_variants uv
+      JOIN inventory_levels il ON il.variant_id = uv.id
+      JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+      LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
+      WHERE UPPER(uv.sku) = ${sku.toUpperCase()}
+      ORDER BY wl.is_pickable DESC, il.variant_qty DESC
+      LIMIT 1
+    `);
+    
+    if (result.rows.length === 0) return undefined;
+    
+    const row = result.rows[0];
+    return {
+      location: row.location_code,
+      zone: row.zone || "U",
+      barcode: row.barcode,
+      imageUrl: row.image_url,
+    };
   }
 
   async getProductLocationByCatalogProductId(catalogProductId: number): Promise<ProductLocation | undefined> {
