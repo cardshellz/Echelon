@@ -46,7 +46,8 @@ import {
   Settings,
   ListTodo,
   User,
-  Upload
+  Upload,
+  Download
 } from "lucide-react";
 
 interface WarehouseLocation {
@@ -990,43 +991,130 @@ export default function Replenishment() {
 
       {/* CSV Upload Dialog */}
       <Dialog open={showCsvDialog} onOpenChange={setShowCsvDialog}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Upload Replen Rules CSV</DialogTitle>
+            <DialogTitle>Import Replenishment Rules</DialogTitle>
             <DialogDescription>
-              Bulk import replenishment rules from a CSV file
+              Bulk import rules from a CSV file. Download the template to get started.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="bg-muted p-4 rounded-lg text-sm">
-              <p className="font-medium mb-2">CSV Format:</p>
-              <code className="text-xs block overflow-x-auto">
-                product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority
-              </code>
-              <p className="mt-2 text-muted-foreground">
-                Example: SKU-A,SKU-A-P1,SKU-A-C10,forward_pick,bulk_storage,fifo,3,,case_break,5
-              </p>
+          <div className="space-y-6">
+            {/* Download Template Section */}
+            <div className="flex items-center justify-between p-4 bg-primary/5 border border-primary/20 rounded-lg">
+              <div>
+                <p className="font-medium">Download Template</p>
+                <p className="text-sm text-muted-foreground">Pre-formatted CSV with headers and example data</p>
+              </div>
+              <Button 
+                variant="outline" 
+                onClick={() => {
+                  const headers = "product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority";
+                  const example = "SHELL-001,SHELL-001-EA,SHELL-001-CS12,forward_pick,bulk_storage,fifo,5,60,case_break,5";
+                  const instructions = "# INSTRUCTIONS - Delete this row before uploading\n# product_sku: Product SKU from your catalog (REQUIRED)\n# pick_variant_sku: SKU of the variant to pick INTO (eaches) (REQUIRED)\n# source_variant_sku: SKU of the variant to pick FROM (cases) (REQUIRED)\n# pick_location_type: forward_pick or bin (default: forward_pick)\n# source_location_type: bulk_storage or pallet (default: bulk_storage)\n# source_priority: fifo (oldest first) or smallest_first (consolidate partials) (default: fifo)\n# min_qty: Trigger replen when qty drops below this (default: 0)\n# max_qty: Fill up to this qty (leave empty to replen 1 source unit)\n# replen_method: case_break, full_case, or pallet_drop (default: case_break)\n# priority: 1-10 where 1 is highest priority (default: 5)";
+                  const csv = instructions + "\n" + headers + "\n" + example;
+                  const blob = new Blob([csv], { type: 'text/csv' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'replen_rules_template.csv';
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                data-testid="button-download-template"
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Download Template
+              </Button>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv"
-              onChange={handleCsvUpload}
-              className="hidden"
-            />
-            <Button 
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadCsvMutation.isPending}
-              className="w-full"
-              data-testid="button-select-csv"
-            >
-              {uploadCsvMutation.isPending ? (
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              ) : (
-                <Upload className="w-4 h-4 mr-2" />
-              )}
-              Select CSV File
-            </Button>
+
+            {/* Field Reference */}
+            <div className="border rounded-lg overflow-hidden">
+              <div className="bg-muted px-4 py-2 border-b">
+                <p className="font-medium text-sm">Column Reference</p>
+              </div>
+              <div className="divide-y text-sm">
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2 bg-muted/30">
+                  <span className="font-medium">Column</span>
+                  <span className="font-medium">Description</span>
+                  <span className="font-medium text-center">Required</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">product_sku</code>
+                  <span className="text-muted-foreground">Product SKU from your catalog</span>
+                  <span className="text-center text-green-600 font-medium">Yes</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">pick_variant_sku</code>
+                  <span className="text-muted-foreground">Variant SKU to replenish (e.g., eaches)</span>
+                  <span className="text-center text-green-600 font-medium">Yes</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">source_variant_sku</code>
+                  <span className="text-muted-foreground">Variant SKU to pick from (e.g., cases)</span>
+                  <span className="text-center text-green-600 font-medium">Yes</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">pick_location_type</code>
+                  <span className="text-muted-foreground">forward_pick, bin (default: forward_pick)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">source_location_type</code>
+                  <span className="text-muted-foreground">bulk_storage, pallet (default: bulk_storage)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">source_priority</code>
+                  <span className="text-muted-foreground">fifo or smallest_first (default: fifo)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">min_qty</code>
+                  <span className="text-muted-foreground">Trigger replen when below this (default: 0)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">max_qty</code>
+                  <span className="text-muted-foreground">Fill up to this qty (empty = 1 source unit)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">replen_method</code>
+                  <span className="text-muted-foreground">case_break, full_case, pallet_drop</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+                <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
+                  <code className="text-xs bg-muted px-1 rounded">priority</code>
+                  <span className="text-muted-foreground">1-10, where 1 is highest (default: 5)</span>
+                  <span className="text-center text-muted-foreground">No</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Upload Section */}
+            <div className="pt-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleCsvUpload}
+                className="hidden"
+              />
+              <Button 
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadCsvMutation.isPending}
+                className="w-full"
+                size="lg"
+                data-testid="button-select-csv"
+              >
+                {uploadCsvMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4 mr-2" />
+                )}
+                Select CSV File to Upload
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
