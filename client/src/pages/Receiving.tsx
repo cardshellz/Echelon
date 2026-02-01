@@ -1161,15 +1161,24 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 )}
                               </TableCell>
                               <TableCell>
-                                <LocationTypeahead
-                                  locations={locations}
-                                  value={line.putawayLocationId}
-                                  onChange={(locationId) => updateLineMutation.mutate({
-                                    lineId: line.id,
-                                    updates: { putawayLocationId: locationId }
-                                  })}
-                                  disabled={selectedReceipt.status === "closed"}
-                                />
+                                {selectedReceipt.status === "closed" ? (
+                                  <span className="text-sm text-muted-foreground">
+                                    {line.putawayLocationId 
+                                      ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
+                                      : "Via CSV"
+                                    }
+                                  </span>
+                                ) : (
+                                  <LocationTypeahead
+                                    locations={locations}
+                                    value={line.putawayLocationId}
+                                    onChange={(locationId) => updateLineMutation.mutate({
+                                      lineId: line.id,
+                                      updates: { putawayLocationId: locationId }
+                                    })}
+                                    disabled={false}
+                                  />
+                                )}
                               </TableCell>
                               <TableCell>
                                 <Badge variant={
