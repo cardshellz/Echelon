@@ -23,7 +23,8 @@ import {
   ChevronDown,
   ArrowUpDown,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Building2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,6 +111,14 @@ interface WarehouseLocation {
   movementPolicy: string;
   minQty: number | null;
   maxQty: number | null;
+}
+
+interface Warehouse {
+  id: number;
+  code: string;
+  name: string;
+  address: string | null;
+  isActive: number;
 }
 
 interface UomVariant {
@@ -338,12 +347,25 @@ export default function Inventory() {
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({
+    queryKey: ["/api/warehouses"],
+  });
+
   const { data: inventorySummary = [], isLoading: loadingInventory, refetch: refetchInventory } = useQuery<InventoryItemSummary[]>({
-    queryKey: ["/api/inventory/summary"],
+    queryKey: ["/api/inventory/summary", selectedWarehouseId],
+    queryFn: async () => {
+      const url = selectedWarehouseId 
+        ? `/api/inventory/summary?warehouseId=${selectedWarehouseId}`
+        : "/api/inventory/summary";
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("Failed to fetch inventory summary");
+      return response.json();
+    },
   });
 
   const { data: locations = [], isLoading: loadingLocations } = useQuery<WarehouseLocation[]>({
@@ -355,7 +377,15 @@ export default function Inventory() {
   });
 
   const { data: variantLevels = [], isLoading: loadingVariantLevels } = useQuery<VariantLevel[]>({
-    queryKey: ["/api/inventory/levels"],
+    queryKey: ["/api/inventory/levels", selectedWarehouseId],
+    queryFn: async () => {
+      const url = selectedWarehouseId 
+        ? `/api/inventory/levels?warehouseId=${selectedWarehouseId}`
+        : "/api/inventory/levels";
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) throw new Error("Failed to fetch inventory levels");
+      return response.json();
+    },
   });
 
   const createItemMutation = useMutation({
@@ -596,8 +626,8 @@ export default function Inventory() {
         </div>
 
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mt-6">
-          <div className="flex items-center gap-2 flex-1 max-w-lg">
-            <div className="relative flex-1">
+          <div className="flex items-center gap-2 flex-1 max-w-2xl">
+            <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
                 placeholder="Search by SKU or Name..." 
@@ -606,9 +636,23 @@ export default function Inventory() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <Button variant="outline" size="sm" className="h-9 gap-2">
-              <Filter size={16} /> <span className="hidden sm:inline">Filters</span>
-            </Button>
+            <Select 
+              value={selectedWarehouseId?.toString() || "all"} 
+              onValueChange={(v) => setSelectedWarehouseId(v === "all" ? null : parseInt(v))}
+            >
+              <SelectTrigger className="w-[180px] h-9" data-testid="select-warehouse-filter">
+                <Building2 className="h-4 w-4 mr-2 text-muted-foreground" />
+                <SelectValue placeholder="All Warehouses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Warehouses</SelectItem>
+                {warehouses.map((wh) => (
+                  <SelectItem key={wh.id} value={wh.id.toString()}>
+                    {wh.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           
         </div>

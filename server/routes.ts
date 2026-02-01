@@ -4892,13 +4892,110 @@ export async function registerRoutes(
   });
 
   // Full inventory summary with all items and their variant availability
+  // Optional query params: warehouseId (filter by warehouse)
   app.get("/api/inventory/summary", async (req, res) => {
     try {
-      const items = await storage.getAllInventoryItems();
-      const summaries = await Promise.all(
-        items.map(item => inventoryService.getInventoryItemSummary(item.id))
-      );
-      res.json(summaries.filter(Boolean));
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      
+      if (warehouseId) {
+        // Warehouse-specific summary: filter inventory levels by locations in this warehouse
+        const allLocations = await storage.getAllWarehouseLocations();
+        const warehouseLocationIds = new Set(
+          allLocations.filter(loc => loc.warehouseId === warehouseId).map(loc => loc.id)
+        );
+        
+        const allLevels = await storage.getAllInventoryLevels();
+        const filteredLevels = allLevels.filter(level => warehouseLocationIds.has(level.warehouseLocationId));
+        
+        // Group levels by variantId to calculate totals
+        const levelsByVariant = new Map<number, typeof filteredLevels>();
+        for (const level of filteredLevels) {
+          if (!level.variantId) continue;
+          const existing = levelsByVariant.get(level.variantId) || [];
+          existing.push(level);
+          levelsByVariant.set(level.variantId, existing);
+        }
+        
+        // Get all variants and items to build summaries
+        const allVariants = await storage.getAllUomVariants();
+        const allItems = await storage.getAllInventoryItems();
+        const variantToItem = new Map<number, number>();
+        for (const v of allVariants) {
+          variantToItem.set(v.id, v.inventoryItemId);
+        }
+        
+        // Build summary by item
+        const summaryByItem = new Map<number, {
+          inventoryItemId: number;
+          baseSku: string;
+          name: string;
+          totalOnHandBase: number;
+          totalReservedBase: number;
+          totalAtpBase: number;
+          variants: Array<{
+            variantId: number;
+            sku: string;
+            name: string;
+            unitsPerVariant: number;
+            available: number;
+            onHandBase: number;
+            reservedBase: number;
+            atpBase: number;
+            variantQty: number;
+          }>;
+        }>();
+        
+        for (const [variantId, levels] of levelsByVariant) {
+          const variant = allVariants.find(v => v.id === variantId);
+          if (!variant) continue;
+          const itemId = variant.inventoryItemId;
+          const item = allItems.find(i => i.id === itemId);
+          if (!item) continue;
+          
+          const variantQty = levels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
+          const onHand = levels.reduce((sum, l) => sum + (l.onHandBase || 0), 0);
+          const reserved = levels.reduce((sum, l) => sum + (l.reservedBase || 0), 0);
+          const atp = onHand - reserved;
+          
+          let summary = summaryByItem.get(itemId);
+          if (!summary) {
+            summary = {
+              inventoryItemId: itemId,
+              baseSku: item.baseSku,
+              name: item.name,
+              totalOnHandBase: 0,
+              totalReservedBase: 0,
+              totalAtpBase: 0,
+              variants: [],
+            };
+            summaryByItem.set(itemId, summary);
+          }
+          
+          summary.totalOnHandBase += onHand;
+          summary.totalReservedBase += reserved;
+          summary.totalAtpBase += atp;
+          summary.variants.push({
+            variantId: variant.id,
+            sku: variant.sku,
+            name: variant.name,
+            unitsPerVariant: variant.unitsPerVariant,
+            available: Math.floor(atp / variant.unitsPerVariant),
+            onHandBase: onHand,
+            reservedBase: reserved,
+            atpBase: atp,
+            variantQty,
+          });
+        }
+        
+        res.json(Array.from(summaryByItem.values()));
+      } else {
+        // Original behavior: full summary across all warehouses
+        const items = await storage.getAllInventoryItems();
+        const summaries = await Promise.all(
+          items.map(item => inventoryService.getInventoryItemSummary(item.id))
+        );
+        res.json(summaries.filter(Boolean));
+      }
     } catch (error) {
       console.error("Error fetching inventory summary:", error);
       res.status(500).json({ error: "Failed to fetch summary" });
@@ -5937,8 +6034,11 @@ export async function registerRoutes(
   //
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      
       // Step 1: Get inventory quantities from inventory_levels (variant_qty only)
       // Pickable = variant_qty where warehouse_locations.is_pickable = 1
+      // Optional filter by warehouseId
       const inventoryResult = await db.execute<{
         variant_id: number;
         variant_sku: string;
@@ -5948,7 +6048,25 @@ export async function registerRoutes(
         total_variant_qty: string;
         location_count: string;
         pickable_variant_qty: string;
-      }>(sql`
+      }>(warehouseId ? sql`
+        SELECT 
+          uv.id as variant_id,
+          uv.sku as variant_sku,
+          uv.name as variant_name,
+          uv.units_per_variant,
+          ii.base_sku,
+          COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+          COUNT(DISTINCT il.warehouse_location_id) as location_count,
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
+        FROM uom_variants uv
+        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+        LEFT JOIN inventory_levels il ON il.variant_id = uv.id
+        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE uv.active = 1
+          AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
+        GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
+        ORDER BY uv.sku
+      ` : sql`
         SELECT 
           uv.id as variant_id,
           uv.sku as variant_sku,
