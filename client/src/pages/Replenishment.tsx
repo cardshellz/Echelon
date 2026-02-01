@@ -173,7 +173,7 @@ export default function Replenishment() {
         body: JSON.stringify({
           pickLocationId: parseInt(data.pickLocationId),
           sourceLocationId: parseInt(data.sourceLocationId),
-          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          catalogProductId: data.catalogProductId && data.catalogProductId !== "none" ? parseInt(data.catalogProductId) : null,
           minQty: parseInt(data.minQty),
           maxQty: parseInt(data.maxQty),
           replenMethod: data.replenMethod,
@@ -238,7 +238,7 @@ export default function Replenishment() {
         body: JSON.stringify({
           fromLocationId: parseInt(data.fromLocationId),
           toLocationId: parseInt(data.toLocationId),
-          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          catalogProductId: data.catalogProductId && data.catalogProductId !== "none" ? parseInt(data.catalogProductId) : null,
           qtyTargetUnits: parseInt(data.qtyTargetUnits),
           priority: parseInt(data.priority),
           triggeredBy: "manual",
@@ -746,7 +746,7 @@ export default function Replenishment() {
                   <SelectValue placeholder="All products..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">All Products</SelectItem>
+                  <SelectItem value="none">All Products</SelectItem>
                   {products.map((p) => (
                     <SelectItem key={p.id} value={p.id.toString()}>
                       {p.sku || p.title || `Product ${p.id}`}
@@ -873,7 +873,7 @@ export default function Replenishment() {
                   <SelectValue placeholder="Any product..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Any Product</SelectItem>
+                  <SelectItem value="none">Any Product</SelectItem>
                   {products.map((p) => (
                     <SelectItem key={p.id} value={p.id.toString()}>
                       {p.sku || p.title || `Product ${p.id}`}
