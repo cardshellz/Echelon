@@ -759,14 +759,15 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <TableHead>Lines</TableHead>
                   <TableHead>Units</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>Created At</TableHead>
+                  <TableHead>Closed At</TableHead>
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {filteredReceipts.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
                       No receipts found. Click "New Receipt" to create one.
                     </TableCell>
                   </TableRow>
@@ -795,7 +796,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                           {STATUS_BADGES[receipt.status]?.label || receipt.status}
                         </Badge>
                       </TableCell>
-                      <TableCell>{format(new Date(receipt.createdAt), "MMM d, yyyy")}</TableCell>
+                      <TableCell className="text-sm">{format(new Date(receipt.createdAt), "MMM d, yyyy h:mm a")}</TableCell>
+                      <TableCell className="text-sm">
+                        {receipt.closedDate ? format(new Date(receipt.closedDate), "MMM d, yyyy h:mm a") : "-"}
+                      </TableCell>
                       <TableCell>
                         <div className="flex gap-1">
                           <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
