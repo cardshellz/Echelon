@@ -1266,23 +1266,41 @@ export default function CycleCounts() {
                     </div>
                     <div className="flex flex-col items-end gap-2">
                       {getStatusBadge(count.status)}
-                      {count.status === "draft" && (
-                        <Button 
-                          size="sm" 
-                          onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
-                          disabled={initializeMutation.isPending}
-                        >
-                          <Play className="h-4 w-4 mr-1" /> Start
-                        </Button>
-                      )}
-                      {count.status === "in_progress" && (
-                        <Button size="sm" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
-                          Continue <ChevronRight className="h-4 w-4 ml-1" />
-                        </Button>
-                      )}
-                      {count.status === "completed" && (
-                        <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                      )}
+                      <div className="flex items-center gap-2">
+                        {count.status === "draft" && (
+                          <Button 
+                            size="sm" 
+                            onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
+                            disabled={initializeMutation.isPending}
+                          >
+                            <Play className="h-4 w-4 mr-1" /> Start
+                          </Button>
+                        )}
+                        {count.status === "in_progress" && (
+                          <Button size="sm" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
+                            Continue <ChevronRight className="h-4 w-4 ml-1" />
+                          </Button>
+                        )}
+                        {count.status === "completed" && (
+                          <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                        )}
+                        {count.status !== "completed" && (
+                          <Button 
+                            size="sm" 
+                            variant="ghost"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50 p-2"
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              if (confirm("Are you sure you want to delete this cycle count? This cannot be undone.")) {
+                                deleteMutation.mutate(count.id);
+                              }
+                            }}
+                            disabled={deleteMutation.isPending}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </CardContent>
@@ -1320,25 +1338,44 @@ export default function CycleCounts() {
                       {format(new Date(count.createdAt), "MMM d, yyyy")}
                     </TableCell>
                     <TableCell>
-                      {count.status === "draft" && (
-                        <Button 
-                          size="sm" 
-                          onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
-                          disabled={initializeMutation.isPending}
-                        >
-                          <Play className="h-4 w-4 mr-1" /> Start
-                        </Button>
-                      )}
-                      {count.status === "in_progress" && (
-                        <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
-                          Continue <ChevronRight className="h-4 w-4 ml-1" />
-                        </Button>
-                      )}
-                      {count.status === "completed" && (
-                        <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
-                          View <ChevronRight className="h-4 w-4 ml-1" />
-                        </Button>
-                      )}
+                      <div className="flex items-center gap-2 justify-end">
+                        {count.status === "draft" && (
+                          <Button 
+                            size="sm" 
+                            onClick={(e) => { e.stopPropagation(); initializeMutation.mutate(count.id); }}
+                            disabled={initializeMutation.isPending}
+                          >
+                            <Play className="h-4 w-4 mr-1" /> Start
+                          </Button>
+                        )}
+                        {count.status === "in_progress" && (
+                          <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
+                            Continue <ChevronRight className="h-4 w-4 ml-1" />
+                          </Button>
+                        )}
+                        {count.status === "completed" && (
+                          <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); setSelectedCount(count.id); }}>
+                            View <ChevronRight className="h-4 w-4 ml-1" />
+                          </Button>
+                        )}
+                        {count.status !== "completed" && (
+                          <Button 
+                            size="sm" 
+                            variant="ghost"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              if (confirm("Are you sure you want to delete this cycle count? This cannot be undone.")) {
+                                deleteMutation.mutate(count.id);
+                              }
+                            }}
+                            disabled={deleteMutation.isPending}
+                            data-testid={`button-delete-count-${count.id}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
