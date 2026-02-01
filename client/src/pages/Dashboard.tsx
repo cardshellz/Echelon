@@ -1,4 +1,5 @@
 import React from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   ArrowUpRight, 
   ArrowDownRight, 
@@ -7,11 +8,31 @@ import {
   Truck, 
   DollarSign, 
   Activity,
-  AlertCircle
+  AlertCircle,
+  RefreshCw,
+  AlertTriangle,
+  X
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useToast } from "@/hooks/use-toast";
+
+interface SyncHealth {
+  lastSuccessfulSync: string | null;
+  lastSyncAttempt: string | null;
+  lastSyncError: string | null;
+  consecutiveErrors: number;
+  minutesSinceLastSync: number | null;
+  status: "healthy" | "stale" | "error";
+  latestShopifyOrder: string | null;
+  latestSyncedOrder: string | null;
+  syncGapMinutes: number | null;
+  unsynced24h: number;
+  needsAlert: boolean;
+  alertMessage: string | null;
+}
 import {
   Table,
   TableBody,
@@ -53,8 +74,81 @@ const inventoryData = [
 ];
 
 export default function Dashboard() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [alertDismissed, setAlertDismissed] = React.useState(false);
+
+  const { data: syncHealth } = useQuery<SyncHealth>({
+    queryKey: ["/api/sync/health"],
+    refetchInterval: 60000, // Check every minute
+  });
+
+  const triggerSyncMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/sync/trigger", { 
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to trigger sync");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Sync triggered", description: "Order sync has been initiated" });
+      queryClient.invalidateQueries({ queryKey: ["/api/sync/health"] });
+    },
+    onError: (error) => {
+      toast({ title: "Sync failed", description: String(error), variant: "destructive" });
+    },
+  });
+
+  const showSyncAlert = syncHealth?.needsAlert && !alertDismissed;
+
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-[1600px] mx-auto">
+      {/* Sync Alert Banner */}
+      {showSyncAlert && (
+        <Alert variant="destructive" className="border-red-500 bg-red-50 dark:bg-red-950/20">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle className="flex items-center justify-between">
+            <span>Order Sync Alert</span>
+            <div className="flex items-center gap-2">
+              <Button 
+                size="sm" 
+                variant="outline"
+                onClick={() => triggerSyncMutation.mutate()}
+                disabled={triggerSyncMutation.isPending}
+                className="h-7"
+                data-testid="button-sync-now"
+              >
+                {triggerSyncMutation.isPending ? (
+                  <RefreshCw className="w-3 h-3 mr-1 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3 h-3 mr-1" />
+                )}
+                Sync Now
+              </Button>
+              <Button 
+                size="sm" 
+                variant="ghost"
+                onClick={() => setAlertDismissed(true)}
+                className="h-7 w-7 p-0"
+                data-testid="button-dismiss-sync-alert"
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+          </AlertTitle>
+          <AlertDescription>
+            {syncHealth?.alertMessage || "Orders may not be syncing properly."}
+            {syncHealth?.unsynced24h > 0 && (
+              <span className="ml-2 font-medium">
+                ({syncHealth.unsynced24h} orders pending)
+              </span>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Header Section */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

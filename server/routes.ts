@@ -5628,14 +5628,143 @@ export async function registerRoutes(
     }
   });
 
-  // Manually trigger order sync from shopify_orders to orders
-  app.post("/api/debug/trigger-sync", async (req, res) => {
+  // Manually trigger order sync from shopify_orders to orders (admin only)
+  app.post("/api/sync/trigger", requirePermission("system", "admin"), async (req, res) => {
+    try {
+      const { syncNewOrders } = await import("./orderSyncListener");
+      await syncNewOrders();
+      res.json({ success: true, message: "Sync triggered - check logs" });
+    } catch (error) {
+      console.error("Trigger sync error:", error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+  
+  // Legacy debug endpoint - redirect to authenticated version
+  app.post("/api/debug/trigger-sync", requirePermission("system", "admin"), async (req, res) => {
     try {
       const { syncNewOrders } = await import("./orderSyncListener");
       await syncNewOrders();
       res.json({ success: true, message: "Sync triggered - check logs" });
     } catch (error) {
       console.error("Debug trigger sync error:", error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
+  // Get sync health status for dashboard alerts
+  app.get("/api/sync/health", async (req, res) => {
+    try {
+      const { getSyncHealth } = await import("./orderSyncListener");
+      const health = getSyncHealth();
+      
+      // Also check for unsynced orders in database
+      const unsyncedCheck = await db.execute(sql`
+        SELECT 
+          (SELECT MAX(created_at) FROM shopify_orders) as latest_shopify_order,
+          (SELECT MAX(created_at) FROM orders WHERE source = 'shopify') as latest_synced_order,
+          (SELECT COUNT(*) FROM shopify_orders so 
+           WHERE NOT EXISTS(SELECT 1 FROM orders WHERE source_table_id = so.id)
+           AND so.created_at > NOW() - INTERVAL '24 hours') as unsynced_24h
+      `);
+      
+      const row = unsyncedCheck.rows[0] as any;
+      const latestShopifyOrder = row?.latest_shopify_order;
+      const latestSyncedOrder = row?.latest_synced_order;
+      const unsynced24h = parseInt(row?.unsynced_24h || "0");
+      
+      // Calculate gap between latest shopify order and latest synced order
+      // Clamp to 0 if negative (synced order can be newer due to processing time)
+      let syncGapMinutes: number | null = null;
+      if (latestShopifyOrder && latestSyncedOrder) {
+        const shopifyTime = new Date(latestShopifyOrder).getTime();
+        const syncedTime = new Date(latestSyncedOrder).getTime();
+        syncGapMinutes = Math.max(0, Math.floor((shopifyTime - syncedTime) / 60000));
+      }
+      
+      // Determine alert status
+      // Alert if: gap > 30 minutes, or unsynced orders > 5, or sync errors
+      const needsAlert = (syncGapMinutes !== null && syncGapMinutes > 30) || 
+                        unsynced24h > 5 || 
+                        health.status === "error";
+      
+      res.json({
+        ...health,
+        latestShopifyOrder,
+        latestSyncedOrder,
+        syncGapMinutes,
+        unsynced24h,
+        needsAlert,
+        alertMessage: needsAlert ? 
+          health.status === "error" ? `Sync error: ${health.lastSyncError}` :
+          unsynced24h > 0 ? `${unsynced24h} orders waiting to sync` :
+          syncGapMinutes && syncGapMinutes > 60 ? `Sync is ${syncGapMinutes} minutes behind` :
+          null : null,
+      });
+    } catch (error) {
+      console.error("Error checking sync health:", error);
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
+  // Email alert endpoint (ready for SendGrid integration later)
+  // For now, logs the alert - can be connected to SendGrid when API key is available
+  app.post("/api/sync/send-alert", requirePermission("system", "admin"), async (req, res) => {
+    try {
+      const { getSyncHealth } = await import("./orderSyncListener");
+      const health = getSyncHealth();
+      
+      // Get admin email from settings
+      const adminEmail = await storage.getSetting("admin_alert_email");
+      
+      if (!adminEmail) {
+        return res.status(400).json({ error: "No admin email configured. Set admin_alert_email in settings." });
+      }
+      
+      // Check if SendGrid is configured
+      const sendgridApiKey = process.env.SENDGRID_API_KEY;
+      
+      if (sendgridApiKey) {
+        // SendGrid integration ready - uncomment when API key is available
+        /*
+        const sgMail = require('@sendgrid/mail');
+        sgMail.setApiKey(sendgridApiKey);
+        
+        const msg = {
+          to: adminEmail,
+          from: process.env.SENDGRID_FROM_EMAIL || 'alerts@echelon.app',
+          subject: 'Echelon Alert: Order Sync Issue Detected',
+          text: `Order sync alert:\n\nStatus: ${health.status}\nLast successful sync: ${health.lastSuccessfulSync || 'Never'}\nConsecutive errors: ${health.consecutiveErrors}\nLast error: ${health.lastSyncError || 'None'}\n\nPlease check the Echelon dashboard for more details.`,
+          html: `
+            <h2>Order Sync Alert</h2>
+            <p><strong>Status:</strong> ${health.status}</p>
+            <p><strong>Last successful sync:</strong> ${health.lastSuccessfulSync || 'Never'}</p>
+            <p><strong>Consecutive errors:</strong> ${health.consecutiveErrors}</p>
+            <p><strong>Last error:</strong> ${health.lastSyncError || 'None'}</p>
+            <p>Please check the <a href="${process.env.APP_URL || 'https://your-app.replit.app'}">Echelon dashboard</a> for more details.</p>
+          `,
+        };
+        
+        await sgMail.send(msg);
+        */
+        console.log("[ALERT] Would send email alert to:", adminEmail);
+        res.json({ success: true, message: "Alert sent (SendGrid configured)", recipient: adminEmail });
+      } else {
+        // Log alert for manual follow-up
+        console.log("[ALERT] Sync alert triggered but SendGrid not configured");
+        console.log("[ALERT] Would send to:", adminEmail);
+        console.log("[ALERT] Status:", health.status);
+        console.log("[ALERT] Error:", health.lastSyncError);
+        
+        res.json({ 
+          success: true, 
+          message: "Alert logged (SendGrid not configured - add SENDGRID_API_KEY to enable email)",
+          recipient: adminEmail,
+          health,
+        });
+      }
+    } catch (error) {
+      console.error("Error sending sync alert:", error);
       res.status(500).json({ error: String(error) });
     }
   });

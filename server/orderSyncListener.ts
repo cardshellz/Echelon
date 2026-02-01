@@ -4,6 +4,32 @@ import { sql } from "drizzle-orm";
 import { storage } from "./storage";
 import type { InsertOrderItem } from "@shared/schema";
 
+// Sync health tracking
+let lastSuccessfulSync: Date | null = null;
+let lastSyncAttempt: Date | null = null;
+let lastSyncError: string | null = null;
+let consecutiveErrors = 0;
+
+export function getSyncHealth() {
+  const now = new Date();
+  const minutesSinceLastSync = lastSuccessfulSync 
+    ? Math.floor((now.getTime() - lastSuccessfulSync.getTime()) / 60000)
+    : null;
+  
+  // Consider sync stale if no successful sync in last 30 minutes and we have shopify orders
+  const isStale = minutesSinceLastSync !== null && minutesSinceLastSync > 30;
+  const hasError = consecutiveErrors > 0;
+  
+  return {
+    lastSuccessfulSync: lastSuccessfulSync?.toISOString() || null,
+    lastSyncAttempt: lastSyncAttempt?.toISOString() || null,
+    lastSyncError,
+    consecutiveErrors,
+    minutesSinceLastSync,
+    status: hasError ? "error" : isStale ? "stale" : "healthy",
+  };
+}
+
 const dbConnectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
 
@@ -17,6 +43,7 @@ export async function syncNewOrders() {
   }
   
   isProcessing = true;
+  lastSyncAttempt = new Date();
   
   try {
     console.log("[ORDER SYNC] Syncing new orders from shopify_orders...");
@@ -139,8 +166,23 @@ export async function syncNewOrders() {
     if (created > 0) {
       console.log(`[ORDER SYNC] Created ${created} new orders`);
     }
+    
+    // Mark successful sync
+    lastSuccessfulSync = new Date();
+    lastSyncError = null;
+    consecutiveErrors = 0;
+    
+    // Persist last sync time to settings
+    await storage.upsertSetting("sync_last_success", lastSuccessfulSync.toISOString(), "sync");
+    
   } catch (error) {
     console.error("[ORDER SYNC] Error syncing orders:", error);
+    lastSyncError = String(error);
+    consecutiveErrors++;
+    
+    // Persist error state
+    await storage.upsertSetting("sync_last_error", lastSyncError, "sync");
+    await storage.upsertSetting("sync_consecutive_errors", String(consecutiveErrors), "sync");
   } finally {
     isProcessing = false;
   }
