@@ -525,6 +525,7 @@ export class DatabaseStorage implements IStorage {
     imageUrl: string | null;
   } | undefined> {
     // Look up variant by SKU, then find any inventory level for that variant
+    // barcode and image_url are on uom_variants, not catalog_products
     const result = await db.execute<{
       location_code: string;
       zone: string | null;
@@ -534,13 +535,12 @@ export class DatabaseStorage implements IStorage {
       SELECT 
         wl.code as location_code,
         wl.zone,
-        cp.shopify_barcode as barcode,
-        cp.image_url
+        uv.barcode,
+        COALESCE(uv.image_url, ii.image_url) as image_url
       FROM uom_variants uv
       JOIN inventory_levels il ON il.variant_id = uv.id
       JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
       LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-      LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
       WHERE UPPER(uv.sku) = ${sku.toUpperCase()}
       ORDER BY wl.is_pickable DESC, il.variant_qty DESC
       LIMIT 1
