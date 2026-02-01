@@ -1,2 +1,2 @@
-release: npx drizzle-kit push
+release: npm run db:push
 web: npm run start
