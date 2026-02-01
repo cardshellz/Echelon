@@ -3904,7 +3904,77 @@ export async function registerRoutes(
     }
   });
 
-  // Get products assigned to a specific bin (warehouse location) - for bin-centric view
+  // Get actual inventory at a specific bin (warehouse location) - shows what's really there
+  app.get("/api/warehouse/locations/:id/inventory", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseLocationId = parseInt(req.params.id);
+      if (isNaN(warehouseLocationId)) {
+        return res.status(400).json({ error: "Invalid location ID" });
+      }
+      
+      // Get all inventory levels at this location with variant and product details
+      const result = await db.execute<{
+        id: number;
+        variant_id: number;
+        variant_qty: number;
+        on_hand_base: number;
+        reserved_base: number;
+        picked_base: number;
+        sku: string | null;
+        variant_name: string | null;
+        units_per_variant: number;
+        product_title: string | null;
+        catalog_product_id: number | null;
+        image_url: string | null;
+        barcode: string | null;
+      }>(sql`
+        SELECT 
+          il.id,
+          il.variant_id,
+          il.variant_qty,
+          il.on_hand_base,
+          il.reserved_base,
+          il.picked_base,
+          uv.sku,
+          uv.name as variant_name,
+          uv.units_per_variant,
+          cp.title as product_title,
+          cp.id as catalog_product_id,
+          COALESCE(uv.image_url, ii.image_url) as image_url,
+          uv.barcode
+        FROM inventory_levels il
+        JOIN uom_variants uv ON il.variant_id = uv.id
+        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+        LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
+        WHERE il.warehouse_location_id = ${warehouseLocationId}
+          AND il.variant_qty > 0
+        ORDER BY uv.sku
+      `);
+      
+      const inventory = result.rows.map(row => ({
+        id: row.id,
+        variantId: row.variant_id,
+        qty: row.variant_qty,
+        onHandBase: row.on_hand_base,
+        reservedBase: row.reserved_base,
+        pickedBase: row.picked_base,
+        sku: row.sku,
+        variantName: row.variant_name,
+        unitsPerVariant: row.units_per_variant,
+        productTitle: row.product_title,
+        catalogProductId: row.catalog_product_id,
+        imageUrl: row.image_url,
+        barcode: row.barcode,
+      }));
+      
+      res.json(inventory);
+    } catch (error: any) {
+      console.error("Error fetching inventory for location:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch inventory" });
+    }
+  });
+
+  // Get products assigned to a specific bin (warehouse location) - LEGACY: for bin-centric view
   app.get("/api/warehouse/locations/:id/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseLocationId = parseInt(req.params.id);

@@ -97,13 +97,6 @@ export default function WarehouseLocations() {
   const [targetLocationId, setTargetLocationId] = useState<string>("");
   const [isAssignProductsOpen, setIsAssignProductsOpen] = useState(false);
   const [assigningToLocation, setAssigningToLocation] = useState<WarehouseLocation | null>(null);
-  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
-  const [productSearchOpen, setProductSearchOpen] = useState(false);
-  const [productSearchQuery, setProductSearchQuery] = useState("");
-  const [assignLocationType, setAssignLocationType] = useState("forward_pick");
-  const [assignIsPrimary, setAssignIsPrimary] = useState(true);
-  const [movingProduct, setMovingProduct] = useState<ProductInBin | null>(null);
-  const [moveTargetLocationId, setMoveTargetLocationId] = useState<string>("");
   const [reassignLocationSearch, setReassignLocationSearch] = useState("");
   const [reassignLocationOpen, setReassignLocationOpen] = useState(false);
   const [newLocation, setNewLocation] = useState({
@@ -169,6 +162,36 @@ export default function WarehouseLocations() {
     isPrimary: number;
     warehouseLocationId?: number;
   }
+
+  // Actual inventory at a location (source of truth)
+  interface InventoryInBin {
+    id: number;
+    variantId: number;
+    qty: number;
+    onHandBase: number;
+    reservedBase: number;
+    pickedBase: number;
+    sku: string | null;
+    variantName: string | null;
+    unitsPerVariant: number;
+    productTitle: string | null;
+    catalogProductId: number | null;
+    imageUrl: string | null;
+    barcode: string | null;
+  }
+
+  const { data: inventoryInBin = [], refetch: refetchInventoryInBin } = useQuery<InventoryInBin[]>({
+    queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "inventory"],
+    queryFn: async () => {
+      if (!assigningToLocation) return [];
+      const res = await fetch(`/api/warehouse/locations/${assigningToLocation.id}/inventory`);
+      if (!res.ok) throw new Error("Failed to fetch inventory");
+      return res.json();
+    },
+    enabled: !!assigningToLocation,
+  });
+
+  // Legacy: products assigned (for backward compat)
   const { data: productsInBin = [], refetch: refetchProductsInBin } = useQuery<ProductInBin[]>({
     queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "products"],
     queryFn: async () => {
@@ -177,46 +200,9 @@ export default function WarehouseLocations() {
       if (!res.ok) throw new Error("Failed to fetch products");
       return res.json();
     },
-    enabled: !!assigningToLocation,
+    enabled: false, // Disabled - using inventory instead
   });
 
-  // Fetch all product locations to show SKUs in the table
-  const { data: allProductLocations = [] } = useQuery<ProductInBin[]>({
-    queryKey: ["/api/locations"],
-    queryFn: async () => {
-      const res = await fetch("/api/locations");
-      if (!res.ok) throw new Error("Failed to fetch product locations");
-      return res.json();
-    },
-    enabled: canView,
-  });
-
-  // Map warehouse location ID to SKU for quick lookup
-  const skuByLocationId = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const pl of allProductLocations) {
-      if (pl.warehouseLocationId && pl.sku) {
-        const existing = map.get(pl.warehouseLocationId);
-        if (existing) {
-          map.set(pl.warehouseLocationId, existing + ", " + pl.sku);
-        } else {
-          map.set(pl.warehouseLocationId, pl.sku);
-        }
-      }
-    }
-    return map;
-  }, [allProductLocations]);
-
-  // Count products per location for display
-  const productCountByLocationId = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const pl of allProductLocations) {
-      if (pl.warehouseLocationId) {
-        map.set(pl.warehouseLocationId, (map.get(pl.warehouseLocationId) || 0) + 1);
-      }
-    }
-    return map;
-  }, [allProductLocations]);
 
   const createLocationMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -395,73 +381,7 @@ export default function WarehouseLocations() {
     },
   });
 
-  const assignProductMutation = useMutation({
-    mutationFn: async ({ warehouseLocationId, catalogProductId, locationType, isPrimary }: { warehouseLocationId: number; catalogProductId: number; locationType: string; isPrimary: number }) => {
-      const res = await fetch(`/api/warehouse/locations/${warehouseLocationId}/products`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ catalogProductId, locationType, isPrimary }),
-      });
-      if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.error || "Failed to assign product");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      refetchProductsInBin();
-      queryClient.invalidateQueries({ queryKey: ["locations"] });
-      setSelectedProductId(null);
-      setProductSearchQuery("");
-      toast({ title: "Product assigned to location" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    },
-  });
 
-  const removeProductFromLocationMutation = useMutation({
-    mutationFn: async (productLocationId: number) => {
-      const res = await fetch(`/api/locations/${productLocationId}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to remove product");
-      return res.json();
-    },
-    onSuccess: () => {
-      refetchProductsInBin();
-      queryClient.invalidateQueries({ queryKey: ["locations"] });
-      toast({ title: "Product removed from location" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const moveProductMutation = useMutation({
-    mutationFn: async ({ productLocationId, targetWarehouseLocationId }: { productLocationId: number; targetWarehouseLocationId: number }) => {
-      const res = await fetch(`/api/locations/${productLocationId}/move`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ targetWarehouseLocationId }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to move product");
-      }
-      return res.json();
-    },
-    onSuccess: (data) => {
-      refetchProductsInBin();
-      queryClient.invalidateQueries({ queryKey: ["/api/locations"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
-      setMovingProduct(null);
-      setMoveTargetLocationId("");
-      toast({ title: data.message || "Product moved successfully" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    },
-  });
 
   const deleteZoneMutation = useMutation({
     mutationFn: async (id: number) => {
@@ -898,8 +818,8 @@ export default function WarehouseLocations() {
                       )}
                       <TableCell>{getWarehouseName(loc.warehouseId)}</TableCell>
                       <TableCell className="font-mono font-medium">{loc.code}</TableCell>
-                      <TableCell className="font-mono text-sm">
-                        {skuByLocationId.get(loc.id) || <span className="text-muted-foreground">-</span>}
+                      <TableCell className="font-mono text-sm text-muted-foreground">
+                        -
                       </TableCell>
                       <TableCell>{loc.zone || '-'}</TableCell>
                       <TableCell>{loc.aisle || '-'}</TableCell>
@@ -920,8 +840,8 @@ export default function WarehouseLocations() {
                                 setAssigningToLocation(loc);
                                 setIsAssignProductsOpen(true);
                               }}
-                              title="Set Primary SKU"
-                              data-testid={`btn-assign-products-${loc.id}`}
+                              title="View Inventory"
+                              data-testid={`btn-view-inventory-${loc.id}`}
                             >
                               <Package className="h-4 w-4" />
                             </Button>
@@ -1546,8 +1466,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                     {targetLocationId
                       ? (() => {
                           const loc = locations.find(l => l.id.toString() === targetLocationId);
-                          const count = productCountByLocationId.get(parseInt(targetLocationId)) || 0;
-                          return loc ? `${loc.code} ${count > 0 ? `(${count} SKUs)` : '(Empty)'}` : "Select...";
+                          return loc ? loc.code : "Select...";
                         })()
                       : "Search for location..."}
                     <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -1571,20 +1490,13 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                             (loc.zone && loc.zone.toLowerCase().includes(reassignLocationSearch.toLowerCase()))
                           )
                           .sort((a, b) => {
-                            // Sort staging locations first, then empty bins
+                            // Sort staging locations first, then by code
                             if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
                             if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
-                            const aCount = productCountByLocationId.get(a.id) || 0;
-                            const bCount = productCountByLocationId.get(b.id) || 0;
-                            if (aCount === 0 && bCount > 0) return -1;
-                            if (aCount > 0 && bCount === 0) return 1;
                             return a.code.localeCompare(b.code);
                           })
                           .slice(0, 50)
-                          .map(loc => {
-                            const count = productCountByLocationId.get(loc.id) || 0;
-                            const skus = skuByLocationId.get(loc.id);
-                            return (
+                          .map(loc => (
                               <CommandItem
                                 key={loc.id}
                                 value={`${loc.code} ${loc.zone || ''}`}
@@ -1601,23 +1513,8 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                                     {loc.zone && ` • Zone ${loc.zone}`}
                                   </div>
                                 </div>
-                                <div className="text-right ml-2">
-                                  {count === 0 ? (
-                                    <Badge variant="outline" className="text-xs bg-green-50 text-green-700 border-green-200">Empty</Badge>
-                                  ) : (
-                                    <div>
-                                      <Badge variant="secondary" className="text-xs">{count} SKU{count > 1 ? 's' : ''}</Badge>
-                                      {skus && (
-                                        <div className="text-xs text-muted-foreground mt-0.5 max-w-[120px] truncate">
-                                          {skus}
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
                               </CommandItem>
-                            );
-                          })}
+                            ))}
                       </CommandGroup>
                     </CommandList>
                   </Command>
@@ -1647,63 +1544,48 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
         </DialogContent>
       </Dialog>
 
-      {/* Set Primary SKU for Bin Dialog */}
+      {/* View Inventory Dialog */}
       <Dialog open={isAssignProductsOpen} onOpenChange={(open) => {
         setIsAssignProductsOpen(open);
         if (!open) {
           setAssigningToLocation(null);
-          setSelectedProductId(null);
-          setProductSearchQuery("");
-          setAssignLocationType("forward_pick");
-          setAssignIsPrimary(true);
         }
       }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <MapPin className="h-5 w-5" />
-              Set Primary SKU for {assigningToLocation?.code}
+              Location {assigningToLocation?.code}
             </DialogTitle>
           </DialogHeader>
           
           <div className="space-y-4">
-            {/* Products currently in this bin */}
+            {/* Actual inventory in this bin */}
             <div>
-              <Label className="text-sm font-medium">Products in this location ({productsInBin.length})</Label>
-              {productsInBin.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-2">No products assigned to this location yet.</p>
+              <Label className="text-sm font-medium">Inventory in this location ({inventoryInBin.length} items)</Label>
+              {inventoryInBin.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-2">No inventory at this location.</p>
               ) : (
-                <ScrollArea className="h-40 border rounded-md mt-2">
+                <ScrollArea className="h-48 border rounded-md mt-2">
                   <div className="p-2 space-y-2">
-                    {productsInBin.map((product) => (
-                      <div key={product.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
-                        <div className="flex items-center gap-2">
-                          {product.isPrimary === 1 && <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />}
+                    {inventoryInBin.map((inv) => (
+                      <div key={inv.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
+                        <div className="flex items-center gap-3">
+                          {inv.imageUrl && (
+                            <img src={inv.imageUrl} alt="" className="w-10 h-10 object-cover rounded" />
+                          )}
                           <div>
-                            <div className="font-medium text-sm">{product.name}</div>
-                            <div className="text-xs text-muted-foreground flex gap-2">
-                              {product.sku && <span>SKU: {product.sku}</span>}
-                              <Badge variant="outline" className="text-xs">{product.locationType.replace('_', ' ')}</Badge>
+                            <div className="font-medium text-sm">{inv.sku || inv.variantName || "Unknown"}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {inv.productTitle && <span className="truncate max-w-[200px] block">{inv.productTitle}</span>}
                             </div>
                           </div>
                         </div>
-                        <div className="flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setMovingProduct(product)}
-                            data-testid={`btn-move-product-${product.id}`}
-                          >
-                            <MoveRight className="h-4 w-4 text-blue-500" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => removeProductFromLocationMutation.mutate(product.id)}
-                            disabled={removeProductFromLocationMutation.isPending}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                        <div className="text-right">
+                          <div className="font-bold text-lg">{inv.qty}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {inv.reservedBase > 0 && <span className="text-amber-600">{inv.reservedBase} reserved</span>}
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1712,184 +1594,30 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
               )}
             </div>
 
-            {/* Add new product */}
-            <div className="border-t pt-4">
-              <Label className="text-sm font-medium">Add product to this location</Label>
-              <div className="grid grid-cols-2 gap-4 mt-2">
-                <div className="col-span-2">
-                  <Popover open={productSearchOpen} onOpenChange={setProductSearchOpen}>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        role="combobox"
-                        aria-expanded={productSearchOpen}
-                        className="w-full justify-between"
-                        data-testid="btn-select-product"
-                      >
-                        {selectedProductId
-                          ? catalogProducts.find(p => p.id === selectedProductId)?.title?.slice(0, 40) || "Select product..."
-                          : "Search and select product..."}
-                        <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-[400px] p-0" align="start">
-                      <Command>
-                        <CommandInput 
-                          placeholder="Search by name or SKU..." 
-                          value={productSearchQuery}
-                          onValueChange={setProductSearchQuery}
-                          data-testid="input-product-search"
-                        />
-                        <CommandList>
-                          <CommandEmpty>No products found.</CommandEmpty>
-                          <CommandGroup>
-                            {catalogProducts
-                              .filter(p => 
-                                p.title.toLowerCase().includes(productSearchQuery.toLowerCase()) ||
-                                (p.sku && p.sku.toLowerCase().includes(productSearchQuery.toLowerCase()))
-                              )
-                              .slice(0, 50)
-                              .map(product => (
-                                <CommandItem
-                                  key={product.id}
-                                  value={`${product.title} ${product.sku || ''}`}
-                                  onSelect={() => {
-                                    setSelectedProductId(product.id);
-                                    setProductSearchOpen(false);
-                                  }}
-                                  className="flex items-center gap-2"
-                                >
-                                  <div className="flex-1 min-w-0">
-                                    <div className="text-sm truncate">{product.title}</div>
-                                    <div className="text-xs text-muted-foreground">{product.sku || 'No SKU'}</div>
-                                  </div>
-                                </CommandItem>
-                              ))}
-                          </CommandGroup>
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-                
-                <div>
-                  <Label className="text-xs">Location Type</Label>
-                  <Select value={assignLocationType} onValueChange={setAssignLocationType}>
-                    <SelectTrigger data-testid="select-assign-location-type">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="forward_pick">Forward Pick</SelectItem>
-                      <SelectItem value="bulk_storage">Bulk Storage</SelectItem>
-                      <SelectItem value="overflow">Overflow</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                
-                <div className="flex items-end gap-2">
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="isPrimary"
-                      checked={assignIsPrimary}
-                      onCheckedChange={(checked) => setAssignIsPrimary(!!checked)}
-                      data-testid="checkbox-is-primary"
-                    />
-                    <Label htmlFor="isPrimary" className="text-sm cursor-pointer">
-                      Primary pick location
-                    </Label>
-                  </div>
+            {/* Location info */}
+            {assigningToLocation && (
+              <div className="border-t pt-4 text-sm text-muted-foreground">
+                <div className="flex gap-4">
+                  <span>Zone: <strong>{assigningToLocation.zone}</strong></span>
+                  <span>Type: <strong>{assigningToLocation.locationType?.replace('_', ' ') || 'N/A'}</strong></span>
+                  {assigningToLocation.isPickable ? (
+                    <Badge variant="outline" className="text-green-600">Pickable</Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-slate-500">Storage</Badge>
+                  )}
                 </div>
               </div>
-            </div>
+            )}
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsAssignProductsOpen(false)}>
               Close
             </Button>
-            <Button
-              onClick={() => {
-                if (assigningToLocation && selectedProductId) {
-                  assignProductMutation.mutate({
-                    warehouseLocationId: assigningToLocation.id,
-                    catalogProductId: selectedProductId,
-                    locationType: assignLocationType,
-                    isPrimary: assignIsPrimary ? 1 : 0,
-                  });
-                }
-              }}
-              disabled={!selectedProductId || assignProductMutation.isPending}
-              data-testid="btn-assign-product"
-            >
-              <Package className="h-4 w-4 mr-2" />
-              {assignProductMutation.isPending ? "Setting..." : "Set Primary"}
-            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Move SKU Dialog */}
-      <Dialog open={!!movingProduct} onOpenChange={(open) => {
-        if (!open) {
-          setMovingProduct(null);
-          setMoveTargetLocationId("");
-        }
-      }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <MoveRight className="h-5 w-5" />
-              Move SKU to New Location
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="bg-muted/50 rounded-md p-3">
-              <p className="text-sm font-medium">{movingProduct?.name}</p>
-              <p className="text-xs text-muted-foreground">SKU: {movingProduct?.sku || 'N/A'}</p>
-              <p className="text-xs text-muted-foreground">Current: {assigningToLocation?.code}</p>
-            </div>
-            <div>
-              <Label>Move to Location</Label>
-              <Select value={moveTargetLocationId} onValueChange={setMoveTargetLocationId}>
-                <SelectTrigger data-testid="select-move-target">
-                  <SelectValue placeholder="Select destination bin..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations
-                    .filter(loc => loc.id !== assigningToLocation?.id)
-                    .sort((a, b) => a.code.localeCompare(b.code))
-                    .map(loc => (
-                      <SelectItem key={loc.id} value={loc.id.toString()}>
-                        {loc.code} - {loc.locationType.replace('_', ' ')}
-                      </SelectItem>
-                    ))
-                  }
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setMovingProduct(null); setMoveTargetLocationId(""); }}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => {
-                if (movingProduct && moveTargetLocationId) {
-                  moveProductMutation.mutate({
-                    productLocationId: movingProduct.id,
-                    targetWarehouseLocationId: parseInt(moveTargetLocationId)
-                  });
-                }
-              }}
-              disabled={!moveTargetLocationId || moveProductMutation.isPending}
-              data-testid="btn-confirm-move"
-            >
-              <MoveRight className="h-4 w-4 mr-2" />
-              {moveProductMutation.isPending ? "Moving..." : "Move SKU"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
