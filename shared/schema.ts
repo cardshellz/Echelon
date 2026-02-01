@@ -679,8 +679,8 @@ export const replenRules = pgTable("replen_rules", {
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
   pickUomVariantId: integer("pick_uom_variant_id").references(() => uomVariants.id), // The each/unit variant in pick bin
   sourceUomVariantId: integer("source_uom_variant_id").references(() => uomVariants.id), // The case/pack variant in source
-  minQty: integer("min_qty").notNull().default(10), // Trigger replen when qty drops below this
-  maxQty: integer("max_qty").notNull().default(50), // Fill up to this qty
+  minQty: integer("min_qty").notNull().default(0), // Trigger replen when qty drops below this
+  maxQty: integer("max_qty"), // Fill up to this qty (null = replen one source unit worth)
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
   priority: integer("priority").notNull().default(5), // 1 = highest priority
   isActive: integer("is_active").notNull().default(1),

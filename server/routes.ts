@@ -7847,27 +7847,34 @@ export async function registerRoutes(
       const inventoryLevels = await storage.getAllInventoryLevels();
       const locations = await storage.getAllWarehouseLocations();
       const catalogProducts = await storage.getAllCatalogProducts();
+      const uomVariants = await storage.getAllUomVariants();
       
       const locationMap = new Map(locations.map(l => [l.id, l]));
       const productMap = new Map(catalogProducts.map(p => [p.id, p]));
+      const variantMap = new Map(uomVariants.map(v => [v.id, v]));
       
-      const inventoryByLocationAndProduct = new Map<string, number>();
-      const inventoryByLocation = new Map<number, number>();
+      // Track inventory by location+product and also store variantId for UOM lookup
+      const inventoryByLocationAndProduct = new Map<string, { qty: number; variantId: number | null }>();
+      const inventoryByLocation = new Map<number, { qty: number; variantId: number | null }>();
       
       for (const level of inventoryLevels) {
         const qty = level.variantQty || 0;
         
-        inventoryByLocation.set(
-          level.warehouseLocationId, 
-          (inventoryByLocation.get(level.warehouseLocationId) || 0) + qty
-        );
+        // Track by location (sum all inventory, keep first variantId for UOM reference)
+        const existingLoc = inventoryByLocation.get(level.warehouseLocationId);
+        inventoryByLocation.set(level.warehouseLocationId, {
+          qty: (existingLoc?.qty || 0) + qty,
+          variantId: existingLoc?.variantId || level.variantId, // Keep first variant found
+        });
         
+        // Track by location+product (sum qty, keep first variantId)
         if (level.catalogProductId) {
           const key = `${level.warehouseLocationId}-${level.catalogProductId}`;
-          inventoryByLocationAndProduct.set(
-            key, 
-            (inventoryByLocationAndProduct.get(key) || 0) + qty
-          );
+          const existing = inventoryByLocationAndProduct.get(key);
+          inventoryByLocationAndProduct.set(key, {
+            qty: (existing?.qty || 0) + qty,
+            variantId: existing?.variantId || level.variantId, // Keep first variant found
+          });
         }
       }
       
@@ -7876,12 +7883,27 @@ export async function registerRoutes(
       
       for (const rule of rules) {
         let currentQty: number;
+        let pickVariantId: number | null = null;
+        let sourceVariantId: number | null = null;
         
+        // Get current qty and variant at pick location
         if (rule.catalogProductId) {
-          const key = `${rule.pickLocationId}-${rule.catalogProductId}`;
-          currentQty = inventoryByLocationAndProduct.get(key) || 0;
+          const pickKey = `${rule.pickLocationId}-${rule.catalogProductId}`;
+          const pickInv = inventoryByLocationAndProduct.get(pickKey);
+          currentQty = pickInv?.qty || 0;
+          pickVariantId = pickInv?.variantId || null;
+          
+          // Get variant at source location
+          const sourceKey = `${rule.sourceLocationId}-${rule.catalogProductId}`;
+          const sourceInv = inventoryByLocationAndProduct.get(sourceKey);
+          sourceVariantId = sourceInv?.variantId || null;
         } else {
-          currentQty = inventoryByLocation.get(rule.pickLocationId) || 0;
+          const pickInv = inventoryByLocation.get(rule.pickLocationId);
+          currentQty = pickInv?.qty || 0;
+          pickVariantId = pickInv?.variantId || null;
+          
+          const sourceInv = inventoryByLocation.get(rule.sourceLocationId);
+          sourceVariantId = sourceInv?.variantId || null;
         }
         
         if (currentQty < rule.minQty) {
@@ -7905,21 +7927,37 @@ export async function registerRoutes(
             continue;
           }
           
-          const qtyNeeded = Math.max(0, rule.maxQty - currentQty);
+          // Get UOM conversion factor from source variant
+          const sourceVariant = sourceVariantId ? variantMap.get(sourceVariantId) : null;
+          const unitsPerSource = sourceVariant?.unitsPerVariant || 1;
           
-          if (qtyNeeded <= 0) {
-            continue;
+          let qtySourceUnits: number;
+          let qtyTargetUnits: number;
+          
+          if (rule.maxQty === null) {
+            // No maxQty: replen exactly 1 source unit worth
+            qtySourceUnits = 1;
+            qtyTargetUnits = unitsPerSource; // e.g., 1 case = 10 eaches
+          } else {
+            // Has maxQty: calculate how many source units needed to reach max
+            const qtyNeeded = Math.max(0, rule.maxQty - currentQty);
+            if (qtyNeeded <= 0) continue;
+            
+            qtySourceUnits = Math.ceil(qtyNeeded / unitsPerSource);
+            qtyTargetUnits = qtySourceUnits * unitsPerSource;
           }
+          
+          if (qtySourceUnits <= 0) continue;
           
           const task = await storage.createReplenTask({
             replenRuleId: rule.id,
             fromLocationId: rule.sourceLocationId,
             toLocationId: rule.pickLocationId,
             catalogProductId: rule.catalogProductId || null,
-            sourceUomVariantId: rule.sourceUomVariantId || null,
-            targetUomVariantId: rule.pickUomVariantId || null,
-            qtySourceUnits: 1,
-            qtyTargetUnits: qtyNeeded,
+            sourceUomVariantId: sourceVariantId,
+            targetUomVariantId: pickVariantId,
+            qtySourceUnits,
+            qtyTargetUnits,
             qtyCompleted: 0,
             status: "pending",
             priority: rule.priority,
@@ -7937,7 +7975,8 @@ export async function registerRoutes(
             product: product?.sku || product?.title || "All",
             currentQty,
             minQty: rule.minQty,
-            qtyToReplen: qtyNeeded,
+            qtySourceUnits,
+            qtyTargetUnits,
           });
         }
       }

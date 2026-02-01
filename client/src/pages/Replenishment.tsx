@@ -174,8 +174,8 @@ export default function Replenishment() {
           pickLocationId: parseInt(data.pickLocationId),
           sourceLocationId: parseInt(data.sourceLocationId),
           catalogProductId: data.catalogProductId && data.catalogProductId !== "none" ? parseInt(data.catalogProductId) : null,
-          minQty: parseInt(data.minQty),
-          maxQty: parseInt(data.maxQty),
+          minQty: parseInt(data.minQty) || 0,
+          maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod,
           priority: parseInt(data.priority),
         }),
@@ -326,9 +326,9 @@ export default function Replenishment() {
     setRuleForm({
       pickLocationId: rule.pickLocationId.toString(),
       sourceLocationId: rule.sourceLocationId.toString(),
-      catalogProductId: rule.catalogProductId?.toString() || "",
+      catalogProductId: rule.catalogProductId?.toString() || "none",
       minQty: rule.minQty.toString(),
-      maxQty: rule.maxQty.toString(),
+      maxQty: rule.maxQty?.toString() || "",
       replenMethod: rule.replenMethod,
       priority: rule.priority.toString(),
     });
@@ -342,9 +342,9 @@ export default function Replenishment() {
         data: {
           pickLocationId: parseInt(ruleForm.pickLocationId),
           sourceLocationId: parseInt(ruleForm.sourceLocationId),
-          catalogProductId: ruleForm.catalogProductId ? parseInt(ruleForm.catalogProductId) : null,
-          minQty: parseInt(ruleForm.minQty),
-          maxQty: parseInt(ruleForm.maxQty),
+          catalogProductId: ruleForm.catalogProductId && ruleForm.catalogProductId !== "none" ? parseInt(ruleForm.catalogProductId) : null,
+          minQty: parseInt(ruleForm.minQty) || 0,
+          maxQty: ruleForm.maxQty ? parseInt(ruleForm.maxQty) : null,
           replenMethod: ruleForm.replenMethod,
           priority: parseInt(ruleForm.priority),
         },
@@ -771,6 +771,7 @@ export default function Replenishment() {
                   type="number"
                   value={ruleForm.maxQty}
                   onChange={(e) => setRuleForm({ ...ruleForm, maxQty: e.target.value })}
+                  placeholder="Auto (1 source unit)"
                   data-testid="input-max-qty"
                 />
               </div>
