@@ -7590,27 +7590,27 @@ export async function registerRoutes(
     try {
       const rules = await storage.getAllReplenRules();
       
-      const locationIds = new Set<number>();
       const productIds = new Set<number>();
+      const variantIds = new Set<number>();
       for (const rule of rules) {
-        locationIds.add(rule.pickLocationId);
-        locationIds.add(rule.sourceLocationId);
-        if (rule.catalogProductId) productIds.add(rule.catalogProductId);
+        productIds.add(rule.catalogProductId);
+        variantIds.add(rule.pickVariantId);
+        variantIds.add(rule.sourceVariantId);
       }
       
-      const [allLocations, allProducts] = await Promise.all([
-        storage.getAllWarehouseLocations(),
+      const [allProducts, allVariants] = await Promise.all([
         storage.getAllCatalogProducts(),
+        storage.getAllUomVariants(),
       ]);
       
-      const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
       const productMap = new Map(allProducts.filter(p => productIds.has(p.id)).map(p => [p.id, p]));
+      const variantMap = new Map(allVariants.filter(v => variantIds.has(v.id)).map(v => [v.id, v]));
       
       const enriched = rules.map(rule => ({
         ...rule,
-        pickLocation: locationMap.get(rule.pickLocationId),
-        sourceLocation: locationMap.get(rule.sourceLocationId),
-        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        catalogProduct: productMap.get(rule.catalogProductId),
+        pickVariant: variantMap.get(rule.pickVariantId),
+        sourceVariant: variantMap.get(rule.sourceVariantId),
       }));
       
       res.json(enriched);
@@ -7628,19 +7628,19 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Replen rule not found" });
       }
       
-      const [allLocations, allProducts] = await Promise.all([
-        storage.getAllWarehouseLocations(),
+      const [allProducts, allVariants] = await Promise.all([
         storage.getAllCatalogProducts(),
+        storage.getAllUomVariants(),
       ]);
       
-      const locationMap = new Map(allLocations.map(l => [l.id, l]));
       const productMap = new Map(allProducts.map(p => [p.id, p]));
+      const variantMap = new Map(allVariants.map(v => [v.id, v]));
       
       const enriched = {
         ...rule,
-        pickLocation: locationMap.get(rule.pickLocationId),
-        sourceLocation: locationMap.get(rule.sourceLocationId),
-        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        catalogProduct: productMap.get(rule.catalogProductId),
+        pickVariant: variantMap.get(rule.pickVariantId),
+        sourceVariant: variantMap.get(rule.sourceVariantId),
       };
       
       res.json(enriched);
@@ -7652,22 +7652,57 @@ export async function registerRoutes(
   
   app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { pickLocationId, sourceLocationId, catalogProductId, pickUomVariantId, sourceUomVariantId, minQty, maxQty, replenMethod, priority } = req.body;
+      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, minQty, maxQty, replenMethod, priority } = req.body;
       
-      if (!pickLocationId || !sourceLocationId) {
-        return res.status(400).json({ error: "pickLocationId and sourceLocationId are required" });
+      if (!catalogProductId || !pickVariantId || !sourceVariantId) {
+        return res.status(400).json({ error: "catalogProductId, pickVariantId, and sourceVariantId are required" });
+      }
+      
+      // Validate that variants belong to the product
+      const [product, pickVariant, sourceVariant, allProducts, allInventoryItems] = await Promise.all([
+        storage.getCatalogProductById(catalogProductId),
+        storage.getUomVariantById(pickVariantId),
+        storage.getUomVariantById(sourceVariantId),
+        storage.getAllCatalogProducts(),
+        storage.getAllInventoryItems(),
+      ]);
+      
+      if (!product) {
+        return res.status(400).json({ error: "Product not found" });
+      }
+      if (!pickVariant) {
+        return res.status(400).json({ error: "Pick variant not found" });
+      }
+      if (!sourceVariant) {
+        return res.status(400).json({ error: "Source variant not found" });
+      }
+      
+      // Build product lookup by inventoryItemId
+      const productByInventoryItemId = new Map(allProducts.filter(p => p.inventoryItemId).map(p => [p.inventoryItemId!, p]));
+      
+      // Validate pick variant belongs to product
+      const pickVariantProduct = productByInventoryItemId.get(pickVariant.inventoryItemId);
+      if (!pickVariantProduct || pickVariantProduct.id !== catalogProductId) {
+        return res.status(400).json({ error: "Pick variant does not belong to the specified product" });
+      }
+      
+      // Validate source variant belongs to product
+      const sourceVariantProduct = productByInventoryItemId.get(sourceVariant.inventoryItemId);
+      if (!sourceVariantProduct || sourceVariantProduct.id !== catalogProductId) {
+        return res.status(400).json({ error: "Source variant does not belong to the specified product" });
       }
       
       const rule = await storage.createReplenRule({
-        pickLocationId,
-        sourceLocationId,
-        catalogProductId: catalogProductId || null,
-        pickUomVariantId: pickUomVariantId || null,
-        sourceUomVariantId: sourceUomVariantId || null,
-        minQty: minQty || 10,
-        maxQty: maxQty || 50,
+        catalogProductId,
+        pickVariantId,
+        sourceVariantId,
+        pickLocationType: pickLocationType || "forward_pick",
+        sourceLocationType: sourceLocationType || "bulk_storage",
+        sourcePriority: sourcePriority || "fifo",
+        minQty: minQty ?? 0,
+        maxQty: maxQty ?? null,
         replenMethod: replenMethod || "case_break",
-        priority: priority || 5,
+        priority: priority ?? 5,
         isActive: 1,
       });
       
@@ -7704,6 +7739,170 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting replen rule:", error);
       res.status(500).json({ error: "Failed to delete replen rule" });
+    }
+  });
+  
+  // CSV upload for replen rules
+  app.post("/api/replen/rules/upload-csv", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const multer = await import("multer");
+      const Papa = await import("papaparse");
+      const upload = multer.default({ storage: multer.default.memoryStorage() });
+      
+      // Handle the file upload
+      upload.single("file")(req, res, async (err: any) => {
+        if (err) {
+          return res.status(400).json({ error: "Failed to upload file" });
+        }
+        
+        const file = (req as any).file;
+        if (!file) {
+          return res.status(400).json({ error: "No file provided" });
+        }
+        
+        const csvContent = file.buffer.toString("utf-8");
+        
+        // Use Papaparse for robust CSV parsing (handles quoted fields, etc.)
+        const parseResult = Papa.default.parse(csvContent, {
+          header: true,
+          skipEmptyLines: true,
+          transformHeader: (h: string) => h.trim().toLowerCase(),
+        });
+        
+        if (parseResult.errors.length > 0) {
+          return res.status(400).json({ 
+            error: "CSV parsing error", 
+            details: parseResult.errors.slice(0, 5).map((e: any) => e.message)
+          });
+        }
+        
+        const rows = parseResult.data as Record<string, string>[];
+        if (rows.length === 0) {
+          return res.status(400).json({ error: "CSV must have at least one data row" });
+        }
+        
+        // Validate required headers
+        const expectedHeaders = ["product_sku", "pick_variant_sku", "source_variant_sku"];
+        const actualHeaders = parseResult.meta.fields || [];
+        const missingHeaders = expectedHeaders.filter(h => !actualHeaders.includes(h));
+        if (missingHeaders.length > 0) {
+          return res.status(400).json({ error: `Missing required headers: ${missingHeaders.join(", ")}` });
+        }
+        
+        // Get lookup data
+        const [products, variants, inventoryItems] = await Promise.all([
+          storage.getAllCatalogProducts(),
+          storage.getAllUomVariants(),
+          storage.getAllInventoryItems(),
+        ]);
+        
+        // Build lookup maps
+        const productBySku = new Map(products.filter(p => p.sku).map(p => [p.sku!.toLowerCase(), p]));
+        const variantBySku = new Map(variants.filter(v => v.sku).map(v => [v.sku!.toLowerCase(), v]));
+        
+        // Build variant-to-product mapping via inventoryItem
+        // variant.inventoryItemId -> inventoryItem.id -> match with product.inventoryItemId
+        const inventoryItemMap = new Map(inventoryItems.map(i => [i.id, i]));
+        const productByInventoryItemId = new Map(products.filter(p => p.inventoryItemId).map(p => [p.inventoryItemId!, p]));
+        
+        const getProductForVariant = (variant: typeof variants[0]) => {
+          return productByInventoryItemId.get(variant.inventoryItemId);
+        };
+        
+        const results = { created: 0, skipped: 0, errors: [] as string[] };
+        
+        // Process data rows
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          const rowNum = i + 2; // Account for header row
+          
+          // Lookup product
+          const productSku = (row.product_sku || "").trim();
+          if (!productSku) {
+            results.errors.push(`Row ${rowNum}: Missing product_sku`);
+            results.skipped++;
+            continue;
+          }
+          
+          const product = productBySku.get(productSku.toLowerCase());
+          if (!product) {
+            results.errors.push(`Row ${rowNum}: Product SKU '${productSku}' not found`);
+            results.skipped++;
+            continue;
+          }
+          
+          // Lookup and validate pick variant
+          const pickVariantSku = (row.pick_variant_sku || "").trim();
+          if (!pickVariantSku) {
+            results.errors.push(`Row ${rowNum}: Missing pick_variant_sku`);
+            results.skipped++;
+            continue;
+          }
+          
+          const pickVariant = variantBySku.get(pickVariantSku.toLowerCase());
+          if (!pickVariant) {
+            results.errors.push(`Row ${rowNum}: Pick variant SKU '${pickVariantSku}' not found`);
+            results.skipped++;
+            continue;
+          }
+          
+          // Validate pick variant belongs to product
+          const pickVariantProduct = getProductForVariant(pickVariant);
+          if (!pickVariantProduct || pickVariantProduct.id !== product.id) {
+            results.errors.push(`Row ${rowNum}: Pick variant '${pickVariantSku}' does not belong to product '${productSku}'`);
+            results.skipped++;
+            continue;
+          }
+          
+          // Lookup and validate source variant
+          const sourceVariantSku = (row.source_variant_sku || "").trim();
+          if (!sourceVariantSku) {
+            results.errors.push(`Row ${rowNum}: Missing source_variant_sku`);
+            results.skipped++;
+            continue;
+          }
+          
+          const sourceVariant = variantBySku.get(sourceVariantSku.toLowerCase());
+          if (!sourceVariant) {
+            results.errors.push(`Row ${rowNum}: Source variant SKU '${sourceVariantSku}' not found`);
+            results.skipped++;
+            continue;
+          }
+          
+          // Validate source variant belongs to product
+          const sourceVariantProduct = getProductForVariant(sourceVariant);
+          if (!sourceVariantProduct || sourceVariantProduct.id !== product.id) {
+            results.errors.push(`Row ${rowNum}: Source variant '${sourceVariantSku}' does not belong to product '${productSku}'`);
+            results.skipped++;
+            continue;
+          }
+          
+          try {
+            await storage.createReplenRule({
+              catalogProductId: product.id,
+              pickVariantId: pickVariant.id,
+              sourceVariantId: sourceVariant.id,
+              pickLocationType: (row.pick_location_type || "forward_pick").trim(),
+              sourceLocationType: (row.source_location_type || "bulk_storage").trim(),
+              sourcePriority: (row.source_priority || "fifo").trim(),
+              minQty: parseInt(row.min_qty) || 0,
+              maxQty: row.max_qty ? parseInt(row.max_qty) : null,
+              replenMethod: (row.replen_method || "case_break").trim(),
+              priority: parseInt(row.priority) || 5,
+              isActive: 1,
+            });
+            results.created++;
+          } catch (error) {
+            results.errors.push(`Row ${rowNum}: Failed to create rule - ${error}`);
+            results.skipped++;
+          }
+        }
+        
+        res.json(results);
+      });
+    } catch (error) {
+      console.error("Error uploading replen rules CSV:", error);
+      res.status(500).json({ error: "Failed to upload CSV" });
     }
   });
   
@@ -7777,7 +7976,7 @@ export async function registerRoutes(
   
   app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceUomVariantId, targetUomVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes } = req.body;
+      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes } = req.body;
       
       if (!fromLocationId || !toLocationId || !qtyTargetUnits) {
         return res.status(400).json({ error: "fromLocationId, toLocationId, and qtyTargetUnits are required" });
@@ -7788,8 +7987,8 @@ export async function registerRoutes(
         fromLocationId,
         toLocationId,
         catalogProductId: catalogProductId || null,
-        sourceUomVariantId: sourceUomVariantId || null,
-        targetUomVariantId: targetUomVariantId || null,
+        sourceVariantId: sourceVariantId || null,
+        pickVariantId: pickVariantId || null,
         qtySourceUnits: qtySourceUnits || 1,
         qtyTargetUnits,
         qtyCompleted: 0,
@@ -7853,109 +8052,183 @@ export async function registerRoutes(
       const productMap = new Map(catalogProducts.map(p => [p.id, p]));
       const variantMap = new Map(uomVariants.map(v => [v.id, v]));
       
-      // Track inventory by location+product and also store variantId for UOM lookup
-      const inventoryByLocationAndProduct = new Map<string, { qty: number; variantId: number | null }>();
-      const inventoryByLocation = new Map<number, { qty: number; variantId: number | null }>();
+      // Build inventory index: variantId + locationType -> list of { locationId, qty, updatedAt }
+      const inventoryByVariantAndType = new Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>>();
       
       for (const level of inventoryLevels) {
         const qty = level.variantQty || 0;
+        if (qty <= 0) continue;
         
-        // Track by location (sum all inventory, keep first variantId for UOM reference)
-        const existingLoc = inventoryByLocation.get(level.warehouseLocationId);
-        inventoryByLocation.set(level.warehouseLocationId, {
-          qty: (existingLoc?.qty || 0) + qty,
-          variantId: existingLoc?.variantId || level.variantId, // Keep first variant found
+        const location = locationMap.get(level.warehouseLocationId);
+        if (!location) continue;
+        
+        const key = `${level.variantId}-${location.locationType}`;
+        const existing = inventoryByVariantAndType.get(key) || [];
+        existing.push({
+          locationId: level.warehouseLocationId,
+          qty,
+          updatedAt: level.updatedAt,
         });
-        
-        // Track by location+product (sum qty, keep first variantId)
-        if (level.catalogProductId) {
-          const key = `${level.warehouseLocationId}-${level.catalogProductId}`;
-          const existing = inventoryByLocationAndProduct.get(key);
-          inventoryByLocationAndProduct.set(key, {
-            qty: (existing?.qty || 0) + qty,
-            variantId: existing?.variantId || level.variantId, // Keep first variant found
-          });
-        }
+        inventoryByVariantAndType.set(key, existing);
       }
       
       const tasksCreated: any[] = [];
       const skipped: any[] = [];
       
       for (const rule of rules) {
-        let currentQty: number;
-        let pickVariantId: number | null = null;
-        let sourceVariantId: number | null = null;
+        const product = productMap.get(rule.catalogProductId);
+        const pickVariant = variantMap.get(rule.pickVariantId);
+        const sourceVariant = variantMap.get(rule.sourceVariantId);
         
-        // Get current qty and variant at pick location
-        if (rule.catalogProductId) {
-          const pickKey = `${rule.pickLocationId}-${rule.catalogProductId}`;
-          const pickInv = inventoryByLocationAndProduct.get(pickKey);
-          currentQty = pickInv?.qty || 0;
-          pickVariantId = pickInv?.variantId || null;
-          
-          // Get variant at source location
-          const sourceKey = `${rule.sourceLocationId}-${rule.catalogProductId}`;
-          const sourceInv = inventoryByLocationAndProduct.get(sourceKey);
-          sourceVariantId = sourceInv?.variantId || null;
-        } else {
-          const pickInv = inventoryByLocation.get(rule.pickLocationId);
-          currentQty = pickInv?.qty || 0;
-          pickVariantId = pickInv?.variantId || null;
-          
-          const sourceInv = inventoryByLocation.get(rule.sourceLocationId);
-          sourceVariantId = sourceInv?.variantId || null;
+        if (!product || !pickVariant || !sourceVariant) {
+          skipped.push({
+            ruleId: rule.id,
+            reason: "missing_product_or_variant",
+            product: product?.sku || product?.title || rule.catalogProductId,
+          });
+          continue;
         }
         
-        if (currentQty < rule.minQty) {
-          const pendingTasks = await storage.getPendingReplenTasksForLocation(rule.pickLocationId);
-          
-          const existingTaskForRule = pendingTasks.find(t => 
+        // Find all pick locations with this variant below minQty
+        const pickKey = `${rule.pickVariantId}-${rule.pickLocationType}`;
+        const pickLocationsWithStock = inventoryByVariantAndType.get(pickKey) || [];
+        
+        // Also find pick locations with zero stock (need to check all locations of this type)
+        const allPickTypeLocations = locations.filter(l => l.locationType === rule.pickLocationType);
+        
+        // Build map of current qty per pick location for this variant
+        const qtyByPickLocation = new Map<number, number>();
+        for (const inv of pickLocationsWithStock) {
+          qtyByPickLocation.set(inv.locationId, inv.qty);
+        }
+        
+        // Find locations that need replen (below minQty)
+        // Only consider locations that either have this variant or are empty pick locations
+        const locationsNeedingReplen: Array<{ locationId: number; currentQty: number }> = [];
+        
+        for (const inv of pickLocationsWithStock) {
+          if (inv.qty < rule.minQty) {
+            locationsNeedingReplen.push({ locationId: inv.locationId, currentQty: inv.qty });
+          }
+        }
+        
+        if (locationsNeedingReplen.length === 0) {
+          continue; // No locations need replen for this rule
+        }
+        
+        // Find source locations with the source variant
+        const sourceKey = `${rule.sourceVariantId}-${rule.sourceLocationType}`;
+        let sourceLocations = inventoryByVariantAndType.get(sourceKey) || [];
+        
+        if (sourceLocations.length === 0) {
+          skipped.push({
+            ruleId: rule.id,
+            product: product.sku || product.title,
+            reason: "no_source_stock",
+            sourceVariant: sourceVariant.sku || sourceVariant.name,
+            sourceLocationType: rule.sourceLocationType,
+          });
+          continue;
+        }
+        
+        // Sort source locations by priority
+        if (rule.sourcePriority === "smallest_first") {
+          sourceLocations = [...sourceLocations].sort((a, b) => a.qty - b.qty);
+        } else {
+          // FIFO - sort by oldest first (updatedAt ascending)
+          sourceLocations = [...sourceLocations].sort((a, b) => {
+            const aTime = a.updatedAt?.getTime() || 0;
+            const bTime = b.updatedAt?.getTime() || 0;
+            return aTime - bTime;
+          });
+        }
+        
+        // UOM conversion
+        const unitsPerSource = sourceVariant.unitsPerVariant || 1;
+        
+        // Track source inventory as we allocate
+        const sourceQtyRemaining = new Map<number, number>();
+        for (const src of sourceLocations) {
+          sourceQtyRemaining.set(src.locationId, src.qty);
+        }
+        
+        for (const pickLoc of locationsNeedingReplen) {
+          // Check for existing pending task
+          const pendingTasks = await storage.getPendingReplenTasksForLocation(pickLoc.locationId);
+          const existingTask = pendingTasks.find(t => 
             t.replenRuleId === rule.id || 
-            (t.catalogProductId === rule.catalogProductId && t.toLocationId === rule.pickLocationId)
+            (t.catalogProductId === rule.catalogProductId && t.pickVariantId === rule.pickVariantId)
           );
           
-          if (existingTaskForRule) {
-            const product = rule.catalogProductId ? productMap.get(rule.catalogProductId) : null;
+          if (existingTask) {
             skipped.push({
               ruleId: rule.id,
-              pickLocationId: rule.pickLocationId,
-              product: product?.sku || product?.title || "All",
+              pickLocationId: pickLoc.locationId,
+              pickLocation: locationMap.get(pickLoc.locationId)?.code,
+              product: product.sku || product.title,
               reason: "pending_task_exists",
-              currentQty,
+              currentQty: pickLoc.currentQty,
               minQty: rule.minQty,
             });
             continue;
           }
           
-          // Get UOM conversion factor from source variant
-          const sourceVariant = sourceVariantId ? variantMap.get(sourceVariantId) : null;
-          const unitsPerSource = sourceVariant?.unitsPerVariant || 1;
+          // Find best source with available stock
+          let selectedSource: { locationId: number; availableQty: number } | null = null;
+          for (const src of sourceLocations) {
+            const remaining = sourceQtyRemaining.get(src.locationId) || 0;
+            if (remaining > 0) {
+              selectedSource = { locationId: src.locationId, availableQty: remaining };
+              break;
+            }
+          }
           
+          if (!selectedSource) {
+            skipped.push({
+              ruleId: rule.id,
+              pickLocation: locationMap.get(pickLoc.locationId)?.code,
+              product: product.sku || product.title,
+              reason: "no_source_available",
+              currentQty: pickLoc.currentQty,
+            });
+            continue;
+          }
+          
+          // Calculate qty to replen
           let qtySourceUnits: number;
           let qtyTargetUnits: number;
           
           if (rule.maxQty === null) {
             // No maxQty: replen exactly 1 source unit worth
             qtySourceUnits = 1;
-            qtyTargetUnits = unitsPerSource; // e.g., 1 case = 10 eaches
+            qtyTargetUnits = unitsPerSource;
           } else {
             // Has maxQty: calculate how many source units needed to reach max
-            const qtyNeeded = Math.max(0, rule.maxQty - currentQty);
+            const qtyNeeded = Math.max(0, rule.maxQty - pickLoc.currentQty);
             if (qtyNeeded <= 0) continue;
             
             qtySourceUnits = Math.ceil(qtyNeeded / unitsPerSource);
             qtyTargetUnits = qtySourceUnits * unitsPerSource;
           }
           
+          // Cap at source available
+          if (qtySourceUnits > selectedSource.availableQty) {
+            qtySourceUnits = selectedSource.availableQty;
+            qtyTargetUnits = qtySourceUnits * unitsPerSource;
+          }
+          
           if (qtySourceUnits <= 0) continue;
+          
+          // Deduct from source tracking
+          sourceQtyRemaining.set(selectedSource.locationId, selectedSource.availableQty - qtySourceUnits);
           
           const task = await storage.createReplenTask({
             replenRuleId: rule.id,
-            fromLocationId: rule.sourceLocationId,
-            toLocationId: rule.pickLocationId,
-            catalogProductId: rule.catalogProductId || null,
-            sourceUomVariantId: sourceVariantId,
-            targetUomVariantId: pickVariantId,
+            fromLocationId: selectedSource.locationId,
+            toLocationId: pickLoc.locationId,
+            catalogProductId: rule.catalogProductId,
+            sourceVariantId: rule.sourceVariantId,
+            pickVariantId: rule.pickVariantId,
             qtySourceUnits,
             qtyTargetUnits,
             qtyCompleted: 0,
@@ -7963,17 +8236,16 @@ export async function registerRoutes(
             priority: rule.priority,
             triggeredBy: "min_max",
             assignedTo: null,
-            notes: `Auto-generated: current qty ${currentQty} < min ${rule.minQty}`,
+            notes: `Auto-generated: current qty ${pickLoc.currentQty} < min ${rule.minQty}`,
           });
           
-          const product = rule.catalogProductId ? productMap.get(rule.catalogProductId) : null;
           tasksCreated.push({
             taskId: task.id,
             ruleId: rule.id,
-            pickLocation: locationMap.get(rule.pickLocationId)?.code,
-            sourceLocation: locationMap.get(rule.sourceLocationId)?.code,
-            product: product?.sku || product?.title || "All",
-            currentQty,
+            pickLocation: locationMap.get(pickLoc.locationId)?.code,
+            sourceLocation: locationMap.get(selectedSource.locationId)?.code,
+            product: product.sku || product.title,
+            currentQty: pickLoc.currentQty,
             minQty: rule.minQty,
             qtySourceUnits,
             qtyTargetUnits,

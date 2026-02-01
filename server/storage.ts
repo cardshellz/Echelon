@@ -412,7 +412,7 @@ export interface IStorage {
   // ============================================
   getAllReplenRules(): Promise<ReplenRule[]>;
   getReplenRuleById(id: number): Promise<ReplenRule | undefined>;
-  getReplenRulesForLocation(pickLocationId: number): Promise<ReplenRule[]>;
+  getReplenRulesForVariant(pickVariantId: number): Promise<ReplenRule[]>;
   getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]>;
   createReplenRule(data: InsertReplenRule): Promise<ReplenRule>;
   updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
@@ -3014,10 +3014,10 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
   
-  async getReplenRulesForLocation(pickLocationId: number): Promise<ReplenRule[]> {
+  async getReplenRulesForVariant(pickVariantId: number): Promise<ReplenRule[]> {
     return await db.select().from(replenRules)
       .where(and(
-        eq(replenRules.pickLocationId, pickLocationId),
+        eq(replenRules.pickVariantId, pickVariantId),
         eq(replenRules.isActive, 1)
       ))
       .orderBy(asc(replenRules.priority));

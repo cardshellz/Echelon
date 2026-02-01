@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -45,7 +45,8 @@ import {
   Loader2,
   Settings,
   ListTodo,
-  User
+  User,
+  Upload
 } from "lucide-react";
 
 interface WarehouseLocation {
@@ -62,23 +63,38 @@ interface CatalogProduct {
   title: string | null;
 }
 
+interface UomVariant {
+  id: number;
+  sku: string | null;
+  name: string;
+  inventoryItemId: number;
+  unitsPerVariant: number;
+  hierarchyLevel: number;
+}
+
+interface InventoryItem {
+  id: number;
+  baseSku: string | null;
+}
+
 interface ReplenRule {
   id: number;
-  pickLocationId: number;
-  sourceLocationId: number;
-  catalogProductId: number | null;
-  pickUomVariantId: number | null;
-  sourceUomVariantId: number | null;
+  catalogProductId: number;
+  pickVariantId: number;
+  sourceVariantId: number;
+  pickLocationType: string;
+  sourceLocationType: string;
+  sourcePriority: string;
   minQty: number;
-  maxQty: number;
+  maxQty: number | null;
   replenMethod: string;
   priority: number;
   isActive: number;
   createdAt: string;
   updatedAt: string;
-  pickLocation?: WarehouseLocation;
-  sourceLocation?: WarehouseLocation;
   catalogProduct?: CatalogProduct;
+  pickVariant?: UomVariant;
+  sourceVariant?: UomVariant;
 }
 
 interface ReplenTask {
@@ -87,8 +103,8 @@ interface ReplenTask {
   fromLocationId: number;
   toLocationId: number;
   catalogProductId: number | null;
-  sourceUomVariantId: number | null;
-  targetUomVariantId: number | null;
+  sourceVariantId: number | null;
+  pickVariantId: number | null;
   qtySourceUnits: number;
   qtyTargetUnits: number;
   qtyCompleted: number;
@@ -107,21 +123,39 @@ interface ReplenTask {
   catalogProduct?: CatalogProduct;
 }
 
+const LOCATION_TYPES = [
+  { value: "forward_pick", label: "Forward Pick" },
+  { value: "bulk_storage", label: "Bulk Storage" },
+  { value: "overflow", label: "Overflow" },
+  { value: "receiving", label: "Receiving" },
+  { value: "staging", label: "Staging" },
+];
+
+const SOURCE_PRIORITIES = [
+  { value: "fifo", label: "FIFO (Oldest First)" },
+  { value: "smallest_first", label: "Smallest First (Consolidate)" },
+];
+
 export default function Replenishment() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("tasks");
   const [showRuleDialog, setShowRuleDialog] = useState(false);
   const [showTaskDialog, setShowTaskDialog] = useState(false);
+  const [showCsvDialog, setShowCsvDialog] = useState(false);
   const [editingRule, setEditingRule] = useState<ReplenRule | null>(null);
   const [taskFilter, setTaskFilter] = useState("pending");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [ruleForm, setRuleForm] = useState({
-    pickLocationId: "",
-    sourceLocationId: "",
     catalogProductId: "",
+    pickVariantId: "",
+    sourceVariantId: "",
+    pickLocationType: "forward_pick",
+    sourceLocationType: "bulk_storage",
+    sourcePriority: "fifo",
     minQty: "10",
-    maxQty: "50",
+    maxQty: "",
     replenMethod: "case_break",
     priority: "5",
   });
@@ -159,10 +193,36 @@ export default function Replenishment() {
     queryKey: ["/api/catalog-products"],
   });
 
-  const pickLocations = locations.filter(l => l.isPickable === 1);
-  const bulkLocations = locations.filter(l => 
-    l.locationType === "bulk_storage" || l.locationType === "bulk_reserve" || l.locationType === "pallet"
-  );
+  const { data: variants = [] } = useQuery<UomVariant[]>({
+    queryKey: ["/api/uom-variants"],
+  });
+
+  const { data: inventoryItems = [] } = useQuery<InventoryItem[]>({
+    queryKey: ["/api/inventory-items"],
+  });
+
+  // Filter variants by selected product
+  // Links: product.inventoryItemId -> inventoryItem.id -> variant.inventoryItemId
+  const getVariantsForProduct = (productId: string) => {
+    if (!productId || productId === "none") return [];
+    const product = products.find(p => p.id === parseInt(productId));
+    if (!product) return [];
+    
+    // Find product's inventoryItemId via matching (product's sku can match inventoryItem's baseSku)
+    // Or we can match via the link in catalog_products
+    // For now, we find all variants that share an inventoryItemId with this product
+    const productInventoryItemId = (product as any).inventoryItemId;
+    if (!productInventoryItemId) {
+      // Fallback: match by baseSku if product doesn't have direct inventoryItemId
+      const matchingItem = inventoryItems.find(i => i.baseSku === product.sku);
+      if (matchingItem) {
+        return variants.filter(v => v.inventoryItemId === matchingItem.id);
+      }
+      return [];
+    }
+    
+    return variants.filter(v => v.inventoryItemId === productInventoryItemId);
+  };
 
   const createRuleMutation = useMutation({
     mutationFn: async (data: typeof ruleForm) => {
@@ -171,9 +231,12 @@ export default function Replenishment() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          pickLocationId: parseInt(data.pickLocationId),
-          sourceLocationId: parseInt(data.sourceLocationId),
-          catalogProductId: data.catalogProductId && data.catalogProductId !== "none" ? parseInt(data.catalogProductId) : null,
+          catalogProductId: parseInt(data.catalogProductId),
+          pickVariantId: parseInt(data.pickVariantId),
+          sourceVariantId: parseInt(data.sourceVariantId),
+          pickLocationType: data.pickLocationType,
+          sourceLocationType: data.sourceLocationType,
+          sourcePriority: data.sourcePriority,
           minQty: parseInt(data.minQty) || 0,
           maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod,
@@ -298,13 +361,44 @@ export default function Replenishment() {
     },
   });
 
+  const uploadCsvMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/replen/rules/upload-csv", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "Failed to upload CSV");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/rules"] });
+      setShowCsvDialog(false);
+      toast({ 
+        title: "CSV uploaded successfully",
+        description: `Created ${data.created} rules, skipped ${data.skipped} rows`
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to upload CSV", description: error.message, variant: "destructive" });
+    },
+  });
+
   const resetRuleForm = () => {
     setRuleForm({
-      pickLocationId: "",
-      sourceLocationId: "",
       catalogProductId: "",
+      pickVariantId: "",
+      sourceVariantId: "",
+      pickLocationType: "forward_pick",
+      sourceLocationType: "bulk_storage",
+      sourcePriority: "fifo",
       minQty: "10",
-      maxQty: "50",
+      maxQty: "",
       replenMethod: "case_break",
       priority: "5",
     });
@@ -324,9 +418,12 @@ export default function Replenishment() {
   const handleEditRule = (rule: ReplenRule) => {
     setEditingRule(rule);
     setRuleForm({
-      pickLocationId: rule.pickLocationId.toString(),
-      sourceLocationId: rule.sourceLocationId.toString(),
-      catalogProductId: rule.catalogProductId?.toString() || "none",
+      catalogProductId: rule.catalogProductId.toString(),
+      pickVariantId: rule.pickVariantId.toString(),
+      sourceVariantId: rule.sourceVariantId.toString(),
+      pickLocationType: rule.pickLocationType,
+      sourceLocationType: rule.sourceLocationType,
+      sourcePriority: rule.sourcePriority,
       minQty: rule.minQty.toString(),
       maxQty: rule.maxQty?.toString() || "",
       replenMethod: rule.replenMethod,
@@ -340,9 +437,12 @@ export default function Replenishment() {
       updateRuleMutation.mutate({
         id: editingRule.id,
         data: {
-          pickLocationId: parseInt(ruleForm.pickLocationId),
-          sourceLocationId: parseInt(ruleForm.sourceLocationId),
-          catalogProductId: ruleForm.catalogProductId && ruleForm.catalogProductId !== "none" ? parseInt(ruleForm.catalogProductId) : null,
+          catalogProductId: parseInt(ruleForm.catalogProductId),
+          pickVariantId: parseInt(ruleForm.pickVariantId),
+          sourceVariantId: parseInt(ruleForm.sourceVariantId),
+          pickLocationType: ruleForm.pickLocationType,
+          sourceLocationType: ruleForm.sourceLocationType,
+          sourcePriority: ruleForm.sourcePriority,
           minQty: parseInt(ruleForm.minQty) || 0,
           maxQty: ruleForm.maxQty ? parseInt(ruleForm.maxQty) : null,
           replenMethod: ruleForm.replenMethod,
@@ -351,6 +451,13 @@ export default function Replenishment() {
       });
     } else {
       createRuleMutation.mutate(ruleForm);
+    }
+  };
+
+  const handleCsvUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      uploadCsvMutation.mutate(file);
     }
   };
 
@@ -573,12 +680,18 @@ export default function Replenishment() {
         <TabsContent value="rules" className="space-y-4">
           <div className="flex justify-between items-center">
             <p className="text-muted-foreground">
-              Define which bulk storage locations feed which pick bins
+              Product-based rules with dynamic source location lookup
             </p>
-            <Button onClick={() => { resetRuleForm(); setEditingRule(null); setShowRuleDialog(true); }} data-testid="button-create-rule">
-              <Plus className="w-4 h-4 mr-2" />
-              Add Rule
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
+                <Upload className="w-4 h-4 mr-2" />
+                Upload CSV
+              </Button>
+              <Button onClick={() => { resetRuleForm(); setEditingRule(null); setShowRuleDialog(true); }} data-testid="button-create-rule">
+                <Plus className="w-4 h-4 mr-2" />
+                Add Rule
+              </Button>
+            </div>
           </div>
 
           <Card>
@@ -591,19 +704,19 @@ export default function Replenishment() {
                 <div className="text-center p-8 text-muted-foreground">
                   <Settings className="w-12 h-12 mx-auto mb-2 opacity-50" />
                   <p>No replenishment rules configured</p>
-                  <p className="text-sm">Add rules to define how inventory flows from bulk to pick locations</p>
+                  <p className="text-sm">Add rules to define how inventory flows by product and variant</p>
                 </div>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Pick Location</TableHead>
-                      <TableHead></TableHead>
-                      <TableHead>Source Location</TableHead>
                       <TableHead>Product</TableHead>
+                      <TableHead>Pick Variant</TableHead>
+                      <TableHead>Source Variant</TableHead>
+                      <TableHead>Location Types</TableHead>
+                      <TableHead>Priority</TableHead>
                       <TableHead>Min/Max</TableHead>
                       <TableHead>Method</TableHead>
-                      <TableHead>Priority</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Actions</TableHead>
                     </TableRow>
@@ -613,38 +726,38 @@ export default function Replenishment() {
                       <TableRow key={rule.id} data-testid={`row-rule-${rule.id}`}>
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            <MapPin className="w-4 h-4 text-blue-500" />
-                            <span className="font-mono text-sm">
-                              {rule.pickLocation?.code || `LOC-${rule.pickLocationId}`}
-                            </span>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <ArrowRight className="w-4 h-4 text-muted-foreground rotate-180" />
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-2">
-                            <Package className="w-4 h-4 text-orange-500" />
-                            <span className="font-mono text-sm">
-                              {rule.sourceLocation?.code || `LOC-${rule.sourceLocationId}`}
+                            <Package className="w-4 h-4 text-blue-500" />
+                            <span className="text-sm font-medium">
+                              {rule.catalogProduct?.sku || rule.catalogProduct?.title || `Product ${rule.catalogProductId}`}
                             </span>
                           </div>
                         </TableCell>
                         <TableCell>
                           <span className="text-sm">
-                            {rule.catalogProduct?.sku || rule.catalogProduct?.title || "All Products"}
+                            {rule.pickVariant?.sku || rule.pickVariant?.name || `Variant ${rule.pickVariantId}`}
                           </span>
                         </TableCell>
                         <TableCell>
+                          <span className="text-sm">
+                            {rule.sourceVariant?.sku || rule.sourceVariant?.name || `Variant ${rule.sourceVariantId}`}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-xs space-y-1">
+                            <div><Badge variant="outline" className="text-xs">{rule.pickLocationType}</Badge></div>
+                            <div className="text-muted-foreground">← {rule.sourceLocationType}</div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary">{rule.sourcePriority}</Badge>
+                        </TableCell>
+                        <TableCell>
                           <span className="font-mono text-sm">
-                            {rule.minQty} / {rule.maxQty}
+                            {rule.minQty} / {rule.maxQty ?? "auto"}
                           </span>
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline">{rule.replenMethod}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <span className="text-sm">{rule.priority}</span>
                         </TableCell>
                         <TableCell>
                           {rule.isActive ? (
@@ -687,66 +800,26 @@ export default function Replenishment() {
         </TabsContent>
       </Tabs>
 
+      {/* Rule Dialog */}
       <Dialog open={showRuleDialog} onOpenChange={setShowRuleDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingRule ? "Edit Replen Rule" : "Create Replen Rule"}</DialogTitle>
             <DialogDescription>
-              Define how inventory flows from bulk storage to a pick bin
+              Define product-based replenishment with dynamic source location lookup
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Pick Location (Destination)</Label>
-              <Select 
-                value={ruleForm.pickLocationId} 
-                onValueChange={(v) => setRuleForm({ ...ruleForm, pickLocationId: v })}
-              >
-                <SelectTrigger data-testid="select-pick-location">
-                  <SelectValue placeholder="Select pick bin..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {pickLocations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Source Location (Bulk Storage)</Label>
-              <Select 
-                value={ruleForm.sourceLocationId} 
-                onValueChange={(v) => setRuleForm({ ...ruleForm, sourceLocationId: v })}
-              >
-                <SelectTrigger data-testid="select-source-location">
-                  <SelectValue placeholder="Select bulk location..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {bulkLocations.length > 0 ? bulkLocations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  )) : locations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Product (Optional)</Label>
+              <Label>Product</Label>
               <Select 
                 value={ruleForm.catalogProductId} 
                 onValueChange={(v) => setRuleForm({ ...ruleForm, catalogProductId: v })}
               >
                 <SelectTrigger data-testid="select-product">
-                  <SelectValue placeholder="All products..." />
+                  <SelectValue placeholder="Select product..." />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">All Products</SelectItem>
                   {products.map((p) => (
                     <SelectItem key={p.id} value={p.id.toString()}>
                       {p.sku || p.title || `Product ${p.id}`}
@@ -755,6 +828,98 @@ export default function Replenishment() {
                 </SelectContent>
               </Select>
             </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Pick Variant (Destination)</Label>
+                <Select 
+                  value={ruleForm.pickVariantId} 
+                  onValueChange={(v) => setRuleForm({ ...ruleForm, pickVariantId: v })}
+                >
+                  <SelectTrigger data-testid="select-pick-variant">
+                    <SelectValue placeholder="Select variant..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {getVariantsForProduct(ruleForm.catalogProductId).map((v) => (
+                      <SelectItem key={v.id} value={v.id.toString()}>
+                        {v.sku || v.name} ({v.unitsPerVariant} units)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Source Variant</Label>
+                <Select 
+                  value={ruleForm.sourceVariantId} 
+                  onValueChange={(v) => setRuleForm({ ...ruleForm, sourceVariantId: v })}
+                >
+                  <SelectTrigger data-testid="select-source-variant">
+                    <SelectValue placeholder="Select variant..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {getVariantsForProduct(ruleForm.catalogProductId).map((v) => (
+                      <SelectItem key={v.id} value={v.id.toString()}>
+                        {v.sku || v.name} ({v.unitsPerVariant} units)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Pick Location Type</Label>
+                <Select 
+                  value={ruleForm.pickLocationType} 
+                  onValueChange={(v) => setRuleForm({ ...ruleForm, pickLocationType: v })}
+                >
+                  <SelectTrigger data-testid="select-pick-location-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LOCATION_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Source Location Type</Label>
+                <Select 
+                  value={ruleForm.sourceLocationType} 
+                  onValueChange={(v) => setRuleForm({ ...ruleForm, sourceLocationType: v })}
+                >
+                  <SelectTrigger data-testid="select-source-location-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {LOCATION_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div>
+              <Label>Source Priority</Label>
+              <Select 
+                value={ruleForm.sourcePriority} 
+                onValueChange={(v) => setRuleForm({ ...ruleForm, sourcePriority: v })}
+              >
+                <SelectTrigger data-testid="select-source-priority">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SOURCE_PRIORITIES.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Label>Min Qty (Trigger)</Label>
@@ -776,40 +941,44 @@ export default function Replenishment() {
                 />
               </div>
             </div>
-            <div>
-              <Label>Replen Method</Label>
-              <Select 
-                value={ruleForm.replenMethod} 
-                onValueChange={(v) => setRuleForm({ ...ruleForm, replenMethod: v })}
-              >
-                <SelectTrigger data-testid="select-replen-method">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="case_break">Case Break</SelectItem>
-                  <SelectItem value="full_case">Full Case</SelectItem>
-                  <SelectItem value="pallet_drop">Pallet Drop</SelectItem>
-                </SelectContent>
-              </Select>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Replen Method</Label>
+                <Select 
+                  value={ruleForm.replenMethod} 
+                  onValueChange={(v) => setRuleForm({ ...ruleForm, replenMethod: v })}
+                >
+                  <SelectTrigger data-testid="select-replen-method">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="case_break">Case Break</SelectItem>
+                    <SelectItem value="full_case">Full Case</SelectItem>
+                    <SelectItem value="pallet_drop">Pallet Drop</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Priority (1 = highest)</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="99"
+                  value={ruleForm.priority}
+                  onChange={(e) => setRuleForm({ ...ruleForm, priority: e.target.value })}
+                  data-testid="input-priority"
+                />
+              </div>
             </div>
-            <div>
-              <Label>Priority (1 = highest)</Label>
-              <Input
-                type="number"
-                min="1"
-                max="99"
-                value={ruleForm.priority}
-                onChange={(e) => setRuleForm({ ...ruleForm, priority: e.target.value })}
-                data-testid="input-priority"
-              />
-            </div>
+
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={() => setShowRuleDialog(false)}>
                 Cancel
               </Button>
               <Button 
                 onClick={handleSaveRule}
-                disabled={!ruleForm.pickLocationId || !ruleForm.sourceLocationId}
+                disabled={!ruleForm.catalogProductId || !ruleForm.pickVariantId || !ruleForm.sourceVariantId}
                 data-testid="button-save-rule"
               >
                 {editingRule ? "Update Rule" : "Create Rule"}
@@ -819,6 +988,50 @@ export default function Replenishment() {
         </DialogContent>
       </Dialog>
 
+      {/* CSV Upload Dialog */}
+      <Dialog open={showCsvDialog} onOpenChange={setShowCsvDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Upload Replen Rules CSV</DialogTitle>
+            <DialogDescription>
+              Bulk import replenishment rules from a CSV file
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="bg-muted p-4 rounded-lg text-sm">
+              <p className="font-medium mb-2">CSV Format:</p>
+              <code className="text-xs block overflow-x-auto">
+                product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority
+              </code>
+              <p className="mt-2 text-muted-foreground">
+                Example: SKU-A,SKU-A-P1,SKU-A-C10,forward_pick,bulk_storage,fifo,3,,case_break,5
+              </p>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              onChange={handleCsvUpload}
+              className="hidden"
+            />
+            <Button 
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadCsvMutation.isPending}
+              className="w-full"
+              data-testid="button-select-csv"
+            >
+              {uploadCsvMutation.isPending ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <Upload className="w-4 h-4 mr-2" />
+              )}
+              Select CSV File
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Task Dialog */}
       <Dialog open={showTaskDialog} onOpenChange={setShowTaskDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>

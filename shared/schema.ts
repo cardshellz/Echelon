@@ -671,14 +671,15 @@ export type ReplenTrigger = typeof replenTriggerEnum[number];
 export const replenTaskStatusEnum = ["pending", "assigned", "in_progress", "completed", "cancelled", "blocked"] as const;
 export type ReplenTaskStatus = typeof replenTaskStatusEnum[number];
 
-// Replenishment rules - links pick locations to their source bulk locations
+// Replenishment rules - product-centric rules with dynamic location lookup
 export const replenRules = pgTable("replen_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  pickLocationId: integer("pick_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
-  sourceLocationId: integer("source_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
-  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
-  pickUomVariantId: integer("pick_uom_variant_id").references(() => uomVariants.id), // The each/unit variant in pick bin
-  sourceUomVariantId: integer("source_uom_variant_id").references(() => uomVariants.id), // The case/pack variant in source
+  catalogProductId: integer("catalog_product_id").notNull().references(() => catalogProducts.id),
+  pickVariantId: integer("pick_variant_id").notNull().references(() => uomVariants.id), // Variant at destination (e.g., eaches)
+  sourceVariantId: integer("source_variant_id").notNull().references(() => uomVariants.id), // Variant at source (e.g., cases)
+  pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("forward_pick"), // Where to look for low stock
+  sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("bulk_storage"), // Where to find source stock
+  sourcePriority: varchar("source_priority", { length: 20 }).notNull().default("fifo"), // fifo, smallest_first
   minQty: integer("min_qty").notNull().default(0), // Trigger replen when qty drops below this
   maxQty: integer("max_qty"), // Fill up to this qty (null = replen one source unit worth)
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
@@ -704,8 +705,8 @@ export const replenTasks = pgTable("replen_tasks", {
   fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),
   toLocationId: integer("to_location_id").notNull().references(() => warehouseLocations.id),
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
-  sourceUomVariantId: integer("source_uom_variant_id").references(() => uomVariants.id), // What to pick (case)
-  targetUomVariantId: integer("target_uom_variant_id").references(() => uomVariants.id), // What to put (eaches)
+  sourceVariantId: integer("source_variant_id").references(() => uomVariants.id), // What to pick (case)
+  pickVariantId: integer("pick_variant_id").references(() => uomVariants.id), // What to put (eaches)
   qtySourceUnits: integer("qty_source_units").notNull().default(1), // How many cases to pick
   qtyTargetUnits: integer("qty_target_units").notNull(), // How many eaches to put (after conversion)
   qtyCompleted: integer("qty_completed").notNull().default(0), // Eaches actually put
