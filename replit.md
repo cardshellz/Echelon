@@ -141,22 +141,25 @@ The receiving system handles inventory intake from vendors and supports initial 
 - **Navigation**: Accessible via Purchasing → Receiving in the sidebar
 
 ### Replenishment Subsystem
-The replenishment system automates inventory flow from bulk storage to forward pick locations:
-- **Replen Rules** (`replen_rules` table): Defines the relationship between pick bins and their source bulk locations
-  - `pickLocationId`: Forward pick bin that needs replenishment
-  - `sourceLocationId`: Bulk storage location that supplies the pick bin
-  - `catalogProductId`: Optional product-specific rule (null = location-based rule)
-  - `minQty/maxQty`: Trigger thresholds - replen when qty drops below min, fill up to max
+The replenishment system automates inventory flow from bulk storage to forward pick locations using a **product-centric design**:
+- **Replen Rules** (`replen_rules` table): Defines product-level replenishment configuration
+  - `catalogProductId`: Required product link (rules are product-specific)
+  - `pickVariantId/sourceVariantId`: UOM variants for pick bin and source (e.g., eaches vs cases)
+  - `pickLocationType/sourceLocationType`: Location types (forward_pick, bulk_storage, etc.) - sources are looked up dynamically
+  - `sourcePriority`: FIFO (oldest first) or smallest_first (consolidate partials)
+  - `minQty/maxQty`: Trigger thresholds - replen when qty drops below min, fill up to max (null maxQty = 1 source unit)
   - `replenMethod`: `case_break` (break cases into eaches), `full_case`, `pallet_drop`
-  - `pickUomVariantId/sourceUomVariantId`: UOM conversion support (e.g., pick eaches from cases)
 - **Replen Tasks** (`replen_tasks` table): Work queue for warehouse workers
-  - `fromLocationId/toLocationId`: Source and destination for the move
+  - `fromLocationId/toLocationId`: Dynamically determined source and destination
+  - `sourceVariantId/pickVariantId`: UOM variants for source pick and target put
   - `qtySourceUnits/qtyTargetUnits`: Case-break support (pick 1 case → put 12 eaches)
   - `qtyCompleted`: Actual eaches put (for partial completions)
   - `status`: pending → assigned → in_progress → completed
   - `triggeredBy`: min_max, wave, manual, stockout
+- **Auto-Generation**: `/api/replen/generate` creates tasks by finding low-stock pick locations, looking up source locations dynamically by variantId + locationType, sorting by FIFO/smallest_first, and capping at available inventory
+- **CSV Bulk Upload**: `/api/replen/rules/upload-csv` for bulk rule creation with Papaparse parsing and variant-product validation
+- **Validation**: Server-side validation ensures pick/source variants belong to the specified product via inventoryItemId mapping
 - **API Endpoints**: Full CRUD at `/api/replen/rules` and `/api/replen/tasks`
-- **Future**: Auto-generation of replen tasks when pick bin qty drops below minQty
 
 ### Future Refactoring Tasks
 - **Deprecate product_locations for picking**: Currently picking looks up bin locations via `product_locations` table (static assignment). Should refactor to use `inventory_levels` instead - this would pick from bins that actually HAVE stock rather than where products are "assigned." Would make picking smarter and potentially allow deprecating `product_locations` table entirely.
