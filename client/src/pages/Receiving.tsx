@@ -1141,7 +1141,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         ) : (
                           selectedReceipt.lines.map((line) => (
                             <TableRow key={line.id}>
-                              <TableCell className="font-mono">{line.sku || "-"}</TableCell>
+                              <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
                               <TableCell>{line.productName || "-"}</TableCell>
                               <TableCell>{line.expectedQty}</TableCell>
                               <TableCell>
