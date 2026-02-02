@@ -8538,7 +8538,9 @@ export async function registerRoutes(
   
   app.post("/api/replen/generate", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const rules = await storage.getActiveReplenRules();
+      // Load all needed data
+      const tierDefaults = await storage.getActiveReplenTierDefaults();
+      const skuOverrides = await storage.getActiveReplenRules();
       const inventoryLevels = await storage.getAllInventoryLevels();
       const locations = await storage.getAllWarehouseLocations();
       const catalogProducts = await storage.getAllCatalogProducts();
@@ -8547,6 +8549,24 @@ export async function registerRoutes(
       const locationMap = new Map(locations.map(l => [l.id, l]));
       const productMap = new Map(catalogProducts.map(p => [p.id, p]));
       const variantMap = new Map(uomVariants.map(v => [v.id, v]));
+      
+      // Group variants by product and hierarchy level
+      const variantsByProduct = new Map<number, Map<number, typeof uomVariants[0]>>();
+      for (const v of uomVariants) {
+        if (!v.catalogProductId) continue;
+        if (!variantsByProduct.has(v.catalogProductId)) {
+          variantsByProduct.set(v.catalogProductId, new Map());
+        }
+        variantsByProduct.get(v.catalogProductId)!.set(v.hierarchyLevel, v);
+      }
+      
+      // Index SKU overrides by product ID
+      const overridesByProduct = new Map<number, typeof skuOverrides[0]>();
+      for (const override of skuOverrides) {
+        if (override.catalogProductId) {
+          overridesByProduct.set(override.catalogProductId, override);
+        }
+      }
       
       // Build inventory index: variantId + locationType -> list of { locationId, qty, updatedAt }
       const inventoryByVariantAndType = new Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>>();
@@ -8568,103 +8588,136 @@ export async function registerRoutes(
         inventoryByVariantAndType.set(key, existing);
       }
       
+      // Find all forward_pick inventory that needs replen
+      // Group by product and variant to check against tier defaults
+      const pickLocationsNeedingReplen = new Map<number, Array<{
+        locationId: number;
+        variantId: number;
+        currentQty: number;
+        hierarchyLevel: number;
+      }>>();
+      
+      for (const level of inventoryLevels) {
+        const location = locationMap.get(level.warehouseLocationId);
+        if (!location || location.locationType !== "forward_pick") continue;
+        
+        const variant = variantMap.get(level.variantId);
+        if (!variant || !variant.catalogProductId) continue;
+        
+        const productId = variant.catalogProductId;
+        if (!pickLocationsNeedingReplen.has(productId)) {
+          pickLocationsNeedingReplen.set(productId, []);
+        }
+        
+        pickLocationsNeedingReplen.get(productId)!.push({
+          locationId: level.warehouseLocationId,
+          variantId: level.variantId,
+          currentQty: level.variantQty || 0,
+          hierarchyLevel: variant.hierarchyLevel,
+        });
+      }
+      
       const tasksCreated: any[] = [];
       const skipped: any[] = [];
       
-      for (const rule of rules) {
-        const product = productMap.get(rule.catalogProductId);
-        const pickVariant = variantMap.get(rule.pickVariantId);
-        const sourceVariant = variantMap.get(rule.sourceVariantId);
+      // Sort tier defaults by priority (1 = highest)
+      const sortedTierDefaults = [...tierDefaults].sort((a, b) => a.priority - b.priority);
+      
+      // Process each product with forward_pick inventory
+      for (const [productId, pickLocs] of pickLocationsNeedingReplen) {
+        const product = productMap.get(productId);
+        if (!product) continue;
         
-        if (!product || !pickVariant || !sourceVariant) {
-          skipped.push({
-            ruleId: rule.id,
-            reason: "missing_product_or_variant",
-            product: product?.sku || product?.title || rule.catalogProductId,
-          });
-          continue;
-        }
+        const productVariants = variantsByProduct.get(productId);
+        if (!productVariants) continue;
         
-        // Find all pick locations with this variant below minQty
-        const pickKey = `${rule.pickVariantId}-${rule.pickLocationType}`;
-        const pickLocationsWithStock = inventoryByVariantAndType.get(pickKey) || [];
+        // Check for SKU override first
+        const override = overridesByProduct.get(productId);
         
-        // Also find pick locations with zero stock (need to check all locations of this type)
-        const allPickTypeLocations = locations.filter(l => l.locationType === rule.pickLocationType);
-        
-        // Build map of current qty per pick location for this variant
-        const qtyByPickLocation = new Map<number, number>();
-        for (const inv of pickLocationsWithStock) {
-          qtyByPickLocation.set(inv.locationId, inv.qty);
-        }
-        
-        // Find locations that need replen (below minQty)
-        // Only consider locations that either have this variant or are empty pick locations
-        const locationsNeedingReplen: Array<{ locationId: number; currentQty: number }> = [];
-        
-        for (const inv of pickLocationsWithStock) {
-          if (inv.qty < rule.minQty) {
-            locationsNeedingReplen.push({ locationId: inv.locationId, currentQty: inv.qty });
+        // For each pick location of this product
+        for (const pickLoc of pickLocs) {
+          // Find the matching tier default (by priority) where both source and target levels exist
+          let matchedDefault: typeof tierDefaults[0] | null = null;
+          let sourceVariant: typeof uomVariants[0] | null = null;
+          let pickVariant = variantMap.get(pickLoc.variantId);
+          
+          if (!pickVariant) continue;
+          
+          for (const tierDefault of sortedTierDefaults) {
+            // Check if this tier default applies to this pick location's hierarchy level
+            if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
+            
+            // Check if the source hierarchy level exists for this product
+            const sourceVar = productVariants.get(tierDefault.sourceHierarchyLevel);
+            if (sourceVar) {
+              matchedDefault = tierDefault;
+              sourceVariant = sourceVar;
+              break; // Use first (highest priority) match
+            }
           }
-        }
-        
-        if (locationsNeedingReplen.length === 0) {
-          continue; // No locations need replen for this rule
-        }
-        
-        // Find source locations with the source variant
-        const sourceKey = `${rule.sourceVariantId}-${rule.sourceLocationType}`;
-        let sourceLocations = inventoryByVariantAndType.get(sourceKey) || [];
-        
-        if (sourceLocations.length === 0) {
-          skipped.push({
-            ruleId: rule.id,
-            product: product.sku || product.title,
-            reason: "no_source_stock",
-            sourceVariant: sourceVariant.sku || sourceVariant.name,
-            sourceLocationType: rule.sourceLocationType,
-          });
-          continue;
-        }
-        
-        // Sort source locations by priority
-        if (rule.sourcePriority === "smallest_first") {
-          sourceLocations = [...sourceLocations].sort((a, b) => a.qty - b.qty);
-        } else {
-          // FIFO - sort by oldest first (updatedAt ascending)
-          sourceLocations = [...sourceLocations].sort((a, b) => {
-            const aTime = a.updatedAt?.getTime() || 0;
-            const bTime = b.updatedAt?.getTime() || 0;
-            return aTime - bTime;
-          });
-        }
-        
-        // UOM conversion
-        const unitsPerSource = sourceVariant.unitsPerVariant || 1;
-        
-        // Track source inventory as we allocate
-        const sourceQtyRemaining = new Map<number, number>();
-        for (const src of sourceLocations) {
-          sourceQtyRemaining.set(src.locationId, src.qty);
-        }
-        
-        for (const pickLoc of locationsNeedingReplen) {
-          // Check for existing pending task
+          
+          if (!matchedDefault || !sourceVariant) {
+            // No tier default matches this product's UOM structure
+            continue;
+          }
+          
+          // Apply SKU override settings if they exist (override nulls = use tier default)
+          const effectiveMinQty = override?.minQty ?? matchedDefault.minQty;
+          const effectiveMaxQty = override?.maxQty ?? matchedDefault.maxQty;
+          const effectiveSourcePriority = override?.sourcePriority ?? matchedDefault.sourcePriority;
+          const effectiveReplenMethod = override?.replenMethod ?? matchedDefault.replenMethod;
+          const effectivePriority = override?.priority ?? matchedDefault.priority;
+          const effectivePickLocationType = override?.pickLocationType ?? matchedDefault.pickLocationType;
+          const effectiveSourceLocationType = override?.sourceLocationType ?? matchedDefault.sourceLocationType;
+          
+          // Check if this location needs replen
+          if (pickLoc.currentQty >= effectiveMinQty) {
+            continue; // Above threshold, no replen needed
+          }
+          
+          // Find source locations with the source variant
+          const sourceKey = `${sourceVariant.id}-${effectiveSourceLocationType}`;
+          let sourceLocations = inventoryByVariantAndType.get(sourceKey) || [];
+          
+          if (sourceLocations.length === 0) {
+            skipped.push({
+              product: product.sku || product.title,
+              reason: "no_source_stock",
+              sourceVariant: sourceVariant.sku || sourceVariant.name,
+              sourceLocationType: effectiveSourceLocationType,
+              tierDefaultId: matchedDefault.id,
+            });
+            continue;
+          }
+          
+          // Sort source locations by priority
+          if (effectiveSourcePriority === "smallest_first") {
+            sourceLocations = [...sourceLocations].sort((a, b) => a.qty - b.qty);
+          } else {
+            // FIFO - sort by oldest first (updatedAt ascending)
+            sourceLocations = [...sourceLocations].sort((a, b) => {
+              const aTime = a.updatedAt?.getTime() || 0;
+              const bTime = b.updatedAt?.getTime() || 0;
+              return aTime - bTime;
+            });
+          }
+          
+          // UOM conversion
+          const unitsPerSource = sourceVariant.unitsPerVariant || 1;
+          
+          // Check for existing pending task for this location/product
           const pendingTasks = await storage.getPendingReplenTasksForLocation(pickLoc.locationId);
           const existingTask = pendingTasks.find(t => 
-            t.replenRuleId === rule.id || 
-            (t.catalogProductId === rule.catalogProductId && t.pickVariantId === rule.pickVariantId)
+            t.catalogProductId === productId && t.pickVariantId === pickLoc.variantId
           );
           
           if (existingTask) {
             skipped.push({
-              ruleId: rule.id,
-              pickLocationId: pickLoc.locationId,
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
               product: product.sku || product.title,
               reason: "pending_task_exists",
               currentQty: pickLoc.currentQty,
-              minQty: rule.minQty,
+              minQty: effectiveMinQty,
             });
             continue;
           }
@@ -8672,16 +8725,14 @@ export async function registerRoutes(
           // Find best source with available stock
           let selectedSource: { locationId: number; availableQty: number } | null = null;
           for (const src of sourceLocations) {
-            const remaining = sourceQtyRemaining.get(src.locationId) || 0;
-            if (remaining > 0) {
-              selectedSource = { locationId: src.locationId, availableQty: remaining };
+            if (src.qty > 0) {
+              selectedSource = { locationId: src.locationId, availableQty: src.qty };
               break;
             }
           }
           
           if (!selectedSource) {
             skipped.push({
-              ruleId: rule.id,
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
               product: product.sku || product.title,
               reason: "no_source_available",
@@ -8694,13 +8745,13 @@ export async function registerRoutes(
           let qtySourceUnits: number;
           let qtyTargetUnits: number;
           
-          if (rule.maxQty === null) {
+          if (effectiveMaxQty === null) {
             // No maxQty: replen exactly 1 source unit worth
             qtySourceUnits = 1;
             qtyTargetUnits = unitsPerSource;
           } else {
             // Has maxQty: calculate how many source units needed to reach max
-            const qtyNeeded = Math.max(0, rule.maxQty - pickLoc.currentQty);
+            const qtyNeeded = Math.max(0, effectiveMaxQty - pickLoc.currentQty);
             if (qtyNeeded <= 0) continue;
             
             qtySourceUnits = Math.ceil(qtyNeeded / unitsPerSource);
@@ -8720,7 +8771,7 @@ export async function registerRoutes(
           let capacityNote = "";
           let overflowQtyTargetUnits = 0;
           let overflowQtySourceUnits = 0;
-          const isFullCaseMethod = rule.replenMethod === "full_case" || rule.replenMethod === "pallet_drop";
+          const isFullCaseMethod = effectiveReplenMethod === "full_case" || effectiveReplenMethod === "pallet_drop";
           
           if (destLocation && pickVariant) {
             const capacity = await inventoryService.calculateRemainingCapacity(
@@ -8746,7 +8797,7 @@ export async function registerRoutes(
                   overflowQtySourceUnits = qtySourceUnits;
                   qtyTargetUnits = 0;
                   qtySourceUnits = 0;
-                  capacityNote = `${rule.replenMethod}: full unit doesn't fit, routed to overflow`;
+                  capacityNote = `${effectiveReplenMethod}: full unit doesn't fit, routed to overflow`;
                 } else {
                   // case_break: partial fit allowed - split the task
                   overflowQtyTargetUnits = qtyTargetUnits - capacity.maxUnits;
@@ -8793,7 +8844,7 @@ export async function registerRoutes(
                 // Report any excess that didn't fit
                 if (actualOverflowQty < overflowQtyTargetUnits) {
                   skipped.push({
-                    ruleId: rule.id,
+                    tierDefaultId: matchedDefault.id,
                     pickLocation: locationMap.get(pickLoc.locationId)?.code,
                     product: product.sku || product.title,
                     reason: "overflow_capacity_partial",
@@ -8805,12 +8856,12 @@ export async function registerRoutes(
             } else {
               // No overflow bin found (for full_case, means no bin could fit full unit)
               skipped.push({
-                ruleId: rule.id,
+                tierDefaultId: matchedDefault.id,
                 pickLocation: locationMap.get(pickLoc.locationId)?.code,
                 product: product.sku || product.title,
                 reason: isFullCaseMethod ? "no_overflow_for_full_unit" : "no_overflow_capacity",
                 overflowQty: overflowQtyTargetUnits,
-                replenMethod: rule.replenMethod,
+                replenMethod: effectiveReplenMethod,
               });
             }
           }
@@ -8835,36 +8886,34 @@ export async function registerRoutes(
             totalSourceUsed = qtySourceUnits + actualOverflowSourceUnits;
           }
           
-          // Deduct from source tracking with final validated quantities
-          sourceQtyRemaining.set(selectedSource.locationId, selectedSource.availableQty - totalSourceUsed);
-          
           // Create main task if any units fit
           if (qtySourceUnits > 0 && qtyTargetUnits > 0) {
             const task = await storage.createReplenTask({
-              replenRuleId: rule.id,
+              replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
               toLocationId: pickLoc.locationId,
-              catalogProductId: rule.catalogProductId,
-              sourceVariantId: rule.sourceVariantId,
-              pickVariantId: rule.pickVariantId,
+              catalogProductId: productId,
+              sourceVariantId: sourceVariant.id,
+              pickVariantId: pickLoc.variantId,
               qtySourceUnits,
               qtyTargetUnits,
               qtyCompleted: 0,
               status: "pending",
-              priority: rule.priority,
+              priority: effectivePriority,
               triggeredBy: "min_max",
               assignedTo: null,
-              notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < min ${rule.minQty}`,
+              notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < min ${effectiveMinQty}`,
             });
             
             tasksCreated.push({
               taskId: task.id,
-              ruleId: rule.id,
+              tierDefaultId: matchedDefault.id,
+              overrideId: override?.id,
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
               product: product.sku || product.title,
               currentQty: pickLoc.currentQty,
-              minQty: rule.minQty,
+              minQty: effectiveMinQty,
               qtySourceUnits,
               qtyTargetUnits,
             });
@@ -8873,17 +8922,17 @@ export async function registerRoutes(
           // Create overflow task if needed and capacity validated
           if (actualOverflowQty > 0 && overflowBinId) {
             const overflowTask = await storage.createReplenTask({
-              replenRuleId: rule.id,
+              replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
               toLocationId: overflowBinId,
-              catalogProductId: rule.catalogProductId,
-              sourceVariantId: rule.sourceVariantId,
-              pickVariantId: rule.pickVariantId,
+              catalogProductId: productId,
+              sourceVariantId: sourceVariant.id,
+              pickVariantId: pickLoc.variantId,
               qtySourceUnits: actualOverflowSourceUnits,
               qtyTargetUnits: actualOverflowQty,
               qtyCompleted: 0,
               status: "pending",
-              priority: rule.priority + 1,
+              priority: effectivePriority + 1,
               triggeredBy: "min_max",
               assignedTo: null,
               notes: `Overflow from ${destLocation?.code}: capacity exceeded`,
@@ -8891,7 +8940,8 @@ export async function registerRoutes(
             
             tasksCreated.push({
               taskId: overflowTask.id,
-              ruleId: rule.id,
+              tierDefaultId: matchedDefault.id,
+              overrideId: override?.id,
               pickLocation: locationMap.get(overflowBinId)?.code,
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
               product: product.sku || product.title,
@@ -8907,7 +8957,8 @@ export async function registerRoutes(
       
       res.json({
         success: true,
-        rulesEvaluated: rules.length,
+        tierDefaultsEvaluated: tierDefaults.length,
+        productsScanned: pickLocationsNeedingReplen.size,
         tasksCreated: tasksCreated.length,
         skipped: skipped.length,
         details: { tasksCreated, skipped },
