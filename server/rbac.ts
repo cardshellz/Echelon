@@ -90,6 +90,10 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "locations", action: "view", description: "View warehouse locations", category: "inventory" },
   { resource: "locations", action: "create", description: "Create locations", category: "inventory" },
   { resource: "locations", action: "edit", description: "Edit locations", category: "inventory" },
+  
+  // Warehouse
+  { resource: "warehouse", action: "read", description: "View warehouse settings", category: "warehouse" },
+  { resource: "warehouse", action: "manage", description: "Manage warehouse settings and replenishment rules", category: "warehouse" },
 ];
 
 // Default system roles with their permission sets
