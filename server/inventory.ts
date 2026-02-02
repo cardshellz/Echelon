@@ -632,6 +632,143 @@ export class InventoryService {
   async logTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
     return await storage.createInventoryTransaction(transaction);
   }
+
+  /**
+   * Calculate cubic volume for a variant in mm³
+   * Returns null if dimensions not set
+   */
+  getVariantCubicMm(variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null }): number | null {
+    if (variant.widthMm && variant.heightMm && variant.depthMm) {
+      return variant.widthMm * variant.heightMm * variant.depthMm;
+    }
+    return null;
+  }
+
+  /**
+   * Calculate total capacity of a location in mm³
+   * Uses capacityCubicMm if set, otherwise calculates from dimensions
+   */
+  getLocationCapacityCubicMm(location: { 
+    capacityCubicMm: number | null; 
+    widthMm: number | null; 
+    heightMm: number | null; 
+    depthMm: number | null 
+  }): number | null {
+    if (location.capacityCubicMm) {
+      return location.capacityCubicMm;
+    }
+    if (location.widthMm && location.heightMm && location.depthMm) {
+      return location.widthMm * location.heightMm * location.depthMm;
+    }
+    return null;
+  }
+
+  /**
+   * Calculate occupied cube at a location based on current inventory
+   * Returns total cubic mm occupied by all variants at this location
+   */
+  async getLocationOccupiedCubicMm(
+    locationId: number,
+    inventoryLevels: InventoryLevel[],
+    variantMap: Map<number, UomVariant>
+  ): Promise<number> {
+    let occupied = 0;
+    
+    for (const level of inventoryLevels) {
+      if (level.warehouseLocationId !== locationId) continue;
+      if (!level.variantId || level.variantQty <= 0) continue;
+      
+      const variant = variantMap.get(level.variantId);
+      if (!variant) continue;
+      
+      const variantCube = this.getVariantCubicMm(variant);
+      if (variantCube) {
+        occupied += variantCube * level.variantQty;
+      }
+    }
+    
+    return occupied;
+  }
+
+  /**
+   * Calculate remaining capacity at a location
+   * Returns: { remainingCubicMm, maxUnits } or null if capacity not set
+   */
+  async calculateRemainingCapacity(
+    location: { 
+      id: number;
+      capacityCubicMm: number | null; 
+      widthMm: number | null; 
+      heightMm: number | null; 
+      depthMm: number | null 
+    },
+    variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null },
+    inventoryLevels: InventoryLevel[],
+    variantMap: Map<number, UomVariant>
+  ): Promise<{ remainingCubicMm: number; maxUnits: number } | null> {
+    const locationCapacity = this.getLocationCapacityCubicMm(location);
+    if (!locationCapacity) return null; // Capacity not enforced
+    
+    const variantCube = this.getVariantCubicMm(variant);
+    if (!variantCube) return null; // Variant dimensions not set
+    
+    const occupied = await this.getLocationOccupiedCubicMm(location.id, inventoryLevels, variantMap);
+    const remaining = Math.max(0, locationCapacity - occupied);
+    const maxUnits = Math.floor(remaining / variantCube);
+    
+    return { remainingCubicMm: remaining, maxUnits };
+  }
+
+  /**
+   * Find best overflow bin for excess inventory
+   * Prioritizes: same warehouse > most available capacity
+   * @param minUnitsRequired - If provided, only returns bins that can fit at least this many units
+   */
+  async findOverflowBin(
+    warehouseId: number | null,
+    variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null },
+    requiredUnits: number,
+    inventoryLevels: InventoryLevel[],
+    variantMap: Map<number, UomVariant>,
+    allLocations: Array<{
+      id: number;
+      warehouseId: number | null;
+      locationType: string;
+      capacityCubicMm: number | null;
+      widthMm: number | null;
+      heightMm: number | null;
+      depthMm: number | null;
+    }>,
+    minUnitsRequired?: number
+  ): Promise<{ locationId: number; maxUnits: number } | null> {
+    const variantCube = this.getVariantCubicMm(variant);
+    if (!variantCube) return null;
+    
+    const overflowLocations = allLocations.filter(l => 
+      l.locationType === "overflow" && 
+      (warehouseId === null || l.warehouseId === warehouseId)
+    );
+    
+    let bestBin: { locationId: number; maxUnits: number; remainingCube: number } | null = null;
+    
+    for (const loc of overflowLocations) {
+      const capacity = await this.calculateRemainingCapacity(loc, variant, inventoryLevels, variantMap);
+      if (!capacity || capacity.maxUnits <= 0) continue;
+      
+      // If minUnitsRequired is set, only consider bins that can fit that many
+      if (minUnitsRequired && capacity.maxUnits < minUnitsRequired) continue;
+      
+      if (!bestBin || capacity.remainingCubicMm > bestBin.remainingCube) {
+        bestBin = {
+          locationId: loc.id,
+          maxUnits: capacity.maxUnits,
+          remainingCube: capacity.remainingCubicMm,
+        };
+      }
+    }
+    
+    return bestBin ? { locationId: bestBin.locationId, maxUnits: bestBin.maxUnits } : null;
+  }
 }
 
 export const inventoryService = new InventoryService();

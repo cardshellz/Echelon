@@ -8540,37 +8540,193 @@ export async function registerRoutes(
           
           if (qtySourceUnits <= 0) continue;
           
-          // Deduct from source tracking
-          sourceQtyRemaining.set(selectedSource.locationId, selectedSource.availableQty - qtySourceUnits);
+          // Check destination cube capacity
+          const destLocation = locationMap.get(pickLoc.locationId);
+          let capacityNote = "";
+          let overflowQtyTargetUnits = 0;
+          let overflowQtySourceUnits = 0;
+          const isFullCaseMethod = rule.replenMethod === "full_case" || rule.replenMethod === "pallet_drop";
           
-          const task = await storage.createReplenTask({
-            replenRuleId: rule.id,
-            fromLocationId: selectedSource.locationId,
-            toLocationId: pickLoc.locationId,
-            catalogProductId: rule.catalogProductId,
-            sourceVariantId: rule.sourceVariantId,
-            pickVariantId: rule.pickVariantId,
-            qtySourceUnits,
-            qtyTargetUnits,
-            qtyCompleted: 0,
-            status: "pending",
-            priority: rule.priority,
-            triggeredBy: "min_max",
-            assignedTo: null,
-            notes: `Auto-generated: current qty ${pickLoc.currentQty} < min ${rule.minQty}`,
-          });
+          if (destLocation && pickVariant) {
+            const capacity = await inventoryService.calculateRemainingCapacity(
+              destLocation,
+              pickVariant,
+              inventoryLevels,
+              variantMap
+            );
+            
+            if (capacity !== null) {
+              // Capacity is enforced for this location
+              if (capacity.maxUnits <= 0) {
+                // No capacity at all - route everything to overflow
+                overflowQtyTargetUnits = qtyTargetUnits;
+                overflowQtySourceUnits = qtySourceUnits;
+                qtyTargetUnits = 0;
+                qtySourceUnits = 0;
+                capacityNote = "Destination full, routed to overflow";
+              } else if (capacity.maxUnits < qtyTargetUnits) {
+                if (isFullCaseMethod) {
+                  // For full_case/pallet_drop: don't split, route whole case to overflow
+                  overflowQtyTargetUnits = qtyTargetUnits;
+                  overflowQtySourceUnits = qtySourceUnits;
+                  qtyTargetUnits = 0;
+                  qtySourceUnits = 0;
+                  capacityNote = `${rule.replenMethod}: full unit doesn't fit, routed to overflow`;
+                } else {
+                  // case_break: partial fit allowed - split the task
+                  overflowQtyTargetUnits = qtyTargetUnits - capacity.maxUnits;
+                  overflowQtySourceUnits = Math.ceil(overflowQtyTargetUnits / unitsPerSource);
+                  qtyTargetUnits = capacity.maxUnits;
+                  qtySourceUnits = Math.ceil(qtyTargetUnits / unitsPerSource);
+                  capacityNote = `Split due to capacity: ${qtyTargetUnits} to bin, ${overflowQtyTargetUnits} to overflow`;
+                }
+              }
+            }
+          }
           
-          tasksCreated.push({
-            taskId: task.id,
-            ruleId: rule.id,
-            pickLocation: locationMap.get(pickLoc.locationId)?.code,
-            sourceLocation: locationMap.get(selectedSource.locationId)?.code,
-            product: product.sku || product.title,
-            currentQty: pickLoc.currentQty,
-            minQty: rule.minQty,
-            qtySourceUnits,
-            qtyTargetUnits,
-          });
+          // Determine actual overflow quantity based on overflow bin capacity
+          let actualOverflowQty = 0;
+          let actualOverflowSourceUnits = 0;
+          let overflowBinId: number | null = null;
+          
+          if (overflowQtyTargetUnits > 0) {
+            // For full_case methods, require overflow bin to fit entire unit
+            const minUnitsRequired = isFullCaseMethod ? overflowQtyTargetUnits : undefined;
+            
+            const overflowBin = await inventoryService.findOverflowBin(
+              destLocation?.warehouseId || null,
+              pickVariant,
+              overflowQtyTargetUnits,
+              inventoryLevels,
+              variantMap,
+              locations,
+              minUnitsRequired
+            );
+            
+            if (overflowBin) {
+              if (isFullCaseMethod) {
+                // Bin already guaranteed to fit full unit by minUnitsRequired filter
+                actualOverflowQty = overflowQtyTargetUnits;
+                actualOverflowSourceUnits = overflowQtySourceUnits;
+                overflowBinId = overflowBin.locationId;
+              } else {
+                // case_break: cap to what fits
+                actualOverflowQty = Math.min(overflowQtyTargetUnits, overflowBin.maxUnits);
+                actualOverflowSourceUnits = Math.ceil(actualOverflowQty / unitsPerSource);
+                overflowBinId = overflowBin.locationId;
+                
+                // Report any excess that didn't fit
+                if (actualOverflowQty < overflowQtyTargetUnits) {
+                  skipped.push({
+                    ruleId: rule.id,
+                    pickLocation: locationMap.get(pickLoc.locationId)?.code,
+                    product: product.sku || product.title,
+                    reason: "overflow_capacity_partial",
+                    overflowQty: actualOverflowQty,
+                    excessQty: overflowQtyTargetUnits - actualOverflowQty,
+                  });
+                }
+              }
+            } else {
+              // No overflow bin found (for full_case, means no bin could fit full unit)
+              skipped.push({
+                ruleId: rule.id,
+                pickLocation: locationMap.get(pickLoc.locationId)?.code,
+                product: product.sku || product.title,
+                reason: isFullCaseMethod ? "no_overflow_for_full_unit" : "no_overflow_capacity",
+                overflowQty: overflowQtyTargetUnits,
+                replenMethod: rule.replenMethod,
+              });
+            }
+          }
+          
+          // Now validate total source usage with actual overflow quantities
+          let totalSourceUsed = qtySourceUnits + actualOverflowSourceUnits;
+          if (totalSourceUsed > selectedSource.availableQty) {
+            // Reduce overflow first, then main if needed
+            const excess = totalSourceUsed - selectedSource.availableQty;
+            if (actualOverflowSourceUnits >= excess) {
+              actualOverflowSourceUnits -= excess;
+              actualOverflowQty = actualOverflowSourceUnits * unitsPerSource;
+            } else {
+              // Not enough - reduce main task too
+              const remainingExcess = excess - actualOverflowSourceUnits;
+              actualOverflowSourceUnits = 0;
+              actualOverflowQty = 0;
+              overflowBinId = null;
+              qtySourceUnits = Math.max(0, qtySourceUnits - remainingExcess);
+              qtyTargetUnits = qtySourceUnits * unitsPerSource;
+            }
+            totalSourceUsed = qtySourceUnits + actualOverflowSourceUnits;
+          }
+          
+          // Deduct from source tracking with final validated quantities
+          sourceQtyRemaining.set(selectedSource.locationId, selectedSource.availableQty - totalSourceUsed);
+          
+          // Create main task if any units fit
+          if (qtySourceUnits > 0 && qtyTargetUnits > 0) {
+            const task = await storage.createReplenTask({
+              replenRuleId: rule.id,
+              fromLocationId: selectedSource.locationId,
+              toLocationId: pickLoc.locationId,
+              catalogProductId: rule.catalogProductId,
+              sourceVariantId: rule.sourceVariantId,
+              pickVariantId: rule.pickVariantId,
+              qtySourceUnits,
+              qtyTargetUnits,
+              qtyCompleted: 0,
+              status: "pending",
+              priority: rule.priority,
+              triggeredBy: "min_max",
+              assignedTo: null,
+              notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < min ${rule.minQty}`,
+            });
+            
+            tasksCreated.push({
+              taskId: task.id,
+              ruleId: rule.id,
+              pickLocation: locationMap.get(pickLoc.locationId)?.code,
+              sourceLocation: locationMap.get(selectedSource.locationId)?.code,
+              product: product.sku || product.title,
+              currentQty: pickLoc.currentQty,
+              minQty: rule.minQty,
+              qtySourceUnits,
+              qtyTargetUnits,
+            });
+          }
+          
+          // Create overflow task if needed and capacity validated
+          if (actualOverflowQty > 0 && overflowBinId) {
+            const overflowTask = await storage.createReplenTask({
+              replenRuleId: rule.id,
+              fromLocationId: selectedSource.locationId,
+              toLocationId: overflowBinId,
+              catalogProductId: rule.catalogProductId,
+              sourceVariantId: rule.sourceVariantId,
+              pickVariantId: rule.pickVariantId,
+              qtySourceUnits: actualOverflowSourceUnits,
+              qtyTargetUnits: actualOverflowQty,
+              qtyCompleted: 0,
+              status: "pending",
+              priority: rule.priority + 1,
+              triggeredBy: "min_max",
+              assignedTo: null,
+              notes: `Overflow from ${destLocation?.code}: capacity exceeded`,
+            });
+            
+            tasksCreated.push({
+              taskId: overflowTask.id,
+              ruleId: rule.id,
+              pickLocation: locationMap.get(overflowBinId)?.code,
+              sourceLocation: locationMap.get(selectedSource.locationId)?.code,
+              product: product.sku || product.title,
+              currentQty: 0,
+              minQty: 0,
+              qtySourceUnits: actualOverflowSourceUnits,
+              qtyTargetUnits: actualOverflowQty,
+              isOverflow: true,
+            });
+          }
         }
       }
       

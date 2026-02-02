@@ -59,6 +59,7 @@ const LOCATION_TYPES = [
   { value: "pallet", label: "Pallet (Case Pick)" },
   { value: "carton_flow", label: "Carton Flow" },
   { value: "bulk_reserve", label: "Bulk Reserve" },
+  { value: "overflow", label: "Overflow" },
   { value: "receiving", label: "Receiving" },
   { value: "putaway_staging", label: "Putaway Staging" },
   { value: "packing", label: "Packing" },
