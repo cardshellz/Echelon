@@ -40,12 +40,11 @@ interface WarehouseLocation {
   isPickable: number;
   pickSequence: number | null;
   parentLocationId: number | null;
-  minQty: number | null;
-  maxQty: number | null;
-  maxWeight: number | null;
-  widthInches: number | null;
-  heightInches: number | null;
-  depthInches: number | null;
+  capacityCubicMm: number | null;
+  maxWeightG: number | null;
+  widthMm: number | null;
+  heightMm: number | null;
+  depthMm: number | null;
   warehouseId: number | null;
 }
 
@@ -109,8 +108,6 @@ export default function WarehouseLocations() {
     locationType: "bin",
     isPickable: 1,
     pickSequence: "",
-    minQty: "",
-    maxQty: "",
     warehouseId: "",
   });
   const [newZone, setNewZone] = useState({
@@ -409,8 +406,6 @@ export default function WarehouseLocations() {
       locationType: "bin",
       isPickable: 1,
       pickSequence: "",
-      minQty: "",
-      maxQty: "",
       warehouseId: "",
     });
   };
@@ -427,8 +422,6 @@ export default function WarehouseLocations() {
     if (newLocation.bin) data.bin = newLocation.bin;
     if (newLocation.name) data.name = newLocation.name;
     if (newLocation.pickSequence) data.pickSequence = parseInt(newLocation.pickSequence);
-    if (newLocation.minQty) data.minQty = parseInt(newLocation.minQty);
-    if (newLocation.maxQty) data.maxQty = parseInt(newLocation.maxQty);
     if (newLocation.warehouseId) data.warehouseId = parseInt(newLocation.warehouseId);
     
     createLocationMutation.mutate(data);
@@ -446,8 +439,6 @@ export default function WarehouseLocations() {
       bin: editingLocation.bin?.trim() || null,
       name: editingLocation.name?.trim() || null,
       pickSequence: editingLocation.pickSequence || null,
-      minQty: editingLocation.minQty || null,
-      maxQty: editingLocation.maxQty || null,
       warehouseId: editingLocation.warehouseId || null,
     };
     
@@ -1053,26 +1044,6 @@ export default function WarehouseLocations() {
                   data-testid="input-location-sequence"
                 />
               </div>
-              <div>
-                <Label>Min Qty</Label>
-                <Input
-                  type="number"
-                  placeholder="0"
-                  value={newLocation.minQty}
-                  onChange={(e) => setNewLocation({ ...newLocation, minQty: e.target.value })}
-                  data-testid="input-location-minqty"
-                />
-              </div>
-              <div>
-                <Label>Max Qty</Label>
-                <Input
-                  type="number"
-                  placeholder="∞"
-                  value={newLocation.maxQty}
-                  onChange={(e) => setNewLocation({ ...newLocation, maxQty: e.target.value })}
-                  data-testid="input-location-maxqty"
-                />
-              </div>
             </div>
 
             <div className="flex items-center space-x-2">
@@ -1208,28 +1179,6 @@ export default function WarehouseLocations() {
                     onChange={(e) => setEditingLocation({ 
                       ...editingLocation, 
                       pickSequence: e.target.value ? parseInt(e.target.value) : null 
-                    })}
-                  />
-                </div>
-                <div>
-                  <Label>Min Qty</Label>
-                  <Input
-                    type="number"
-                    value={editingLocation.minQty ?? ""}
-                    onChange={(e) => setEditingLocation({ 
-                      ...editingLocation, 
-                      minQty: e.target.value ? parseInt(e.target.value) : null 
-                    })}
-                  />
-                </div>
-                <div>
-                  <Label>Max Qty</Label>
-                  <Input
-                    type="number"
-                    value={editingLocation.maxQty ?? ""}
-                    onChange={(e) => setEditingLocation({ 
-                      ...editingLocation, 
-                      maxQty: e.target.value ? parseInt(e.target.value) : null 
                     })}
                   />
                 </div>

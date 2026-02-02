@@ -109,8 +109,8 @@ interface WarehouseLocation {
   isPickable: number;
   parentLocationId: number | null;
   movementPolicy: string;
-  minQty: number | null;
-  maxQty: number | null;
+  capacityCubicMm: number | null;
+  maxWeightG: number | null;
 }
 
 interface Warehouse {

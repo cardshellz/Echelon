@@ -416,13 +416,12 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   replenSourceType: varchar("replen_source_type", { length: 30 }), // Location type that feeds this: bulk_storage, case_pick, pallet_pick
   movementPolicy: varchar("movement_policy", { length: 20 }).notNull().default("implicit"),
   
-  // Capacity constraints
-  minQty: integer("min_qty"), // Trigger replenishment alert when below
-  maxQty: integer("max_qty"), // Maximum units this location can hold
-  maxWeight: integer("max_weight"), // Max weight in lbs (optional)
-  widthInches: integer("width_inches"), // Physical dimensions for slotting
-  heightInches: integer("height_inches"),
-  depthInches: integer("depth_inches"),
+  // Capacity constraints (dimensions in mm for cube calculations)
+  capacityCubicMm: bigint("capacity_cubic_mm", { mode: "number" }), // Calculated from dimensions or set directly
+  maxWeightG: integer("max_weight_g"), // Max weight in grams
+  widthMm: integer("width_mm"), // Physical dimensions for slotting
+  heightMm: integer("height_mm"),
+  depthMm: integer("depth_mm"),
   
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -535,6 +534,13 @@ export const uomVariants = pgTable("uom_variants", {
   barcode: varchar("barcode", { length: 100 }),
   imageUrl: text("image_url"),
   active: integer("active").notNull().default(1),
+  
+  // Physical dimensions for cube calculations and slotting (all in mm/grams)
+  widthMm: integer("width_mm"),
+  heightMm: integer("height_mm"),
+  depthMm: integer("depth_mm"),
+  weightG: integer("weight_g"), // Weight in grams
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

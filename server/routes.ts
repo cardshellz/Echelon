@@ -3637,7 +3637,7 @@ export async function registerRoutes(
       const locations = await storage.getAllWarehouseLocations();
       
       const csvRows = [
-        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence", "min_qty", "max_qty"].join(",")
+        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence", "width_mm", "height_mm", "depth_mm"].join(",")
       ];
       
       for (const loc of locations) {
@@ -3652,8 +3652,9 @@ export async function registerRoutes(
           loc.locationType || "",
           loc.isPickable ?? 1,
           loc.pickSequence ?? "",
-          loc.minQty ?? "",
-          loc.maxQty ?? ""
+          loc.widthMm ?? "",
+          loc.heightMm ?? "",
+          loc.depthMm ?? ""
         ].join(","));
       }
       
@@ -3874,12 +3875,15 @@ export async function registerRoutes(
             pickSequence: loc.pickSequence || loc.pick_sequence 
               ? parseInt(loc.pickSequence || loc.pick_sequence) 
               : (existing?.pickSequence ?? null),
-            minQty: loc.minQty || loc.min_qty 
-              ? parseInt(loc.minQty || loc.min_qty) 
-              : (existing?.minQty ?? null),
-            maxQty: loc.maxQty || loc.max_qty 
-              ? parseInt(loc.maxQty || loc.max_qty) 
-              : (existing?.maxQty ?? null),
+            widthMm: loc.widthMm || loc.width_mm 
+              ? parseInt(loc.widthMm || loc.width_mm) 
+              : (existing?.widthMm ?? null),
+            heightMm: loc.heightMm || loc.height_mm 
+              ? parseInt(loc.heightMm || loc.height_mm) 
+              : (existing?.heightMm ?? null),
+            depthMm: loc.depthMm || loc.depth_mm 
+              ? parseInt(loc.depthMm || loc.depth_mm) 
+              : (existing?.depthMm ?? null),
             warehouseId: effectiveWarehouseId ?? existing?.warehouseId ?? null,
           };
           
