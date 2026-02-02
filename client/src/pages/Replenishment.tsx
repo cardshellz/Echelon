@@ -144,10 +144,23 @@ interface ReplenTask {
 
 interface WarehouseSettings {
   id: number;
-  warehouseId: number | null;
+  warehouseCode: string;
+  warehouseName: string;
   replenMode: string;
   shortPickAction: string;
-  hybridThreshold: number | null;
+  autoGenerateTrigger: string;
+  inlineReplenMaxUnits: number | null;
+  inlineReplenMaxCases: number | null;
+  urgentReplenThreshold: number | null;
+  stockoutPriority: number | null;
+  minMaxPriority: number | null;
+  scheduledReplenIntervalMinutes: number | null;
+  scheduledReplenEnabled: number | null;
+  pickPathOptimization: string | null;
+  maxOrdersPerWave: number | null;
+  maxItemsPerWave: number | null;
+  waveAutoRelease: number | null;
+  isActive: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -262,9 +275,9 @@ export default function Replenishment() {
   });
 
   const { data: warehouseSettings, isLoading: settingsLoading } = useQuery<WarehouseSettings>({
-    queryKey: ["/api/warehouse-settings"],
+    queryKey: ["/api/warehouse-settings/default"],
     queryFn: async () => {
-      const res = await fetch("/api/warehouse-settings", { credentials: "include" });
+      const res = await fetch("/api/warehouse-settings/default", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch settings");
       return res.json();
     },
@@ -272,8 +285,8 @@ export default function Replenishment() {
 
   const [settingsForm, setSettingsForm] = useState({
     replenMode: "queue",
-    shortPickAction: "generate_task",
-    hybridThreshold: "50",
+    shortPickAction: "partial_pick",
+    inlineReplenMaxUnits: "50",
   });
 
   // Sync settings form when data loads
@@ -282,15 +295,16 @@ export default function Replenishment() {
       setSettingsForm({
         replenMode: warehouseSettings.replenMode,
         shortPickAction: warehouseSettings.shortPickAction,
-        hybridThreshold: warehouseSettings.hybridThreshold?.toString() || "50",
+        inlineReplenMaxUnits: warehouseSettings.inlineReplenMaxUnits?.toString() || "50",
       });
     }
   }, [warehouseSettings]);
 
   const saveSettingsMutation = useMutation({
-    mutationFn: async (data: { replenMode: string; shortPickAction: string; hybridThreshold: number | null }) => {
-      const res = await fetch("/api/warehouse-settings", {
-        method: "PUT",
+    mutationFn: async (data: { replenMode: string; shortPickAction: string; inlineReplenMaxUnits: number | null }) => {
+      if (!warehouseSettings?.id) throw new Error("No settings to update");
+      const res = await fetch(`/api/warehouse-settings/${warehouseSettings.id}`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify(data),
@@ -300,7 +314,7 @@ export default function Replenishment() {
     },
     onSuccess: () => {
       toast({ title: "Settings saved" });
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings/default"] });
     },
     onError: () => {
       toast({ title: "Failed to save settings", variant: "destructive" });
@@ -1200,18 +1214,18 @@ export default function Replenishment() {
 
                     {settingsForm.replenMode === "hybrid" && (
                       <div className="ml-8 p-4 bg-muted/30 rounded-lg">
-                        <Label htmlFor="hybridThreshold">Hybrid Threshold (units)</Label>
+                        <Label htmlFor="inlineReplenMaxUnits">Inline Replen Max Units</Label>
                         <p className="text-sm text-muted-foreground mb-2">
                           Tasks below this quantity are handled inline, above go to queue
                         </p>
                         <Input
-                          id="hybridThreshold"
+                          id="inlineReplenMaxUnits"
                           type="number"
-                          value={settingsForm.hybridThreshold}
-                          onChange={(e) => setSettingsForm({ ...settingsForm, hybridThreshold: e.target.value })}
+                          value={settingsForm.inlineReplenMaxUnits}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, inlineReplenMaxUnits: e.target.value })}
                           className="w-32"
                           min="1"
-                          data-testid="input-hybrid-threshold"
+                          data-testid="input-inline-replen-max-units"
                         />
                       </div>
                     )}
@@ -1243,8 +1257,8 @@ export default function Replenishment() {
                       onClick={() => saveSettingsMutation.mutate({
                         replenMode: settingsForm.replenMode,
                         shortPickAction: settingsForm.shortPickAction,
-                        hybridThreshold: settingsForm.replenMode === "hybrid" 
-                          ? parseInt(settingsForm.hybridThreshold) || 50 
+                        inlineReplenMaxUnits: settingsForm.replenMode === "hybrid" 
+                          ? parseInt(settingsForm.inlineReplenMaxUnits) || 50 
                           : null,
                       })}
                       disabled={saveSettingsMutation.isPending}

@@ -60,7 +60,29 @@ The `inventory_transactions` table is an append-only ledger for a complete inven
 The receiving system handles inventory intake from vendors. It includes `vendors`, `receiving_orders` (with workflow), `receiving_lines` (with expected/received quantities and put-away location), and CSV bulk import functionality. Closing a receiving order generates `inventory_transactions` and updates `inventory_levels`.
 
 ### Replenishment Subsystem
-Automates inventory flow from bulk to forward pick locations using a product-centric design. `replen_rules` define product-level configurations (`catalogProductId`, `minQty`/`maxQty`, `replenMethod`). `replen_tasks` are generated as a work queue for warehouse workers, determining source and destination locations dynamically.
+Automates inventory flow from bulk to forward pick locations using a two-tier architecture:
+
+**Tier Defaults (`replen_tier_defaults`)**: Define replenishment rules by UOM hierarchy level. Each default specifies:
+- `hierarchyLevel`: Target UOM tier (1=each, 2=pack, 3=case, 4=pallet)
+- `sourceHierarchyLevel`: Source UOM tier to replenish from
+- `pickLocationType` / `sourceLocationType`: Location types for source and destination
+- `minQty` / `maxQty`: Trigger thresholds
+- `replenMethod`: case_break, full_case, or pallet_drop
+- `priority`: Lower = higher priority when multiple defaults match
+
+**SKU Overrides (`replen_rules`)**: Product-specific exceptions that override tier defaults. Null fields inherit from the matching tier default.
+
+**Generate Logic**: When generating tasks, the system:
+1. Scans all products with inventory in forward pick locations below minQty
+2. For each product, finds the highest-priority tier default where BOTH hierarchyLevel and sourceHierarchyLevel exist in the product's UOM variants
+3. Applies any SKU-specific overrides (null fields fall back to tier default)
+4. Creates replenishment tasks with source/destination locations
+
+**Warehouse Settings (`warehouse_settings`)**: Configure warehouse-level replenishment behavior:
+- `replenMode`: inline (pickers replen), queue (dedicated workers), hybrid (threshold-based)
+- `shortPickAction`: What happens when picker finds empty bin
+- `inlineReplenMaxUnits`: Threshold for hybrid mode
+- Additional wave planning and pick path settings
 
 ### Sync Health Monitoring
 The system monitors order sync health and alerts when issues are detected via an API endpoint (`/api/sync/health`), a dashboard alert banner, and optional email alerts. Thresholds are configured for detecting sync gaps, unsynced orders, and consecutive errors.
