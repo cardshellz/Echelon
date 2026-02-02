@@ -88,7 +88,15 @@ export async function registerRoutes(
       };
       
       req.session.user = safeUser;
-      res.json({ user: safeUser });
+      
+      // Explicitly save session before responding (fixes mobile browser issues)
+      req.session.save((err) => {
+        if (err) {
+          console.error("Session save error:", err);
+          return res.status(500).json({ error: "Session failed to save" });
+        }
+        res.json({ user: safeUser });
+      });
     } catch (error) {
       console.error("Login error:", error);
       res.status(500).json({ error: "Login failed" });
