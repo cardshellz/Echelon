@@ -78,11 +78,10 @@ interface InventoryItem {
   baseSku: string | null;
 }
 
-interface ReplenRule {
+interface ReplenTierDefault {
   id: number;
-  catalogProductId: number;
-  pickVariantId: number;
-  sourceVariantId: number;
+  hierarchyLevel: number;
+  sourceHierarchyLevel: number;
   pickLocationType: string;
   sourceLocationType: string;
   sourcePriority: string;
@@ -90,6 +89,23 @@ interface ReplenRule {
   maxQty: number | null;
   replenMethod: string;
   priority: number;
+  isActive: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ReplenRule {
+  id: number;
+  catalogProductId: number | null;
+  pickVariantId: number | null;
+  sourceVariantId: number | null;
+  pickLocationType: string | null;
+  sourceLocationType: string | null;
+  sourcePriority: string | null;
+  minQty: number | null;
+  maxQty: number | null;
+  replenMethod: string | null;
+  priority: number | null;
   isActive: number;
   createdAt: string;
   updatedAt: string;
@@ -137,28 +153,55 @@ const SOURCE_PRIORITIES = [
   { value: "smallest_first", label: "Smallest First (Consolidate)" },
 ];
 
+const REPLEN_METHODS = [
+  { value: "case_break", label: "Case Break" },
+  { value: "full_case", label: "Full Case" },
+  { value: "pallet_drop", label: "Pallet Drop" },
+];
+
+const HIERARCHY_LEVELS = [
+  { value: 1, label: "Level 1 (Each/Unit)" },
+  { value: 2, label: "Level 2 (Pack/Inner)" },
+  { value: 3, label: "Level 3 (Case/Outer)" },
+  { value: 4, label: "Level 4 (Pallet/Master)" },
+];
+
 export default function Replenishment() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState("tasks");
-  const [showRuleDialog, setShowRuleDialog] = useState(false);
+  const [showTierDefaultDialog, setShowTierDefaultDialog] = useState(false);
+  const [showOverrideDialog, setShowOverrideDialog] = useState(false);
   const [showTaskDialog, setShowTaskDialog] = useState(false);
   const [showCsvDialog, setShowCsvDialog] = useState(false);
-  const [editingRule, setEditingRule] = useState<ReplenRule | null>(null);
+  const [editingTierDefault, setEditingTierDefault] = useState<ReplenTierDefault | null>(null);
+  const [editingOverride, setEditingOverride] = useState<ReplenRule | null>(null);
   const [taskFilter, setTaskFilter] = useState("pending");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [ruleForm, setRuleForm] = useState({
-    catalogProductId: "",
-    pickVariantId: "",
-    sourceVariantId: "",
+  const [tierDefaultForm, setTierDefaultForm] = useState({
+    hierarchyLevel: "1",
+    sourceHierarchyLevel: "3",
     pickLocationType: "forward_pick",
     sourceLocationType: "bulk_storage",
     sourcePriority: "fifo",
-    minQty: "10",
+    minQty: "0",
     maxQty: "",
     replenMethod: "case_break",
     priority: "5",
+  });
+
+  const [overrideForm, setOverrideForm] = useState({
+    catalogProductId: "",
+    pickVariantId: "",
+    sourceVariantId: "",
+    pickLocationType: "",
+    sourceLocationType: "",
+    sourcePriority: "",
+    minQty: "",
+    maxQty: "",
+    replenMethod: "",
+    priority: "",
   });
 
   const [taskForm, setTaskForm] = useState({
@@ -170,7 +213,11 @@ export default function Replenishment() {
     notes: "",
   });
 
-  const { data: rules = [], isLoading: rulesLoading } = useQuery<ReplenRule[]>({
+  const { data: tierDefaults = [], isLoading: tierDefaultsLoading } = useQuery<ReplenTierDefault[]>({
+    queryKey: ["/api/replen/tier-defaults"],
+  });
+
+  const { data: overrides = [], isLoading: overridesLoading } = useQuery<ReplenRule[]>({
     queryKey: ["/api/replen/rules"],
   });
 
@@ -225,16 +272,16 @@ export default function Replenishment() {
     return variants.filter(v => v.inventoryItemId === productInventoryItemId);
   };
 
-  const createRuleMutation = useMutation({
-    mutationFn: async (data: typeof ruleForm) => {
-      const res = await fetch("/api/replen/rules", {
+  // Tier Default mutations
+  const createTierDefaultMutation = useMutation({
+    mutationFn: async (data: typeof tierDefaultForm) => {
+      const res = await fetch("/api/replen/tier-defaults", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          catalogProductId: parseInt(data.catalogProductId),
-          pickVariantId: parseInt(data.pickVariantId),
-          sourceVariantId: parseInt(data.sourceVariantId),
+          hierarchyLevel: parseInt(data.hierarchyLevel),
+          sourceHierarchyLevel: parseInt(data.sourceHierarchyLevel),
           pickLocationType: data.pickLocationType,
           sourceLocationType: data.sourceLocationType,
           sourcePriority: data.sourcePriority,
@@ -244,21 +291,90 @@ export default function Replenishment() {
           priority: parseInt(data.priority),
         }),
       });
-      if (!res.ok) throw new Error("Failed to create rule");
+      if (!res.ok) throw new Error("Failed to create tier default");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tier-defaults"] });
+      setShowTierDefaultDialog(false);
+      resetTierDefaultForm();
+      toast({ title: "Default rule created" });
+    },
+    onError: () => {
+      toast({ title: "Failed to create default rule", variant: "destructive" });
+    },
+  });
+
+  const updateTierDefaultMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenTierDefault> }) => {
+      const res = await fetch(`/api/replen/tier-defaults/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to update tier default");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tier-defaults"] });
+      setShowTierDefaultDialog(false);
+      setEditingTierDefault(null);
+      resetTierDefaultForm();
+      toast({ title: "Default rule updated" });
+    },
+  });
+
+  const deleteTierDefaultMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/replen/tier-defaults/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to delete tier default");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tier-defaults"] });
+      toast({ title: "Default rule deleted" });
+    },
+  });
+
+  // SKU Override mutations
+  const createOverrideMutation = useMutation({
+    mutationFn: async (data: typeof overrideForm) => {
+      const res = await fetch("/api/replen/rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          pickVariantId: data.pickVariantId ? parseInt(data.pickVariantId) : null,
+          sourceVariantId: data.sourceVariantId ? parseInt(data.sourceVariantId) : null,
+          pickLocationType: data.pickLocationType || null,
+          sourceLocationType: data.sourceLocationType || null,
+          sourcePriority: data.sourcePriority || null,
+          minQty: data.minQty ? parseInt(data.minQty) : null,
+          maxQty: data.maxQty ? parseInt(data.maxQty) : null,
+          replenMethod: data.replenMethod || null,
+          priority: data.priority ? parseInt(data.priority) : null,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create override");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/rules"] });
-      setShowRuleDialog(false);
-      resetRuleForm();
-      toast({ title: "Replen rule created" });
+      setShowOverrideDialog(false);
+      resetOverrideForm();
+      toast({ title: "SKU override created" });
     },
     onError: () => {
-      toast({ title: "Failed to create rule", variant: "destructive" });
+      toast({ title: "Failed to create override", variant: "destructive" });
     },
   });
 
-  const updateRuleMutation = useMutation({
+  const updateOverrideMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenRule> }) => {
       const res = await fetch(`/api/replen/rules/${id}`, {
         method: "PATCH",
@@ -266,30 +382,30 @@ export default function Replenishment() {
         credentials: "include",
         body: JSON.stringify(data),
       });
-      if (!res.ok) throw new Error("Failed to update rule");
+      if (!res.ok) throw new Error("Failed to update override");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/rules"] });
-      setShowRuleDialog(false);
-      setEditingRule(null);
-      resetRuleForm();
-      toast({ title: "Replen rule updated" });
+      setShowOverrideDialog(false);
+      setEditingOverride(null);
+      resetOverrideForm();
+      toast({ title: "SKU override updated" });
     },
   });
 
-  const deleteRuleMutation = useMutation({
+  const deleteOverrideMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/replen/rules/${id}`, {
         method: "DELETE",
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to delete rule");
+      if (!res.ok) throw new Error("Failed to delete override");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/rules"] });
-      toast({ title: "Replen rule deleted" });
+      toast({ title: "SKU override deleted" });
     },
   });
 
@@ -390,18 +506,32 @@ export default function Replenishment() {
     },
   });
 
-  const resetRuleForm = () => {
-    setRuleForm({
-      catalogProductId: "",
-      pickVariantId: "",
-      sourceVariantId: "",
+  const resetTierDefaultForm = () => {
+    setTierDefaultForm({
+      hierarchyLevel: "1",
+      sourceHierarchyLevel: "3",
       pickLocationType: "forward_pick",
       sourceLocationType: "bulk_storage",
       sourcePriority: "fifo",
-      minQty: "10",
+      minQty: "0",
       maxQty: "",
       replenMethod: "case_break",
       priority: "5",
+    });
+  };
+
+  const resetOverrideForm = () => {
+    setOverrideForm({
+      catalogProductId: "",
+      pickVariantId: "",
+      sourceVariantId: "",
+      pickLocationType: "",
+      sourceLocationType: "",
+      sourcePriority: "",
+      minQty: "",
+      maxQty: "",
+      replenMethod: "",
+      priority: "",
     });
   };
 
@@ -416,43 +546,85 @@ export default function Replenishment() {
     });
   };
 
-  const handleEditRule = (rule: ReplenRule) => {
-    setEditingRule(rule);
-    setRuleForm({
-      catalogProductId: rule.catalogProductId.toString(),
-      pickVariantId: rule.pickVariantId.toString(),
-      sourceVariantId: rule.sourceVariantId.toString(),
-      pickLocationType: rule.pickLocationType,
-      sourceLocationType: rule.sourceLocationType,
-      sourcePriority: rule.sourcePriority,
-      minQty: rule.minQty.toString(),
-      maxQty: rule.maxQty?.toString() || "",
-      replenMethod: rule.replenMethod,
-      priority: rule.priority.toString(),
+  const handleEditTierDefault = (tierDefault: ReplenTierDefault) => {
+    setEditingTierDefault(tierDefault);
+    setTierDefaultForm({
+      hierarchyLevel: tierDefault.hierarchyLevel.toString(),
+      sourceHierarchyLevel: tierDefault.sourceHierarchyLevel.toString(),
+      pickLocationType: tierDefault.pickLocationType,
+      sourceLocationType: tierDefault.sourceLocationType,
+      sourcePriority: tierDefault.sourcePriority,
+      minQty: tierDefault.minQty.toString(),
+      maxQty: tierDefault.maxQty?.toString() || "",
+      replenMethod: tierDefault.replenMethod,
+      priority: tierDefault.priority.toString(),
     });
-    setShowRuleDialog(true);
+    setShowTierDefaultDialog(true);
   };
 
-  const handleSaveRule = () => {
-    if (editingRule) {
-      updateRuleMutation.mutate({
-        id: editingRule.id,
+  const handleEditOverride = (override: ReplenRule) => {
+    setEditingOverride(override);
+    setOverrideForm({
+      catalogProductId: override.catalogProductId?.toString() || "",
+      pickVariantId: override.pickVariantId?.toString() || "",
+      sourceVariantId: override.sourceVariantId?.toString() || "",
+      pickLocationType: override.pickLocationType || "",
+      sourceLocationType: override.sourceLocationType || "",
+      sourcePriority: override.sourcePriority || "",
+      minQty: override.minQty?.toString() || "",
+      maxQty: override.maxQty?.toString() || "",
+      replenMethod: override.replenMethod || "",
+      priority: override.priority?.toString() || "",
+    });
+    setShowOverrideDialog(true);
+  };
+
+  const handleSaveTierDefault = () => {
+    if (editingTierDefault) {
+      updateTierDefaultMutation.mutate({
+        id: editingTierDefault.id,
         data: {
-          catalogProductId: parseInt(ruleForm.catalogProductId),
-          pickVariantId: parseInt(ruleForm.pickVariantId),
-          sourceVariantId: parseInt(ruleForm.sourceVariantId),
-          pickLocationType: ruleForm.pickLocationType,
-          sourceLocationType: ruleForm.sourceLocationType,
-          sourcePriority: ruleForm.sourcePriority,
-          minQty: parseInt(ruleForm.minQty) || 0,
-          maxQty: ruleForm.maxQty ? parseInt(ruleForm.maxQty) : null,
-          replenMethod: ruleForm.replenMethod,
-          priority: parseInt(ruleForm.priority),
+          hierarchyLevel: parseInt(tierDefaultForm.hierarchyLevel),
+          sourceHierarchyLevel: parseInt(tierDefaultForm.sourceHierarchyLevel),
+          pickLocationType: tierDefaultForm.pickLocationType,
+          sourceLocationType: tierDefaultForm.sourceLocationType,
+          sourcePriority: tierDefaultForm.sourcePriority,
+          minQty: parseInt(tierDefaultForm.minQty) || 0,
+          maxQty: tierDefaultForm.maxQty ? parseInt(tierDefaultForm.maxQty) : null,
+          replenMethod: tierDefaultForm.replenMethod,
+          priority: parseInt(tierDefaultForm.priority),
         },
       });
     } else {
-      createRuleMutation.mutate(ruleForm);
+      createTierDefaultMutation.mutate(tierDefaultForm);
     }
+  };
+
+  const handleSaveOverride = () => {
+    if (editingOverride) {
+      updateOverrideMutation.mutate({
+        id: editingOverride.id,
+        data: {
+          catalogProductId: overrideForm.catalogProductId ? parseInt(overrideForm.catalogProductId) : null,
+          pickVariantId: overrideForm.pickVariantId ? parseInt(overrideForm.pickVariantId) : null,
+          sourceVariantId: overrideForm.sourceVariantId ? parseInt(overrideForm.sourceVariantId) : null,
+          pickLocationType: overrideForm.pickLocationType || null,
+          sourceLocationType: overrideForm.sourceLocationType || null,
+          sourcePriority: overrideForm.sourcePriority || null,
+          minQty: overrideForm.minQty ? parseInt(overrideForm.minQty) : null,
+          maxQty: overrideForm.maxQty ? parseInt(overrideForm.maxQty) : null,
+          replenMethod: overrideForm.replenMethod || null,
+          priority: overrideForm.priority ? parseInt(overrideForm.priority) : null,
+        },
+      });
+    } else {
+      createOverrideMutation.mutate(overrideForm);
+    }
+  };
+
+  const getHierarchyLabel = (level: number) => {
+    const found = HIERARCHY_LEVELS.find(h => h.value === level);
+    return found?.label || `Level ${level}`;
   };
 
   const handleCsvUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -678,42 +850,40 @@ export default function Replenishment() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="rules" className="space-y-4">
-          <div className="flex justify-between items-center">
-            <p className="text-muted-foreground">
-              Product-based rules with dynamic source location lookup
-            </p>
-            <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
-                <Upload className="w-4 h-4 mr-2" />
-                Upload CSV
-              </Button>
-              <Button onClick={() => { resetRuleForm(); setEditingRule(null); setShowRuleDialog(true); }} data-testid="button-create-rule">
-                <Plus className="w-4 h-4 mr-2" />
-                Add Rule
-              </Button>
-            </div>
-          </div>
-
+        <TabsContent value="rules" className="space-y-6">
+          {/* Default Replen Rules Section */}
           <Card>
+            <CardHeader>
+              <div className="flex justify-between items-center">
+                <div>
+                  <CardTitle>Default Replen Rules</CardTitle>
+                  <CardDescription>
+                    Tier-based rules that apply to all products at each hierarchy level
+                  </CardDescription>
+                </div>
+                <Button onClick={() => { resetTierDefaultForm(); setEditingTierDefault(null); setShowTierDefaultDialog(true); }} data-testid="button-add-tier-default">
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add Default Rule
+                </Button>
+              </div>
+            </CardHeader>
             <CardContent className="p-0">
-              {rulesLoading ? (
+              {tierDefaultsLoading ? (
                 <div className="flex justify-center p-8">
                   <Loader2 className="w-6 h-6 animate-spin" />
                 </div>
-              ) : rules.length === 0 ? (
+              ) : tierDefaults.length === 0 ? (
                 <div className="text-center p-8 text-muted-foreground">
                   <Settings className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No replenishment rules configured</p>
-                  <p className="text-sm">Add rules to define how inventory flows by product and variant</p>
+                  <p>No default rules configured</p>
+                  <p className="text-sm">Add tier-based rules to define how inventory flows by hierarchy level</p>
                 </div>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Product</TableHead>
-                      <TableHead>Pick Variant</TableHead>
-                      <TableHead>Source Variant</TableHead>
+                      <TableHead>Tier Level</TableHead>
+                      <TableHead>Source Level</TableHead>
                       <TableHead>Location Types</TableHead>
                       <TableHead>Priority</TableHead>
                       <TableHead>Min/Max</TableHead>
@@ -723,45 +893,33 @@ export default function Replenishment() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rules.map((rule) => (
-                      <TableRow key={rule.id} data-testid={`row-rule-${rule.id}`}>
+                    {tierDefaults.map((tierDefault) => (
+                      <TableRow key={tierDefault.id} data-testid={`row-tier-default-${tierDefault.id}`}>
                         <TableCell>
-                          <div className="flex items-center gap-2">
-                            <Package className="w-4 h-4 text-blue-500" />
-                            <span className="text-sm font-medium">
-                              {rule.catalogProduct?.sku || rule.catalogProduct?.title || `Product ${rule.catalogProductId}`}
-                            </span>
-                          </div>
+                          <Badge className="bg-blue-500">{getHierarchyLabel(tierDefault.hierarchyLevel)}</Badge>
                         </TableCell>
                         <TableCell>
-                          <span className="text-sm">
-                            {rule.pickVariant?.sku || rule.pickVariant?.name || `Variant ${rule.pickVariantId}`}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <span className="text-sm">
-                            {rule.sourceVariant?.sku || rule.sourceVariant?.name || `Variant ${rule.sourceVariantId}`}
-                          </span>
+                          <Badge variant="outline">{getHierarchyLabel(tierDefault.sourceHierarchyLevel)}</Badge>
                         </TableCell>
                         <TableCell>
                           <div className="text-xs space-y-1">
-                            <div><Badge variant="outline" className="text-xs">{rule.pickLocationType}</Badge></div>
-                            <div className="text-muted-foreground">← {rule.sourceLocationType}</div>
+                            <div><Badge variant="outline" className="text-xs">{tierDefault.pickLocationType}</Badge></div>
+                            <div className="text-muted-foreground">← {tierDefault.sourceLocationType}</div>
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="secondary">{rule.sourcePriority}</Badge>
+                          <Badge variant="secondary">{tierDefault.sourcePriority}</Badge>
                         </TableCell>
                         <TableCell>
                           <span className="font-mono text-sm">
-                            {rule.minQty} / {rule.maxQty ?? "auto"}
+                            {tierDefault.minQty} / {tierDefault.maxQty ?? "auto"}
                           </span>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline">{rule.replenMethod}</Badge>
+                          <Badge variant="outline">{tierDefault.replenMethod}</Badge>
                         </TableCell>
                         <TableCell>
-                          {rule.isActive ? (
+                          {tierDefault.isActive ? (
                             <Badge className="bg-green-500">Active</Badge>
                           ) : (
                             <Badge variant="secondary">Inactive</Badge>
@@ -772,8 +930,8 @@ export default function Replenishment() {
                             <Button
                               size="icon"
                               variant="ghost"
-                              onClick={() => handleEditRule(rule)}
-                              data-testid={`button-edit-rule-${rule.id}`}
+                              onClick={() => handleEditTierDefault(tierDefault)}
+                              data-testid={`button-edit-tier-default-${tierDefault.id}`}
                             >
                               <Edit className="w-4 h-4" />
                             </Button>
@@ -781,11 +939,113 @@ export default function Replenishment() {
                               size="icon"
                               variant="ghost"
                               onClick={() => {
-                                if (confirm("Delete this replenishment rule?")) {
-                                  deleteRuleMutation.mutate(rule.id);
+                                if (confirm("Delete this default rule?")) {
+                                  deleteTierDefaultMutation.mutate(tierDefault.id);
                                 }
                               }}
-                              data-testid={`button-delete-rule-${rule.id}`}
+                              data-testid={`button-delete-tier-default-${tierDefault.id}`}
+                            >
+                              <Trash2 className="w-4 h-4 text-red-500" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* SKU Overrides Section */}
+          <Card>
+            <CardHeader>
+              <div className="flex justify-between items-center">
+                <div>
+                  <CardTitle>SKU Overrides</CardTitle>
+                  <CardDescription>
+                    Product-specific exceptions that override the default tier rules
+                  </CardDescription>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
+                    <Upload className="w-4 h-4 mr-2" />
+                    Upload CSV
+                  </Button>
+                  <Button onClick={() => { resetOverrideForm(); setEditingOverride(null); setShowOverrideDialog(true); }} data-testid="button-add-override">
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add Override
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              {overridesLoading ? (
+                <div className="flex justify-center p-8">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                </div>
+              ) : overrides.length === 0 ? (
+                <div className="text-center p-8 text-muted-foreground">
+                  <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                  <p>No SKU overrides configured</p>
+                  <p className="text-sm">Add overrides when a product needs different behavior than its tier default</p>
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Product</TableHead>
+                      <TableHead>Overrides</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {overrides.map((override) => (
+                      <TableRow key={override.id} data-testid={`row-override-${override.id}`}>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <Package className="w-4 h-4 text-blue-500" />
+                            <span className="text-sm font-medium">
+                              {override.catalogProduct?.sku || override.catalogProduct?.title || `Product ${override.catalogProductId}`}
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {override.replenMethod && <Badge variant="outline">{override.replenMethod}</Badge>}
+                            {override.minQty !== null && <Badge variant="secondary">Min: {override.minQty}</Badge>}
+                            {override.maxQty !== null && <Badge variant="secondary">Max: {override.maxQty}</Badge>}
+                            {override.sourcePriority && <Badge variant="secondary">{override.sourcePriority}</Badge>}
+                            {override.pickLocationType && <Badge variant="outline">{override.pickLocationType}</Badge>}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {override.isActive ? (
+                            <Badge className="bg-green-500">Active</Badge>
+                          ) : (
+                            <Badge variant="secondary">Inactive</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex gap-1">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => handleEditOverride(override)}
+                              data-testid={`button-edit-override-${override.id}`}
+                            >
+                              <Edit className="w-4 h-4" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => {
+                                if (confirm("Delete this SKU override?")) {
+                                  deleteOverrideMutation.mutate(override.id);
+                                }
+                              }}
+                              data-testid={`button-delete-override-${override.id}`}
                             >
                               <Trash2 className="w-4 h-4 text-red-500" />
                             </Button>
@@ -801,68 +1061,45 @@ export default function Replenishment() {
         </TabsContent>
       </Tabs>
 
-      {/* Rule Dialog */}
-      <Dialog open={showRuleDialog} onOpenChange={setShowRuleDialog}>
+      {/* Tier Default Dialog */}
+      <Dialog open={showTierDefaultDialog} onOpenChange={setShowTierDefaultDialog}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingRule ? "Edit Replen Rule" : "Create Replen Rule"}</DialogTitle>
+            <DialogTitle>{editingTierDefault ? "Edit Default Rule" : "Create Default Rule"}</DialogTitle>
             <DialogDescription>
-              Define product-based replenishment with dynamic source location lookup
+              Define tier-based replenishment settings by hierarchy level
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div>
-              <Label>Product</Label>
-              <Select 
-                value={ruleForm.catalogProductId} 
-                onValueChange={(v) => setRuleForm({ ...ruleForm, catalogProductId: v })}
-              >
-                <SelectTrigger data-testid="select-product">
-                  <SelectValue placeholder="Select product..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {products.map((p) => (
-                    <SelectItem key={p.id} value={p.id.toString()}>
-                      {p.sku || p.title || `Product ${p.id}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label>Pick Variant (Destination)</Label>
+                <Label>Target Tier Level</Label>
                 <Select 
-                  value={ruleForm.pickVariantId} 
-                  onValueChange={(v) => setRuleForm({ ...ruleForm, pickVariantId: v })}
+                  value={tierDefaultForm.hierarchyLevel} 
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, hierarchyLevel: v })}
                 >
-                  <SelectTrigger data-testid="select-pick-variant">
-                    <SelectValue placeholder="Select variant..." />
+                  <SelectTrigger data-testid="select-hierarchy-level">
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {getVariantsForProduct(ruleForm.catalogProductId).map((v) => (
-                      <SelectItem key={v.id} value={v.id.toString()}>
-                        {v.sku || v.name} ({v.unitsPerVariant} units)
-                      </SelectItem>
+                    {HIERARCHY_LEVELS.map((h) => (
+                      <SelectItem key={h.value} value={h.value.toString()}>{h.label}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
               <div>
-                <Label>Source Variant</Label>
+                <Label>Source Tier Level</Label>
                 <Select 
-                  value={ruleForm.sourceVariantId} 
-                  onValueChange={(v) => setRuleForm({ ...ruleForm, sourceVariantId: v })}
+                  value={tierDefaultForm.sourceHierarchyLevel} 
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourceHierarchyLevel: v })}
                 >
-                  <SelectTrigger data-testid="select-source-variant">
-                    <SelectValue placeholder="Select variant..." />
+                  <SelectTrigger data-testid="select-source-hierarchy-level">
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {getVariantsForProduct(ruleForm.catalogProductId).map((v) => (
-                      <SelectItem key={v.id} value={v.id.toString()}>
-                        {v.sku || v.name} ({v.unitsPerVariant} units)
-                      </SelectItem>
+                    {HIERARCHY_LEVELS.map((h) => (
+                      <SelectItem key={h.value} value={h.value.toString()}>{h.label}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -873,10 +1110,10 @@ export default function Replenishment() {
               <div>
                 <Label>Pick Location Type</Label>
                 <Select 
-                  value={ruleForm.pickLocationType} 
-                  onValueChange={(v) => setRuleForm({ ...ruleForm, pickLocationType: v })}
+                  value={tierDefaultForm.pickLocationType} 
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, pickLocationType: v })}
                 >
-                  <SelectTrigger data-testid="select-pick-location-type">
+                  <SelectTrigger data-testid="select-tier-pick-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -889,10 +1126,10 @@ export default function Replenishment() {
               <div>
                 <Label>Source Location Type</Label>
                 <Select 
-                  value={ruleForm.sourceLocationType} 
-                  onValueChange={(v) => setRuleForm({ ...ruleForm, sourceLocationType: v })}
+                  value={tierDefaultForm.sourceLocationType} 
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourceLocationType: v })}
                 >
-                  <SelectTrigger data-testid="select-source-location-type">
+                  <SelectTrigger data-testid="select-tier-source-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -907,10 +1144,10 @@ export default function Replenishment() {
             <div>
               <Label>Source Priority</Label>
               <Select 
-                value={ruleForm.sourcePriority} 
-                onValueChange={(v) => setRuleForm({ ...ruleForm, sourcePriority: v })}
+                value={tierDefaultForm.sourcePriority} 
+                onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourcePriority: v })}
               >
-                <SelectTrigger data-testid="select-source-priority">
+                <SelectTrigger data-testid="select-tier-source-priority">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -926,19 +1163,19 @@ export default function Replenishment() {
                 <Label>Min Qty (Trigger)</Label>
                 <Input
                   type="number"
-                  value={ruleForm.minQty}
-                  onChange={(e) => setRuleForm({ ...ruleForm, minQty: e.target.value })}
-                  data-testid="input-min-qty"
+                  value={tierDefaultForm.minQty}
+                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, minQty: e.target.value })}
+                  data-testid="input-tier-min-qty"
                 />
               </div>
               <div>
                 <Label>Max Qty (Fill To)</Label>
                 <Input
                   type="number"
-                  value={ruleForm.maxQty}
-                  onChange={(e) => setRuleForm({ ...ruleForm, maxQty: e.target.value })}
-                  placeholder="Auto (1 source unit)"
-                  data-testid="input-max-qty"
+                  value={tierDefaultForm.maxQty}
+                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, maxQty: e.target.value })}
+                  placeholder="Auto (bin capacity)"
+                  data-testid="input-tier-max-qty"
                 />
               </div>
             </div>
@@ -947,16 +1184,16 @@ export default function Replenishment() {
               <div>
                 <Label>Replen Method</Label>
                 <Select 
-                  value={ruleForm.replenMethod} 
-                  onValueChange={(v) => setRuleForm({ ...ruleForm, replenMethod: v })}
+                  value={tierDefaultForm.replenMethod} 
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, replenMethod: v })}
                 >
-                  <SelectTrigger data-testid="select-replen-method">
+                  <SelectTrigger data-testid="select-tier-replen-method">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="case_break">Case Break</SelectItem>
-                    <SelectItem value="full_case">Full Case</SelectItem>
-                    <SelectItem value="pallet_drop">Pallet Drop</SelectItem>
+                    {REPLEN_METHODS.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -966,23 +1203,168 @@ export default function Replenishment() {
                   type="number"
                   min="1"
                   max="99"
-                  value={ruleForm.priority}
-                  onChange={(e) => setRuleForm({ ...ruleForm, priority: e.target.value })}
-                  data-testid="input-priority"
+                  value={tierDefaultForm.priority}
+                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, priority: e.target.value })}
+                  data-testid="input-tier-priority"
                 />
               </div>
             </div>
 
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowRuleDialog(false)}>
+              <Button variant="outline" onClick={() => setShowTierDefaultDialog(false)}>
                 Cancel
               </Button>
               <Button 
-                onClick={handleSaveRule}
-                disabled={!ruleForm.catalogProductId || !ruleForm.pickVariantId || !ruleForm.sourceVariantId}
-                data-testid="button-save-rule"
+                onClick={handleSaveTierDefault}
+                data-testid="button-save-tier-default"
               >
-                {editingRule ? "Update Rule" : "Create Rule"}
+                {editingTierDefault ? "Update Rule" : "Create Rule"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* SKU Override Dialog */}
+      <Dialog open={showOverrideDialog} onOpenChange={setShowOverrideDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editingOverride ? "Edit SKU Override" : "Create SKU Override"}</DialogTitle>
+            <DialogDescription>
+              Override default tier settings for a specific product (leave fields empty to use tier defaults)
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Product (Required)</Label>
+              <Select 
+                value={overrideForm.catalogProductId} 
+                onValueChange={(v) => setOverrideForm({ ...overrideForm, catalogProductId: v })}
+              >
+                <SelectTrigger data-testid="select-override-product">
+                  <SelectValue placeholder="Select product..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {products.map((p) => (
+                    <SelectItem key={p.id} value={p.id.toString()}>
+                      {p.sku || p.title || `Product ${p.id}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Pick Variant (Optional)</Label>
+                <Select 
+                  value={overrideForm.pickVariantId} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, pickVariantId: v })}
+                >
+                  <SelectTrigger data-testid="select-override-pick-variant">
+                    <SelectValue placeholder="Use default..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use default</SelectItem>
+                    {getVariantsForProduct(overrideForm.catalogProductId).map((v) => (
+                      <SelectItem key={v.id} value={v.id.toString()}>
+                        {v.sku || v.name} ({v.unitsPerVariant} units)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Source Variant (Optional)</Label>
+                <Select 
+                  value={overrideForm.sourceVariantId} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourceVariantId: v })}
+                >
+                  <SelectTrigger data-testid="select-override-source-variant">
+                    <SelectValue placeholder="Use default..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use default</SelectItem>
+                    {getVariantsForProduct(overrideForm.catalogProductId).map((v) => (
+                      <SelectItem key={v.id} value={v.id.toString()}>
+                        {v.sku || v.name} ({v.unitsPerVariant} units)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Replen Method (Optional)</Label>
+                <Select 
+                  value={overrideForm.replenMethod} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, replenMethod: v })}
+                >
+                  <SelectTrigger data-testid="select-override-replen-method">
+                    <SelectValue placeholder="Use default..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use default</SelectItem>
+                    {REPLEN_METHODS.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label>Source Priority (Optional)</Label>
+                <Select 
+                  value={overrideForm.sourcePriority} 
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, sourcePriority: v })}
+                >
+                  <SelectTrigger data-testid="select-override-source-priority">
+                    <SelectValue placeholder="Use default..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use default</SelectItem>
+                    {SOURCE_PRIORITIES.map((p) => (
+                      <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Min Qty Override</Label>
+                <Input
+                  type="number"
+                  value={overrideForm.minQty}
+                  onChange={(e) => setOverrideForm({ ...overrideForm, minQty: e.target.value })}
+                  placeholder="Use default"
+                  data-testid="input-override-min-qty"
+                />
+              </div>
+              <div>
+                <Label>Max Qty Override</Label>
+                <Input
+                  type="number"
+                  value={overrideForm.maxQty}
+                  onChange={(e) => setOverrideForm({ ...overrideForm, maxQty: e.target.value })}
+                  placeholder="Use default"
+                  data-testid="input-override-max-qty"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowOverrideDialog(false)}>
+                Cancel
+              </Button>
+              <Button 
+                onClick={handleSaveOverride}
+                disabled={!overrideForm.catalogProductId}
+                data-testid="button-save-override"
+              >
+                {editingOverride ? "Update Override" : "Create Override"}
               </Button>
             </div>
           </div>

@@ -7907,6 +7907,82 @@ export async function registerRoutes(
 
   // ===== REPLENISHMENT API =====
   
+  // Tier Defaults - default rules by UOM hierarchy level
+  app.get("/api/replen/tier-defaults", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const tierDefaults = await storage.getAllReplenTierDefaults();
+      res.json(tierDefaults);
+    } catch (error) {
+      console.error("Error fetching tier defaults:", error);
+      res.status(500).json({ error: "Failed to fetch tier defaults" });
+    }
+  });
+  
+  app.get("/api/replen/tier-defaults/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const tierDefault = await storage.getReplenTierDefaultById(id);
+      if (!tierDefault) {
+        return res.status(404).json({ error: "Tier default not found" });
+      }
+      res.json(tierDefault);
+    } catch (error) {
+      console.error("Error fetching tier default:", error);
+      res.status(500).json({ error: "Failed to fetch tier default" });
+    }
+  });
+  
+  app.post("/api/replen/tier-defaults", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const data = req.body;
+      const tierDefault = await storage.createReplenTierDefault({
+        hierarchyLevel: data.hierarchyLevel,
+        sourceHierarchyLevel: data.sourceHierarchyLevel,
+        pickLocationType: data.pickLocationType || "forward_pick",
+        sourceLocationType: data.sourceLocationType || "bulk_storage",
+        sourcePriority: data.sourcePriority || "fifo",
+        minQty: data.minQty || 0,
+        maxQty: data.maxQty || null,
+        replenMethod: data.replenMethod || "case_break",
+        priority: data.priority || 5,
+        isActive: data.isActive ?? 1,
+      });
+      res.status(201).json(tierDefault);
+    } catch (error) {
+      console.error("Error creating tier default:", error);
+      res.status(500).json({ error: "Failed to create tier default" });
+    }
+  });
+  
+  app.patch("/api/replen/tier-defaults/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const tierDefault = await storage.updateReplenTierDefault(id, req.body);
+      if (!tierDefault) {
+        return res.status(404).json({ error: "Tier default not found" });
+      }
+      res.json(tierDefault);
+    } catch (error) {
+      console.error("Error updating tier default:", error);
+      res.status(500).json({ error: "Failed to update tier default" });
+    }
+  });
+  
+  app.delete("/api/replen/tier-defaults/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteReplenTierDefault(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Tier default not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting tier default:", error);
+      res.status(500).json({ error: "Failed to delete tier default" });
+    }
+  });
+  
+  // SKU Overrides (product-specific exceptions to tier defaults)
   app.get("/api/replen/rules", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const rules = await storage.getAllReplenRules();
