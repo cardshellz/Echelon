@@ -371,6 +371,7 @@ export const warehouses = pgTable("warehouses", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 20 }).notNull().unique(), // Short code: "EAST", "WEST", "HQ"
   name: varchar("name", { length: 200 }).notNull(), // Full name: "East Coast Distribution Center"
+  warehouseType: varchar("warehouse_type", { length: 30 }).notNull().default("fulfillment_center"), // fulfillment_center, bulk_storage, distribution_center
   address: text("address"),
   city: varchar("city", { length: 100 }),
   state: varchar("state", { length: 50 }),
@@ -688,6 +689,7 @@ export type AutoGenerateTrigger = typeof autoGenerateTriggerEnum[number];
 // Warehouse settings - configurable per warehouse
 export const warehouseSettings = pgTable("warehouse_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id), // Link to actual warehouse (null = DEFAULT global settings)
   warehouseCode: varchar("warehouse_code", { length: 50 }).notNull().unique().default("DEFAULT"),
   warehouseName: varchar("warehouse_name", { length: 100 }).notNull().default("Main Warehouse"),
   
@@ -739,6 +741,7 @@ export type ReplenTaskStatus = typeof replenTaskStatusEnum[number];
 // These are the DEFAULT rules that apply to all products at a given tier
 export const replenTierDefaults = pgTable("replen_tier_defaults", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this rule applies to (null = global default for all warehouses)
   hierarchyLevel: integer("hierarchy_level").notNull(), // Which tier this applies to (1=each, 2=pack, 3=case, etc.)
   sourceHierarchyLevel: integer("source_hierarchy_level").notNull(), // What tier to pull from
   pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("forward_pick"),
