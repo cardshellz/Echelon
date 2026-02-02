@@ -130,6 +130,8 @@ interface ReplenTask {
   status: string;
   priority: number;
   triggeredBy: string;
+  executionMode: string;
+  warehouseId: number | null;
   createdBy: string | null;
   assignedTo: string | null;
   assignedAt: string | null;
@@ -285,7 +287,7 @@ export default function Replenishment() {
   const { data: warehouses = [] } = useQuery<WarehouseType[]>({
     queryKey: ["/api/warehouses"],
     queryFn: async () => {
-      const res = await fetch("/api/warehouses");
+      const res = await fetch("/api/warehouses", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch warehouses");
       return res.json();
     },
@@ -806,14 +808,13 @@ export default function Replenishment() {
   const filteredTasks = tasks.filter((task) => {
     // Warehouse filter
     if (warehouseFilter !== "all") {
-      const taskWarehouseId = (task as any).warehouseId;
-      if (taskWarehouseId !== parseInt(warehouseFilter)) {
+      if (task.warehouseId !== parseInt(warehouseFilter)) {
         return false;
       }
     }
     // Mode filter
     if (modeFilter !== "all") {
-      const taskMode = (task as any).executionMode || "queue";
+      const taskMode = task.executionMode || "queue";
       if (taskMode !== modeFilter) {
         return false;
       }
@@ -983,7 +984,7 @@ export default function Replenishment() {
                           </div>
                         </TableCell>
                         <TableCell>{getStatusBadge(task.status)}</TableCell>
-                        <TableCell>{getModeBadge((task as any).executionMode)}</TableCell>
+                        <TableCell>{getModeBadge(task.executionMode)}</TableCell>
                         <TableCell>{getTriggerBadge(task.triggeredBy)}</TableCell>
                         <TableCell>
                           <span className="text-sm text-muted-foreground">
