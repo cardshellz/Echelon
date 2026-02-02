@@ -134,6 +134,7 @@ export default function CycleCounts() {
   const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "variance" | "ok">("all");
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -223,11 +224,15 @@ export default function CycleCounts() {
       if (!res.ok) throw new Error("Failed to record count");
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
       toast({ 
         title: "Count recorded", 
         description: data.varianceType ? `Variance detected: ${data.varianceQty}` : "No variance" 
       });
+      // Clear any draft for the item that was just counted (handles all flows)
+      if (selectedCount) {
+        clearDraft(selectedCount, variables.itemId);
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
       setCountDialogOpen(false);
       setSelectedItem(null);
@@ -373,11 +378,24 @@ export default function CycleCounts() {
     }
   };
 
-  const filteredItems = cycleCountDetail?.items.filter(item => 
-    !searchQuery || 
-    item.locationCode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    item.expectedSku?.toLowerCase().includes(searchQuery.toLowerCase())
-  ) || [];
+  const filteredItems = cycleCountDetail?.items.filter(item => {
+    const matchesSearch = !searchQuery || 
+      item.locationCode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      item.expectedSku?.toLowerCase().includes(searchQuery.toLowerCase());
+    
+    if (!matchesSearch) return false;
+    
+    switch (statusFilter) {
+      case "pending":
+        return item.status === "pending";
+      case "variance":
+        return item.varianceType && item.status !== "approved";
+      case "ok":
+        return item.status !== "pending" && !item.varianceType;
+      default:
+        return true;
+    }
+  }) || [];
 
   const handleCountClick = (item: CycleCountItem) => {
     setSelectedItem(item);
@@ -403,6 +421,36 @@ export default function CycleCounts() {
   const [quickCountQty, setQuickCountQty] = useState("");
   const [differentSkuMode, setDifferentSkuMode] = useState(false);
   const [foundSku, setFoundSku] = useState("");
+  
+  // Draft storage key for local persistence
+  const getDraftKey = (cycleCountId: number, itemId: number) => 
+    `cycle-count-draft-${cycleCountId}-${itemId}`;
+  
+  // Save draft to local storage
+  const saveDraft = (cycleCountId: number, itemId: number, qty: string, sku: string) => {
+    if (qty !== "") {
+      localStorage.setItem(getDraftKey(cycleCountId, itemId), JSON.stringify({ qty, sku, savedAt: Date.now() }));
+    }
+  };
+  
+  // Load draft from local storage
+  const loadDraft = (cycleCountId: number, itemId: number): { qty: string; sku: string } | null => {
+    const stored = localStorage.getItem(getDraftKey(cycleCountId, itemId));
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        return { qty: parsed.qty, sku: parsed.sku };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+  
+  // Clear draft from local storage
+  const clearDraft = (cycleCountId: number, itemId: number) => {
+    localStorage.removeItem(getDraftKey(cycleCountId, itemId));
+  };
 
   if (selectedCount && cycleCountDetail) {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
@@ -425,10 +473,10 @@ export default function CycleCounts() {
         }
       }, {
         onSuccess: () => {
-          setQuickCountQty("");
-          setDifferentSkuMode(false);
-          setFoundSku("");
-          // Auto-advance to next bin
+          // Clear the draft after successful submit
+          clearDraft(cycleCountDetail.id, currentItem.id);
+          // Note: useEffect will handle loading draft for next bin and resetting state
+          // Auto-advance to next bin (useEffect handles draft loading)
           if (currentBinIndex < pendingItems.length - 1) {
             setCurrentBinIndex(currentBinIndex + 1);
           }
@@ -436,13 +484,49 @@ export default function CycleCounts() {
       });
     };
     
+    // Exit handler - save draft to local storage (not a real count)
+    const handleExitCountMode = () => {
+      if (quickCountQty !== "" && currentItem) {
+        // Save as draft to local storage - not a real count
+        const skuToSubmit = differentSkuMode ? foundSku : currentItem.expectedSku;
+        saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSubmit || "");
+        toast({ title: "Draft saved", description: `Progress saved for ${currentItem.locationCode}. Resume counting to submit.` });
+      }
+      setQuickCountQty("");
+      setDifferentSkuMode(false);
+      setFoundSku("");
+      setMobileCountMode(false);
+    };
+    
+    // Centralized draft loading via useEffect - triggers on bin change or entering mobile mode
+    React.useEffect(() => {
+      if (mobileCountMode && currentItem) {
+        const draft = loadDraft(cycleCountDetail.id, currentItem.id);
+        if (draft) {
+          setQuickCountQty(draft.qty);
+          if (draft.sku && draft.sku !== currentItem.expectedSku) {
+            setDifferentSkuMode(true);
+            setFoundSku(draft.sku);
+          } else {
+            setDifferentSkuMode(false);
+            setFoundSku("");
+          }
+        } else {
+          // No draft - reset all state to prevent leakage
+          setQuickCountQty("");
+          setDifferentSkuMode(false);
+          setFoundSku("");
+        }
+      }
+    }, [mobileCountMode, currentBinIndex, currentItem?.id]);
+    
     // Mobile counting view
     if (mobileCountMode && pendingItems.length > 0) {
       return (
         <div className="flex flex-col h-full bg-slate-50">
           {/* Header */}
           <div className="bg-white border-b px-4 py-3 flex items-center justify-between">
-            <Button variant="ghost" size="sm" onClick={() => setMobileCountMode(false)}>
+            <Button variant="ghost" size="sm" onClick={handleExitCountMode}>
               <RotateCcw className="h-4 w-4 mr-2" /> Exit
             </Button>
             <div className="text-center">
@@ -527,7 +611,15 @@ export default function CycleCounts() {
                 variant="outline" 
                 size="lg"
                 className="h-14"
-                onClick={() => setCurrentBinIndex(Math.max(0, currentBinIndex - 1))}
+                onClick={() => {
+                  // Save current draft before navigating
+                  if (quickCountQty !== "" && currentItem) {
+                    const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
+                    saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
+                  }
+                  // useEffect will handle loading drafts when currentBinIndex changes
+                  setCurrentBinIndex(Math.max(0, currentBinIndex - 1));
+                }}
                 disabled={currentBinIndex === 0}
               >
                 Prev
@@ -546,7 +638,15 @@ export default function CycleCounts() {
                 variant="outline" 
                 size="lg"
                 className="h-14"
-                onClick={() => setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1))}
+                onClick={() => {
+                  // Save current draft before navigating
+                  if (quickCountQty !== "" && currentItem) {
+                    const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
+                    saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
+                  }
+                  // useEffect will handle loading drafts when currentBinIndex changes
+                  setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1));
+                }}
                 disabled={currentBinIndex === pendingItems.length - 1}
               >
                 Skip
@@ -735,7 +835,7 @@ export default function CycleCounts() {
               className="flex-1 md:flex-none"
               onClick={() => {
                 setCurrentBinIndex(0);
-                setQuickCountQty("");
+                // useEffect will handle loading drafts when mobileCountMode becomes true
                 setMobileCountMode(true);
               }}
               data-testid="button-start-counting"
@@ -765,25 +865,41 @@ export default function CycleCounts() {
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
-          <Card>
+          <Card 
+            className={`cursor-pointer transition-all hover:ring-2 hover:ring-primary/50 ${statusFilter === "all" ? "ring-2 ring-primary" : ""}`}
+            onClick={() => setStatusFilter("all")}
+            data-testid="card-filter-all"
+          >
             <CardContent className="pt-4 p-3 md:p-6">
               <div className="text-xl md:text-2xl font-bold">{cycleCountDetail.totalBins}</div>
               <div className="text-xs md:text-sm text-muted-foreground">Total</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card 
+            className={`cursor-pointer transition-all hover:ring-2 hover:ring-blue-500/50 ${statusFilter === "pending" ? "ring-2 ring-blue-500" : ""}`}
+            onClick={() => setStatusFilter("pending")}
+            data-testid="card-filter-pending"
+          >
             <CardContent className="pt-4 p-3 md:p-6">
               <div className="text-xl md:text-2xl font-bold">{pendingCount}</div>
               <div className="text-xs md:text-sm text-muted-foreground">Pending</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card 
+            className={`cursor-pointer transition-all hover:ring-2 hover:ring-amber-500/50 ${statusFilter === "variance" ? "ring-2 ring-amber-500" : ""}`}
+            onClick={() => setStatusFilter("variance")}
+            data-testid="card-filter-variance"
+          >
             <CardContent className="pt-4 p-3 md:p-6">
               <div className="text-xl md:text-2xl font-bold text-amber-600">{varianceCount}</div>
               <div className="text-xs md:text-sm text-muted-foreground">Variances</div>
             </CardContent>
           </Card>
-          <Card>
+          <Card 
+            className={`cursor-pointer transition-all hover:ring-2 hover:ring-emerald-500/50 ${statusFilter === "ok" ? "ring-2 ring-emerald-500" : ""}`}
+            onClick={() => setStatusFilter("ok")}
+            data-testid="card-filter-ok"
+          >
             <CardContent className="pt-4 p-3 md:p-6">
               <div className="text-xl md:text-2xl font-bold text-emerald-600">
                 {cycleCountDetail.countedBins - varianceCount}
