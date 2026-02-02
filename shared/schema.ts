@@ -670,8 +670,66 @@ export const replenMethodEnum = ["case_break", "full_case", "pallet_drop", "manu
 export type ReplenMethod = typeof replenMethodEnum[number];
 
 // Replenishment trigger types
-export const replenTriggerEnum = ["min_max", "wave", "manual", "stockout"] as const;
+export const replenTriggerEnum = ["min_max", "wave", "manual", "stockout", "inline_pick"] as const;
 export type ReplenTrigger = typeof replenTriggerEnum[number];
+
+// Warehouse replenishment mode - who does replen work
+export const replenModeEnum = ["inline", "queue", "hybrid"] as const;
+export type ReplenMode = typeof replenModeEnum[number];
+
+// Short pick action - what happens when picker encounters shortage
+export const shortPickActionEnum = ["pause_and_replen", "partial_pick", "skip_to_next", "block_order"] as const;
+export type ShortPickAction = typeof shortPickActionEnum[number];
+
+// Auto-generate trigger - when replen tasks are automatically created
+export const autoGenerateTriggerEnum = ["after_pick", "after_wave", "scheduled", "manual_only"] as const;
+export type AutoGenerateTrigger = typeof autoGenerateTriggerEnum[number];
+
+// Warehouse settings - configurable per warehouse
+export const warehouseSettings = pgTable("warehouse_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseCode: varchar("warehouse_code", { length: 50 }).notNull().unique().default("DEFAULT"),
+  warehouseName: varchar("warehouse_name", { length: 100 }).notNull().default("Main Warehouse"),
+  
+  // Replenishment workflow settings
+  replenMode: varchar("replen_mode", { length: 20 }).notNull().default("queue"), // inline, queue, hybrid
+  shortPickAction: varchar("short_pick_action", { length: 30 }).notNull().default("partial_pick"), // pause_and_replen, partial_pick, skip_to_next, block_order
+  autoGenerateTrigger: varchar("auto_generate_trigger", { length: 30 }).notNull().default("manual_only"), // after_pick, after_wave, scheduled, manual_only
+  
+  // Hybrid mode thresholds
+  inlineReplenMaxUnits: integer("inline_replen_max_units").default(50), // Max units for inline replen (larger goes to queue)
+  inlineReplenMaxCases: integer("inline_replen_max_cases").default(2), // Max cases picker can grab inline
+  
+  // Priority settings
+  urgentReplenThreshold: integer("urgent_replen_threshold").default(0), // Qty at which replen becomes urgent priority
+  stockoutPriority: integer("stockout_priority").default(1), // Priority for stockout-triggered tasks
+  minMaxPriority: integer("min_max_priority").default(5), // Priority for min/max triggered tasks
+  
+  // Scheduling settings (for scheduled mode)
+  scheduledReplenIntervalMinutes: integer("scheduled_replen_interval_minutes").default(30),
+  scheduledReplenEnabled: integer("scheduled_replen_enabled").default(0),
+  
+  // Pick path optimization
+  pickPathOptimization: varchar("pick_path_optimization", { length: 30 }).default("zone_sequence"), // zone_sequence, shortest_path, fifo
+  
+  // Wave planning settings
+  maxOrdersPerWave: integer("max_orders_per_wave").default(50),
+  maxItemsPerWave: integer("max_items_per_wave").default(500),
+  waveAutoRelease: integer("wave_auto_release").default(0), // Auto-release waves when full
+  
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertWarehouseSettingsSchema = createInsertSchema(warehouseSettings).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertWarehouseSettings = z.infer<typeof insertWarehouseSettingsSchema>;
+export type WarehouseSettings = typeof warehouseSettings.$inferSelect;
 
 // Replenishment task status workflow
 export const replenTaskStatusEnum = ["pending", "assigned", "in_progress", "completed", "cancelled", "blocked"] as const;

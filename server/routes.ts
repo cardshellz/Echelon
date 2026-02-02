@@ -7905,6 +7905,105 @@ export async function registerRoutes(
     }
   });
 
+  // ===== WAREHOUSE SETTINGS API =====
+  
+  app.get("/api/warehouse-settings", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      const settings = await storage.getAllWarehouseSettings();
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching warehouse settings:", error);
+      res.status(500).json({ error: "Failed to fetch warehouse settings" });
+    }
+  });
+  
+  app.get("/api/warehouse-settings/default", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      let settings = await storage.getDefaultWarehouseSettings();
+      if (!settings) {
+        settings = await storage.createWarehouseSettings({
+          warehouseCode: "DEFAULT",
+          warehouseName: "Main Warehouse",
+        });
+      }
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching default warehouse settings:", error);
+      res.status(500).json({ error: "Failed to fetch default warehouse settings" });
+    }
+  });
+  
+  app.get("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const settings = await storage.getWarehouseSettingsById(id);
+      if (!settings) {
+        return res.status(404).json({ error: "Warehouse settings not found" });
+      }
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching warehouse settings:", error);
+      res.status(500).json({ error: "Failed to fetch warehouse settings" });
+    }
+  });
+  
+  app.post("/api/warehouse-settings", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      const data = req.body;
+      const settings = await storage.createWarehouseSettings({
+        warehouseCode: data.warehouseCode || "DEFAULT",
+        warehouseName: data.warehouseName || "Main Warehouse",
+        replenMode: data.replenMode || "queue",
+        shortPickAction: data.shortPickAction || "partial_pick",
+        autoGenerateTrigger: data.autoGenerateTrigger || "manual_only",
+        inlineReplenMaxUnits: data.inlineReplenMaxUnits || 50,
+        inlineReplenMaxCases: data.inlineReplenMaxCases || 2,
+        urgentReplenThreshold: data.urgentReplenThreshold || 0,
+        stockoutPriority: data.stockoutPriority || 1,
+        minMaxPriority: data.minMaxPriority || 5,
+        scheduledReplenIntervalMinutes: data.scheduledReplenIntervalMinutes || 30,
+        scheduledReplenEnabled: data.scheduledReplenEnabled || 0,
+        pickPathOptimization: data.pickPathOptimization || "zone_sequence",
+        maxOrdersPerWave: data.maxOrdersPerWave || 50,
+        maxItemsPerWave: data.maxItemsPerWave || 500,
+        waveAutoRelease: data.waveAutoRelease || 0,
+        isActive: data.isActive ?? 1,
+      });
+      res.status(201).json(settings);
+    } catch (error) {
+      console.error("Error creating warehouse settings:", error);
+      res.status(500).json({ error: "Failed to create warehouse settings" });
+    }
+  });
+  
+  app.patch("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const settings = await storage.updateWarehouseSettings(id, req.body);
+      if (!settings) {
+        return res.status(404).json({ error: "Warehouse settings not found" });
+      }
+      res.json(settings);
+    } catch (error) {
+      console.error("Error updating warehouse settings:", error);
+      res.status(500).json({ error: "Failed to update warehouse settings" });
+    }
+  });
+  
+  app.delete("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const deleted = await storage.deleteWarehouseSettings(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Warehouse settings not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting warehouse settings:", error);
+      res.status(500).json({ error: "Failed to delete warehouse settings" });
+    }
+  });
+
   // ===== REPLENISHMENT API =====
   
   // Tier Defaults - default rules by UOM hierarchy level

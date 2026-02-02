@@ -65,6 +65,8 @@ import {
   type InsertReplenRule,
   type ReplenTask,
   type InsertReplenTask,
+  type WarehouseSettings,
+  type InsertWarehouseSettings,
   users,
   productLocations,
   orders,
@@ -95,6 +97,7 @@ import {
   replenTierDefaults,
   replenRules,
   replenTasks,
+  warehouseSettings,
   generateLocationCode,
   echelonSettings
 } from "@shared/schema";
@@ -440,6 +443,15 @@ export interface IStorage {
   updateReplenTask(id: number, updates: Partial<InsertReplenTask>): Promise<ReplenTask | null>;
   deleteReplenTask(id: number): Promise<boolean>;
   getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]>;
+  
+  // Warehouse Settings
+  getAllWarehouseSettings(): Promise<WarehouseSettings[]>;
+  getWarehouseSettingsByCode(code: string): Promise<WarehouseSettings | undefined>;
+  getWarehouseSettingsById(id: number): Promise<WarehouseSettings | undefined>;
+  getDefaultWarehouseSettings(): Promise<WarehouseSettings | undefined>;
+  createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings>;
+  updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null>;
+  deleteWarehouseSettings(id: number): Promise<boolean>;
   
   // Vendors
   getAllVendors(): Promise<Vendor[]>;
@@ -3167,6 +3179,47 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(replenRules)
       .where(eq(replenRules.isActive, 1))
       .orderBy(asc(replenRules.priority));
+  }
+  
+  // Warehouse Settings
+  async getAllWarehouseSettings(): Promise<WarehouseSettings[]> {
+    return await db.select().from(warehouseSettings).orderBy(asc(warehouseSettings.warehouseCode));
+  }
+  
+  async getWarehouseSettingsByCode(code: string): Promise<WarehouseSettings | undefined> {
+    const result = await db.select().from(warehouseSettings)
+      .where(eq(warehouseSettings.warehouseCode, code)).limit(1);
+    return result[0];
+  }
+  
+  async getWarehouseSettingsById(id: number): Promise<WarehouseSettings | undefined> {
+    const result = await db.select().from(warehouseSettings)
+      .where(eq(warehouseSettings.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async getDefaultWarehouseSettings(): Promise<WarehouseSettings | undefined> {
+    const result = await db.select().from(warehouseSettings)
+      .where(eq(warehouseSettings.warehouseCode, "DEFAULT")).limit(1);
+    return result[0];
+  }
+  
+  async createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings> {
+    const result = await db.insert(warehouseSettings).values(data).returning();
+    return result[0];
+  }
+  
+  async updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null> {
+    const result = await db.update(warehouseSettings)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(warehouseSettings.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteWarehouseSettings(id: number): Promise<boolean> {
+    const result = await db.delete(warehouseSettings).where(eq(warehouseSettings.id, id)).returning();
+    return result.length > 0;
   }
 }
 
