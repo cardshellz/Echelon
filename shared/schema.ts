@@ -677,19 +677,47 @@ export type ReplenTrigger = typeof replenTriggerEnum[number];
 export const replenTaskStatusEnum = ["pending", "assigned", "in_progress", "completed", "cancelled", "blocked"] as const;
 export type ReplenTaskStatus = typeof replenTaskStatusEnum[number];
 
-// Replenishment rules - product-centric rules with dynamic location lookup
-export const replenRules = pgTable("replen_rules", {
+// Replenishment tier defaults - tier-based rules by UOM hierarchy level
+// These are the DEFAULT rules that apply to all products at a given tier
+export const replenTierDefaults = pgTable("replen_tier_defaults", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  catalogProductId: integer("catalog_product_id").notNull().references(() => catalogProducts.id),
-  pickVariantId: integer("pick_variant_id").notNull().references(() => uomVariants.id), // Variant at destination (e.g., eaches)
-  sourceVariantId: integer("source_variant_id").notNull().references(() => uomVariants.id), // Variant at source (e.g., cases)
-  pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("forward_pick"), // Where to look for low stock
-  sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("bulk_storage"), // Where to find source stock
+  hierarchyLevel: integer("hierarchy_level").notNull(), // Which tier this applies to (1=each, 2=pack, 3=case, etc.)
+  sourceHierarchyLevel: integer("source_hierarchy_level").notNull(), // What tier to pull from
+  pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("forward_pick"),
+  sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("bulk_storage"),
   sourcePriority: varchar("source_priority", { length: 20 }).notNull().default("fifo"), // fifo, smallest_first
   minQty: integer("min_qty").notNull().default(0), // Trigger replen when qty drops below this
-  maxQty: integer("max_qty"), // Fill up to this qty (null = replen one source unit worth)
+  maxQty: integer("max_qty"), // Fill up to this qty (null = use bin capacity or one source unit)
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
   priority: integer("priority").notNull().default(5), // 1 = highest priority
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertReplenTierDefaultSchema = createInsertSchema(replenTierDefaults).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertReplenTierDefault = z.infer<typeof insertReplenTierDefaultSchema>;
+export type ReplenTierDefault = typeof replenTierDefaults.$inferSelect;
+
+// Replenishment SKU overrides - product-specific exceptions to tier defaults
+// Only create these when a product needs DIFFERENT behavior than its tier default
+export const replenRules = pgTable("replen_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id), // Which product this override applies to
+  pickVariantId: integer("pick_variant_id").references(() => uomVariants.id), // Override: specific variant at destination
+  sourceVariantId: integer("source_variant_id").references(() => uomVariants.id), // Override: specific variant from source
+  pickLocationType: varchar("pick_location_type", { length: 30 }), // Override: different pick location type
+  sourceLocationType: varchar("source_location_type", { length: 30 }), // Override: different source location type
+  sourcePriority: varchar("source_priority", { length: 20 }), // Override: different priority (fifo, smallest_first)
+  minQty: integer("min_qty"), // Override: different trigger threshold
+  maxQty: integer("max_qty"), // Override: different fill target
+  replenMethod: varchar("replen_method", { length: 30 }), // Override: different method (case_break, full_case, pallet_drop)
+  priority: integer("priority"), // Override: different task priority
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

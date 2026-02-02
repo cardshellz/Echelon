@@ -47,6 +47,8 @@ import {
   type InsertChannelReservation,
   type CatalogProduct,
   type InsertCatalogProduct,
+  type ReplenTierDefault,
+  type InsertReplenTierDefault,
   type CatalogAsset,
   type InsertCatalogAsset,
   type CycleCount,
@@ -90,6 +92,7 @@ import {
   vendors,
   receivingOrders,
   receivingLines,
+  replenTierDefaults,
   replenRules,
   replenTasks,
   generateLocationCode,
@@ -410,6 +413,17 @@ export interface IStorage {
   // ============================================
   // REPLENISHMENT
   // ============================================
+  
+  // Tier Defaults (default rules by UOM hierarchy level)
+  getAllReplenTierDefaults(): Promise<ReplenTierDefault[]>;
+  getReplenTierDefaultById(id: number): Promise<ReplenTierDefault | undefined>;
+  getReplenTierDefaultByLevel(hierarchyLevel: number): Promise<ReplenTierDefault | undefined>;
+  getActiveReplenTierDefaults(): Promise<ReplenTierDefault[]>;
+  createReplenTierDefault(data: InsertReplenTierDefault): Promise<ReplenTierDefault>;
+  updateReplenTierDefault(id: number, updates: Partial<InsertReplenTierDefault>): Promise<ReplenTierDefault | null>;
+  deleteReplenTierDefault(id: number): Promise<boolean>;
+  
+  // SKU Overrides (product-specific exceptions)
   getAllReplenRules(): Promise<ReplenRule[]>;
   getReplenRuleById(id: number): Promise<ReplenRule | undefined>;
   getReplenRulesForVariant(pickVariantId: number): Promise<ReplenRule[]>;
@@ -417,6 +431,7 @@ export interface IStorage {
   createReplenRule(data: InsertReplenRule): Promise<ReplenRule>;
   updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
   deleteReplenRule(id: number): Promise<boolean>;
+  getActiveReplenRules(): Promise<ReplenRule[]>;
   
   // Replen Tasks
   getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]>;
@@ -425,7 +440,6 @@ export interface IStorage {
   updateReplenTask(id: number, updates: Partial<InsertReplenTask>): Promise<ReplenTask | null>;
   deleteReplenTask(id: number): Promise<boolean>;
   getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]>;
-  getActiveReplenRules(): Promise<ReplenRule[]>;
   
   // Vendors
   getAllVendors(): Promise<Vendor[]>;
@@ -3005,6 +3019,51 @@ export class DatabaseStorage implements IStorage {
   // REPLENISHMENT
   // ============================================
   
+  // Tier Defaults
+  async getAllReplenTierDefaults(): Promise<ReplenTierDefault[]> {
+    return await db.select().from(replenTierDefaults).orderBy(asc(replenTierDefaults.hierarchyLevel));
+  }
+  
+  async getReplenTierDefaultById(id: number): Promise<ReplenTierDefault | undefined> {
+    const result = await db.select().from(replenTierDefaults).where(eq(replenTierDefaults.id, id)).limit(1);
+    return result[0];
+  }
+  
+  async getReplenTierDefaultByLevel(hierarchyLevel: number): Promise<ReplenTierDefault | undefined> {
+    const result = await db.select().from(replenTierDefaults)
+      .where(and(
+        eq(replenTierDefaults.hierarchyLevel, hierarchyLevel),
+        eq(replenTierDefaults.isActive, 1)
+      ))
+      .limit(1);
+    return result[0];
+  }
+  
+  async getActiveReplenTierDefaults(): Promise<ReplenTierDefault[]> {
+    return await db.select().from(replenTierDefaults)
+      .where(eq(replenTierDefaults.isActive, 1))
+      .orderBy(asc(replenTierDefaults.hierarchyLevel));
+  }
+  
+  async createReplenTierDefault(data: InsertReplenTierDefault): Promise<ReplenTierDefault> {
+    const result = await db.insert(replenTierDefaults).values(data).returning();
+    return result[0];
+  }
+  
+  async updateReplenTierDefault(id: number, updates: Partial<InsertReplenTierDefault>): Promise<ReplenTierDefault | null> {
+    const result = await db.update(replenTierDefaults)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(replenTierDefaults.id, id))
+      .returning();
+    return result[0] || null;
+  }
+  
+  async deleteReplenTierDefault(id: number): Promise<boolean> {
+    const result = await db.delete(replenTierDefaults).where(eq(replenTierDefaults.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+  
+  // SKU Overrides
   async getAllReplenRules(): Promise<ReplenRule[]> {
     return await db.select().from(replenRules).orderBy(asc(replenRules.priority));
   }
