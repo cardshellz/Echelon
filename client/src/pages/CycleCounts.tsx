@@ -543,40 +543,40 @@ export default function CycleCounts() {
             />
           </div>
           
-          {/* Main counting card */}
-          <div className="flex-1 p-4 flex flex-col gap-4">
-            <Card className="flex-1">
-              <CardContent className="pt-6 flex flex-col items-center justify-center h-full gap-6">
-                {/* Location - BIG and prominent */}
-                <div className="text-center">
-                  <div className="text-sm text-muted-foreground mb-1">Go to bin</div>
-                  <div className="text-5xl font-bold font-mono text-blue-600">
+          {/* Main counting area - mobile optimized */}
+          <div className="flex-1 p-3 overflow-hidden flex flex-col gap-3">
+            <Card className="flex-1 overflow-hidden">
+              <CardContent className="p-4 flex flex-col items-center justify-center h-full gap-4">
+                {/* Location - prominent but fits screen */}
+                <div className="text-center w-full px-2">
+                  <div className="text-xs text-muted-foreground mb-1">Go to bin</div>
+                  <div className="text-3xl sm:text-4xl font-bold font-mono text-blue-600 truncate">
                     {currentItem?.locationCode}
                   </div>
                 </div>
                 
                 {/* SKU */}
-                <div className="text-center">
-                  <div className="text-sm text-muted-foreground mb-1">Product</div>
-                  <div className="text-xl font-semibold">
+                <div className="text-center w-full px-2">
+                  <div className="text-xs text-muted-foreground mb-1">Product</div>
+                  <div className="text-base sm:text-lg font-semibold truncate">
                     {currentItem?.expectedSku || "(Empty bin)"}
                   </div>
                 </div>
                 
                 {/* Expected quantity hint */}
-                <div className="text-center bg-slate-100 rounded-lg px-6 py-3">
-                  <div className="text-sm text-muted-foreground">Expected</div>
-                  <div className="text-3xl font-bold">{currentItem?.expectedQty}</div>
+                <div className="text-center bg-slate-100 rounded-lg px-4 py-2">
+                  <div className="text-xs text-muted-foreground">Expected</div>
+                  <div className="text-2xl font-bold">{currentItem?.expectedQty}</div>
                 </div>
                 
                 {/* Quantity input */}
-                <div className="w-full max-w-xs">
-                  <div className="text-sm text-muted-foreground text-center mb-2">Count what you see</div>
-                  <div className="flex items-center gap-3">
+                <div className="w-full max-w-xs px-2">
+                  <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
+                  <div className="flex items-center gap-2">
                     <Button 
                       variant="outline" 
                       size="lg"
-                      className="h-16 w-16 text-2xl"
+                      className="h-14 w-14 text-xl shrink-0"
                       onClick={() => setQuickCountQty(String(Math.max(0, (parseInt(quickCountQty) || 0) - 1)))}
                       data-testid="button-decrease-qty"
                     >
@@ -587,14 +587,14 @@ export default function CycleCounts() {
                       inputMode="numeric"
                       value={quickCountQty}
                       onChange={(e) => setQuickCountQty(e.target.value)}
-                      className="h-16 text-3xl text-center font-mono flex-1"
+                      className="h-14 text-2xl text-center font-mono flex-1 min-w-0"
                       placeholder="0"
                       data-testid="input-quick-count"
                     />
                     <Button 
                       variant="outline" 
                       size="lg"
-                      className="h-16 w-16 text-2xl"
+                      className="h-14 w-14 text-xl shrink-0"
                       onClick={() => setQuickCountQty(String((parseInt(quickCountQty) || 0) + 1))}
                       data-testid="button-increase-qty"
                     >
@@ -606,11 +606,11 @@ export default function CycleCounts() {
             </Card>
             
             {/* Navigation and confirm */}
-            <div className="flex gap-3">
+            <div className="flex gap-2">
               <Button 
                 variant="outline" 
-                size="lg"
-                className="h-14"
+                size="default"
+                className="h-12 px-3"
                 onClick={() => {
                   // Save current draft before navigating
                   if (quickCountQty !== "" && currentItem) {
@@ -625,19 +625,19 @@ export default function CycleCounts() {
                 Prev
               </Button>
               <Button 
-                size="lg"
-                className="flex-1 h-14 text-lg"
+                size="default"
+                className="flex-1 h-12 text-base"
                 onClick={handleQuickCount}
                 disabled={countMutation.isPending || quickCountQty === ""}
                 data-testid="button-confirm-count"
               >
-                <Check className="h-5 w-5 mr-2" />
+                <Check className="h-4 w-4 mr-1" />
                 Confirm & Next
               </Button>
               <Button 
                 variant="outline" 
-                size="lg"
-                className="h-14"
+                size="default"
+                className="h-12 px-3"
                 onClick={() => {
                   // Save current draft before navigating
                   if (quickCountQty !== "" && currentItem) {
@@ -657,8 +657,8 @@ export default function CycleCounts() {
             <div className="flex gap-2">
               <Button 
                 variant="secondary" 
-                size="lg"
-                className="flex-1 h-12"
+                size="default"
+                className="flex-1 h-10 text-sm"
                 onClick={() => {
                   setQuickCountQty(String(currentItem?.expectedQty || 0));
                 }}
@@ -668,8 +668,8 @@ export default function CycleCounts() {
               </Button>
               <Button 
                 variant={differentSkuMode ? "default" : "outline"}
-                size="lg"
-                className="h-12"
+                size="default"
+                className="h-10 text-sm"
                 onClick={() => {
                   setDifferentSkuMode(!differentSkuMode);
                   if (!differentSkuMode) {
@@ -678,24 +678,24 @@ export default function CycleCounts() {
                 }}
                 data-testid="button-different-sku"
               >
-                <AlertTriangle className="h-4 w-4 mr-1" />
+                <AlertTriangle className="h-3 w-3 mr-1" />
                 Wrong SKU
               </Button>
             </div>
             
             {/* Different SKU input */}
             {differentSkuMode && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                <Label className="text-amber-800">What SKU is actually in this bin?</Label>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <Label className="text-amber-800 text-sm">What SKU is actually in this bin?</Label>
                 <Input
                   value={foundSku}
                   onChange={(e) => setFoundSku(e.target.value)}
                   placeholder="Enter or scan actual SKU"
-                  className="mt-2 text-lg"
+                  className="mt-2 text-base"
                   autoFocus
                   data-testid="input-found-sku"
                 />
-                <p className="text-xs text-amber-600 mt-2">
+                <p className="text-xs text-amber-600 mt-1">
                   This will be flagged as a SKU mismatch for review
                 </p>
               </div>
