@@ -805,6 +805,8 @@ export const replenTasks = pgTable("replen_tasks", {
   status: varchar("status", { length: 20 }).notNull().default("pending"),
   priority: integer("priority").notNull().default(5),
   triggeredBy: varchar("triggered_by", { length: 20 }).notNull().default("min_max"), // min_max, wave, manual, stockout
+  executionMode: varchar("execution_mode", { length: 20 }).notNull().default("queue"), // queue, inline - based on warehouse settings
+  warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this task belongs to
   createdBy: varchar("created_by", { length: 100 }),
   assignedTo: varchar("assigned_to", { length: 100 }),
   assignedAt: timestamp("assigned_at"),

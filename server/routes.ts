@@ -8545,10 +8545,31 @@ export async function registerRoutes(
       const locations = await storage.getAllWarehouseLocations();
       const catalogProducts = await storage.getAllCatalogProducts();
       const uomVariants = await storage.getAllUomVariants();
+      const warehouses = await storage.getAllWarehouses();
+      const allWarehouseSettings = await storage.getAllWarehouseSettings();
       
       const locationMap = new Map(locations.map(l => [l.id, l]));
       const productMap = new Map(catalogProducts.map(p => [p.id, p]));
       const variantMap = new Map(uomVariants.map(v => [v.id, v]));
+      const warehouseMap = new Map(warehouses.map(w => [w.id, w]));
+      
+      // Map warehouse code to settings
+      const settingsByWarehouseCode = new Map(allWarehouseSettings.map(s => [s.warehouseCode, s]));
+      
+      // Get default settings (or create sensible defaults if none exist)
+      const defaultSettings = allWarehouseSettings.find(s => s.warehouseCode === "DEFAULT") || {
+        replenMode: "queue",
+        shortPickAction: "partial_pick",
+        inlineReplenMaxUnits: 50,
+      };
+      
+      // Helper to get settings for a location
+      const getWarehouseSettings = (location: typeof locations[0]) => {
+        if (!location.warehouseId) return defaultSettings;
+        const warehouse = warehouseMap.get(location.warehouseId);
+        if (!warehouse) return defaultSettings;
+        return settingsByWarehouseCode.get(warehouse.code) || defaultSettings;
+      };
       
       // Group variants by product and hierarchy level
       const variantsByProduct = new Map<number, Map<number, typeof uomVariants[0]>>();
@@ -8888,6 +8909,19 @@ export async function registerRoutes(
           
           // Create main task if any units fit
           if (qtySourceUnits > 0 && qtyTargetUnits > 0) {
+            // Get warehouse settings for this location
+            const warehouseSettings = getWarehouseSettings(destLocation!);
+            const warehouseId = destLocation?.warehouseId || null;
+            
+            // Determine execution mode based on warehouse settings
+            let executionMode = "queue";
+            if (warehouseSettings.replenMode === "inline") {
+              executionMode = "inline";
+            } else if (warehouseSettings.replenMode === "hybrid") {
+              const threshold = warehouseSettings.inlineReplenMaxUnits || 50;
+              executionMode = qtyTargetUnits <= threshold ? "inline" : "queue";
+            }
+            
             const task = await storage.createReplenTask({
               replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
@@ -8901,6 +8935,8 @@ export async function registerRoutes(
               status: "pending",
               priority: effectivePriority,
               triggeredBy: "min_max",
+              executionMode,
+              warehouseId,
               assignedTo: null,
               notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < min ${effectiveMinQty}`,
             });
@@ -8916,11 +8952,25 @@ export async function registerRoutes(
               minQty: effectiveMinQty,
               qtySourceUnits,
               qtyTargetUnits,
+              executionMode,
+              warehouseId,
             });
           }
           
           // Create overflow task if needed and capacity validated
           if (actualOverflowQty > 0 && overflowBinId) {
+            // Use same warehouse settings for overflow
+            const warehouseSettings = getWarehouseSettings(destLocation!);
+            const warehouseId = destLocation?.warehouseId || null;
+            
+            let overflowExecutionMode = "queue";
+            if (warehouseSettings.replenMode === "inline") {
+              overflowExecutionMode = "inline";
+            } else if (warehouseSettings.replenMode === "hybrid") {
+              const threshold = warehouseSettings.inlineReplenMaxUnits || 50;
+              overflowExecutionMode = actualOverflowQty <= threshold ? "inline" : "queue";
+            }
+            
             const overflowTask = await storage.createReplenTask({
               replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
@@ -8934,6 +8984,8 @@ export async function registerRoutes(
               status: "pending",
               priority: effectivePriority + 1,
               triggeredBy: "min_max",
+              executionMode: overflowExecutionMode,
+              warehouseId,
               assignedTo: null,
               notes: `Overflow from ${destLocation?.code}: capacity exceeded`,
             });
@@ -8950,6 +9002,8 @@ export async function registerRoutes(
               qtySourceUnits: actualOverflowSourceUnits,
               qtyTargetUnits: actualOverflowQty,
               isOverflow: true,
+              executionMode: overflowExecutionMode,
+              warehouseId,
             });
           }
         }
