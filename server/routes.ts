@@ -7915,7 +7915,7 @@ export async function registerRoutes(
 
   // ===== WAREHOUSE SETTINGS API =====
   
-  app.get("/api/warehouse-settings", requirePermission("system", "manage"), async (req, res) => {
+  app.get("/api/warehouse-settings", requirePermission("warehouse", "read"), async (req, res) => {
     try {
       const settings = await storage.getAllWarehouseSettings();
       res.json(settings);
@@ -7925,7 +7925,7 @@ export async function registerRoutes(
     }
   });
   
-  app.get("/api/warehouse-settings/default", requirePermission("system", "manage"), async (req, res) => {
+  app.get("/api/warehouse-settings/default", requirePermission("warehouse", "read"), async (req, res) => {
     try {
       let settings = await storage.getDefaultWarehouseSettings();
       if (!settings) {
@@ -7941,7 +7941,7 @@ export async function registerRoutes(
     }
   });
   
-  app.get("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+  app.get("/api/warehouse-settings/:id", requirePermission("warehouse", "read"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const settings = await storage.getWarehouseSettingsById(id);
@@ -7955,7 +7955,7 @@ export async function registerRoutes(
     }
   });
   
-  app.post("/api/warehouse-settings", requirePermission("system", "manage"), async (req, res) => {
+  app.post("/api/warehouse-settings", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const data = req.body;
       const settings = await storage.createWarehouseSettings({
@@ -7985,7 +7985,7 @@ export async function registerRoutes(
     }
   });
   
-  app.patch("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+  app.patch("/api/warehouse-settings/:id", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const settings = await storage.updateWarehouseSettings(id, req.body);
@@ -7999,7 +7999,7 @@ export async function registerRoutes(
     }
   });
   
-  app.delete("/api/warehouse-settings/:id", requirePermission("system", "manage"), async (req, res) => {
+  app.delete("/api/warehouse-settings/:id", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const deleted = await storage.deleteWarehouseSettings(id);
