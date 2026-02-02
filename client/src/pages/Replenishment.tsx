@@ -146,6 +146,7 @@ interface ReplenTask {
 
 interface WarehouseSettings {
   id: number;
+  warehouseId: number | null;
   warehouseCode: string;
   warehouseName: string;
   replenMode: string;
@@ -303,10 +304,14 @@ export default function Replenishment() {
   });
 
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("");
-  const [showNewWarehouseDialog, setShowNewWarehouseDialog] = useState(false);
-  const [newWarehouseForm, setNewWarehouseForm] = useState({ warehouseCode: "", warehouseName: "" });
 
-  const selectedWarehouse = allWarehouseSettings.find(w => w.id.toString() === selectedWarehouseId);
+  // Find the warehouse from the warehouses table
+  const selectedWarehouseData = warehouses.find(w => w.id.toString() === selectedWarehouseId);
+  // Find settings for this warehouse (by warehouseId or matching warehouseCode)
+  const selectedWarehouse = allWarehouseSettings.find(
+    w => w.warehouseId?.toString() === selectedWarehouseId || 
+         (selectedWarehouseData && w.warehouseCode === selectedWarehouseData.code)
+  );
 
   const [settingsForm, setSettingsForm] = useState({
     replenMode: "queue",
@@ -316,10 +321,10 @@ export default function Replenishment() {
 
   // Auto-select first warehouse when data loads
   useEffect(() => {
-    if (allWarehouseSettings.length > 0 && !selectedWarehouseId) {
-      setSelectedWarehouseId(allWarehouseSettings[0].id.toString());
+    if (warehouses.length > 0 && !selectedWarehouseId) {
+      setSelectedWarehouseId(warehouses[0].id.toString());
     }
-  }, [allWarehouseSettings, selectedWarehouseId]);
+  }, [warehouses, selectedWarehouseId]);
 
   // Sync settings form when selected warehouse changes
   useEffect(() => {
@@ -332,40 +337,39 @@ export default function Replenishment() {
     }
   }, [selectedWarehouse]);
 
-  const createWarehouseMutation = useMutation({
-    mutationFn: async (data: { warehouseCode: string; warehouseName: string }) => {
-      const res = await fetch("/api/warehouse-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) throw new Error("Failed to create warehouse");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      toast({ title: "Warehouse created" });
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings"] });
-      setShowNewWarehouseDialog(false);
-      setNewWarehouseForm({ warehouseCode: "", warehouseName: "" });
-      setSelectedWarehouseId(data.id.toString());
-    },
-    onError: () => {
-      toast({ title: "Failed to create warehouse", variant: "destructive" });
-    },
-  });
-
   const saveSettingsMutation = useMutation({
     mutationFn: async (data: { replenMode: string; shortPickAction: string; inlineReplenMaxUnits: number | null }) => {
-      if (!selectedWarehouse?.id) throw new Error("No warehouse selected");
-      const res = await fetch(`/api/warehouse-settings/${selectedWarehouse.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) throw new Error("Failed to save settings");
-      return res.json();
+      if (!selectedWarehouseData) throw new Error("No warehouse selected");
+      
+      if (selectedWarehouse?.id) {
+        // Update existing settings - also ensure warehouseId is set (for legacy rows)
+        const res = await fetch(`/api/warehouse-settings/${selectedWarehouse.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            ...data,
+            warehouseId: selectedWarehouseData.id, // Ensure warehouseId is linked
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to save settings");
+        return res.json();
+      } else {
+        // Create new settings for this warehouse
+        const res = await fetch("/api/warehouse-settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            warehouseId: selectedWarehouseData.id,
+            warehouseCode: selectedWarehouseData.code,
+            warehouseName: selectedWarehouseData.name,
+            ...data,
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to create settings");
+        return res.json();
+      }
     },
     onSuccess: () => {
       toast({ title: "Settings saved" });
@@ -1261,16 +1265,13 @@ export default function Replenishment() {
                       <SelectValue placeholder="Select warehouse..." />
                     </SelectTrigger>
                     <SelectContent>
-                      {allWarehouseSettings.map((wh) => (
+                      {warehouses.map((wh) => (
                         <SelectItem key={wh.id} value={wh.id.toString()}>
-                          {wh.warehouseName} ({wh.warehouseCode})
+                          {wh.name} ({wh.code})
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button variant="outline" size="icon" onClick={() => setShowNewWarehouseDialog(true)} data-testid="button-add-warehouse">
-                    <Plus className="w-4 h-4" />
-                  </Button>
                 </div>
               </div>
             </CardHeader>
@@ -1279,14 +1280,15 @@ export default function Replenishment() {
                 <div className="flex justify-center p-8">
                   <Loader2 className="w-6 h-6 animate-spin" />
                 </div>
-              ) : !selectedWarehouse ? (
+              ) : warehouses.length === 0 ? (
                 <div className="text-center p-8 text-muted-foreground">
                   <Warehouse className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No warehouse selected. Create one to get started.</p>
-                  <Button className="mt-4" onClick={() => setShowNewWarehouseDialog(true)}>
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Warehouse
-                  </Button>
+                  <p>No warehouses configured. Add warehouses from the Warehouses page first.</p>
+                </div>
+              ) : !selectedWarehouseData ? (
+                <div className="text-center p-8 text-muted-foreground">
+                  <Warehouse className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                  <p>Select a warehouse to configure its settings.</p>
                 </div>
               ) : (
                 <>
@@ -1958,50 +1960,6 @@ export default function Replenishment() {
         </DialogContent>
       </Dialog>
 
-      {/* New Warehouse Dialog */}
-      <Dialog open={showNewWarehouseDialog} onOpenChange={setShowNewWarehouseDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add Warehouse</DialogTitle>
-            <DialogDescription>
-              Create a new warehouse with its own replenishment settings
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label>Warehouse Code</Label>
-              <Input
-                value={newWarehouseForm.warehouseCode}
-                onChange={(e) => setNewWarehouseForm({ ...newWarehouseForm, warehouseCode: e.target.value.toUpperCase() })}
-                placeholder="e.g., WH-EAST"
-                data-testid="input-warehouse-code"
-              />
-            </div>
-            <div>
-              <Label>Warehouse Name</Label>
-              <Input
-                value={newWarehouseForm.warehouseName}
-                onChange={(e) => setNewWarehouseForm({ ...newWarehouseForm, warehouseName: e.target.value })}
-                placeholder="e.g., East Coast Warehouse"
-                data-testid="input-warehouse-name"
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowNewWarehouseDialog(false)}>
-                Cancel
-              </Button>
-              <Button 
-                onClick={() => createWarehouseMutation.mutate(newWarehouseForm)}
-                disabled={!newWarehouseForm.warehouseCode || !newWarehouseForm.warehouseName || createWarehouseMutation.isPending}
-                data-testid="button-create-warehouse"
-              >
-                {createWarehouseMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-                Create Warehouse
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

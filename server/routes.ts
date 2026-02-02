@@ -7959,6 +7959,7 @@ export async function registerRoutes(
     try {
       const data = req.body;
       const settings = await storage.createWarehouseSettings({
+        warehouseId: data.warehouseId || null,
         warehouseCode: data.warehouseCode || "DEFAULT",
         warehouseName: data.warehouseName || "Main Warehouse",
         replenMode: data.replenMode || "queue",
