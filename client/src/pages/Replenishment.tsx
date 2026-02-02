@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -47,7 +47,9 @@ import {
   ListTodo,
   User,
   Upload,
-  Download
+  Download,
+  Warehouse,
+  Save
 } from "lucide-react";
 
 interface WarehouseLocation {
@@ -138,6 +140,16 @@ interface ReplenTask {
   fromLocation?: WarehouseLocation;
   toLocation?: WarehouseLocation;
   catalogProduct?: CatalogProduct;
+}
+
+interface WarehouseSettings {
+  id: number;
+  warehouseId: number | null;
+  replenMode: string;
+  shortPickAction: string;
+  hybridThreshold: number | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 const LOCATION_TYPES = [
@@ -247,6 +259,52 @@ export default function Replenishment() {
 
   const { data: inventoryItems = [] } = useQuery<InventoryItem[]>({
     queryKey: ["/api/inventory-items"],
+  });
+
+  const { data: warehouseSettings, isLoading: settingsLoading } = useQuery<WarehouseSettings>({
+    queryKey: ["/api/warehouse-settings"],
+    queryFn: async () => {
+      const res = await fetch("/api/warehouse-settings", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch settings");
+      return res.json();
+    },
+  });
+
+  const [settingsForm, setSettingsForm] = useState({
+    replenMode: "queue",
+    shortPickAction: "generate_task",
+    hybridThreshold: "50",
+  });
+
+  // Sync settings form when data loads
+  useEffect(() => {
+    if (warehouseSettings) {
+      setSettingsForm({
+        replenMode: warehouseSettings.replenMode,
+        shortPickAction: warehouseSettings.shortPickAction,
+        hybridThreshold: warehouseSettings.hybridThreshold?.toString() || "50",
+      });
+    }
+  }, [warehouseSettings]);
+
+  const saveSettingsMutation = useMutation({
+    mutationFn: async (data: { replenMode: string; shortPickAction: string; hybridThreshold: number | null }) => {
+      const res = await fetch("/api/warehouse-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to save settings");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Settings saved" });
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings"] });
+    },
+    onError: () => {
+      toast({ title: "Failed to save settings", variant: "destructive" });
+    },
   });
 
   // Filter variants by selected product
@@ -700,6 +758,10 @@ export default function Replenishment() {
             <Settings className="w-4 h-4" />
             Replen Rules
           </TabsTrigger>
+          <TabsTrigger value="settings" className="gap-2">
+            <Warehouse className="w-4 h-4" />
+            Warehouse Settings
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="tasks" className="space-y-4">
@@ -1055,6 +1117,148 @@ export default function Replenishment() {
                     ))}
                   </TableBody>
                 </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="settings" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Replenishment Workflow</CardTitle>
+              <CardDescription>
+                Configure how replenishment tasks are handled during picking operations
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {settingsLoading ? (
+                <div className="flex justify-center p-8">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-4">
+                    <div>
+                      <Label className="text-base font-semibold">Replenishment Mode</Label>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        How should low-stock situations be handled during picking?
+                      </p>
+                      <div className="grid gap-3">
+                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'inline' ? 'border-primary bg-primary/5' : ''}`}>
+                          <input
+                            type="radio"
+                            name="replenMode"
+                            value="inline"
+                            checked={settingsForm.replenMode === "inline"}
+                            onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
+                            className="mt-1"
+                            data-testid="radio-replen-inline"
+                          />
+                          <div>
+                            <div className="font-medium">Inline Replenishment</div>
+                            <div className="text-sm text-muted-foreground">
+                              Pickers replenish stock themselves when low. Best for small operations.
+                            </div>
+                          </div>
+                        </label>
+                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'queue' ? 'border-primary bg-primary/5' : ''}`}>
+                          <input
+                            type="radio"
+                            name="replenMode"
+                            value="queue"
+                            checked={settingsForm.replenMode === "queue"}
+                            onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
+                            className="mt-1"
+                            data-testid="radio-replen-queue"
+                          />
+                          <div>
+                            <div className="font-medium">Queue Mode</div>
+                            <div className="text-sm text-muted-foreground">
+                              Replenishment tasks are generated for dedicated replen workers. Best for larger operations with specialized roles.
+                            </div>
+                          </div>
+                        </label>
+                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'hybrid' ? 'border-primary bg-primary/5' : ''}`}>
+                          <input
+                            type="radio"
+                            name="replenMode"
+                            value="hybrid"
+                            checked={settingsForm.replenMode === "hybrid"}
+                            onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
+                            className="mt-1"
+                            data-testid="radio-replen-hybrid"
+                          />
+                          <div>
+                            <div className="font-medium">Hybrid Mode</div>
+                            <div className="text-sm text-muted-foreground">
+                              Small replenishments are done inline by pickers, larger ones go to the queue for dedicated workers.
+                            </div>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    {settingsForm.replenMode === "hybrid" && (
+                      <div className="ml-8 p-4 bg-muted/30 rounded-lg">
+                        <Label htmlFor="hybridThreshold">Hybrid Threshold (units)</Label>
+                        <p className="text-sm text-muted-foreground mb-2">
+                          Tasks below this quantity are handled inline, above go to queue
+                        </p>
+                        <Input
+                          id="hybridThreshold"
+                          type="number"
+                          value={settingsForm.hybridThreshold}
+                          onChange={(e) => setSettingsForm({ ...settingsForm, hybridThreshold: e.target.value })}
+                          className="w-32"
+                          min="1"
+                          data-testid="input-hybrid-threshold"
+                        />
+                      </div>
+                    )}
+
+                    <div className="pt-4 border-t">
+                      <Label className="text-base font-semibold">Short Pick Action</Label>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        What happens when a picker encounters an empty or insufficient pick location?
+                      </p>
+                      <Select 
+                        value={settingsForm.shortPickAction} 
+                        onValueChange={(v) => setSettingsForm({ ...settingsForm, shortPickAction: v })}
+                      >
+                        <SelectTrigger className="w-80" data-testid="select-short-pick-action">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="generate_task">Generate replen task automatically</SelectItem>
+                          <SelectItem value="alert_supervisor">Alert supervisor only</SelectItem>
+                          <SelectItem value="skip_and_continue">Skip and continue picking</SelectItem>
+                          <SelectItem value="partial_pick">Allow partial pick</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end pt-4 border-t">
+                    <Button 
+                      onClick={() => saveSettingsMutation.mutate({
+                        replenMode: settingsForm.replenMode,
+                        shortPickAction: settingsForm.shortPickAction,
+                        hybridThreshold: settingsForm.replenMode === "hybrid" 
+                          ? parseInt(settingsForm.hybridThreshold) || 50 
+                          : null,
+                      })}
+                      disabled={saveSettingsMutation.isPending}
+                      data-testid="button-save-settings"
+                    >
+                      {saveSettingsMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Save className="w-4 h-4 mr-2" />
+                      )}
+                      Save Settings
+                    </Button>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
