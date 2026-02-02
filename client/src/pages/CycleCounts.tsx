@@ -475,11 +475,10 @@ export default function CycleCounts() {
         onSuccess: () => {
           // Clear the draft after successful submit
           clearDraft(cycleCountDetail.id, currentItem.id);
-          // Note: useEffect will handle loading draft for next bin and resetting state
-          // Auto-advance to next bin (useEffect handles draft loading)
-          if (currentBinIndex < pendingItems.length - 1) {
-            setCurrentBinIndex(currentBinIndex + 1);
-          }
+          // Note: When query refreshes, this item will be removed from pendingItems
+          // so pendingItems[currentBinIndex] will naturally become the next item.
+          // We do NOT increment the index - just reset state for the "new" current item.
+          // useEffect will handle loading any draft for the next item.
         }
       });
     };
