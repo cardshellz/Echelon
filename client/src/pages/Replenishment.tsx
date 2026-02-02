@@ -202,6 +202,8 @@ export default function Replenishment() {
   const [editingTierDefault, setEditingTierDefault] = useState<ReplenTierDefault | null>(null);
   const [editingOverride, setEditingOverride] = useState<ReplenRule | null>(null);
   const [taskFilter, setTaskFilter] = useState("pending");
+  const [warehouseFilter, setWarehouseFilter] = useState("all");
+  const [modeFilter, setModeFilter] = useState("all");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [tierDefaultForm, setTierDefaultForm] = useState({
@@ -274,6 +276,21 @@ export default function Replenishment() {
     queryKey: ["/api/inventory-items"],
   });
 
+  interface WarehouseType {
+    id: number;
+    code: string;
+    name: string;
+  }
+  
+  const { data: warehouses = [] } = useQuery<WarehouseType[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: async () => {
+      const res = await fetch("/api/warehouses");
+      if (!res.ok) throw new Error("Failed to fetch warehouses");
+      return res.json();
+    },
+  });
+  
   const { data: allWarehouseSettings = [], isLoading: settingsLoading } = useQuery<WarehouseSettings[]>({
     queryKey: ["/api/warehouse-settings"],
     queryFn: async () => {
@@ -774,6 +791,36 @@ export default function Replenishment() {
     }
   };
 
+  const getModeBadge = (mode: string | null | undefined) => {
+    switch (mode) {
+      case "inline":
+        return <Badge className="bg-orange-500">Inline</Badge>;
+      case "queue":
+        return <Badge variant="outline">Queue</Badge>;
+      default:
+        return <Badge variant="secondary">-</Badge>;
+    }
+  };
+
+  // Apply additional client-side filters for warehouse and mode
+  const filteredTasks = tasks.filter((task) => {
+    // Warehouse filter
+    if (warehouseFilter !== "all") {
+      const taskWarehouseId = (task as any).warehouseId;
+      if (taskWarehouseId !== parseInt(warehouseFilter)) {
+        return false;
+      }
+    }
+    // Mode filter
+    if (modeFilter !== "all") {
+      const taskMode = (task as any).executionMode || "queue";
+      if (taskMode !== modeFilter) {
+        return false;
+      }
+    }
+    return true;
+  });
+  
   const pendingCount = tasks.filter(t => t.status === "pending").length;
   const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
 
@@ -829,6 +876,29 @@ export default function Replenishment() {
                   <SelectItem value="all">All Tasks</SelectItem>
                 </SelectContent>
               </Select>
+              <Select value={modeFilter} onValueChange={setModeFilter}>
+                <SelectTrigger className="w-32" data-testid="select-mode-filter">
+                  <SelectValue placeholder="Mode" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Modes</SelectItem>
+                  <SelectItem value="queue">Queue</SelectItem>
+                  <SelectItem value="inline">Inline</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={warehouseFilter} onValueChange={setWarehouseFilter}>
+                <SelectTrigger className="w-40" data-testid="select-warehouse-filter">
+                  <SelectValue placeholder="Warehouse" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Warehouses</SelectItem>
+                  {warehouses.map((wh) => (
+                    <SelectItem key={wh.id} value={wh.id.toString()}>
+                      {wh.code} - {wh.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Button 
                 variant="outline" 
                 size="icon"
@@ -865,10 +935,10 @@ export default function Replenishment() {
                 <div className="flex justify-center p-8">
                   <Loader2 className="w-6 h-6 animate-spin" />
                 </div>
-              ) : tasks.length === 0 ? (
+              ) : filteredTasks.length === 0 ? (
                 <div className="text-center p-8 text-muted-foreground">
                   <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                  <p>No replenishment tasks</p>
+                  <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all") ? " matching filters" : ""}</p>
                 </div>
               ) : (
                 <Table>
@@ -880,13 +950,14 @@ export default function Replenishment() {
                       <TableHead>Product</TableHead>
                       <TableHead>Qty</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Mode</TableHead>
                       <TableHead>Trigger</TableHead>
                       <TableHead>Assigned</TableHead>
                       <TableHead>Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {tasks.map((task) => (
+                    {filteredTasks.map((task) => (
                       <TableRow key={task.id} data-testid={`row-task-${task.id}`}>
                         <TableCell>
                           <div className="font-mono text-sm">
@@ -912,6 +983,7 @@ export default function Replenishment() {
                           </div>
                         </TableCell>
                         <TableCell>{getStatusBadge(task.status)}</TableCell>
+                        <TableCell>{getModeBadge((task as any).executionMode)}</TableCell>
                         <TableCell>{getTriggerBadge(task.triggeredBy)}</TableCell>
                         <TableCell>
                           <span className="text-sm text-muted-foreground">
