@@ -562,9 +562,9 @@ export default function CycleCounts() {
     // Mobile counting view
     if (mobileCountMode && pendingItems.length > 0) {
       return (
-        <div className="flex flex-col h-[100dvh] bg-slate-50 overflow-hidden">
+        <div className="flex flex-col h-full bg-slate-50">
           {/* Header - compact */}
-          <div className="bg-white border-b px-3 py-2 flex items-center justify-between shrink-0">
+          <div className="bg-white border-b px-3 py-2 flex items-center justify-between">
             <Button variant="ghost" size="sm" className="h-8 px-2" onClick={handleExitCountMode}>
               <RotateCcw className="h-4 w-4 mr-1" /> Exit
             </Button>
@@ -575,15 +575,15 @@ export default function CycleCounts() {
           </div>
           
           {/* Progress bar */}
-          <div className="h-2 bg-slate-200">
+          <div className="h-1 bg-slate-200">
             <div 
               className="h-full bg-emerald-500 transition-all" 
               style={{ width: `${((cycleCountDetail.countedBins) / cycleCountDetail.totalBins) * 100}%` }}
             />
           </div>
           
-          {/* Main counting area - mobile optimized, scrollable */}
-          <div className="flex-1 p-2 overflow-y-auto flex flex-col gap-2 min-h-0">
+          {/* Main counting area - scrollable, with padding for fixed footer */}
+          <div className="flex-1 p-2 overflow-y-auto flex flex-col gap-2 pb-16">
             {/* Location and SKU info - compact */}
             <div className="bg-white rounded-lg p-3 shadow-sm shrink-0">
               <div className="flex items-center justify-between gap-2">
@@ -817,15 +817,14 @@ export default function CycleCounts() {
                 Found Extra Item
               </Button>
             )}
-
           </div>
           
-          {/* Fixed footer - navigation buttons */}
-          <div className="bg-white border-t p-2 flex gap-2 shrink-0">
+          {/* Fixed navigation footer at bottom of viewport */}
+          <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-2 flex gap-2 z-50">
             <Button 
               variant="outline" 
               size="sm"
-              className="h-10 px-2"
+              className="h-11 px-4"
               onClick={() => {
                 if (quickCountQty !== "" && currentItem) {
                   const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
@@ -839,18 +838,18 @@ export default function CycleCounts() {
             </Button>
             <Button 
               size="sm"
-              className="flex-1 h-10 text-sm"
+              className="flex-1 h-11 text-sm"
               onClick={handleQuickCount}
               disabled={countMutation.isPending || quickCountQty === ""}
               data-testid="button-confirm-count"
             >
               <Check className="h-4 w-4 mr-1" />
-              Confirm & Next
+              Confirm
             </Button>
             <Button 
               variant="outline" 
               size="sm"
-              className="h-10 px-2"
+              className="h-11 px-4"
               onClick={() => {
                 if (quickCountQty !== "" && currentItem) {
                   const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
