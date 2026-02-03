@@ -571,6 +571,7 @@ export class DatabaseStorage implements IStorage {
       LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
       WHERE UPPER(uv.sku) = ${sku.toUpperCase()}
         AND il.variant_qty > 0
+        AND wl.is_pickable = 1
       ORDER BY 
         CASE wl.location_type 
           WHEN 'forward_pick' THEN 1 
