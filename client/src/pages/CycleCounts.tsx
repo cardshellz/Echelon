@@ -422,6 +422,35 @@ export default function CycleCounts() {
   const [quickCountQty, setQuickCountQty] = useState("");
   const [differentSkuMode, setDifferentSkuMode] = useState(false);
   const [foundSku, setFoundSku] = useState("");
+  const [mobileSkuSearch, setMobileSkuSearch] = useState("");
+  const [mobileSkuDropdownOpen, setMobileSkuDropdownOpen] = useState(false);
+  const debouncedMobileSkuSearch = useDebounce(mobileSkuSearch, 300);
+  
+  // SKU search query for mobile typeahead
+  const { data: mobileSkuResults = [] } = useQuery<Array<{ sku: string; name: string }>>({
+    queryKey: ["/api/inventory/skus/search", debouncedMobileSkuSearch],
+    queryFn: async () => {
+      if (!debouncedMobileSkuSearch || debouncedMobileSkuSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(debouncedMobileSkuSearch)}&limit=10`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedMobileSkuSearch.length >= 2 && mobileSkuDropdownOpen,
+  });
+  
+  // Extra item SKU search
+  const [extraItemSkuDropdownOpen, setExtraItemSkuDropdownOpen] = useState(false);
+  const debouncedExtraItemSku = useDebounce(foundItemForm.sku, 300);
+  const { data: extraItemSkuResults = [] } = useQuery<Array<{ sku: string; name: string }>>({
+    queryKey: ["/api/inventory/skus/search", "extra", debouncedExtraItemSku],
+    queryFn: async () => {
+      if (!debouncedExtraItemSku || debouncedExtraItemSku.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(debouncedExtraItemSku)}&limit=10`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedExtraItemSku.length >= 2 && extraItemSkuDropdownOpen,
+  });
   
   // Draft storage key for local persistence
   const getDraftKey = (cycleCountId: number, itemId: number) => 
@@ -643,6 +672,8 @@ export default function CycleCounts() {
                   setDifferentSkuMode(!differentSkuMode);
                   if (!differentSkuMode) {
                     setFoundSku("");
+                    setMobileSkuSearch("");
+                    setMobileSkuDropdownOpen(false);
                   }
                 }}
                 data-testid="button-different-sku"
@@ -652,18 +683,44 @@ export default function CycleCounts() {
               </Button>
             </div>
             
-            {/* Different SKU input */}
+            {/* Different SKU input with typeahead */}
             {differentSkuMode && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 shrink-0">
                 <Label className="text-amber-800 text-sm">What SKU is actually in this bin?</Label>
-                <Input
-                  value={foundSku}
-                  onChange={(e) => setFoundSku(e.target.value)}
-                  placeholder="Enter or scan actual SKU"
-                  className="mt-2 text-base"
-                  autoFocus
-                  data-testid="input-found-sku"
-                />
+                <div className="relative mt-2">
+                  <Input
+                    value={mobileSkuSearch || foundSku}
+                    onChange={(e) => {
+                      setMobileSkuSearch(e.target.value);
+                      setFoundSku(e.target.value);
+                      setMobileSkuDropdownOpen(true);
+                    }}
+                    onFocus={() => setMobileSkuDropdownOpen(true)}
+                    placeholder="Type to search SKUs..."
+                    className="text-base"
+                    autoFocus
+                    data-testid="input-found-sku"
+                  />
+                  {mobileSkuDropdownOpen && mobileSkuResults.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {mobileSkuResults.map((result) => (
+                        <button
+                          key={result.sku}
+                          type="button"
+                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                          onClick={() => {
+                            setFoundSku(result.sku);
+                            setMobileSkuSearch(result.sku);
+                            setMobileSkuDropdownOpen(false);
+                          }}
+                        >
+                          <div className="font-medium text-sm">{result.sku}</div>
+                          {result.name && <div className="text-xs text-muted-foreground truncate">{result.name}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <p className="text-xs text-amber-600 mt-1">
                   This will be flagged as a SKU mismatch for review
                 </p>
@@ -672,22 +729,47 @@ export default function CycleCounts() {
             
             {/* Add unexpected item found */}
             {addFoundItemMode ? (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-                <Label className="text-blue-800">Add Unexpected Item Found in This Bin</Label>
-                <Input
-                  value={foundItemForm.sku}
-                  onChange={(e) => setFoundItemForm({ ...foundItemForm, sku: e.target.value })}
-                  placeholder="Enter or scan SKU"
-                  className="text-lg"
-                  autoFocus
-                  data-testid="input-add-found-sku"
-                />
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2 shrink-0">
+                <Label className="text-blue-800 text-sm">Add Unexpected Item Found in This Bin</Label>
+                <div className="relative">
+                  <Input
+                    value={foundItemForm.sku}
+                    onChange={(e) => {
+                      setFoundItemForm({ ...foundItemForm, sku: e.target.value });
+                      setExtraItemSkuDropdownOpen(true);
+                    }}
+                    onFocus={() => setExtraItemSkuDropdownOpen(true)}
+                    placeholder="Type to search SKUs..."
+                    className="text-base"
+                    autoFocus
+                    data-testid="input-add-found-sku"
+                  />
+                  {extraItemSkuDropdownOpen && extraItemSkuResults.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                      {extraItemSkuResults.map((result) => (
+                        <button
+                          key={result.sku}
+                          type="button"
+                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                          onClick={() => {
+                            setFoundItemForm({ ...foundItemForm, sku: result.sku });
+                            setExtraItemSkuDropdownOpen(false);
+                          }}
+                        >
+                          <div className="font-medium text-sm">{result.sku}</div>
+                          {result.name && <div className="text-xs text-muted-foreground truncate">{result.name}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <Input
                   type="number"
+                  inputMode="numeric"
                   value={foundItemForm.quantity}
                   onChange={(e) => setFoundItemForm({ ...foundItemForm, quantity: e.target.value })}
                   placeholder="Quantity"
-                  className="text-lg"
+                  className="text-base"
                   data-testid="input-add-found-qty"
                 />
                 <div className="flex gap-2">
@@ -697,6 +779,7 @@ export default function CycleCounts() {
                     onClick={() => {
                       setAddFoundItemMode(false);
                       setFoundItemForm({ sku: "", quantity: "" });
+                      setExtraItemSkuDropdownOpen(false);
                     }}
                   >
                     Cancel
