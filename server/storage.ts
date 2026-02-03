@@ -848,23 +848,26 @@ export class DatabaseStorage implements IStorage {
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
     // Optimized: Only fetch orders that need to be in pick queue
-    // - EXCLUDE orders already fulfilled in Shopify (source of truth)
-    // - ready and in_progress orders (always)
-    // - completed orders from last 24 hours only
+    // - EXCLUDE orders already fulfilled in Shopify (source of truth) for ready/in_progress
+    // - ready and in_progress orders (unfulfilled only)
+    // - completed orders from last 24 hours (show regardless of fulfillment status for done queue)
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     // Use raw SQL to JOIN with shopify_orders and exclude fulfilled
     // Get customer name from shopify_orders as fallback
+    // NOTE: Completed orders are shown even if fulfilled (for done queue history)
     const orderList = await db.execute(sql`
       SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), s.customer_name) as resolved_customer_name
       FROM orders o
       LEFT JOIN shopify_orders s ON o.source_table_id = s.id
-      WHERE (
-        o.status IN ('ready', 'in_progress')
-        OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
-      )
-      AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
-      AND s.cancelled_at IS NULL
+      WHERE s.cancelled_at IS NULL
+        AND (
+          -- Ready/in_progress orders: exclude if already fulfilled in Shopify
+          (o.status IN ('ready', 'in_progress') 
+           AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled'))
+          -- Completed orders: show for 24 hours regardless of fulfillment status (for done queue)
+          OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
+        )
       ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
