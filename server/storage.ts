@@ -544,6 +544,7 @@ export class DatabaseStorage implements IStorage {
 
   // NEW: Get bin location from inventory_levels instead of product_locations
   // Returns location data for picking based on where inventory actually exists
+  // CRITICAL: Prioritizes forward_pick locations over bulk_storage to ensure pickers go to pickable bins
   async getBinLocationFromInventoryBySku(sku: string): Promise<{
     location: string;
     zone: string;
@@ -552,6 +553,7 @@ export class DatabaseStorage implements IStorage {
   } | undefined> {
     // Look up variant by SKU, then find any inventory level for that variant
     // barcode and image_url are on uom_variants, not catalog_products
+    // Priority: forward_pick first, then bulk_storage, then by pick sequence, then by quantity
     const result = await db.execute<{
       location_code: string;
       zone: string | null;
@@ -568,7 +570,17 @@ export class DatabaseStorage implements IStorage {
       JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
       LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
       WHERE UPPER(uv.sku) = ${sku.toUpperCase()}
-      ORDER BY wl.is_pickable DESC, il.variant_qty DESC
+        AND il.variant_qty > 0
+      ORDER BY 
+        CASE wl.location_type 
+          WHEN 'forward_pick' THEN 1 
+          WHEN 'overflow' THEN 2
+          WHEN 'bulk_storage' THEN 3 
+          ELSE 4 
+        END,
+        wl.is_pickable DESC,
+        wl.pick_sequence ASC NULLS LAST,
+        il.variant_qty DESC
       LIMIT 1
     `);
     
