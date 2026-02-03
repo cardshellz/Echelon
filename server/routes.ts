@@ -829,7 +829,8 @@ export async function registerRoutes(
       
       // Add picker display name, channel info, and C2P (Click to Pick) time to orders
       // Also filter out non-shippable items from the pick list (donations, memberships, etc.)
-      const ordersWithMetadata = filteredOrders.map(order => {
+      // Re-lookup locations for UNASSIGNED items to catch newly available inventory
+      const ordersWithMetadata = await Promise.all(filteredOrders.map(async (order) => {
         // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
         let c2pMs: number | null = null;
         if (order.completedAt && order.shopifyCreatedAt) {
@@ -841,15 +842,32 @@ export async function registerRoutes(
         // Only include items that require shipping in the pick list
         const shippableItems = order.items.filter(item => item.requiresShipping === 1);
         
+        // Re-lookup locations for items that are still UNASSIGNED
+        const itemsWithFreshLocations = await Promise.all(shippableItems.map(async (item) => {
+          if (item.location === "UNASSIGNED" && item.sku) {
+            const freshLocation = await storage.getBinLocationFromInventoryBySku(item.sku);
+            if (freshLocation) {
+              return {
+                ...item,
+                location: freshLocation.location,
+                zone: freshLocation.zone,
+                barcode: freshLocation.barcode || item.barcode,
+                imageUrl: freshLocation.imageUrl || item.imageUrl,
+              };
+            }
+          }
+          return item;
+        }));
+        
         return {
           ...order,
-          items: shippableItems,
+          items: itemsWithFreshLocations,
           pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
           c2pMs, // Click to Pick time in milliseconds
           channelName: channelInfo?.name || null,
           channelProvider: channelInfo?.provider || order.source || null,
         };
-      });
+      }));
       
       res.json(ordersWithMetadata);
     } catch (error) {
