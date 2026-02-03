@@ -498,7 +498,7 @@ export default function CycleCounts() {
     };
     
     // Centralized draft loading via useEffect - triggers on bin change or entering mobile mode
-    React.useEffect(() => {
+    useEffect(() => {
       if (mobileCountMode && currentItem) {
         const draft = loadDraft(cycleCountDetail.id, currentItem.id);
         if (draft) {
