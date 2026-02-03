@@ -2368,6 +2368,11 @@ export default function Picking() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="h-11 min-h-[44px] pl-10 pr-10 text-base"
+                enterKeyHint="search"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-search-queue"
               />
               {searchQuery && (
