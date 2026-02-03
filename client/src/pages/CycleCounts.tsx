@@ -1107,27 +1107,25 @@ export default function CycleCounts() {
         </div>
 
         <Dialog open={countDialogOpen} onOpenChange={setCountDialogOpen}>
-          <DialogContent className="max-w-md">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <MapPin className="h-5 w-5 text-blue-600" />
-                {selectedItem?.locationCode}
-              </DialogTitle>
-            </DialogHeader>
-            
-            {/* Expected info - prominent display */}
-            <div className="bg-slate-100 rounded-lg p-4 text-center">
-              <div className="text-sm text-muted-foreground">Expected</div>
-              <div className="font-semibold text-lg">{selectedItem?.expectedSku || "(empty bin)"}</div>
-              <div className="text-3xl font-bold text-blue-600">{selectedItem?.expectedQty}</div>
+          <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+            {/* Compact header with expected info */}
+            <div className="flex items-center justify-between gap-2 pb-2 border-b">
+              <div className="flex items-center gap-2">
+                <MapPin className="h-4 w-4 text-blue-600 shrink-0" />
+                <span className="font-bold text-lg">{selectedItem?.locationCode}</span>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-muted-foreground">Expected</div>
+                <div className="font-bold">{selectedItem?.expectedSku || "(empty)"} × {selectedItem?.expectedQty}</div>
+              </div>
             </div>
             
-            <div className="space-y-4">
+            <div className="space-y-3 pt-2">
               {/* Primary action: Confirm match */}
               <Button 
                 variant="default" 
                 size="lg"
-                className="w-full h-14 text-lg bg-emerald-600 hover:bg-emerald-700"
+                className="w-full h-12 bg-emerald-600 hover:bg-emerald-700"
                 onClick={() => selectedItem && countMutation.mutate({
                   itemId: selectedItem.id,
                   data: {
@@ -1139,20 +1137,20 @@ export default function CycleCounts() {
                 disabled={countMutation.isPending}
                 data-testid="button-confirm-match"
               >
-                <Check className="h-5 w-5 mr-2" />
-                Confirm Match (SKU & Qty)
+                <Check className="h-4 w-4 mr-2" />
+                Confirm Match
               </Button>
               
-              <div className="text-center text-sm text-muted-foreground">— or enter different count —</div>
+              <div className="text-center text-xs text-muted-foreground">— or enter different count —</div>
               
-              {/* Quantity section */}
+              {/* Quantity section - more compact */}
               <div>
-                <Label>Actual Quantity in Bin</Label>
-                <div className="flex gap-2 mt-1">
+                <Label className="text-sm">Quantity</Label>
+                <div className="flex gap-1 mt-1">
                   <Button 
                     variant="outline" 
                     size="icon"
-                    className="h-12 w-14 text-xl"
+                    className="h-10 w-12 text-lg shrink-0"
                     onClick={() => setCountForm({ 
                       ...countForm, 
                       countedQty: String(Math.max(0, (parseInt(countForm.countedQty) || 0) - 1)) 
@@ -1166,13 +1164,13 @@ export default function CycleCounts() {
                     value={countForm.countedQty}
                     onChange={(e) => setCountForm({ ...countForm, countedQty: e.target.value })}
                     placeholder="Qty"
-                    className="text-center text-xl h-12 flex-1"
+                    className="text-center text-lg h-10 flex-1"
                     data-testid="input-counted-qty"
                   />
                   <Button 
                     variant="outline" 
                     size="icon"
-                    className="h-12 w-14 text-xl"
+                    className="h-10 w-12 text-lg shrink-0"
                     onClick={() => setCountForm({ 
                       ...countForm, 
                       countedQty: String((parseInt(countForm.countedQty) || 0) + 1) 
@@ -1181,19 +1179,19 @@ export default function CycleCounts() {
                     +
                   </Button>
                 </div>
-                <div className="flex gap-2 mt-2">
+                <div className="flex gap-1 mt-1">
                   <Button 
                     variant="outline" 
                     size="sm"
-                    className="flex-1"
+                    className="flex-1 h-8 text-xs"
                     onClick={() => setCountForm({ ...countForm, countedQty: "0" })}
                   >
-                    Bin Empty
+                    Empty
                   </Button>
                   <Button 
                     variant="outline" 
                     size="sm"
-                    className="flex-1"
+                    className="flex-1 h-8 text-xs"
                     onClick={() => setCountForm({ ...countForm, countedQty: String(selectedItem?.expectedQty || 0) })}
                   >
                     Same as Expected
@@ -1203,14 +1201,11 @@ export default function CycleCounts() {
               
               {/* SKU section - searchable typeahead */}
               <div>
-                <div className="flex items-center justify-between">
-                  <Label>Different SKU in Bin?</Label>
-                  <span className="text-xs text-muted-foreground">Search if different product found</span>
-                </div>
+                <Label className="text-sm">Different SKU?</Label>
                 <div className="relative mt-1">
-                  <div className="flex gap-2">
+                  <div className="flex gap-1">
                     <div className="relative flex-1">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                       <Input
                         ref={skuInputRef}
                         value={skuSearch}
@@ -1222,7 +1217,12 @@ export default function CycleCounts() {
                         onFocus={() => setSkuDropdownOpen(true)}
                         onBlur={() => setTimeout(() => setSkuDropdownOpen(false), 200)}
                         placeholder="Search SKU..."
-                        className="pl-10"
+                        className="pl-8 h-10"
+                        enterKeyHint="search"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid="input-sku-search"
                       />
                       {/* Dropdown */}
@@ -1313,22 +1313,28 @@ export default function CycleCounts() {
                 </div>
               </div>
               
-              {/* Notes */}
-              <div>
-                <Label>Notes (optional)</Label>
+              {/* Notes - collapsible */}
+              <details className="text-sm">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                  Add notes (optional)
+                </summary>
                 <Textarea
                   value={countForm.notes}
                   onChange={(e) => setCountForm({ ...countForm, notes: e.target.value })}
                   placeholder="Any observations..."
                   rows={2}
+                  className="mt-2"
                   data-testid="textarea-notes"
                 />
-              </div>
+              </details>
             </div>
             
-            <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <div className="flex gap-2 pt-2 border-t">
+              <Button variant="outline" className="flex-1 h-10" onClick={() => setCountDialogOpen(false)}>
+                Cancel
+              </Button>
               <Button 
-                className="w-full"
+                className="flex-1 h-10"
                 onClick={() => selectedItem && countMutation.mutate({
                   itemId: selectedItem.id,
                   data: {
@@ -1339,12 +1345,9 @@ export default function CycleCounts() {
                 })}
                 disabled={countMutation.isPending || countForm.countedQty === ""}
               >
-                Save Count
+                Save
               </Button>
-              <Button variant="outline" className="w-full" onClick={() => setCountDialogOpen(false)}>
-                Cancel
-              </Button>
-            </DialogFooter>
+            </div>
           </DialogContent>
         </Dialog>
 
