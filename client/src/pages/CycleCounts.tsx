@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useDebounce } from "@/hooks/use-debounce";
+import { playSoundWithHaptic } from "@/lib/sounds";
 import { 
   ClipboardList, 
   Plus, 
@@ -498,13 +499,19 @@ export default function CycleCounts() {
           notes: differentSkuMode ? `Found different SKU: ${foundSku}` : null,
         }
       }, {
-        onSuccess: () => {
+        onSuccess: (data) => {
           // Clear the draft after successful submit
           clearDraft(cycleCountDetail.id, currentItem.id);
-          // Note: When query refreshes, this item will be removed from pendingItems
-          // so pendingItems[currentBinIndex] will naturally become the next item.
-          // We do NOT increment the index - just reset state for the "new" current item.
-          // useEffect will handle loading any draft for the next item.
+          // Play sound based on result
+          if (data.varianceType) {
+            playSoundWithHaptic("error", "classic", true); // Variance detected
+          } else {
+            playSoundWithHaptic("success", "classic", true); // Count matches
+          }
+          // Check if this was the last item
+          if (pendingItems.length <= 1) {
+            playSoundWithHaptic("complete", "classic", true); // All done!
+          }
         }
       });
     };
@@ -526,16 +533,16 @@ export default function CycleCounts() {
     // Mobile counting view
     if (mobileCountMode && pendingItems.length > 0) {
       return (
-        <div className="flex flex-col h-full bg-slate-50">
-          {/* Header */}
-          <div className="bg-white border-b px-4 py-3 flex items-center justify-between">
-            <Button variant="ghost" size="sm" onClick={handleExitCountMode}>
-              <RotateCcw className="h-4 w-4 mr-2" /> Exit
+        <div className="flex flex-col h-[100dvh] bg-slate-50 overflow-hidden">
+          {/* Header - compact */}
+          <div className="bg-white border-b px-3 py-2 flex items-center justify-between shrink-0">
+            <Button variant="ghost" size="sm" className="h-8 px-2" onClick={handleExitCountMode}>
+              <RotateCcw className="h-4 w-4 mr-1" /> Exit
             </Button>
             <div className="text-center">
-              <div className="text-sm text-muted-foreground">Bin {currentBinIndex + 1} of {pendingItems.length}</div>
+              <div className="text-xs text-muted-foreground">Bin {currentBinIndex + 1} of {pendingItems.length}</div>
             </div>
-            <div className="w-16" />
+            <div className="w-14" />
           </div>
           
           {/* Progress bar */}
@@ -546,133 +553,92 @@ export default function CycleCounts() {
             />
           </div>
           
-          {/* Main counting area - mobile optimized */}
-          <div className="flex-1 p-3 overflow-hidden flex flex-col gap-3">
-            <Card className="flex-1 overflow-hidden">
-              <CardContent className="p-4 flex flex-col items-center justify-center h-full gap-4">
-                {/* Location - prominent but fits screen */}
-                <div className="text-center w-full px-2">
-                  <div className="text-xs text-muted-foreground mb-1">Go to bin</div>
-                  <div className="text-3xl sm:text-4xl font-bold font-mono text-blue-600 truncate">
+          {/* Main counting area - mobile optimized, scrollable */}
+          <div className="flex-1 p-2 overflow-y-auto flex flex-col gap-2 min-h-0">
+            {/* Location and SKU info - compact */}
+            <div className="bg-white rounded-lg p-3 shadow-sm shrink-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-muted-foreground">Bin</div>
+                  <div className="text-2xl font-bold font-mono text-blue-600 truncate">
                     {currentItem?.locationCode}
                   </div>
                 </div>
-                
-                {/* SKU */}
-                <div className="text-center w-full px-2">
-                  <div className="text-xs text-muted-foreground mb-1">Product</div>
-                  <div className="text-base sm:text-lg font-semibold truncate">
-                    {currentItem?.expectedSku || "(Empty bin)"}
-                  </div>
-                </div>
-                
-                {/* Expected quantity hint */}
-                <div className="text-center bg-slate-100 rounded-lg px-4 py-2">
+                <div className="text-center bg-slate-100 rounded-lg px-3 py-1 shrink-0">
                   <div className="text-xs text-muted-foreground">Expected</div>
-                  <div className="text-2xl font-bold">{currentItem?.expectedQty}</div>
+                  <div className="text-xl font-bold">{currentItem?.expectedQty}</div>
                 </div>
-                
-                {/* Quantity input */}
-                <div className="w-full max-w-xs px-2">
-                  <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
-                  <div className="flex items-center gap-2">
-                    <Button 
-                      variant="outline" 
-                      size="lg"
-                      className="h-14 w-14 text-xl shrink-0"
-                      onClick={() => setQuickCountQty(String(Math.max(0, (parseInt(quickCountQty) || 0) - 1)))}
-                      data-testid="button-decrease-qty"
-                    >
-                      -
-                    </Button>
-                    <Input
-                      type="number"
-                      inputMode="numeric"
-                      value={quickCountQty}
-                      onChange={(e) => setQuickCountQty(e.target.value)}
-                      className="h-14 text-2xl text-center font-mono flex-1 min-w-0"
-                      placeholder="0"
-                      data-testid="input-quick-count"
-                    />
-                    <Button 
-                      variant="outline" 
-                      size="lg"
-                      className="h-14 w-14 text-xl shrink-0"
-                      onClick={() => setQuickCountQty(String((parseInt(quickCountQty) || 0) + 1))}
-                      data-testid="button-increase-qty"
-                    >
-                      +
-                    </Button>
-                  </div>
+              </div>
+              <div className="mt-1">
+                <div className="text-xs text-muted-foreground">SKU</div>
+                <div className="text-sm font-medium truncate">
+                  {currentItem?.expectedSku || "(Empty bin)"}
                 </div>
-              </CardContent>
-            </Card>
-            
-            {/* Navigation and confirm */}
-            <div className="flex gap-2">
-              <Button 
-                variant="outline" 
-                size="default"
-                className="h-12 px-3"
-                onClick={() => {
-                  // Save current draft before navigating
-                  if (quickCountQty !== "" && currentItem) {
-                    const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
-                    saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
-                  }
-                  // useEffect will handle loading drafts when currentBinIndex changes
-                  setCurrentBinIndex(Math.max(0, currentBinIndex - 1));
-                }}
-                disabled={currentBinIndex === 0}
-              >
-                Prev
-              </Button>
-              <Button 
-                size="default"
-                className="flex-1 h-12 text-base"
-                onClick={handleQuickCount}
-                disabled={countMutation.isPending || quickCountQty === ""}
-                data-testid="button-confirm-count"
-              >
-                <Check className="h-4 w-4 mr-1" />
-                Confirm & Next
-              </Button>
-              <Button 
-                variant="outline" 
-                size="default"
-                className="h-12 px-3"
-                onClick={() => {
-                  // Save current draft before navigating
-                  if (quickCountQty !== "" && currentItem) {
-                    const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
-                    saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
-                  }
-                  // useEffect will handle loading drafts when currentBinIndex changes
-                  setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1));
-                }}
-                disabled={currentBinIndex === pendingItems.length - 1}
-              >
-                Skip
-              </Button>
+              </div>
             </div>
             
-            {/* Quick actions */}
-            <div className="flex gap-2">
+            {/* Quantity input - compact */}
+            <div className="bg-white rounded-lg p-3 shadow-sm shrink-0">
+              <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
+              <div className="flex items-center gap-2 max-w-xs mx-auto">
+                <Button 
+                  variant="outline" 
+                  size="lg"
+                  className="h-12 w-12 text-xl shrink-0"
+                  onClick={() => setQuickCountQty(String(Math.max(0, (parseInt(quickCountQty) || 0) - 1)))}
+                  data-testid="button-decrease-qty"
+                >
+                  -
+                </Button>
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  value={quickCountQty}
+                  onChange={(e) => setQuickCountQty(e.target.value)}
+                  className="h-12 text-xl text-center font-mono flex-1 min-w-0"
+                  placeholder="0"
+                  data-testid="input-quick-count"
+                />
+                <Button 
+                  variant="outline" 
+                  size="lg"
+                  className="h-12 w-12 text-xl shrink-0"
+                  onClick={() => setQuickCountQty(String((parseInt(quickCountQty) || 0) + 1))}
+                  data-testid="button-increase-qty"
+                >
+                  +
+                </Button>
+              </div>
+            </div>
+            
+            {/* Quick actions - compact */}
+            <div className="bg-white rounded-lg p-2 shadow-sm flex gap-2 shrink-0">
               <Button 
                 variant="secondary" 
-                size="default"
-                className="flex-1 h-10 text-sm"
+                size="sm"
+                className="flex-1 h-9 text-xs"
                 onClick={() => {
                   setQuickCountQty(String(currentItem?.expectedQty || 0));
+                  playSoundWithHaptic("success", "classic", true);
                 }}
                 data-testid="button-match-expected"
               >
                 Matches ({currentItem?.expectedQty})
               </Button>
               <Button 
+                variant="outline" 
+                size="sm"
+                className="h-9 text-xs"
+                onClick={() => {
+                  setQuickCountQty("0");
+                }}
+              >
+                Empty
+              </Button>
+              <Button 
                 variant={differentSkuMode ? "default" : "outline"}
-                size="default"
-                className="h-10 text-sm"
+                size="sm"
+                className="h-9 text-xs"
                 onClick={() => {
                   setDifferentSkuMode(!differentSkuMode);
                   if (!differentSkuMode) {
@@ -769,17 +735,49 @@ export default function CycleCounts() {
               </Button>
             )}
 
-            {/* Empty bin option */}
+          </div>
+          
+          {/* Fixed footer - navigation buttons */}
+          <div className="bg-white border-t p-2 flex gap-2 shrink-0">
             <Button 
-              variant="ghost" 
+              variant="outline" 
               size="sm"
-              className="text-muted-foreground"
+              className="h-10 px-2"
               onClick={() => {
-                setQuickCountQty("0");
+                if (quickCountQty !== "" && currentItem) {
+                  const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
+                  saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
+                }
+                setCurrentBinIndex(Math.max(0, currentBinIndex - 1));
               }}
-              data-testid="button-bin-empty"
+              disabled={currentBinIndex === 0}
             >
-              Bin is empty
+              Prev
+            </Button>
+            <Button 
+              size="sm"
+              className="flex-1 h-10 text-sm"
+              onClick={handleQuickCount}
+              disabled={countMutation.isPending || quickCountQty === ""}
+              data-testid="button-confirm-count"
+            >
+              <Check className="h-4 w-4 mr-1" />
+              Confirm & Next
+            </Button>
+            <Button 
+              variant="outline" 
+              size="sm"
+              className="h-10 px-2"
+              onClick={() => {
+                if (quickCountQty !== "" && currentItem) {
+                  const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
+                  saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
+                }
+                setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1));
+              }}
+              disabled={currentBinIndex === pendingItems.length - 1}
+            >
+              Skip
             </Button>
           </div>
         </div>
