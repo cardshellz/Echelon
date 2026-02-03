@@ -528,18 +528,14 @@ export default function CycleCounts() {
           notes: differentSkuMode ? `Found different SKU: ${foundSku}` : null,
         }
       }, {
-        onSuccess: (data) => {
+        onSuccess: () => {
           // Clear the draft after successful submit
           clearDraft(cycleCountDetail.id, currentItem.id);
-          // Play sound based on result
-          if (data.varianceType) {
-            playSoundWithHaptic("error", "classic", true); // Variance detected
-          } else {
-            playSoundWithHaptic("success", "classic", true); // Count matches
-          }
           // Check if this was the last item
           if (pendingItems.length <= 1) {
             playSoundWithHaptic("complete", "classic", true); // All done!
+          } else {
+            playSoundWithHaptic("success", "classic", true); // Count saved
           }
         }
       });
