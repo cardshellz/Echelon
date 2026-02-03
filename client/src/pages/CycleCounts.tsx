@@ -830,6 +830,15 @@ export default function CycleCounts() {
                   const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
                   saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
                 }
+                // Clear form state for previous bin
+                setQuickCountQty("");
+                setDifferentSkuMode(false);
+                setFoundSku("");
+                setMobileSkuSearch("");
+                setMobileSkuDropdownOpen(false);
+                setAddFoundItemMode(false);
+                setFoundItemForm({ sku: "", quantity: "" });
+                setExtraItemSkuDropdownOpen(false);
                 setCurrentBinIndex(Math.max(0, currentBinIndex - 1));
               }}
               disabled={currentBinIndex === 0}
@@ -855,6 +864,15 @@ export default function CycleCounts() {
                   const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
                   saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
                 }
+                // Clear form state for next bin
+                setQuickCountQty("");
+                setDifferentSkuMode(false);
+                setFoundSku("");
+                setMobileSkuSearch("");
+                setMobileSkuDropdownOpen(false);
+                setAddFoundItemMode(false);
+                setFoundItemForm({ sku: "", quantity: "" });
+                setExtraItemSkuDropdownOpen(false);
                 setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1));
               }}
               disabled={currentBinIndex === pendingItems.length - 1}
