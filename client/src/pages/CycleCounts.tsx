@@ -451,6 +451,32 @@ export default function CycleCounts() {
   const clearDraft = (cycleCountId: number, itemId: number) => {
     localStorage.removeItem(getDraftKey(cycleCountId, itemId));
   };
+  
+  // Get pending items for mobile mode (must be outside conditional for hook dependencies)
+  const pendingItemsForHook = cycleCountDetail?.items.filter(i => i.status === "pending") || [];
+  const currentItemForHook = pendingItemsForHook[currentBinIndex];
+  
+  // Centralized draft loading via useEffect - MUST be at top level, not inside conditional
+  useEffect(() => {
+    if (mobileCountMode && currentItemForHook && cycleCountDetail) {
+      const draft = loadDraft(cycleCountDetail.id, currentItemForHook.id);
+      if (draft) {
+        setQuickCountQty(draft.qty);
+        if (draft.sku && draft.sku !== currentItemForHook.expectedSku) {
+          setDifferentSkuMode(true);
+          setFoundSku(draft.sku);
+        } else {
+          setDifferentSkuMode(false);
+          setFoundSku("");
+        }
+      } else {
+        // No draft - reset all state to prevent leakage
+        setQuickCountQty("");
+        setDifferentSkuMode(false);
+        setFoundSku("");
+      }
+    }
+  }, [mobileCountMode, currentBinIndex, currentItemForHook?.id, cycleCountDetail?.id]);
 
   if (selectedCount && cycleCountDetail) {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
@@ -496,28 +522,6 @@ export default function CycleCounts() {
       setFoundSku("");
       setMobileCountMode(false);
     };
-    
-    // Centralized draft loading via useEffect - triggers on bin change or entering mobile mode
-    useEffect(() => {
-      if (mobileCountMode && currentItem) {
-        const draft = loadDraft(cycleCountDetail.id, currentItem.id);
-        if (draft) {
-          setQuickCountQty(draft.qty);
-          if (draft.sku && draft.sku !== currentItem.expectedSku) {
-            setDifferentSkuMode(true);
-            setFoundSku(draft.sku);
-          } else {
-            setDifferentSkuMode(false);
-            setFoundSku("");
-          }
-        } else {
-          // No draft - reset all state to prevent leakage
-          setQuickCountQty("");
-          setDifferentSkuMode(false);
-          setFoundSku("");
-        }
-      }
-    }, [mobileCountMode, currentBinIndex, currentItem?.id]);
     
     // Mobile counting view
     if (mobileCountMode && pendingItems.length > 0) {
