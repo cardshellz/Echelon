@@ -304,34 +304,38 @@ export default function OrderHistory() {
   return (
     <div className="flex flex-col h-full">
       <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="flex items-center justify-between p-4 md:p-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-2 md:p-6">
           <div>
-            <h1 className="text-2xl font-bold">Order History</h1>
-            <p className="text-sm text-muted-foreground">
+            <h1 className="text-xl md:text-2xl font-bold">Order History</h1>
+            <p className="text-xs md:text-sm text-muted-foreground">
               Search and view completed orders
             </p>
           </div>
-          <Button variant="outline" onClick={handleExport} data-testid="button-export">
+          <Button variant="outline" onClick={handleExport} className="min-h-[44px]" data-testid="button-export">
             <Download className="h-4 w-4 mr-2" />
             <span className="hidden sm:inline">Export CSV</span>
             <span className="sm:hidden">Export</span>
           </Button>
         </div>
 
-        <div className="px-4 md:px-6 pb-4 flex flex-col sm:flex-row gap-2">
+        <div className="px-2 md:px-6 pb-4 flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search order #, customer name..."
               value={search}
               onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-              className="pl-9"
+              className="pl-9 h-11"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               data-testid="input-search"
             />
           </div>
           <div className="flex gap-2">
             <Select value={datePreset} onValueChange={(v) => { setDatePreset(v); setPage(0); }}>
-              <SelectTrigger className="w-[140px]" data-testid="select-date-preset">
+              <SelectTrigger className="w-[140px] h-11" data-testid="select-date-preset">
                 <Calendar className="h-4 w-4 mr-2" />
                 <SelectValue />
               </SelectTrigger>
@@ -346,7 +350,7 @@ export default function OrderHistory() {
 
             <Sheet open={filterOpen} onOpenChange={setFilterOpen}>
               <SheetTrigger asChild>
-                <Button variant="outline" data-testid="button-filters">
+                <Button variant="outline" className="min-h-[44px]" data-testid="button-filters">
                   <Filter className="h-4 w-4 mr-2" />
                   Filters
                   {hasActiveFilters && (
@@ -356,7 +360,7 @@ export default function OrderHistory() {
                   )}
                 </Button>
               </SheetTrigger>
-              <SheetContent>
+              <SheetContent className="max-h-[90vh] overflow-y-auto">
                 <SheetHeader>
                   <SheetTitle>Filters</SheetTitle>
                 </SheetHeader>
@@ -364,7 +368,7 @@ export default function OrderHistory() {
                   <div>
                     <label className="text-sm font-medium mb-2 block">Status</label>
                     <Select value={status} onValueChange={(v) => { setStatus(v); setPage(0); }}>
-                      <SelectTrigger data-testid="select-status">
+                      <SelectTrigger className="h-11" data-testid="select-status">
                         <SelectValue placeholder="All statuses" />
                       </SelectTrigger>
                       <SelectContent>
@@ -380,7 +384,7 @@ export default function OrderHistory() {
                   <div>
                     <label className="text-sm font-medium mb-2 block">Priority</label>
                     <Select value={priority} onValueChange={(v) => { setPriority(v); setPage(0); }}>
-                      <SelectTrigger data-testid="select-priority">
+                      <SelectTrigger className="h-11" data-testid="select-priority">
                         <SelectValue placeholder="All priorities" />
                       </SelectTrigger>
                       <SelectContent>
@@ -396,7 +400,7 @@ export default function OrderHistory() {
                   <div>
                     <label className="text-sm font-medium mb-2 block">Picker</label>
                     <Select value={pickerId} onValueChange={(v) => { setPickerId(v); setPage(0); }}>
-                      <SelectTrigger data-testid="select-picker">
+                      <SelectTrigger className="h-11" data-testid="select-picker">
                         <SelectValue placeholder="All pickers" />
                       </SelectTrigger>
                       <SelectContent>
@@ -416,6 +420,11 @@ export default function OrderHistory() {
                       placeholder="Enter SKU..."
                       value={sku}
                       onChange={(e) => { setSku(e.target.value); setPage(0); }}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       data-testid="input-sku"
                     />
                   </div>
@@ -423,7 +432,7 @@ export default function OrderHistory() {
                   <div>
                     <label className="text-sm font-medium mb-2 block">Channel</label>
                     <Select value={channel} onValueChange={(v) => { setChannel(v); setPage(0); }}>
-                      <SelectTrigger data-testid="select-channel">
+                      <SelectTrigger className="h-11" data-testid="select-channel">
                         <SelectValue placeholder="All channels" />
                       </SelectTrigger>
                       <SelectContent>
@@ -437,10 +446,10 @@ export default function OrderHistory() {
                   </div>
 
                   <div className="flex gap-2 pt-4">
-                    <Button variant="outline" onClick={clearFilters} className="flex-1" data-testid="button-clear-filters">
+                    <Button variant="outline" onClick={clearFilters} className="flex-1 min-h-[44px]" data-testid="button-clear-filters">
                       Clear All
                     </Button>
-                    <Button onClick={() => setFilterOpen(false)} className="flex-1" data-testid="button-apply-filters">
+                    <Button onClick={() => setFilterOpen(false)} className="flex-1 min-h-[44px]" data-testid="button-apply-filters">
                       Apply
                     </Button>
                   </div>
@@ -451,7 +460,7 @@ export default function OrderHistory() {
         </div>
 
         {hasActiveFilters && (
-          <div className="px-4 md:px-6 pb-3 flex flex-wrap gap-2">
+          <div className="px-2 md:px-6 pb-3 flex flex-wrap gap-2">
             {search && (
               <Badge variant="secondary" className="gap-1">
                 Order: {search}
@@ -515,7 +524,7 @@ export default function OrderHistory() {
           ) : (
             <>
               {/* Mobile card layout */}
-              <div className="md:hidden p-4 space-y-3">
+              <div className="md:hidden p-2 space-y-3">
                 {data?.orders.map((order) => (
                   <Card
                     key={order.id}
@@ -526,10 +535,10 @@ export default function OrderHistory() {
                     onClick={() => setSelectedOrderId(order.id)}
                     data-testid={`card-order-${order.id}`}
                   >
-                    <CardContent className="p-4">
+                    <CardContent className="p-3">
                       <div className="flex items-start justify-between mb-2">
                         <div>
-                          <div className="font-medium flex items-center gap-2">
+                          <div className="font-medium text-sm flex items-center gap-2">
                             #{order.orderNumber}
                             {order.priority !== "normal" && (
                               <Badge variant="outline" className={`text-xs ${getPriorityColor(order.priority)}`}>
@@ -628,8 +637,8 @@ export default function OrderHistory() {
               </div>
 
               {totalPages > 1 && (
-                <div className="flex items-center justify-between p-4 border-t">
-                  <p className="text-sm text-muted-foreground">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-2 p-2 md:p-4 border-t">
+                  <p className="text-xs md:text-sm text-muted-foreground">
                     Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, data?.total || 0)} of {data?.total || 0}
                   </p>
                   <div className="flex gap-2">
@@ -638,6 +647,7 @@ export default function OrderHistory() {
                       size="sm"
                       onClick={() => setPage(p => Math.max(0, p - 1))}
                       disabled={page === 0}
+                      className="min-h-[44px]"
                       data-testid="button-prev-page"
                     >
                       Previous
@@ -647,6 +657,7 @@ export default function OrderHistory() {
                       size="sm"
                       onClick={() => setPage(p => p + 1)}
                       disabled={page >= totalPages - 1}
+                      className="min-h-[44px]"
                       data-testid="button-next-page"
                     >
                       Next
@@ -671,7 +682,7 @@ export default function OrderHistory() {
 
       {selectedOrderId && isMobile && (
         <Sheet open={!!selectedOrderId} onOpenChange={() => setSelectedOrderId(null)}>
-          <SheetContent className="w-full sm:max-w-lg p-0">
+          <SheetContent className="w-full sm:max-w-lg max-h-[90vh] overflow-y-auto p-0">
             <OrderDetailPanel
               detail={orderDetail}
               loading={detailLoading}
@@ -728,7 +739,7 @@ function OrderDetailPanel({
             <h2 className="text-xl font-bold">#{order.orderNumber}</h2>
             <p className="text-sm text-muted-foreground">{order.customerName}</p>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} className="lg:hidden" data-testid="button-close-detail">
+          <Button variant="ghost" size="icon" onClick={onClose} className="lg:hidden min-h-[44px] min-w-[44px]" data-testid="button-close-detail">
             <X className="h-4 w-4" />
           </Button>
         </div>

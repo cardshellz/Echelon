@@ -160,69 +160,75 @@ export default function Products() {
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Package className="h-6 w-6" />
+          <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
+            <Package className="h-5 w-5 md:h-6 md:w-6" />
             Products
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Manage your product catalog and inventory
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 w-full md:w-auto">
           <Button
             variant="outline"
             onClick={() => syncMutation.mutate()}
             disabled={syncMutation.isPending}
+            className="min-h-[44px] flex-1 md:flex-none"
             data-testid="btn-sync-shopify"
           >
             <RefreshCw className={`h-4 w-4 mr-2 ${syncMutation.isPending ? "animate-spin" : ""}`} />
-            {syncMutation.isPending ? "Syncing..." : "Sync from Shopify"}
+            <span className="hidden sm:inline">{syncMutation.isPending ? "Syncing..." : "Sync from Shopify"}</span>
+            <span className="sm:hidden">{syncMutation.isPending ? "..." : "Sync"}</span>
           </Button>
-          <Button onClick={() => setCreateDialogOpen(true)} data-testid="btn-add-product">
+          <Button onClick={() => setCreateDialogOpen(true)} className="min-h-[44px] flex-1 md:flex-none" data-testid="btn-add-product">
             <Plus className="h-4 w-4 mr-2" />
             Add Product
           </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-2 md:gap-4">
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.total}</div>
-            <div className="text-sm text-muted-foreground">Total Products</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Total Products</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.active}</div>
-            <div className="text-sm text-muted-foreground">Active</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold">{stats.active}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Active</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.variants}</div>
-            <div className="text-sm text-muted-foreground">Variants</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold">{stats.variants}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Variants</div>
           </CardContent>
         </Card>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-        <div className="flex flex-wrap gap-2 items-center w-full sm:w-auto">
-          <div className="relative w-full sm:w-80">
+      <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
+        <div className="flex flex-wrap gap-2 items-center w-full md:w-auto">
+          <div className="relative w-full md:w-80">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search products..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 w-full"
+              className="pl-9 w-full h-10"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               data-testid="input-search-products"
             />
           </div>
           <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger className="w-36" data-testid="select-status-filter">
+            <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-status-filter">
               <SelectValue placeholder="Status" />
             </SelectTrigger>
             <SelectContent>
@@ -233,7 +239,7 @@ export default function Products() {
           </Select>
           {categories.length > 0 && (
             <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-              <SelectTrigger className="w-40" data-testid="select-category-filter">
+              <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-category-filter">
                 <SelectValue placeholder="Category" />
               </SelectTrigger>
               <SelectContent>
@@ -250,6 +256,7 @@ export default function Products() {
             variant={viewMode === "table" ? "secondary" : "ghost"}
             size="icon"
             onClick={() => setViewMode("table")}
+            className="min-h-[44px] min-w-[44px]"
             data-testid="btn-view-table"
           >
             <List className="h-4 w-4" />
@@ -258,6 +265,7 @@ export default function Products() {
             variant={viewMode === "grid" ? "secondary" : "ghost"}
             size="icon"
             onClick={() => setViewMode("grid")}
+            className="min-h-[44px] min-w-[44px]"
             data-testid="btn-view-grid"
           >
             <Grid3X3 className="h-4 w-4" />
@@ -289,7 +297,7 @@ export default function Products() {
               onClick={() => setLocation(`/products/${product.id}`)}
               data-testid={`product-card-${product.id}`}
             >
-              <CardContent className="p-4">
+              <CardContent className="p-3 md:p-4">
                 <div className="aspect-square bg-muted rounded-lg mb-3 flex items-center justify-center overflow-hidden">
                   {product.imageUrl ? (
                     <img 
@@ -302,10 +310,10 @@ export default function Products() {
                   )}
                 </div>
                 <div className="space-y-1">
-                  <p className="font-medium line-clamp-2">{product.name}</p>
-                  <p className="text-sm text-muted-foreground font-mono">{product.sku || '-'}</p>
+                  <p className="font-medium line-clamp-2 text-sm md:text-base">{product.name}</p>
+                  <p className="text-xs md:text-sm text-muted-foreground font-mono">{product.sku || '-'}</p>
                   <div className="flex gap-1 flex-wrap">
-                    <Badge variant={product.isActive ? "default" : "secondary"}>
+                    <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
                       {product.isActive ? "Active" : "Inactive"}
                     </Badge>
                   </div>
@@ -315,29 +323,18 @@ export default function Products() {
           ))}
         </div>
       ) : (
-        <Card>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-12"></TableHead>
-                <TableHead>Product</TableHead>
-                <TableHead>SKU</TableHead>
-                <TableHead>Unit</TableHead>
-                <TableHead>Category</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="w-12"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredProducts.map((product) => (
-                <TableRow 
-                  key={product.id}
-                  className="cursor-pointer"
-                  onClick={() => setLocation(`/products/${product.id}`)}
-                  data-testid={`product-row-${product.id}`}
-                >
-                  <TableCell>
-                    <div className="w-10 h-10 bg-muted rounded flex items-center justify-center overflow-hidden">
+        <>
+          <div className="md:hidden space-y-2">
+            {filteredProducts.map((product) => (
+              <Card 
+                key={product.id}
+                className="cursor-pointer hover:border-primary transition-colors"
+                onClick={() => setLocation(`/products/${product.id}`)}
+                data-testid={`product-card-mobile-${product.id}`}
+              >
+                <CardContent className="p-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 bg-muted rounded flex-shrink-0 flex items-center justify-center overflow-hidden">
                       {product.imageUrl ? (
                         <img 
                           src={product.imageUrl} 
@@ -345,106 +342,182 @@ export default function Products() {
                           className="w-full h-full object-cover"
                         />
                       ) : (
-                        <ImageIcon className="h-4 w-4 text-muted-foreground/50" />
+                        <ImageIcon className="h-5 w-5 text-muted-foreground/50" />
                       )}
                     </div>
-                  </TableCell>
-                  <TableCell>
-                    <div>
-                      <p className="font-medium">{product.name}</p>
-                      {product.brand && (
-                        <p className="text-sm text-muted-foreground">{product.brand}</p>
-                      )}
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-sm truncate">{product.name}</p>
+                      <p className="text-xs text-muted-foreground font-mono">{product.sku || '-'}</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
+                          {product.isActive ? "Active" : "Inactive"}
+                        </Badge>
+                        {product.category && (
+                          <span className="text-xs text-muted-foreground">{product.category}</span>
+                        )}
+                      </div>
                     </div>
-                  </TableCell>
-                  <TableCell className="font-mono text-sm">{product.sku || '-'}</TableCell>
-                  <TableCell className="capitalize">{product.baseUnit || 'piece'}</TableCell>
-                  <TableCell>{product.category || "-"}</TableCell>
-                  <TableCell>
-                    <Badge variant={product.isActive ? "default" : "secondary"}>
-                      {product.isActive ? "Active" : "Inactive"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                  </TableCell>
+                    <ChevronRight className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+          <Card className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-12"></TableHead>
+                  <TableHead>Product</TableHead>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>Unit</TableHead>
+                  <TableHead>Category</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="w-12"></TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+              </TableHeader>
+              <TableBody>
+                {filteredProducts.map((product) => (
+                  <TableRow 
+                    key={product.id}
+                    className="cursor-pointer"
+                    onClick={() => setLocation(`/products/${product.id}`)}
+                    data-testid={`product-row-${product.id}`}
+                  >
+                    <TableCell>
+                      <div className="w-10 h-10 bg-muted rounded flex items-center justify-center overflow-hidden">
+                        {product.imageUrl ? (
+                          <img 
+                            src={product.imageUrl} 
+                            alt={product.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <ImageIcon className="h-4 w-4 text-muted-foreground/50" />
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div>
+                        <p className="font-medium">{product.name}</p>
+                        {product.brand && (
+                          <p className="text-sm text-muted-foreground">{product.brand}</p>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="font-mono text-sm">{product.sku || '-'}</TableCell>
+                    <TableCell className="capitalize">{product.baseUnit || 'piece'}</TableCell>
+                    <TableCell>{product.category || "-"}</TableCell>
+                    <TableCell>
+                      <Badge variant={product.isActive ? "default" : "secondary"}>
+                        {product.isActive ? "Active" : "Inactive"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Card>
+        </>
       )}
 
-      <div className="text-sm text-muted-foreground">
+      <div className="text-xs md:text-sm text-muted-foreground">
         Showing {filteredProducts.length} of {products.length} products
       </div>
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add New Product</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="product-name">Name *</Label>
+              <Label htmlFor="product-name" className="text-sm">Name *</Label>
               <Input
                 id="product-name"
                 value={newProduct.name}
                 onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
                 placeholder="Product name"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-product-name"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="product-sku">SKU</Label>
+              <Label htmlFor="product-sku" className="text-sm">SKU</Label>
               <Input
                 id="product-sku"
                 value={newProduct.sku}
                 onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value })}
                 placeholder="e.g., ARM-ENV-SGL"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-product-sku"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="product-description">Description</Label>
+              <Label htmlFor="product-description" className="text-sm">Description</Label>
               <Textarea
                 id="product-description"
                 value={newProduct.description}
                 onChange={(e) => setNewProduct({ ...newProduct, description: e.target.value })}
                 placeholder="Product description"
                 rows={3}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-product-description"
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="product-category">Category</Label>
+                <Label htmlFor="product-category" className="text-sm">Category</Label>
                 <Input
                   id="product-category"
                   value={newProduct.category}
                   onChange={(e) => setNewProduct({ ...newProduct, category: e.target.value })}
                   placeholder="e.g., Envelopes"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-product-category"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="product-brand">Brand</Label>
+                <Label htmlFor="product-brand" className="text-sm">Brand</Label>
                 <Input
                   id="product-brand"
                   value={newProduct.brand}
                   onChange={(e) => setNewProduct({ ...newProduct, brand: e.target.value })}
                   placeholder="e.g., Armor"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-product-brand"
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="product-unit">Base Unit</Label>
+              <Label htmlFor="product-unit" className="text-sm">Base Unit</Label>
               <Select
                 value={newProduct.baseUnit}
                 onValueChange={(val) => setNewProduct({ ...newProduct, baseUnit: val })}
               >
-                <SelectTrigger id="product-unit" data-testid="select-product-unit">
+                <SelectTrigger id="product-unit" className="h-11" data-testid="select-product-unit">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -457,13 +530,14 @@ export default function Products() {
               </Select>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)} className="min-h-[44px]">
               Cancel
             </Button>
             <Button
               onClick={() => createMutation.mutate(newProduct)}
               disabled={!newProduct.name || createMutation.isPending}
+              className="min-h-[44px]"
               data-testid="btn-save-product"
             >
               {createMutation.isPending ? "Creating..." : "Create Product"}

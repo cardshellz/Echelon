@@ -113,8 +113,7 @@ export default function Login() {
           <div className="mt-8 text-center">
             <Button 
               variant="ghost" 
-              size="sm" 
-              className="text-slate-500 hover:text-emerald-400 hover:bg-slate-900 gap-2 text-xs"
+              className="text-slate-500 hover:text-emerald-400 hover:bg-slate-900 gap-2 text-xs min-h-[44px]"
               onClick={handleInstall}
             >
               <Download size={14} /> Install App to Device

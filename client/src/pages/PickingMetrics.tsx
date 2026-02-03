@@ -124,19 +124,19 @@ export default function PickingMetrics() {
   const data = metrics || defaultMetrics;
 
   return (
-    <div className="space-y-6 p-4 md:p-6" data-testid="picking-metrics-page">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+    <div className="space-y-4 md:space-y-6 p-2 md:p-6" data-testid="picking-metrics-page">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <BarChart3 className="h-6 w-6" />
+          <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
+            <BarChart3 className="h-5 w-5 md:h-6 md:w-6" />
             Picking Metrics
           </h1>
-          <p className="text-muted-foreground text-sm mt-1">
+          <p className="text-muted-foreground text-xs md:text-sm mt-1">
             Warehouse picking performance and quality analytics
           </p>
         </div>
         <Select value={dateRange} onValueChange={(v) => setDateRange(v as DateRange)}>
-          <SelectTrigger className="w-[150px]" data-testid="date-range-select">
+          <SelectTrigger className="w-[150px] h-11" data-testid="date-range-select">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -156,61 +156,61 @@ export default function PickingMetrics() {
           <TabsTrigger value="pickers">By Picker</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="overview" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <TabsContent value="overview" className="space-y-4 md:space-y-6 mt-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Package className="h-4 w-4" />
                   Orders Completed
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{data.throughput.totalOrdersCompleted}</div>
-                <p className="text-sm text-muted-foreground">
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{data.throughput.totalOrdersCompleted}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">
                   {data.throughput.ordersPerHour.toFixed(1)}/hour avg
                 </p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Zap className="h-4 w-4" />
                   Items Picked
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{data.throughput.totalItemsPicked}</div>
-                <p className="text-sm text-muted-foreground">
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{data.throughput.totalItemsPicked}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">
                   {data.throughput.itemsPerHour.toFixed(1)}/hour avg
                 </p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Timer className="h-4 w-4" />
                   Avg Pick Time
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{formatTime(data.productivity.averagePickTime)}</div>
-                <p className="text-sm text-muted-foreground">per item</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{formatTime(data.productivity.averagePickTime)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">per item</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4" />
                   Short Pick Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{formatPercent(data.quality.shortPickRate)}</div>
-                <p className="text-sm text-muted-foreground">
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{formatPercent(data.quality.shortPickRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">
                   {data.quality.totalShortPicks} total shorts
                 </p>
               </CardContent>
@@ -284,160 +284,160 @@ export default function PickingMetrics() {
           </div>
         </TabsContent>
 
-        <TabsContent value="productivity" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <TabsContent value="productivity" className="space-y-4 md:space-y-6 mt-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Clock className="h-4 w-4" />
                   Avg Queue Wait
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{formatTime(data.productivity.averageQueueWait)}</div>
-                <p className="text-sm text-muted-foreground">Time until claimed</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{formatTime(data.productivity.averageQueueWait)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">Time until claimed</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Timer className="h-4 w-4" />
                   Avg Claim to Complete
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{formatTime(data.productivity.averageClaimToComplete)}</div>
-                <p className="text-sm text-muted-foreground">Per order</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{formatTime(data.productivity.averageClaimToComplete)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">Per order</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Users className="h-4 w-4" />
                   Active Pickers
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{data.productivity.pickersActive}</div>
-                <p className="text-sm text-muted-foreground">In selected period</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{data.productivity.pickersActive}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">In selected period</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Target className="h-4 w-4" />
                   Utilization Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{formatPercent(data.productivity.utilizationRate)}</div>
-                <p className="text-sm text-muted-foreground">Active picking time</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold">{formatPercent(data.productivity.utilizationRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">Active picking time</p>
               </CardContent>
             </Card>
           </div>
 
           <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Flow Metrics</CardTitle>
-              <CardDescription>Order processing timeline breakdown</CardDescription>
+            <CardHeader className="p-2 md:p-6">
+              <CardTitle className="text-base md:text-lg">Flow Metrics</CardTitle>
+              <CardDescription className="text-xs md:text-sm">Order processing timeline breakdown</CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
+            <CardContent className="p-2 md:p-6">
+              <div className="space-y-3 md:space-y-4">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-2 md:p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
-                      <Clock className="h-5 w-5 text-blue-600" />
+                    <div className="h-8 w-8 md:h-10 md:w-10 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+                      <Clock className="h-4 w-4 md:h-5 md:w-5 text-blue-600" />
                     </div>
                     <div>
-                      <div className="font-medium">Queue Wait Time</div>
-                      <div className="text-sm text-muted-foreground">Time from order sync to picker claim</div>
+                      <div className="font-medium text-sm md:text-base">Queue Wait Time</div>
+                      <div className="text-xs md:text-sm text-muted-foreground">Time from order sync to picker claim</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averageQueueWait)}</div>
+                  <div className="text-xl md:text-2xl font-bold md:text-right">{formatTime(data.productivity.averageQueueWait)}</div>
                 </div>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-2 md:p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
-                      <Zap className="h-5 w-5 text-green-600" />
+                    <div className="h-8 w-8 md:h-10 md:w-10 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+                      <Zap className="h-4 w-4 md:h-5 md:w-5 text-green-600" />
                     </div>
                     <div>
-                      <div className="font-medium">Pick Time</div>
-                      <div className="text-sm text-muted-foreground">Average time to pick each item</div>
+                      <div className="font-medium text-sm md:text-base">Pick Time</div>
+                      <div className="text-xs md:text-sm text-muted-foreground">Average time to pick each item</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averagePickTime)}</div>
+                  <div className="text-xl md:text-2xl font-bold md:text-right">{formatTime(data.productivity.averagePickTime)}</div>
                 </div>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 bg-muted/50 rounded-lg">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 p-2 md:p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 rounded-full bg-purple-100 flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="h-5 w-5 text-purple-600" />
+                    <div className="h-8 w-8 md:h-10 md:w-10 rounded-full bg-purple-100 flex items-center justify-center flex-shrink-0">
+                      <CheckCircle2 className="h-4 w-4 md:h-5 md:w-5 text-purple-600" />
                     </div>
                     <div>
-                      <div className="font-medium">Total Fulfillment Time</div>
-                      <div className="text-sm text-muted-foreground">Claim to order completion</div>
+                      <div className="font-medium text-sm md:text-base">Total Fulfillment Time</div>
+                      <div className="text-xs md:text-sm text-muted-foreground">Claim to order completion</div>
                     </div>
                   </div>
-                  <div className="text-2xl font-bold sm:text-right">{formatTime(data.productivity.averageClaimToComplete)}</div>
+                  <div className="text-xl md:text-2xl font-bold md:text-right">{formatTime(data.productivity.averageClaimToComplete)}</div>
                 </div>
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="quality" className="space-y-6 mt-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <TabsContent value="quality" className="space-y-4 md:space-y-6 mt-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <ScanLine className="h-4 w-4" />
                   Scan Pick Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-green-600">{formatPercent(data.quality.scanPickRate)}</div>
-                <p className="text-sm text-muted-foreground">Items verified by scan</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold text-green-600">{formatPercent(data.quality.scanPickRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">Items verified by scan</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <Hand className="h-4 w-4" />
                   Manual Pick Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-amber-600">{formatPercent(data.quality.manualPickRate)}</div>
-                <p className="text-sm text-muted-foreground">Items confirmed manually</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold text-amber-600">{formatPercent(data.quality.manualPickRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">Items confirmed manually</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4" />
                   Short Pick Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-red-600">{formatPercent(data.quality.shortPickRate)}</div>
-                <p className="text-sm text-muted-foreground">{data.quality.totalShortPicks} total shorts</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold text-red-600">{formatPercent(data.quality.shortPickRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">{data.quality.totalShortPicks} total shorts</p>
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardHeader className="pb-2 p-2 md:p-6 md:pb-2">
+                <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4" />
                   Exception Rate
                 </CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold text-orange-600">{formatPercent(data.quality.exceptionRate)}</div>
-                <p className="text-sm text-muted-foreground">{data.quality.totalExceptions} total exceptions</p>
+              <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                <div className="text-2xl md:text-3xl font-bold text-orange-600">{formatPercent(data.quality.exceptionRate)}</div>
+                <p className="text-xs md:text-sm text-muted-foreground">{data.quality.totalExceptions} total exceptions</p>
               </CardContent>
             </Card>
           </div>
@@ -479,48 +479,91 @@ export default function PickingMetrics() {
 
         <TabsContent value="pickers" className="space-y-6 mt-6">
           <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Picker Performance</CardTitle>
-              <CardDescription>Individual picker statistics for selected period</CardDescription>
+            <CardHeader className="p-2 md:p-6">
+              <CardTitle className="text-base md:text-lg">Picker Performance</CardTitle>
+              <CardDescription className="text-xs md:text-sm">Individual picker statistics for selected period</CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="p-2 md:p-6">
               {data.pickerPerformance.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left py-3 px-2 font-medium">Picker</th>
-                        <th className="text-right py-3 px-2 font-medium">Orders</th>
-                        <th className="text-right py-3 px-2 font-medium">Items</th>
-                        <th className="text-right py-3 px-2 font-medium">Avg Pick Time</th>
-                        <th className="text-right py-3 px-2 font-medium">Shorts</th>
-                        <th className="text-right py-3 px-2 font-medium">Scan Rate</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.pickerPerformance.map((picker) => (
-                        <tr key={picker.pickerId} className="border-b hover:bg-muted/50">
-                          <td className="py-3 px-2 font-medium">{picker.pickerName}</td>
-                          <td className="text-right py-3 px-2">{picker.ordersCompleted}</td>
-                          <td className="text-right py-3 px-2">{picker.itemsPicked}</td>
-                          <td className="text-right py-3 px-2">{formatTime(picker.avgPickTime)}</td>
-                          <td className="text-right py-3 px-2">
-                            {picker.shortPicks > 0 ? (
-                              <Badge variant="destructive">{picker.shortPicks}</Badge>
-                            ) : (
-                              <Badge variant="secondary">0</Badge>
-                            )}
-                          </td>
-                          <td className="text-right py-3 px-2">
-                            <Badge variant={picker.scanRate > 0.8 ? "default" : "secondary"}>
-                              {formatPercent(picker.scanRate)}
-                            </Badge>
-                          </td>
+                <>
+                  {/* Mobile card layout */}
+                  <div className="md:hidden space-y-3">
+                    {data.pickerPerformance.map((picker) => (
+                      <div key={picker.pickerId} className="border rounded-lg p-3">
+                        <div className="font-medium text-sm mb-2">{picker.pickerName}</div>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div>
+                            <span className="text-muted-foreground text-xs">Orders:</span>
+                            <div>{picker.ordersCompleted}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground text-xs">Items:</span>
+                            <div>{picker.itemsPicked}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground text-xs">Avg Time:</span>
+                            <div>{formatTime(picker.avgPickTime)}</div>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground text-xs">Shorts:</span>
+                            <div>
+                              {picker.shortPicks > 0 ? (
+                                <Badge variant="destructive" className="text-xs">{picker.shortPicks}</Badge>
+                              ) : (
+                                <Badge variant="secondary" className="text-xs">0</Badge>
+                              )}
+                            </div>
+                          </div>
+                          <div className="col-span-2">
+                            <span className="text-muted-foreground text-xs">Scan Rate:</span>
+                            <div>
+                              <Badge variant={picker.scanRate > 0.8 ? "default" : "secondary"} className="text-xs">
+                                {formatPercent(picker.scanRate)}
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {/* Desktop table layout */}
+                  <div className="hidden md:block overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left py-3 px-2 font-medium">Picker</th>
+                          <th className="text-right py-3 px-2 font-medium">Orders</th>
+                          <th className="text-right py-3 px-2 font-medium">Items</th>
+                          <th className="text-right py-3 px-2 font-medium">Avg Pick Time</th>
+                          <th className="text-right py-3 px-2 font-medium">Shorts</th>
+                          <th className="text-right py-3 px-2 font-medium">Scan Rate</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {data.pickerPerformance.map((picker) => (
+                          <tr key={picker.pickerId} className="border-b hover:bg-muted/50">
+                            <td className="py-3 px-2 font-medium">{picker.pickerName}</td>
+                            <td className="text-right py-3 px-2">{picker.ordersCompleted}</td>
+                            <td className="text-right py-3 px-2">{picker.itemsPicked}</td>
+                            <td className="text-right py-3 px-2">{formatTime(picker.avgPickTime)}</td>
+                            <td className="text-right py-3 px-2">
+                              {picker.shortPicks > 0 ? (
+                                <Badge variant="destructive">{picker.shortPicks}</Badge>
+                              ) : (
+                                <Badge variant="secondary">0</Badge>
+                              )}
+                            </td>
+                            <td className="text-right py-3 px-2">
+                              <Badge variant={picker.scanRate > 0.8 ? "default" : "secondary"}>
+                                {formatPercent(picker.scanRate)}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               ) : (
                 <div className="text-center py-8 text-muted-foreground">
                   No picker data for selected period

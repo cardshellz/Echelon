@@ -168,7 +168,7 @@ export default function Roles() {
   }
 
   return (
-    <div className="space-y-4 md:space-y-6" data-testid="page-roles">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6" data-testid="page-roles">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Roles & Permissions</h1>
@@ -177,47 +177,55 @@ export default function Roles() {
         {canCreateRoles && (
           <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
             <DialogTrigger asChild>
-              <Button className="w-full sm:w-auto" data-testid="button-create-role">
+              <Button className="w-full sm:w-auto min-h-[44px]" data-testid="button-create-role">
                 <Plus className="h-4 w-4 mr-2" />
                 Create Role
               </Button>
             </DialogTrigger>
-            <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
               <DialogHeader>
                 <DialogTitle>Create New Role</DialogTitle>
               </DialogHeader>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <Label htmlFor="role-name">Role Name</Label>
+                  <Label htmlFor="role-name" className="text-sm">Role Name</Label>
                   <Input
                     id="role-name"
                     value={newRoleName}
                     onChange={(e) => setNewRoleName(e.target.value)}
                     placeholder="e.g., Warehouse Manager"
-                    className="w-full"
+                    className="w-full h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-role-name"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="role-description">Description</Label>
+                  <Label htmlFor="role-description" className="text-sm">Description</Label>
                   <Input
                     id="role-description"
                     value={newRoleDescription}
                     onChange={(e) => setNewRoleDescription(e.target.value)}
                     placeholder="e.g., Full access to warehouse operations"
-                    className="w-full"
+                    className="w-full h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-role-description"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Permissions</Label>
-                  <div className="border rounded-lg p-3 md:p-4 max-h-60 overflow-y-auto">
+                  <Label className="text-sm">Permissions</Label>
+                  <div className="border rounded-lg p-2 md:p-4 max-h-60 overflow-y-auto">
                     {Object.entries(groupedPermissions).map(([category, perms]) => (
                       <div key={category} className="mb-4 last:mb-0">
-                        <h4 className="font-medium capitalize mb-2 text-sm md:text-base">{category}</h4>
+                        <h4 className="font-medium capitalize mb-2 text-sm">{category}</h4>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           {perms.map(perm => (
-                            <div key={perm.id} className="flex items-center space-x-2">
+                            <div key={perm.id} className="flex items-center space-x-2 min-h-[44px]">
                               <Checkbox
                                 id={`create-perm-${perm.id}`}
                                 checked={selectedPermissions.includes(perm.id)}
@@ -240,7 +248,7 @@ export default function Roles() {
                     permissionIds: selectedPermissions,
                   })}
                   disabled={!newRoleName || createRoleMutation.isPending}
-                  className="w-full sm:w-auto"
+                  className="w-full sm:w-auto min-h-[44px]"
                   data-testid="button-submit-role"
                 >
                   Create Role
@@ -300,7 +308,7 @@ export default function Roles() {
                   variant="destructive"
                   size="sm"
                   onClick={() => deleteRoleMutation.mutate(selectedRole.id)}
-                  className="w-full sm:w-auto"
+                  className="w-full sm:w-auto min-h-[44px]"
                   data-testid="button-delete-role"
                 >
                   <Trash2 className="h-4 w-4 mr-1" />

@@ -398,22 +398,26 @@ export default function Orders() {
         </div>
       </div>
 
-      <div className="p-4 md:p-6 grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-3">
+      <div className="p-2 md:p-6 grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-3">
         <div className="md:col-span-2 space-y-4">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-4">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
                 placeholder="Search orders..." 
-                className="pl-9 bg-card" 
+                className="pl-9 bg-card h-11" 
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-search-orders"
               />
             </div>
             <div className="flex items-center gap-2">
               <Select value={channelFilter} onValueChange={setChannelFilter}>
-                <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-channel-filter">
+                <SelectTrigger className="w-full sm:w-[180px] h-11" data-testid="select-channel-filter">
                   <Store className="h-4 w-4 mr-2" />
                   <SelectValue placeholder="All Channels" />
                 </SelectTrigger>
@@ -424,7 +428,7 @@ export default function Orders() {
                   ))}
                 </SelectContent>
               </Select>
-              <Button variant="outline" size="icon" onClick={() => refetchOrders()} data-testid="button-refresh-orders">
+              <Button variant="outline" size="icon" onClick={() => refetchOrders()} className="min-h-[44px] min-w-[44px]" data-testid="button-refresh-orders">
                 <RefreshCw className="h-4 w-4" />
               </Button>
             </div>
@@ -576,29 +580,34 @@ export default function Orders() {
       </div>
 
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-md sm:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Create Manual Order</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="orderNumber">Order Number *</Label>
+                <Label htmlFor="orderNumber" className="text-sm">Order Number *</Label>
                 <Input
                   id="orderNumber"
                   value={newOrder.orderNumber}
                   onChange={(e) => setNewOrder({ ...newOrder, orderNumber: e.target.value })}
                   placeholder="ORD-001"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-order-number"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="priority">Priority</Label>
+                <Label htmlFor="priority" className="text-sm">Priority</Label>
                 <Select 
                   value={newOrder.priority} 
                   onValueChange={(v) => setNewOrder({ ...newOrder, priority: v })}
                 >
-                  <SelectTrigger data-testid="select-priority">
+                  <SelectTrigger className="h-11" data-testid="select-priority">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -612,23 +621,33 @@ export default function Orders() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="customerName">Customer Name *</Label>
+                <Label htmlFor="customerName" className="text-sm">Customer Name *</Label>
                 <Input
                   id="customerName"
                   value={newOrder.customerName}
                   onChange={(e) => setNewOrder({ ...newOrder, customerName: e.target.value })}
                   placeholder="John Doe"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-customer-name"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="customerEmail">Email</Label>
+                <Label htmlFor="customerEmail" className="text-sm">Email</Label>
                 <Input
                   id="customerEmail"
                   type="email"
                   value={newOrder.customerEmail}
                   onChange={(e) => setNewOrder({ ...newOrder, customerEmail: e.target.value })}
                   placeholder="john@example.com"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-customer-email"
                 />
               </div>
@@ -636,22 +655,32 @@ export default function Orders() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="customerPhone">Phone</Label>
+                <Label htmlFor="customerPhone" className="text-sm">Phone</Label>
                 <Input
                   id="customerPhone"
                   value={newOrder.customerPhone}
                   onChange={(e) => setNewOrder({ ...newOrder, customerPhone: e.target.value })}
                   placeholder="(555) 123-4567"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-customer-phone"
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="totalAmount">Total Amount</Label>
+                <Label htmlFor="totalAmount" className="text-sm">Total Amount</Label>
                 <Input
                   id="totalAmount"
                   value={newOrder.totalAmount}
                   onChange={(e) => setNewOrder({ ...newOrder, totalAmount: e.target.value })}
                   placeholder="$99.99"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-total-amount"
                 />
               </div>
@@ -659,8 +688,8 @@ export default function Orders() {
 
             <div className="border-t pt-4">
               <div className="flex items-center justify-between mb-3">
-                <Label className="text-base font-medium">Order Items *</Label>
-                <Button type="button" variant="outline" size="sm" onClick={addOrderItem} data-testid="button-add-item">
+                <Label className="text-sm font-medium">Order Items *</Label>
+                <Button type="button" variant="outline" size="sm" onClick={addOrderItem} className="min-h-[44px]" data-testid="button-add-item">
                   <Plus className="h-4 w-4 mr-1" /> Add Item
                 </Button>
               </div>
@@ -673,6 +702,11 @@ export default function Orders() {
                         value={item.sku}
                         onChange={(e) => updateOrderItem(index, "sku", e.target.value)}
                         placeholder="SKU-001"
+                        className="h-11"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid={`input-item-sku-${index}`}
                       />
                     </div>
@@ -682,6 +716,11 @@ export default function Orders() {
                         value={item.name}
                         onChange={(e) => updateOrderItem(index, "name", e.target.value)}
                         placeholder="Product Name"
+                        className="h-11"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid={`input-item-name-${index}`}
                       />
                     </div>
@@ -693,6 +732,7 @@ export default function Orders() {
                           min={1}
                           value={item.quantity}
                           onChange={(e) => updateOrderItem(index, "quantity", parseInt(e.target.value) || 1)}
+                          className="h-11"
                           data-testid={`input-item-qty-${index}`}
                         />
                       </div>
@@ -701,7 +741,7 @@ export default function Orders() {
                           type="button" 
                           variant="ghost" 
                           size="icon" 
-                          className="mt-5"
+                          className="mt-5 min-h-[44px]"
                           onClick={() => removeOrderItem(index)}
                           data-testid={`button-remove-item-${index}`}
                         >
@@ -715,20 +755,24 @@ export default function Orders() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="notes">Notes</Label>
+              <Label htmlFor="notes" className="text-sm">Notes</Label>
               <Textarea
                 id="notes"
                 value={newOrder.notes}
                 onChange={(e) => setNewOrder({ ...newOrder, notes: e.target.value })}
                 placeholder="Special instructions or notes..."
                 rows={2}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-notes"
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateOpen(false)} data-testid="button-cancel-order">Cancel</Button>
-            <Button onClick={handleCreateOrder} disabled={createOrderMutation.isPending} data-testid="button-submit-order">
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setIsCreateOpen(false)} className="min-h-[44px]" data-testid="button-cancel-order">Cancel</Button>
+            <Button onClick={handleCreateOrder} disabled={createOrderMutation.isPending} className="min-h-[44px]" data-testid="button-submit-order">
               {createOrderMutation.isPending ? "Creating..." : "Create Order"}
             </Button>
           </DialogFooter>

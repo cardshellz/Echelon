@@ -631,16 +631,20 @@ export default function Inventory() {
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
                 placeholder="Search by SKU or Name..." 
-                className="pl-9 h-9 w-full"
+                className="pl-9 h-11 w-full"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <Select 
               value={selectedWarehouseId?.toString() || "all"} 
               onValueChange={(v) => setSelectedWarehouseId(v === "all" ? null : parseInt(v))}
             >
-              <SelectTrigger className="w-[180px] h-9" data-testid="select-warehouse-filter">
+              <SelectTrigger className="w-[180px] h-11" data-testid="select-warehouse-filter">
                 <Building2 className="h-4 w-4 mr-2 text-muted-foreground" />
                 <SelectValue placeholder="All Warehouses" />
               </SelectTrigger>
@@ -812,45 +816,53 @@ export default function Inventory() {
       </div>
 
       <Dialog open={adjustDialogOpen} onOpenChange={setAdjustDialogOpen}>
-        <DialogContent className="w-[95vw] max-w-lg mx-auto">
+        <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Adjust Inventory</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-sm">
               Adjust the base unit count for {selectedItem?.baseSku}. Use positive numbers to add stock, negative to remove.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>Current On Hand: {selectedItem?.totalOnHandBase.toLocaleString()} base units</Label>
+              <Label className="text-sm">Current On Hand: {selectedItem?.totalOnHandBase.toLocaleString()} base units</Label>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="qty">Adjustment Quantity (+ or -)</Label>
+              <Label htmlFor="qty" className="text-sm">Adjustment Quantity (+ or -)</Label>
               <Input
                 id="qty"
                 type="number"
                 placeholder="e.g., 100 or -50"
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(e.target.value)}
-                className="w-full"
+                className="w-full h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="reason">Reason for Adjustment</Label>
+              <Label htmlFor="reason" className="text-sm">Reason for Adjustment</Label>
               <Textarea
                 id="reason"
                 placeholder="e.g., Cycle count correction, damaged goods, etc."
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value)}
                 className="w-full min-h-[100px]"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
           </div>
           <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => setAdjustDialogOpen(false)} className="w-full sm:w-auto">Cancel</Button>
+            <Button variant="outline" onClick={() => setAdjustDialogOpen(false)} className="w-full sm:w-auto min-h-[44px]">Cancel</Button>
             <Button 
               onClick={handleAdjustSubmit}
               disabled={!adjustmentQty || !adjustmentReason || adjustInventoryMutation.isPending}
-              className="w-full sm:w-auto"
+              className="w-full sm:w-auto min-h-[44px]"
             >
               {adjustInventoryMutation.isPending ? "Adjusting..." : "Apply Adjustment"}
             </Button>
@@ -859,51 +871,63 @@ export default function Inventory() {
       </Dialog>
 
       <Dialog open={addItemDialogOpen} onOpenChange={setAddItemDialogOpen}>
-        <DialogContent className="w-[95vw] max-w-lg mx-auto">
+        <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add Inventory Item</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-sm">
               Create a new base inventory item. You'll add variants and stock levels separately.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="baseSku">Base SKU</Label>
+              <Label htmlFor="baseSku" className="text-sm">Base SKU</Label>
               <Input
                 id="baseSku"
                 placeholder="e.g., EG-STD-SLV"
                 value={newItemForm.baseSku}
                 onChange={(e) => setNewItemForm({ ...newItemForm, baseSku: e.target.value })}
-                className="w-full"
+                className="w-full h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="name">Name</Label>
+              <Label htmlFor="name" className="text-sm">Name</Label>
               <Input
                 id="name"
                 placeholder="e.g., Easy Glide Standard Sleeve"
                 value={newItemForm.name}
                 onChange={(e) => setNewItemForm({ ...newItemForm, name: e.target.value })}
-                className="w-full"
+                className="w-full h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="description">Description (optional)</Label>
+              <Label htmlFor="description" className="text-sm">Description (optional)</Label>
               <Textarea
                 id="description"
                 placeholder="Product description..."
                 value={newItemForm.description}
                 onChange={(e) => setNewItemForm({ ...newItemForm, description: e.target.value })}
                 className="w-full min-h-[100px]"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
           </div>
           <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => setAddItemDialogOpen(false)} className="w-full sm:w-auto">Cancel</Button>
+            <Button variant="outline" onClick={() => setAddItemDialogOpen(false)} className="w-full sm:w-auto min-h-[44px]">Cancel</Button>
             <Button 
               onClick={() => createItemMutation.mutate(newItemForm)}
               disabled={!newItemForm.baseSku || !newItemForm.name || createItemMutation.isPending}
-              className="w-full sm:w-auto"
+              className="w-full sm:w-auto min-h-[44px]"
             >
               {createItemMutation.isPending ? "Creating..." : "Create Item"}
             </Button>
@@ -918,7 +942,7 @@ export default function Inventory() {
           setCsvResults(null);
         }
       }}>
-        <DialogContent className="w-[95vw] max-w-2xl mx-auto max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <FileSpreadsheet className="h-5 w-5" />
@@ -928,27 +952,27 @@ export default function Inventory() {
               Upload a CSV file to update inventory levels in bulk. The CSV should have columns: location_code, sku, quantity
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4 flex-1 overflow-auto">
+          <div className="space-y-4 py-4">
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={handleDownloadTemplate}>
+              <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="min-h-[44px]">
                 <Download size={14} className="mr-1" /> Download Template
               </Button>
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="csvFile">Select CSV File</Label>
+              <Label htmlFor="csvFile" className="text-sm">Select CSV File</Label>
               <Input
                 id="csvFile"
                 type="file"
                 accept=".csv"
-                className="w-full"
+                className="w-full h-11"
                 onChange={(e) => {
                   setCsvFile(e.target.files?.[0] || null);
                   setCsvResults(null);
                 }}
               />
               {csvFile && (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-xs text-muted-foreground">
                   Selected: {csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)
                 </p>
               )}
@@ -956,9 +980,9 @@ export default function Inventory() {
 
             {csvResults && (
               <div className="space-y-2">
-                <Label>Results</Label>
+                <Label className="text-sm">Results</Label>
                 {/* Mobile card layout for CSV results */}
-                <div className="md:hidden space-y-2 max-h-60 overflow-auto">
+                <div className="md:hidden space-y-2 max-h-48 overflow-auto">
                   {csvResults.map((result, idx) => (
                     <div key={idx} className={`p-3 rounded-md border ${result.status === "error" ? "bg-red-50 border-red-200" : "bg-green-50 border-green-200"}`}>
                       <div className="flex items-center justify-between mb-1">
@@ -1009,14 +1033,14 @@ export default function Inventory() {
             )}
           </div>
           <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => setCsvUploadOpen(false)} className="w-full sm:w-auto">
+            <Button variant="outline" onClick={() => setCsvUploadOpen(false)} className="w-full sm:w-auto min-h-[44px]">
               {csvResults ? "Close" : "Cancel"}
             </Button>
             {!csvResults && (
               <Button 
                 onClick={handleCsvUpload}
                 disabled={!csvFile || csvUploading}
-                className="w-full sm:w-auto"
+                className="w-full sm:w-auto min-h-[44px]"
               >
                 {csvUploading ? "Uploading..." : "Upload & Process"}
               </Button>
@@ -1026,19 +1050,19 @@ export default function Inventory() {
       </Dialog>
 
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Export Inventory</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-sm">
               Export inventory data to CSV. Filter by location type, storage type, or zone.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Location Purpose (optional filter)</Label>
+              <Label className="text-sm">Location Purpose (optional filter)</Label>
               <div className="grid grid-cols-2 gap-2 mt-2">
                 {locationTypeOptions.map((type) => (
-                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer min-h-[44px]">
                     <input
                       type="checkbox"
                       checked={exportFilters.locationTypes.includes(type.value)}
@@ -1049,7 +1073,7 @@ export default function Inventory() {
                           setExportFilters({ ...exportFilters, locationTypes: exportFilters.locationTypes.filter(t => t !== type.value) });
                         }
                       }}
-                      className="h-4 w-4"
+                      className="h-5 w-5"
                     />
                     <span className="text-sm">{type.label}</span>
                   </label>
@@ -1057,10 +1081,10 @@ export default function Inventory() {
               </div>
             </div>
             <div>
-              <Label>Storage Type (optional filter)</Label>
+              <Label className="text-sm">Storage Type (optional filter)</Label>
               <div className="grid grid-cols-2 gap-2 mt-2">
                 {binTypeOptions.map((type) => (
-                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer min-h-[44px]">
                     <input
                       type="checkbox"
                       checked={exportFilters.binTypes.includes(type.value)}
@@ -1071,7 +1095,7 @@ export default function Inventory() {
                           setExportFilters({ ...exportFilters, binTypes: exportFilters.binTypes.filter(t => t !== type.value) });
                         }
                       }}
-                      className="h-4 w-4"
+                      className="h-5 w-5"
                     />
                     <span className="text-sm">{type.label}</span>
                   </label>
@@ -1079,18 +1103,23 @@ export default function Inventory() {
               </div>
             </div>
             <div>
-              <Label>Zone (optional)</Label>
+              <Label className="text-sm">Zone (optional)</Label>
               <Input
                 value={exportFilters.zone}
                 onChange={(e) => setExportFilters({ ...exportFilters, zone: e.target.value })}
                 placeholder="e.g., A, B, BULK"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <p className="text-xs text-muted-foreground">Leave filters empty to export all inventory with stock.</p>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setExportDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleExport} disabled={exporting}>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setExportDialogOpen(false)} className="w-full sm:w-auto min-h-[44px]">Cancel</Button>
+            <Button onClick={handleExport} disabled={exporting} className="w-full sm:w-auto min-h-[44px]">
               {exporting ? "Exporting..." : "Export CSV"}
             </Button>
           </DialogFooter>

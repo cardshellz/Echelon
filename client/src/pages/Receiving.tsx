@@ -154,7 +154,7 @@ function LocationTypeahead({
         <Button 
           variant="outline" 
           size="sm" 
-          className="w-28 h-8 justify-start text-left font-normal truncate"
+          className="w-28 min-h-[44px] h-10 justify-start text-left font-normal truncate"
         >
           {selectedLocation?.code || "Select..."}
         </Button>
@@ -166,13 +166,17 @@ function LocationTypeahead({
             placeholder="Type to search..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="h-8"
+            className="h-10"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
           />
         </div>
         <ScrollArea className="h-48">
           <div className="p-1">
             <button
-              className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-accent cursor-pointer"
+              className="w-full text-left px-2 py-3 text-sm rounded hover:bg-accent active:bg-accent/80 cursor-pointer min-h-[44px]"
               onClick={() => { onChange(null); setOpen(false); setSearch(""); }}
             >
               Clear
@@ -180,7 +184,7 @@ function LocationTypeahead({
             {filteredLocations.map((loc) => (
               <button
                 key={loc.id}
-                className={`w-full text-left px-2 py-1.5 text-sm rounded hover:bg-accent cursor-pointer ${loc.id === value ? 'bg-accent' : ''}`}
+                className={`w-full text-left px-2 py-3 text-sm rounded hover:bg-accent active:bg-accent/80 cursor-pointer min-h-[44px] ${loc.id === value ? 'bg-accent' : ''}`}
                 onClick={() => { onChange(loc.id); setOpen(false); setSearch(""); }}
               >
                 {loc.code}
@@ -676,52 +680,52 @@ DEF-456,25,,,5.00,,Location TBD`;
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Truck className="h-6 w-6" />
+          <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
+            <Truck className="h-5 w-5 md:h-6 md:w-6" />
             Receiving
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Receive inventory and manage purchase orders
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setShowNewVendorDialog(true)} data-testid="btn-new-vendor">
+        <div className="flex gap-2 w-full sm:w-auto">
+          <Button variant="outline" onClick={() => setShowNewVendorDialog(true)} data-testid="btn-new-vendor" className="min-h-[44px] flex-1 sm:flex-none">
             <Building2 className="h-4 w-4 mr-2" />
-            New Vendor
+            <span className="hidden sm:inline">New</span> Vendor
           </Button>
-          <Button onClick={() => setShowNewReceiptDialog(true)} data-testid="btn-new-receipt">
+          <Button onClick={() => setShowNewReceiptDialog(true)} data-testid="btn-new-receipt" className="min-h-[44px] flex-1 sm:flex-none">
             <Plus className="h-4 w-4 mr-2" />
-            New Receipt
+            <span className="hidden sm:inline">New</span> Receipt
           </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.total}</div>
-            <div className="text-sm text-muted-foreground">Total Receipts</div>
+          <CardContent className="p-3 md:p-4">
+            <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Total Receipts</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold text-blue-600">{stats.open}</div>
-            <div className="text-sm text-muted-foreground">In Progress</div>
+          <CardContent className="p-3 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-blue-600">{stats.open}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">In Progress</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold text-green-600">{stats.closed}</div>
-            <div className="text-sm text-muted-foreground">Completed</div>
+          <CardContent className="p-3 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-green-600">{stats.closed}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Completed</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold text-gray-500">{stats.draft}</div>
-            <div className="text-sm text-muted-foreground">Drafts</div>
+          <CardContent className="p-3 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-gray-500">{stats.draft}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Drafts</div>
           </CardContent>
         </Card>
       </div>
@@ -735,7 +739,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         <TabsContent value="receipts" className="space-y-4">
           <div className="flex gap-2 items-center">
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-40" data-testid="select-status-filter">
+              <SelectTrigger className="w-40 h-10" data-testid="select-status-filter">
                 <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
               <SelectContent>
@@ -748,7 +752,74 @@ DEF-456,25,,,5.00,,Location TBD`;
             </Select>
           </div>
 
-          <Card>
+          {/* Mobile card view */}
+          <div className="md:hidden space-y-3">
+            {filteredReceipts.length === 0 ? (
+              <Card>
+                <CardContent className="p-4 text-center text-muted-foreground">
+                  No receipts found. Tap "Receipt" to create one.
+                </CardContent>
+              </Card>
+            ) : (
+              filteredReceipts.map((receipt) => (
+                <Card 
+                  key={receipt.id} 
+                  className="cursor-pointer active:bg-accent/50"
+                  onClick={() => loadReceiptDetail(receipt)}
+                  data-testid={`receipt-card-${receipt.id}`}
+                >
+                  <CardContent className="p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-medium text-sm">{receipt.receiptNumber}</span>
+                          <Badge variant={STATUS_BADGES[receipt.status]?.variant || "secondary"} className="text-xs">
+                            {STATUS_BADGES[receipt.status]?.label || receipt.status}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                          <Badge variant="outline" className="text-xs">{receipt.sourceType}</Badge>
+                          {receipt.vendor?.name && <span>• {receipt.vendor.name}</span>}
+                        </div>
+                        <div className="flex gap-4 mt-2 text-xs">
+                          <span>Lines: {receipt.receivedLineCount || 0}/{receipt.expectedLineCount || 0}</span>
+                          <span>Units: {receipt.receivedTotalUnits || 0}/{receipt.expectedTotalUnits || 0}</span>
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1">
+                          {format(new Date(receipt.createdAt), "MMM d, yyyy h:mm a")}
+                        </div>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button variant="ghost" size="sm" className="min-h-[44px] min-w-[44px] p-0" onClick={(e) => { e.stopPropagation(); loadReceiptDetail(receipt); }}>
+                          <FileText className="h-4 w-4" />
+                        </Button>
+                        {receipt.status !== "closed" && (
+                          <Button 
+                            variant="ghost" 
+                            size="sm"
+                            className="min-h-[44px] min-w-[44px] p-0"
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              if (confirm(`Delete receipt ${receipt.receiptNumber}?`)) {
+                                deleteReceiptMutation.mutate(receipt.id);
+                              }
+                            }}
+                            disabled={deleteReceiptMutation.isPending}
+                            data-testid={`btn-delete-receipt-mobile-${receipt.id}`}
+                          >
+                            <Trash2 className="h-4 w-4 text-red-500" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+
+          {/* Desktop table view */}
+          <Card className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -832,7 +903,46 @@ DEF-456,25,,,5.00,,Location TBD`;
         </TabsContent>
 
         <TabsContent value="vendors" className="space-y-4">
-          <Card>
+          {/* Mobile card view */}
+          <div className="md:hidden space-y-3">
+            {vendors.length === 0 ? (
+              <Card>
+                <CardContent className="p-4 text-center text-muted-foreground">
+                  No vendors found. Tap "Vendor" to add one.
+                </CardContent>
+              </Card>
+            ) : (
+              vendors.map((vendor) => (
+                <Card key={vendor.id} data-testid={`vendor-card-${vendor.id}`}>
+                  <CardContent className="p-3">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-medium text-sm">{vendor.code}</span>
+                          <Badge variant={vendor.active ? "default" : "secondary"} className="text-xs">
+                            {vendor.active ? "Active" : "Inactive"}
+                          </Badge>
+                        </div>
+                        <div className="font-medium mt-1">{vendor.name}</div>
+                        {vendor.contactName && (
+                          <div className="text-xs text-muted-foreground mt-1">{vendor.contactName}</div>
+                        )}
+                        {vendor.email && (
+                          <div className="text-xs text-muted-foreground">{vendor.email}</div>
+                        )}
+                        {vendor.phone && (
+                          <div className="text-xs text-muted-foreground">{vendor.phone}</div>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
+          </div>
+
+          {/* Desktop table view */}
+          <Card className="hidden md:block">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -875,16 +985,16 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* New Receipt Dialog */}
       <Dialog open={showNewReceiptDialog} onOpenChange={setShowNewReceiptDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Create New Receipt</DialogTitle>
             <DialogDescription>Create a new receiving document to receive inventory</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Receipt Type</Label>
+              <Label className="text-sm">Receipt Type</Label>
               <Select value={newReceipt.sourceType} onValueChange={(v) => setNewReceipt({ ...newReceipt, sourceType: v })}>
-                <SelectTrigger data-testid="select-receipt-type">
+                <SelectTrigger className="h-11" data-testid="select-receipt-type">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -895,57 +1005,77 @@ DEF-456,25,,,5.00,,Location TBD`;
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label>Vendor (Optional)</Label>
-              <Select value={newReceipt.vendorId} onValueChange={(v) => setNewReceipt({ ...newReceipt, vendorId: v })}>
-                <SelectTrigger data-testid="select-vendor">
-                  <SelectValue placeholder="Select vendor..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No Vendor</SelectItem>
-                  {vendors.map((v) => (
-                    <SelectItem key={v.id} value={v.id.toString()}>{v.name} ({v.code})</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Warehouse (Optional)</Label>
-              <Select value={newReceipt.warehouseId} onValueChange={(v) => setNewReceipt({ ...newReceipt, warehouseId: v })}>
-                <SelectTrigger data-testid="select-warehouse">
-                  <SelectValue placeholder="Select warehouse..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No Warehouse</SelectItem>
-                  {warehouses.map((w) => (
-                    <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {(newReceipt.sourceType === "po" || newReceipt.sourceType === "asn") && (
-              <div>
-                <Label>PO / Reference Number</Label>
-                <Input 
-                  value={newReceipt.poNumber} 
-                  onChange={(e) => setNewReceipt({ ...newReceipt, poNumber: e.target.value })}
-                  placeholder="Enter PO or reference number"
-                  data-testid="input-po-number"
-                />
+            
+            <details className="group">
+              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Optional Fields
+              </summary>
+              <div className="space-y-4 mt-4 pl-4 border-l-2">
+                <div>
+                  <Label className="text-sm">Vendor</Label>
+                  <Select value={newReceipt.vendorId} onValueChange={(v) => setNewReceipt({ ...newReceipt, vendorId: v })}>
+                    <SelectTrigger className="h-11" data-testid="select-vendor">
+                      <SelectValue placeholder="Select vendor..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No Vendor</SelectItem>
+                      {vendors.map((v) => (
+                        <SelectItem key={v.id} value={v.id.toString()}>{v.name} ({v.code})</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-sm">Warehouse</Label>
+                  <Select value={newReceipt.warehouseId} onValueChange={(v) => setNewReceipt({ ...newReceipt, warehouseId: v })}>
+                    <SelectTrigger className="h-11" data-testid="select-warehouse">
+                      <SelectValue placeholder="Select warehouse..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No Warehouse</SelectItem>
+                      {warehouses.map((w) => (
+                        <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {(newReceipt.sourceType === "po" || newReceipt.sourceType === "asn") && (
+                  <div>
+                    <Label className="text-sm">PO / Reference Number</Label>
+                    <Input 
+                      className="h-11"
+                      value={newReceipt.poNumber} 
+                      onChange={(e) => setNewReceipt({ ...newReceipt, poNumber: e.target.value })}
+                      placeholder="Enter PO or reference number"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-po-number"
+                    />
+                  </div>
+                )}
+                <div>
+                  <Label className="text-sm">Notes</Label>
+                  <Textarea 
+                    value={newReceipt.notes} 
+                    onChange={(e) => setNewReceipt({ ...newReceipt, notes: e.target.value })}
+                    placeholder="Any notes about this receipt..."
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-notes"
+                  />
+                </div>
               </div>
-            )}
-            <div>
-              <Label>Notes (Optional)</Label>
-              <Textarea 
-                value={newReceipt.notes} 
-                onChange={(e) => setNewReceipt({ ...newReceipt, notes: e.target.value })}
-                placeholder="Any notes about this receipt..."
-                data-testid="input-notes"
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowNewReceiptDialog(false)}>Cancel</Button>
+            </details>
+            
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowNewReceiptDialog(false)}>Cancel</Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={() => createReceiptMutation.mutate(newReceipt)}
                 disabled={createReceiptMutation.isPending}
                 data-testid="btn-create-receipt"
@@ -959,63 +1089,100 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* New Vendor Dialog */}
       <Dialog open={showNewVendorDialog} onOpenChange={setShowNewVendorDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add New Vendor</DialogTitle>
             <DialogDescription>Add a supplier to track receiving</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Code *</Label>
+                <Label className="text-sm">Code *</Label>
                 <Input 
+                  className="h-11"
                   value={newVendor.code} 
                   onChange={(e) => setNewVendor({ ...newVendor, code: e.target.value.toUpperCase() })}
                   placeholder="e.g., ACME"
                   maxLength={20}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="characters"
+                  spellCheck={false}
                   data-testid="input-vendor-code"
                 />
               </div>
               <div>
-                <Label>Name *</Label>
+                <Label className="text-sm">Name *</Label>
                 <Input 
+                  className="h-11"
                   value={newVendor.name} 
                   onChange={(e) => setNewVendor({ ...newVendor, name: e.target.value })}
                   placeholder="Company name"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-vendor-name"
                 />
               </div>
             </div>
-            <div>
-              <Label>Contact Name</Label>
-              <Input 
-                value={newVendor.contactName} 
-                onChange={(e) => setNewVendor({ ...newVendor, contactName: e.target.value })}
-                placeholder="Contact person"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <Label>Email</Label>
-                <Input 
-                  type="email"
-                  value={newVendor.email} 
-                  onChange={(e) => setNewVendor({ ...newVendor, email: e.target.value })}
-                  placeholder="email@example.com"
-                />
+            
+            <details className="group">
+              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Optional Contact Details
+              </summary>
+              <div className="space-y-4 mt-4 pl-4 border-l-2">
+                <div>
+                  <Label className="text-sm">Contact Name</Label>
+                  <Input 
+                    className="h-11"
+                    value={newVendor.contactName} 
+                    onChange={(e) => setNewVendor({ ...newVendor, contactName: e.target.value })}
+                    placeholder="Contact person"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <Label className="text-sm">Email</Label>
+                    <Input 
+                      className="h-11"
+                      type="email"
+                      value={newVendor.email} 
+                      onChange={(e) => setNewVendor({ ...newVendor, email: e.target.value })}
+                      placeholder="email@example.com"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-sm">Phone</Label>
+                    <Input 
+                      className="h-11"
+                      type="tel"
+                      value={newVendor.phone} 
+                      onChange={(e) => setNewVendor({ ...newVendor, phone: e.target.value })}
+                      placeholder="Phone number"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <Label>Phone</Label>
-                <Input 
-                  value={newVendor.phone} 
-                  onChange={(e) => setNewVendor({ ...newVendor, phone: e.target.value })}
-                  placeholder="Phone number"
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowNewVendorDialog(false)}>Cancel</Button>
+            </details>
+            
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowNewVendorDialog(false)}>Cancel</Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={() => createVendorMutation.mutate(newVendor)}
                 disabled={createVendorMutation.isPending || !newVendor.code || !newVendor.name}
                 data-testid="btn-create-vendor"
@@ -1029,18 +1196,18 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Receipt Detail Dialog */}
       <Dialog open={showReceiptDetail} onOpenChange={setShowReceiptDetail}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl md:max-w-4xl max-h-[90vh] overflow-y-auto p-4">
           {selectedReceipt && (
             <>
               <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
+                <DialogTitle className="flex flex-wrap items-center gap-2">
                   <FileText className="h-5 w-5" />
-                  Receipt {selectedReceipt.receiptNumber}
-                  <Badge variant={STATUS_BADGES[selectedReceipt.status]?.variant || "secondary"} className="ml-2">
+                  <span className="text-base md:text-lg">Receipt {selectedReceipt.receiptNumber}</span>
+                  <Badge variant={STATUS_BADGES[selectedReceipt.status]?.variant || "secondary"} className="text-xs">
                     {STATUS_BADGES[selectedReceipt.status]?.label || selectedReceipt.status}
                   </Badge>
                 </DialogTitle>
-                <DialogDescription>
+                <DialogDescription className="text-xs md:text-sm">
                   {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" : 
                    selectedReceipt.sourceType === "po" ? `PO: ${selectedReceipt.poNumber}` :
                    selectedReceipt.sourceType}
@@ -1054,28 +1221,31 @@ DEF-456,25,,,5.00,,Location TBD`;
                   {selectedReceipt.status === "draft" && (
                     <>
                       <Button 
-                        variant="outline" 
+                        variant="outline"
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={downloadTemplate}
                         data-testid="btn-download-template"
                       >
-                        <Download className="h-4 w-4 mr-2" />
-                        Download Template
+                        <Download className="h-4 w-4 mr-1 md:mr-2" />
+                        <span className="hidden sm:inline">Download</span> Template
                       </Button>
                       <Button 
-                        variant="outline" 
+                        variant="outline"
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => { setShowCSVImport(true); }}
                         data-testid="btn-import-csv"
                       >
-                        <Upload className="h-4 w-4 mr-2" />
-                        Import CSV
+                        <Upload className="h-4 w-4 mr-1 md:mr-2" />
+                        <span className="hidden sm:inline">Import</span> CSV
                       </Button>
                       <Button 
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => openReceiptMutation.mutate(selectedReceipt.id)}
                         disabled={openReceiptMutation.isPending}
                         data-testid="btn-open-receipt"
                       >
-                        <Play className="h-4 w-4 mr-2" />
-                        Start Receiving
+                        <Play className="h-4 w-4 mr-1 md:mr-2" />
+                        Start
                       </Button>
                     </>
                   )}
@@ -1083,33 +1253,36 @@ DEF-456,25,,,5.00,,Location TBD`;
                     <>
                       <Button 
                         variant="outline"
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => completeAllMutation.mutate(selectedReceipt.id)}
                         disabled={completeAllMutation.isPending}
                         data-testid="btn-complete-all"
                       >
-                        <CheckCircle className="h-4 w-4 mr-2" />
-                        Complete All Lines
+                        <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
+                        Complete All
                       </Button>
                       <Button 
+                        className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => closeReceiptMutation.mutate(selectedReceipt.id)}
                         disabled={closeReceiptMutation.isPending}
                         data-testid="btn-close-receipt"
                       >
-                        <CheckCircle className="h-4 w-4 mr-2" />
-                        Close & Update Inventory
+                        <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
+                        Close
                       </Button>
                     </>
                   )}
                 </div>
 
-                {/* Lines table */}
+                {/* Lines section */}
                 <Card>
-                  <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                    <CardTitle className="text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
+                  <CardHeader className="p-3 md:pb-2 flex flex-row items-center justify-between">
+                    <CardTitle className="text-sm md:text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
                     {selectedReceipt.status !== "closed" && (
                       <Button 
                         variant="outline" 
                         size="sm"
+                        className="min-h-[44px]"
                         onClick={() => setShowAddLineDialog(true)}
                         data-testid="btn-add-line"
                       >
@@ -1119,7 +1292,109 @@ DEF-456,25,,,5.00,,Location TBD`;
                     )}
                   </CardHeader>
                   <CardContent className="p-0">
-                    <Table>
+                    {/* Mobile card view for lines */}
+                    <div className="md:hidden p-2 space-y-2">
+                      {(!selectedReceipt.lines || selectedReceipt.lines.length === 0) ? (
+                        <div className="text-center text-muted-foreground py-8 text-sm">
+                          No lines yet. Import CSV or add lines manually.
+                        </div>
+                      ) : (
+                        selectedReceipt.lines.map((line) => (
+                          <Card key={line.id} className="border">
+                            <CardContent className="p-3 space-y-2">
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-mono text-sm font-medium truncate">{line.sku || "-"}</div>
+                                  <div className="text-xs text-muted-foreground truncate">{line.productName || "-"}</div>
+                                </div>
+                                <Badge variant={
+                                  line.status === "complete" ? "default" :
+                                  line.status === "partial" ? "outline" :
+                                  line.status === "overage" ? "destructive" :
+                                  "secondary"
+                                } className="text-xs ml-2">
+                                  {line.status}
+                                </Badge>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 text-xs">
+                                <div>
+                                  <Label className="text-xs text-muted-foreground">Expected</Label>
+                                  <div className="font-medium">{line.expectedQty}</div>
+                                </div>
+                                <div>
+                                  <Label className="text-xs text-muted-foreground">Received</Label>
+                                  {selectedReceipt.status !== "closed" ? (
+                                    <Input 
+                                      type="number"
+                                      value={line.receivedQty}
+                                      onChange={(e) => updateLineMutation.mutate({ 
+                                        lineId: line.id, 
+                                        updates: { receivedQty: parseInt(e.target.value) || 0 } 
+                                      })}
+                                      className="h-10 w-full mt-1"
+                                      min={0}
+                                      autoComplete="off"
+                                    />
+                                  ) : (
+                                    <div className="font-medium">{line.receivedQty}</div>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex-1">
+                                  <Label className="text-xs text-muted-foreground">Location</Label>
+                                  <div className="mt-1">
+                                    {selectedReceipt.status === "closed" ? (
+                                      <span className="text-sm">
+                                        {line.putawayLocationId 
+                                          ? locations.find(l => l.id === line.putawayLocationId)?.code || "Set"
+                                          : "Via CSV"
+                                        }
+                                      </span>
+                                    ) : (
+                                      <LocationTypeahead
+                                        locations={locations}
+                                        value={line.putawayLocationId}
+                                        onChange={(locationId) => updateLineMutation.mutate({
+                                          lineId: line.id,
+                                          updates: { putawayLocationId: locationId }
+                                        })}
+                                        disabled={false}
+                                      />
+                                    )}
+                                  </div>
+                                </div>
+                                {selectedReceipt.status !== "closed" && line.status !== "complete" && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="min-h-[44px]"
+                                    onClick={() => updateLineMutation.mutate({
+                                      lineId: line.id,
+                                      updates: { 
+                                        receivedQty: line.expectedQty || 0,
+                                        status: "complete" 
+                                      }
+                                    })}
+                                    disabled={updateLineMutation.isPending}
+                                    data-testid={`btn-complete-line-mobile-${line.id}`}
+                                  >
+                                    <Check className="h-4 w-4 mr-1" />
+                                    Done
+                                  </Button>
+                                )}
+                                {line.status === "complete" && (
+                                  <Check className="h-5 w-5 text-green-600" />
+                                )}
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))
+                      )}
+                    </div>
+                    
+                    {/* Desktop table view for lines */}
+                    <Table className="hidden md:table">
                       <TableHeader>
                         <TableRow>
                           <TableHead>SKU</TableHead>
@@ -1153,8 +1428,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       lineId: line.id, 
                                       updates: { receivedQty: parseInt(e.target.value) || 0 } 
                                     })}
-                                    className="w-20 h-8"
+                                    className="w-20 h-10"
                                     min={0}
+                                    autoComplete="off"
                                   />
                                 ) : (
                                   line.receivedQty
@@ -1196,6 +1472,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     <Button
                                       variant="ghost"
                                       size="sm"
+                                      className="min-h-[44px]"
                                       onClick={() => updateLineMutation.mutate({
                                         lineId: line.id,
                                         updates: { 
@@ -1228,26 +1505,31 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* CSV Import Dialog */}
       <Dialog open={showCSVImport} onOpenChange={setShowCSVImport}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Import from CSV</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-xs md:text-sm">
               Paste CSV data with columns: sku, qty, location (optional)
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="bg-muted p-3 rounded text-sm font-mono">
-              Example:<br/>
-              sku,qty,location<br/>
-              PROD-001,100,A-01<br/>
-              PROD-002,50,B-02
-            </div>
+            <details className="group">
+              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                View Example Format
+              </summary>
+              <div className="bg-muted p-3 rounded text-xs md:text-sm font-mono mt-2">
+                sku,qty,location<br/>
+                PROD-001,100,A-01<br/>
+                PROD-002,50,B-02
+              </div>
+            </details>
             
             <div className="flex items-center gap-4">
               <div className="flex-1">
-                <label className="flex items-center justify-center gap-2 border-2 border-dashed rounded-lg p-4 cursor-pointer hover:border-primary transition-colors">
+                <label className="flex items-center justify-center gap-2 border-2 border-dashed rounded-lg p-4 cursor-pointer hover:border-primary transition-colors active:bg-accent/50 min-h-[60px]">
                   <Upload className="h-5 w-5 text-muted-foreground" />
-                  <span className="text-sm text-muted-foreground">Choose CSV file or drag & drop</span>
+                  <span className="text-xs md:text-sm text-muted-foreground">Choose CSV file or drag & drop</span>
                   <input 
                     type="file" 
                     accept=".csv,text/csv"
@@ -1274,18 +1556,23 @@ DEF-456,25,,,5.00,,Location TBD`;
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
               placeholder="Paste your CSV data here..."
-              className="min-h-[200px] font-mono text-sm"
+              className="min-h-[150px] md:min-h-[200px] font-mono text-xs md:text-sm"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               data-testid="textarea-csv"
             />
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowCSVImport(false)}>Cancel</Button>
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowCSVImport(false)}>Cancel</Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={handleCSVImport}
                 disabled={bulkImportMutation.isPending || !csvText.trim()}
                 data-testid="btn-import"
               >
                 <Upload className="h-4 w-4 mr-2" />
-                Import Lines
+                Import
               </Button>
             </div>
           </div>
@@ -1294,23 +1581,28 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Add Line Dialog */}
       <Dialog open={showAddLineDialog} onOpenChange={setShowAddLineDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add Line</DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-xs md:text-sm">
               Add a product line to this receiving order.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="space-y-4 py-2">
             <div className="space-y-2">
-              <Label>SKU</Label>
+              <Label className="text-sm">SKU</Label>
               <div className="relative">
                 <Input
+                  className="h-11"
                   value={skuSearch}
                   onChange={(e) => handleSkuSearch(e.target.value)}
                   onFocus={() => skuResults.length > 0 && setShowSkuDropdown(true)}
                   onBlur={() => setTimeout(() => setShowSkuDropdown(false), 200)}
                   placeholder="Search by SKU or product name..."
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-add-line-sku"
                 />
                 {showSkuDropdown && skuResults.length > 0 && (
@@ -1319,7 +1611,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <button
                         key={item.uomVariantId}
                         type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-gray-100 text-sm"
+                        className="w-full px-3 py-3 text-left hover:bg-gray-100 active:bg-gray-200 text-sm min-h-[44px]"
                         onClick={() => {
                           setNewLine({
                             ...newLine,
@@ -1334,7 +1626,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         }}
                         data-testid={`sku-option-${item.sku}`}
                       >
-                        <div className="font-mono">{item.sku}</div>
+                        <div className="font-mono text-sm">{item.sku}</div>
                         <div className="text-xs text-muted-foreground truncate">{item.name}</div>
                       </button>
                     ))}
@@ -1349,12 +1641,15 @@ DEF-456,25,,,5.00,,Location TBD`;
             </div>
 
             <div className="space-y-2">
-              <Label>{selectedReceipt?.sourceType === "blind" ? "Quantity" : "Expected Qty"}</Label>
+              <Label className="text-sm">{selectedReceipt?.sourceType === "blind" ? "Quantity" : "Expected Qty"}</Label>
               <Input
+                className="h-11"
                 type="number"
+                inputMode="numeric"
                 value={newLine.expectedQty}
                 onChange={(e) => setNewLine({ ...newLine, expectedQty: e.target.value })}
                 min="1"
+                autoComplete="off"
                 data-testid="input-add-line-expected"
               />
               {selectedReceipt?.sourceType === "blind" && (
@@ -1364,55 +1659,65 @@ DEF-456,25,,,5.00,,Location TBD`;
               )}
             </div>
 
-            <div className="space-y-2">
-              <Label>Put-away Location</Label>
-              <div className="relative">
-                <Input
-                  value={locationSearch}
-                  onChange={(e) => handleLocationSearch(e.target.value)}
-                  onFocus={() => {
-                    if (locationSearch.length > 0 && locationResults.length > 0) {
-                      setShowLocationDropdown(true);
-                    } else if (locationSearch.length === 0) {
-                      const initial = locations.slice(0, 20);
-                      setLocationResults(initial);
-                      setShowLocationDropdown(initial.length > 0);
-                    }
-                  }}
-                  onBlur={() => setTimeout(() => setShowLocationDropdown(false), 200)}
-                  placeholder="Search location by code..."
-                  data-testid="input-add-line-location"
-                />
-                {showLocationDropdown && locationResults.length > 0 && (
-                  <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                    {locationResults.map((loc) => (
-                      <button
-                        key={loc.id}
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-gray-100 text-sm"
-                        onClick={() => {
-                          setNewLine({ ...newLine, putawayLocationId: loc.id.toString() });
-                          setLocationSearch(loc.code);
-                          setShowLocationDropdown(false);
-                        }}
-                        data-testid={`location-option-${loc.code}`}
-                      >
-                        <div className="font-mono">{loc.code}</div>
-                        {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
-                      </button>
-                    ))}
+            <details className="group">
+              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Put-away Location (optional)
+              </summary>
+              <div className="space-y-2 mt-3">
+                <div className="relative">
+                  <Input
+                    className="h-11"
+                    value={locationSearch}
+                    onChange={(e) => handleLocationSearch(e.target.value)}
+                    onFocus={() => {
+                      if (locationSearch.length > 0 && locationResults.length > 0) {
+                        setShowLocationDropdown(true);
+                      } else if (locationSearch.length === 0) {
+                        const initial = locations.slice(0, 20);
+                        setLocationResults(initial);
+                        setShowLocationDropdown(initial.length > 0);
+                      }
+                    }}
+                    onBlur={() => setTimeout(() => setShowLocationDropdown(false), 200)}
+                    placeholder="Search location by code..."
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-add-line-location"
+                  />
+                  {showLocationDropdown && locationResults.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {locationResults.map((loc) => (
+                        <button
+                          key={loc.id}
+                          type="button"
+                          className="w-full px-3 py-3 text-left hover:bg-gray-100 active:bg-gray-200 text-sm min-h-[44px]"
+                          onClick={() => {
+                            setNewLine({ ...newLine, putawayLocationId: loc.id.toString() });
+                            setLocationSearch(loc.code);
+                            setShowLocationDropdown(false);
+                          }}
+                          data-testid={`location-option-${loc.code}`}
+                        >
+                          <div className="font-mono">{loc.code}</div>
+                          {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {newLine.putawayLocationId && !locationSearch && (
+                  <div className="text-xs text-muted-foreground">
+                    Selected: {locations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
                   </div>
                 )}
               </div>
-              {newLine.putawayLocationId && !locationSearch && (
-                <div className="text-xs text-muted-foreground">
-                  Selected: {locations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
-                </div>
-              )}
-            </div>
+            </details>
 
             <div className="flex justify-end gap-2 pt-4">
-              <Button variant="outline" onClick={() => {
+              <Button variant="outline" className="min-h-[44px]" onClick={() => {
                 setShowAddLineDialog(false);
                 setSkuSearch("");
                 setSkuResults([]);
@@ -1431,6 +1736,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 Cancel
               </Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={() => {
                   if (!selectedReceipt || !newLine.sku) return;
                   const qty = parseInt(newLine.expectedQty) || 1;
@@ -1463,9 +1769,9 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Import Results Dialog - Persistent error/warning log */}
       <Dialog open={showImportResults} onOpenChange={setShowImportResults}>
-        <DialogContent className="max-w-2xl max-h-[80vh]">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
+            <DialogTitle className="flex items-center gap-2 text-base md:text-lg">
               {importResults?.errors?.length ? (
                 <XCircle className="h-5 w-5 text-red-500" />
               ) : (
@@ -1473,18 +1779,18 @@ DEF-456,25,,,5.00,,Location TBD`;
               )}
               Import Results
             </DialogTitle>
-            <DialogDescription>
+            <DialogDescription className="text-xs md:text-sm">
               {importResults?.created || 0} lines created, {importResults?.updated || 0} lines updated
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4 max-h-[50vh] overflow-y-auto">
+          <div className="space-y-4 py-2 max-h-[50vh] overflow-y-auto">
             {importResults?.errors && importResults.errors.length > 0 && (
               <div className="space-y-2">
-                <h4 className="font-medium text-red-600 flex items-center gap-1">
+                <h4 className="font-medium text-red-600 flex items-center gap-1 text-sm">
                   <XCircle className="h-4 w-4" />
                   Errors ({importResults.errors.length})
                 </h4>
-                <div className="bg-red-50 border border-red-200 rounded-md p-3 space-y-1 text-sm">
+                <div className="bg-red-50 border border-red-200 rounded-md p-2 md:p-3 space-y-1 text-xs md:text-sm">
                   {importResults.errors.map((err, i) => (
                     <div key={i} className="text-red-700">{err}</div>
                   ))}
@@ -1493,11 +1799,11 @@ DEF-456,25,,,5.00,,Location TBD`;
             )}
             {importResults?.warnings && importResults.warnings.length > 0 && (
               <div className="space-y-2">
-                <h4 className="font-medium text-yellow-600 flex items-center gap-1">
+                <h4 className="font-medium text-yellow-600 flex items-center gap-1 text-sm">
                   <AlertTriangle className="h-4 w-4" />
                   Warnings ({importResults.warnings.length})
                 </h4>
-                <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 space-y-1 text-sm">
+                <div className="bg-yellow-50 border border-yellow-200 rounded-md p-2 md:p-3 space-y-1 text-xs md:text-sm">
                   {importResults.warnings.map((warn, i) => (
                     <div key={i} className="text-yellow-700">{warn}</div>
                   ))}
@@ -1505,9 +1811,10 @@ DEF-456,25,,,5.00,,Location TBD`;
               </div>
             )}
           </div>
-          <div className="flex justify-between">
+          <div className="flex flex-col sm:flex-row justify-between gap-2 pt-2">
             <Button
               variant="outline"
+              className="min-h-[44px] text-sm"
               onClick={() => {
                 const allIssues = [
                   ...(importResults?.errors || []).map(e => `ERROR: ${e}`),
@@ -1526,7 +1833,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Download className="h-4 w-4 mr-2" />
               Download Log
             </Button>
-            <Button onClick={() => setShowImportResults(false)} data-testid="btn-close-results">
+            <Button className="min-h-[44px]" onClick={() => setShowImportResults(false)} data-testid="btn-close-results">
               Close
             </Button>
           </div>

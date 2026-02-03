@@ -154,13 +154,13 @@ export default function PickingLogs() {
   const totalPages = data ? Math.ceil(data.count / pageSize) : 0;
 
   return (
-    <div className="space-y-6 p-4 md:p-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-4 md:space-y-6 p-2 md:p-6">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold" data-testid="page-title">Picking Logs</h1>
-          <p className="text-muted-foreground">Audit trail of all picking operations</p>
+          <h1 className="text-xl md:text-2xl font-bold" data-testid="page-title">Picking Logs</h1>
+          <p className="text-muted-foreground text-sm">Audit trail of all picking operations</p>
         </div>
-        <Button onClick={() => refetch()} variant="outline" data-testid="button-refresh">
+        <Button onClick={() => refetch()} variant="outline" className="min-h-[44px]" data-testid="button-refresh">
           <RefreshCw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
@@ -173,30 +173,40 @@ export default function PickingLogs() {
             Filters
           </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-2 md:p-6">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <div>
-              <label className="text-sm font-medium mb-1 block">Start Date</label>
+              <label className="text-xs md:text-sm font-medium mb-1 block">Start Date</label>
               <Input
                 type="date"
                 value={startDate}
                 onChange={(e) => { setStartDate(e.target.value); setPage(0); }}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-start-date"
               />
             </div>
             <div>
-              <label className="text-sm font-medium mb-1 block">End Date</label>
+              <label className="text-xs md:text-sm font-medium mb-1 block">End Date</label>
               <Input
                 type="date"
                 value={endDate}
                 onChange={(e) => { setEndDate(e.target.value); setPage(0); }}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-end-date"
               />
             </div>
             <div>
-              <label className="text-sm font-medium mb-1 block">Action Type</label>
+              <label className="text-xs md:text-sm font-medium mb-1 block">Action Type</label>
               <Select value={actionType} onValueChange={(v) => { setActionType(v); setPage(0); }}>
-                <SelectTrigger data-testid="select-action-type">
+                <SelectTrigger className="h-11" data-testid="select-action-type">
                   <SelectValue placeholder="All actions" />
                 </SelectTrigger>
                 <SelectContent>
@@ -208,27 +218,35 @@ export default function PickingLogs() {
               </Select>
             </div>
             <div>
-              <label className="text-sm font-medium mb-1 block">Order #</label>
+              <label className="text-xs md:text-sm font-medium mb-1 block">Order #</label>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Search order..."
                   value={orderNumber}
                   onChange={(e) => { setOrderNumber(e.target.value); setPage(0); }}
-                  className="pl-9"
+                  className="pl-9 h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-order-number"
                 />
               </div>
             </div>
             <div>
-              <label className="text-sm font-medium mb-1 block">SKU</label>
+              <label className="text-xs md:text-sm font-medium mb-1 block">SKU</label>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Search SKU..."
                   value={sku}
                   onChange={(e) => { setSku(e.target.value); setPage(0); }}
-                  className="pl-9"
+                  className="pl-9 h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-sku"
                 />
               </div>
@@ -249,18 +267,20 @@ export default function PickingLogs() {
                 <Button
                   variant="outline"
                   size="sm"
+                  className="min-h-[44px]"
                   onClick={() => setPage(p => Math.max(0, p - 1))}
                   disabled={page === 0}
                   data-testid="button-prev-page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm">
+                <span className="text-xs md:text-sm">
                   Page {page + 1} of {totalPages}
                 </span>
                 <Button
                   variant="outline"
                   size="sm"
+                  className="min-h-[44px]"
                   onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
                   disabled={page >= totalPages - 1}
                   data-testid="button-next-page"
@@ -446,7 +466,7 @@ export default function PickingLogs() {
       </Card>
 
       <Dialog open={!!selectedOrderId} onOpenChange={() => setSelectedOrderId(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>
               Order Timeline: {timeline?.order.orderNumber || "Loading..."}

@@ -192,34 +192,38 @@ export default function Channels() {
         {canCreate && (
           <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
             <DialogTrigger asChild>
-              <Button data-testid="button-create-channel">
+              <Button data-testid="button-create-channel" className="min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Channel
               </Button>
             </DialogTrigger>
-            <DialogContent>
+            <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
               <DialogHeader>
                 <DialogTitle>Add New Channel</DialogTitle>
               </DialogHeader>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <Label htmlFor="channel-name">Channel Name</Label>
+                  <Label htmlFor="channel-name" className="text-sm">Channel Name</Label>
                   <Input
                     id="channel-name"
-                    className="w-full"
+                    className="w-full h-11"
                     value={newChannel.name}
                     onChange={(e) => setNewChannel(prev => ({ ...prev, name: e.target.value }))}
                     placeholder="e.g., Shopify Main Store"
                     data-testid="input-channel-name"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="channel-type">Type</Label>
+                  <Label htmlFor="channel-type" className="text-sm">Type</Label>
                   <Select
                     value={newChannel.type}
                     onValueChange={(value) => setNewChannel(prev => ({ ...prev, type: value }))}
                   >
-                    <SelectTrigger className="w-full" data-testid="select-channel-type">
+                    <SelectTrigger className="w-full h-11" data-testid="select-channel-type">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -229,12 +233,12 @@ export default function Channels() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="channel-provider">Provider</Label>
+                  <Label htmlFor="channel-provider" className="text-sm">Provider</Label>
                   <Select
                     value={newChannel.provider}
                     onValueChange={(value) => setNewChannel(prev => ({ ...prev, provider: value }))}
                   >
-                    <SelectTrigger className="w-full" data-testid="select-channel-provider">
+                    <SelectTrigger className="w-full h-11" data-testid="select-channel-provider">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -252,6 +256,7 @@ export default function Channels() {
               </div>
               <DialogFooter>
                 <Button
+                  className="min-h-[44px]"
                   onClick={() => createMutation.mutate(newChannel)}
                   disabled={!newChannel.name || createMutation.isPending}
                   data-testid="button-submit-channel"
@@ -274,7 +279,7 @@ export default function Channels() {
           <h2 className="text-xl font-semibold mb-2">No Channels Connected</h2>
           <p className="text-muted-foreground mb-4">Add your first sales channel to start syncing orders and inventory.</p>
           {canCreate && (
-            <Button onClick={() => setIsCreateOpen(true)}>
+            <Button onClick={() => setIsCreateOpen(true)} className="min-h-[44px]">
               <Plus className="h-4 w-4 mr-2" />
               Add Your First Channel
             </Button>
@@ -346,7 +351,7 @@ export default function Channels() {
 
       {/* Channel Detail Dialog */}
       <Dialog open={!!selectedChannel} onOpenChange={(open) => !open && setSelectedChannel(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           {selectedChannel && (
             <>
               <DialogHeader>
@@ -357,18 +362,18 @@ export default function Channels() {
               </DialogHeader>
               
               <Tabs defaultValue="settings" className="mt-4">
-                <TabsList>
-                  <TabsTrigger value="settings">Settings</TabsTrigger>
-                  <TabsTrigger value="connection">Connection</TabsTrigger>
+                <TabsList className="w-full flex-wrap h-auto">
+                  <TabsTrigger value="settings" className="text-sm">Settings</TabsTrigger>
+                  <TabsTrigger value="connection" className="text-sm">Connection</TabsTrigger>
                   {selectedChannel.type === 'partner' && (
-                    <TabsTrigger value="partner">Partner Info</TabsTrigger>
+                    <TabsTrigger value="partner" className="text-sm">Partner Info</TabsTrigger>
                   )}
                 </TabsList>
                 
                 <TabsContent value="settings" className="space-y-4 mt-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label>Status</Label>
+                      <Label className="text-sm">Status</Label>
                       <Select
                         value={selectedChannel.status}
                         onValueChange={(value) => {
@@ -377,7 +382,7 @@ export default function Channels() {
                         }}
                         disabled={!canEdit}
                       >
-                        <SelectTrigger>
+                        <SelectTrigger className="h-11">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -388,9 +393,9 @@ export default function Channels() {
                       </Select>
                     </div>
                     <div className="space-y-2">
-                      <Label>Priority</Label>
+                      <Label className="text-sm">Priority</Label>
                       <Input
-                        className="w-full"
+                        className="w-full h-11"
                         type="number"
                         value={selectedChannel.priority}
                         onChange={(e) => {
@@ -399,6 +404,7 @@ export default function Channels() {
                           setSelectedChannel({ ...selectedChannel, priority });
                         }}
                         disabled={!canEdit}
+                        autoComplete="off"
                       />
                       <p className="text-xs text-muted-foreground">Higher priority syncs first</p>
                     </div>
@@ -439,10 +445,10 @@ export default function Channels() {
                       
                       {selectedChannel.connection.shopDomain && (
                         <div className="space-y-2">
-                          <Label>Shop Domain</Label>
+                          <Label className="text-sm">Shop Domain</Label>
                           <div className="flex items-center gap-2">
-                            <Input className="w-full" value={selectedChannel.connection.shopDomain} readOnly />
-                            <Button variant="outline" size="icon" asChild>
+                            <Input className="w-full h-11" value={selectedChannel.connection.shopDomain} readOnly />
+                            <Button variant="outline" size="icon" className="min-h-[44px] min-w-[44px]" asChild>
                               <a href={`https://${selectedChannel.connection.shopDomain}`} target="_blank" rel="noopener noreferrer">
                                 <ExternalLink className="h-4 w-4" />
                               </a>
@@ -464,7 +470,7 @@ export default function Channels() {
                       <p className="text-muted-foreground">No connection configured yet.</p>
                       {selectedChannel.provider === 'shopify' ? (
                         <Button 
-                          className="mt-4" 
+                          className="mt-4 min-h-[44px]" 
                           onClick={async () => {
                             try {
                               const res = await fetch(`/api/channels/${selectedChannel.id}/setup-shopify`, {
@@ -493,7 +499,7 @@ export default function Channels() {
                           Connect to Shopify
                         </Button>
                       ) : (
-                        <Button className="mt-4" variant="outline">
+                        <Button className="mt-4 min-h-[44px]" variant="outline">
                           Configure Connection
                         </Button>
                       )}
@@ -507,23 +513,23 @@ export default function Channels() {
                       <div className="space-y-4">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div>
-                            <Label className="text-muted-foreground">Company</Label>
+                            <Label className="text-sm text-muted-foreground">Company</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.companyName}</p>
                           </div>
                           <div>
-                            <Label className="text-muted-foreground">Contact</Label>
+                            <Label className="text-sm text-muted-foreground">Contact</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.contactName || '-'}</p>
                           </div>
                           <div>
-                            <Label className="text-muted-foreground">Email</Label>
+                            <Label className="text-sm text-muted-foreground">Email</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.contactEmail || '-'}</p>
                           </div>
                           <div>
-                            <Label className="text-muted-foreground">Discount %</Label>
+                            <Label className="text-sm text-muted-foreground">Discount %</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.discountPercent}%</p>
                           </div>
                           <div>
-                            <Label className="text-muted-foreground">SLA Days</Label>
+                            <Label className="text-sm text-muted-foreground">SLA Days</Label>
                             <p className="font-medium">{selectedChannel.partnerProfile.slaDays} days</p>
                           </div>
                         </div>

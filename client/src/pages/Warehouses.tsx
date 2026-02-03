@@ -173,7 +173,7 @@ export default function Warehouses() {
 
   if (!canView) {
     return (
-      <div className="p-4 md:p-6">
+      <div className="p-2 md:p-6">
         <Card>
           <CardContent className="pt-6">
             <p className="text-muted-foreground">You don't have permission to view warehouses.</p>
@@ -184,48 +184,48 @@ export default function Warehouses() {
   }
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-bold flex items-center gap-2">
-            <Building2 className="h-8 w-8" />
+          <h1 className="text-xl md:text-3xl font-bold flex items-center gap-2">
+            <Building2 className="h-6 w-6 md:h-8 md:w-8" />
             Warehouses
           </h1>
-          <p className="text-muted-foreground mt-1">Manage your physical warehouse locations</p>
+          <p className="text-sm text-muted-foreground mt-1">Manage your physical warehouse locations</p>
         </div>
         {canCreate && (
-          <Button onClick={() => setIsCreateOpen(true)} data-testid="btn-add-warehouse">
+          <Button onClick={() => setIsCreateOpen(true)} className="min-h-[44px]" data-testid="btn-add-warehouse">
             <Plus className="h-4 w-4 mr-2" />
             Add Warehouse
           </Button>
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Total Warehouses</CardTitle>
+          <CardHeader className="pb-2 p-3 md:p-6">
+            <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground">Total Warehouses</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{warehouses.length}</div>
+          <CardContent className="p-3 pt-0 md:p-6 md:pt-0">
+            <div className="text-xl md:text-2xl font-bold">{warehouses.length}</div>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Active</CardTitle>
+          <CardHeader className="pb-2 p-3 md:p-6">
+            <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground">Active</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-green-600">
+          <CardContent className="p-3 pt-0 md:p-6 md:pt-0">
+            <div className="text-xl md:text-2xl font-bold text-green-600">
               {warehouses.filter(w => w.isActive === 1).length}
             </div>
           </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Default Warehouse</CardTitle>
+          <CardHeader className="pb-2 p-3 md:p-6">
+            <CardTitle className="text-xs md:text-sm font-medium text-muted-foreground">Default Warehouse</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="text-lg font-medium">
+          <CardContent className="p-3 pt-0 md:p-6 md:pt-0">
+            <div className="text-base md:text-lg font-medium">
               {warehouses.find(w => w.isDefault === 1)?.name || "None set"}
             </div>
           </CardContent>
@@ -233,11 +233,11 @@ export default function Warehouses() {
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle>Warehouse List</CardTitle>
-          <CardDescription>All physical warehouse sites in your network</CardDescription>
+        <CardHeader className="p-3 md:p-6">
+          <CardTitle className="text-lg md:text-xl">Warehouse List</CardTitle>
+          <CardDescription className="text-xs md:text-sm">All physical warehouse sites in your network</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-2 md:p-6">
           {isLoading ? (
             <p className="text-muted-foreground">Loading...</p>
           ) : warehouses.length === 0 ? (
@@ -247,65 +247,123 @@ export default function Warehouses() {
               <p className="text-sm">Add your first warehouse to get started.</p>
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Code</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Location</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Default</TableHead>
-                  {canEdit && <TableHead className="w-24">Actions</TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            <>
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-3">
                 {warehouses.map((warehouse) => (
-                  <TableRow key={warehouse.id} data-testid={`warehouse-row-${warehouse.id}`}>
-                    <TableCell className="font-mono font-medium">{warehouse.code}</TableCell>
-                    <TableCell>{warehouse.name}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {[warehouse.city, warehouse.state].filter(Boolean).join(", ") || "-"}
-                    </TableCell>
-                    <TableCell>
-                      {warehouse.isActive === 1 ? (
-                        <Badge variant="default" className="bg-green-100 text-green-800">Active</Badge>
-                      ) : (
-                        <Badge variant="secondary">Inactive</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {warehouse.isDefault === 1 ? (
-                        <Check className="h-4 w-4 text-green-600" />
-                      ) : (
-                        <X className="h-4 w-4 text-muted-foreground" />
-                      )}
-                    </TableCell>
-                    {canEdit && (
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleEdit(warehouse)}
-                            data-testid={`btn-edit-warehouse-${warehouse.id}`}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => handleDelete(warehouse.id, warehouse.name)}
-                            data-testid={`btn-delete-warehouse-${warehouse.id}`}
-                          >
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
+                  <Card key={warehouse.id} data-testid={`warehouse-card-${warehouse.id}`}>
+                    <CardContent className="p-3">
+                      <div className="flex items-start justify-between">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-sm">{warehouse.code}</span>
+                            {warehouse.isDefault === 1 && (
+                              <Badge variant="outline" className="text-xs">Default</Badge>
+                            )}
+                          </div>
+                          <p className="font-medium text-sm">{warehouse.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {[warehouse.city, warehouse.state].filter(Boolean).join(", ") || "No location"}
+                          </p>
+                          <div className="pt-1">
+                            {warehouse.isActive === 1 ? (
+                              <Badge variant="default" className="bg-green-100 text-green-800 text-xs">Active</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs">Inactive</Badge>
+                            )}
+                          </div>
                         </div>
-                      </TableCell>
-                    )}
-                  </TableRow>
+                        {canEdit && (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="min-h-[44px] min-w-[44px]"
+                              onClick={() => handleEdit(warehouse)}
+                              data-testid={`btn-edit-warehouse-mobile-${warehouse.id}`}
+                            >
+                              <Edit className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="min-h-[44px] min-w-[44px]"
+                              onClick={() => handleDelete(warehouse.id, warehouse.name)}
+                              data-testid={`btn-delete-warehouse-mobile-${warehouse.id}`}
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+
+              {/* Desktop Table View */}
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Code</TableHead>
+                      <TableHead>Name</TableHead>
+                      <TableHead>Location</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Default</TableHead>
+                      {canEdit && <TableHead className="w-24">Actions</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {warehouses.map((warehouse) => (
+                      <TableRow key={warehouse.id} data-testid={`warehouse-row-${warehouse.id}`}>
+                        <TableCell className="font-mono font-medium">{warehouse.code}</TableCell>
+                        <TableCell>{warehouse.name}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {[warehouse.city, warehouse.state].filter(Boolean).join(", ") || "-"}
+                        </TableCell>
+                        <TableCell>
+                          {warehouse.isActive === 1 ? (
+                            <Badge variant="default" className="bg-green-100 text-green-800">Active</Badge>
+                          ) : (
+                            <Badge variant="secondary">Inactive</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {warehouse.isDefault === 1 ? (
+                            <Check className="h-4 w-4 text-green-600" />
+                          ) : (
+                            <X className="h-4 w-4 text-muted-foreground" />
+                          )}
+                        </TableCell>
+                        {canEdit && (
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleEdit(warehouse)}
+                                data-testid={`btn-edit-warehouse-${warehouse.id}`}
+                              >
+                                <Edit className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDelete(warehouse.id, warehouse.name)}
+                                data-testid={`btn-delete-warehouse-${warehouse.id}`}
+                              >
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -317,135 +375,189 @@ export default function Warehouses() {
           resetForm();
         }
       }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>
               {editingWarehouse ? "Edit Warehouse" : "Add New Warehouse"}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="code">Code *</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="code" className="text-xs md:text-sm">Code *</Label>
                 <Input
                   id="code"
                   placeholder="EAST"
                   value={formData.code}
                   onChange={(e) => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-warehouse-code"
                 />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="name">Name *</Label>
+              <div className="space-y-1">
+                <Label htmlFor="name" className="text-xs md:text-sm">Name *</Label>
                 <Input
                   id="name"
                   placeholder="East Coast Distribution"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-warehouse-name"
                 />
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="address">Address</Label>
-              <Input
-                id="address"
-                placeholder="123 Warehouse Blvd"
-                value={formData.address}
-                onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                data-testid="input-warehouse-address"
-              />
-            </div>
+            <details className="group" open>
+              <summary className="text-xs md:text-sm font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Address Details
+              </summary>
+              <div className="space-y-3 pt-2">
+                <div className="space-y-1">
+                  <Label htmlFor="address" className="text-xs md:text-sm">Address</Label>
+                  <Input
+                    id="address"
+                    placeholder="123 Warehouse Blvd"
+                    value={formData.address}
+                    onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-warehouse-address"
+                  />
+                </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="city">City</Label>
-                <Input
-                  id="city"
-                  placeholder="Newark"
-                  value={formData.city}
-                  onChange={(e) => setFormData({ ...formData, city: e.target.value })}
-                  data-testid="input-warehouse-city"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="state">State</Label>
-                <Input
-                  id="state"
-                  placeholder="NJ"
-                  value={formData.state}
-                  onChange={(e) => setFormData({ ...formData, state: e.target.value })}
-                  data-testid="input-warehouse-state"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="postalCode">Postal Code</Label>
-                <Input
-                  id="postalCode"
-                  placeholder="07102"
-                  value={formData.postalCode}
-                  onChange={(e) => setFormData({ ...formData, postalCode: e.target.value })}
-                  data-testid="input-warehouse-postal"
-                />
-              </div>
-            </div>
+                <div className="grid grid-cols-3 gap-2 md:gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="city" className="text-xs md:text-sm">City</Label>
+                    <Input
+                      id="city"
+                      placeholder="Newark"
+                      value={formData.city}
+                      onChange={(e) => setFormData({ ...formData, city: e.target.value })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-warehouse-city"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="state" className="text-xs md:text-sm">State</Label>
+                    <Input
+                      id="state"
+                      placeholder="NJ"
+                      value={formData.state}
+                      onChange={(e) => setFormData({ ...formData, state: e.target.value })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-warehouse-state"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="postalCode" className="text-xs md:text-sm">Postal</Label>
+                    <Input
+                      id="postalCode"
+                      placeholder="07102"
+                      value={formData.postalCode}
+                      onChange={(e) => setFormData({ ...formData, postalCode: e.target.value })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-warehouse-postal"
+                    />
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="country">Country</Label>
-                <Input
-                  id="country"
-                  placeholder="US"
-                  value={formData.country}
-                  onChange={(e) => setFormData({ ...formData, country: e.target.value })}
-                  data-testid="input-warehouse-country"
-                />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="country" className="text-xs md:text-sm">Country</Label>
+                    <Input
+                      id="country"
+                      placeholder="US"
+                      value={formData.country}
+                      onChange={(e) => setFormData({ ...formData, country: e.target.value })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-warehouse-country"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="timezone" className="text-xs md:text-sm">Timezone</Label>
+                    <Input
+                      id="timezone"
+                      placeholder="America/New_York"
+                      value={formData.timezone}
+                      onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-warehouse-timezone"
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="timezone">Timezone</Label>
-                <Input
-                  id="timezone"
-                  placeholder="America/New_York"
-                  value={formData.timezone}
-                  onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
-                  data-testid="input-warehouse-timezone"
-                />
-              </div>
-            </div>
+            </details>
 
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-h-[44px]">
                 <Switch
                   id="isActive"
                   checked={formData.isActive === 1}
                   onCheckedChange={(checked) => setFormData({ ...formData, isActive: checked ? 1 : 0 })}
                   data-testid="switch-warehouse-active"
                 />
-                <Label htmlFor="isActive">Active</Label>
+                <Label htmlFor="isActive" className="text-sm">Active</Label>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-h-[44px]">
                 <Switch
                   id="isDefault"
                   checked={formData.isDefault === 1}
                   onCheckedChange={(checked) => setFormData({ ...formData, isDefault: checked ? 1 : 0 })}
                   data-testid="switch-warehouse-default"
                 />
-                <Label htmlFor="isDefault">Default Warehouse</Label>
+                <Label htmlFor="isDefault" className="text-sm">Default Warehouse</Label>
               </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => {
-              setIsCreateOpen(false);
-              setEditingWarehouse(null);
-              resetForm();
-            }} data-testid="btn-cancel-warehouse">
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button 
+              variant="outline" 
+              className="min-h-[44px] w-full sm:w-auto"
+              onClick={() => {
+                setIsCreateOpen(false);
+                setEditingWarehouse(null);
+                resetForm();
+              }} 
+              data-testid="btn-cancel-warehouse"
+            >
               Cancel
             </Button>
             <Button
               onClick={handleSubmit}
               disabled={createMutation.isPending || updateMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="btn-save-warehouse"
             >
               {editingWarehouse ? "Update" : "Create"} Warehouse

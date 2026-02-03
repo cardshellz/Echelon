@@ -89,11 +89,8 @@ export default function ProductCatalog() {
     },
   });
 
-  // Only show inventory items that have a hierarchyLevel 1 variant (true parent products)
-  // Child SKUs created as separate items won't have hierarchyLevel 1 variants
   const parentItemsOnly = items.filter(item => {
     const itemVariants = variants.filter(v => v.inventoryItemId === item.id);
-    // A true parent product has a base unit variant (hierarchyLevel 1)
     return itemVariants.some(v => v.hierarchyLevel === 1);
   });
 
@@ -159,14 +156,14 @@ export default function ProductCatalog() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10 p-4 md:p-6">
+      <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10 p-2 md:p-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
-              <Layers className="h-6 w-6" />
+            <h1 className="text-lg md:text-2xl font-bold tracking-tight flex items-center gap-2">
+              <Layers className="h-5 w-5 md:h-6 md:w-6" />
               Product Catalog
             </h1>
-            <p className="text-sm text-muted-foreground mt-1">
+            <p className="text-xs md:text-sm text-muted-foreground mt-1">
               Manage products and their unit of measure (UOM) hierarchy
             </p>
           </div>
@@ -175,9 +172,13 @@ export default function ProductCatalog() {
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input
                 placeholder="Search products or SKUs..."
-                className="pl-9 h-9"
+                className="pl-9 h-10"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-search-catalog"
               />
             </div>
@@ -185,19 +186,19 @@ export default function ProductCatalog() {
         </div>
       </div>
 
-      <div className="flex-1 p-4 md:p-6 overflow-auto">
+      <div className="flex-1 p-2 md:p-6 overflow-auto">
         {filteredProducts.length === 0 ? (
-          <div className="flex-1 bg-card rounded-md border flex flex-col items-center justify-center text-center p-12">
+          <div className="flex-1 bg-card rounded-md border flex flex-col items-center justify-center text-center p-8 md:p-12">
             <div className="bg-primary/10 p-4 rounded-full mb-4">
-              <Package className="h-10 w-10 text-primary" />
+              <Package className="h-8 w-8 md:h-10 md:w-10 text-primary" />
             </div>
-            <h2 className="text-2xl font-bold mb-2">No Products Found</h2>
-            <p className="text-muted-foreground max-w-md">
+            <h2 className="text-xl md:text-2xl font-bold mb-2">No Products Found</h2>
+            <p className="text-sm text-muted-foreground max-w-md">
               {searchQuery ? "No products match your search." : "Add products via Shopify sync or manually to see them here."}
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3 md:space-y-4">
             {filteredProducts.map(({ item, variants }) => {
               const isExpanded = expandedProducts.has(item.id);
 
@@ -205,26 +206,102 @@ export default function ProductCatalog() {
                 <Card key={item.id} data-testid={`card-product-${item.id}`}>
                   <Collapsible open={isExpanded} onOpenChange={() => toggleExpanded(item.id)}>
                     <CollapsibleTrigger asChild>
-                      <CardHeader className="cursor-pointer hover:bg-muted/50 transition-colors">
+                      <CardHeader className="cursor-pointer hover:bg-muted/50 transition-colors p-3 md:p-6">
                         <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2 md:gap-3">
                             {isExpanded ? (
-                              <ChevronDown className="h-5 w-5 text-muted-foreground" />
+                              <ChevronDown className="h-4 w-4 md:h-5 md:w-5 text-muted-foreground" />
                             ) : (
-                              <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                              <ChevronRight className="h-4 w-4 md:h-5 md:w-5 text-muted-foreground" />
                             )}
                             <div>
-                              <CardTitle className="text-base font-mono">{item.baseSku}</CardTitle>
-                              <CardDescription className="mt-1">{item.name}</CardDescription>
+                              <CardTitle className="text-sm md:text-base font-mono">{item.baseSku}</CardTitle>
+                              <CardDescription className="mt-1 text-xs md:text-sm">{item.name}</CardDescription>
                             </div>
                           </div>
-                          <Badge variant="outline">{variants.length} variants</Badge>
+                          <Badge variant="outline" className="text-xs">{variants.length} variants</Badge>
                         </div>
                       </CardHeader>
                     </CollapsibleTrigger>
                     <CollapsibleContent>
-                      <CardContent className="pt-0">
-                        <div className="border rounded-lg overflow-hidden">
+                      <CardContent className="pt-0 p-2 md:p-6 md:pt-0">
+                        <div className="md:hidden space-y-2">
+                          {variants.map((variant) => (
+                            <div key={variant.id} className="border rounded-lg p-3" data-testid={`card-variant-mobile-${variant.id}`}>
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="font-mono text-sm text-primary">{variant.sku}</span>
+                                <Badge variant="outline" className="text-xs">
+                                  {getVariantTypeLabel(variant.hierarchyLevel)}
+                                </Badge>
+                              </div>
+                              <p className="text-sm text-muted-foreground mb-2">{variant.name}</p>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <span className="text-xs text-muted-foreground">Units:</span>
+                                  {editingVariant === variant.id ? (
+                                    <Input
+                                      type="number"
+                                      min="1"
+                                      value={editValue}
+                                      onChange={(e) => setEditValue(e.target.value)}
+                                      className="w-20 h-10 text-right font-mono ml-2 inline-block"
+                                      autoComplete="off"
+                                      autoCorrect="off"
+                                      autoCapitalize="off"
+                                      spellCheck={false}
+                                      data-testid={`input-units-mobile-${variant.id}`}
+                                    />
+                                  ) : (
+                                    <span className="font-mono text-sm font-medium ml-2">
+                                      {variant.unitsPerVariant.toLocaleString()}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex gap-1">
+                                  {editingVariant === variant.id ? (
+                                    <>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-10 w-10 min-h-[44px]"
+                                        onClick={() => saveEdit(variant.id)}
+                                        disabled={updateVariantMutation.isPending}
+                                        data-testid={`button-save-mobile-${variant.id}`}
+                                      >
+                                        <Save className="h-4 w-4 text-green-600" />
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-10 w-10 min-h-[44px]"
+                                        onClick={cancelEdit}
+                                        data-testid={`button-cancel-mobile-${variant.id}`}
+                                      >
+                                        <X className="h-4 w-4 text-red-600" />
+                                      </Button>
+                                    </>
+                                  ) : (
+                                    <Button
+                                      size="icon"
+                                      variant="ghost"
+                                      className="h-10 w-10 min-h-[44px]"
+                                      onClick={() => startEdit(variant)}
+                                      data-testid={`button-edit-mobile-${variant.id}`}
+                                    >
+                                      <Edit2 className="h-4 w-4" />
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                              {variant.barcode && (
+                                <p className="text-xs text-muted-foreground mt-2 font-mono">
+                                  Barcode: {variant.barcode}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="hidden md:block border rounded-lg overflow-hidden">
                           <table className="w-full">
                             <thead className="bg-muted/50">
                               <tr>
@@ -253,7 +330,11 @@ export default function ProductCatalog() {
                                         min="1"
                                         value={editValue}
                                         onChange={(e) => setEditValue(e.target.value)}
-                                        className="w-20 h-8 text-right font-mono ml-auto"
+                                        className="w-20 h-10 text-right font-mono ml-auto"
+                                        autoComplete="off"
+                                        autoCorrect="off"
+                                        autoCapitalize="off"
+                                        spellCheck={false}
                                         data-testid={`input-units-${variant.id}`}
                                       />
                                     ) : (
@@ -271,7 +352,7 @@ export default function ProductCatalog() {
                                         <Button
                                           size="icon"
                                           variant="ghost"
-                                          className="h-7 w-7"
+                                          className="h-8 w-8 min-h-[44px]"
                                           onClick={() => saveEdit(variant.id)}
                                           disabled={updateVariantMutation.isPending}
                                           data-testid={`button-save-${variant.id}`}
@@ -281,7 +362,7 @@ export default function ProductCatalog() {
                                         <Button
                                           size="icon"
                                           variant="ghost"
-                                          className="h-7 w-7"
+                                          className="h-8 w-8 min-h-[44px]"
                                           onClick={cancelEdit}
                                           data-testid={`button-cancel-${variant.id}`}
                                         >
@@ -292,7 +373,7 @@ export default function ProductCatalog() {
                                       <Button
                                         size="icon"
                                         variant="ghost"
-                                        className="h-7 w-7"
+                                        className="h-8 w-8 min-h-[44px]"
                                         onClick={() => startEdit(variant)}
                                         data-testid={`button-edit-${variant.id}`}
                                       >

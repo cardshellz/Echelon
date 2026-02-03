@@ -1592,46 +1592,54 @@ export default function CycleCounts() {
       )}
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Create Cycle Count</DialogTitle>
-            <DialogDescription>
-              Create a new inventory reconciliation session
-            </DialogDescription>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader className="pb-2">
+            <DialogTitle className="text-lg">New Cycle Count</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-3">
             <div>
-              <Label>Name</Label>
+              <Label className="text-sm">Name *</Label>
               <Input
                 value={newCountForm.name}
                 onChange={(e) => setNewCountForm({ ...newCountForm, name: e.target.value })}
                 placeholder="e.g., January 2026 Full Count"
+                className="h-10"
+                autoComplete="off"
                 data-testid="input-count-name"
               />
             </div>
-            <div>
-              <Label>Description (optional)</Label>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                Description (optional)
+              </summary>
               <Textarea
                 value={newCountForm.description}
                 onChange={(e) => setNewCountForm({ ...newCountForm, description: e.target.value })}
                 placeholder="Notes about this count..."
+                rows={2}
+                className="mt-2"
                 data-testid="textarea-description"
               />
-            </div>
-            <div>
-              <Label>Zone Filter (optional)</Label>
+            </details>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                Zone Filter (optional)
+              </summary>
               <Input
                 value={newCountForm.zoneFilter}
                 onChange={(e) => setNewCountForm({ ...newCountForm, zoneFilter: e.target.value })}
                 placeholder="e.g., A to count only zone A"
+                className="mt-2 h-10"
                 data-testid="input-zone-filter"
               />
-            </div>
-            <div>
-              <Label>Location Purpose (where inventory is used)</Label>
+            </details>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                Location Purpose
+              </summary>
               <div className="grid grid-cols-2 gap-2 mt-2">
                 {locationTypeOptions.map((type) => (
-                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer min-h-[44px]">
                     <input
                       type="checkbox"
                       checked={newCountForm.locationTypes.includes(type.value)}
@@ -1642,20 +1650,22 @@ export default function CycleCounts() {
                           setNewCountForm({ ...newCountForm, locationTypes: newCountForm.locationTypes.filter(t => t !== type.value) });
                         }
                       }}
-                      className="h-4 w-4"
+                      className="h-5 w-5"
                       data-testid={`checkbox-location-type-${type.value}`}
                     />
                     <span className="text-sm">{type.label}</span>
                   </label>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all purposes</p>
-            </div>
-            <div>
-              <Label>Storage Type (physical container type)</Label>
+              <p className="text-xs text-muted-foreground mt-1">Leave unchecked for all</p>
+            </details>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                Storage Type
+              </summary>
               <div className="grid grid-cols-2 gap-2 mt-2">
                 {binTypeOptions.map((type) => (
-                  <label key={type.value} className="flex items-center gap-2 cursor-pointer">
+                  <label key={type.value} className="flex items-center gap-2 cursor-pointer min-h-[44px]">
                     <input
                       type="checkbox"
                       checked={newCountForm.binTypes.includes(type.value)}
@@ -1666,19 +1676,20 @@ export default function CycleCounts() {
                           setNewCountForm({ ...newCountForm, binTypes: newCountForm.binTypes.filter(t => t !== type.value) });
                         }
                       }}
-                      className="h-4 w-4"
+                      className="h-5 w-5"
                       data-testid={`checkbox-bin-type-${type.value}`}
                     />
                     <span className="text-sm">{type.label}</span>
                   </label>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground mt-1">Leave all unchecked to include all storage types</p>
-            </div>
+              <p className="text-xs text-muted-foreground mt-1">Leave unchecked for all</p>
+            </details>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
+          <div className="flex gap-2 pt-3 border-t mt-3">
+            <Button variant="outline" className="flex-1 h-11" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
             <Button 
+              className="flex-1 h-11"
               onClick={() => createMutation.mutate({
                 name: newCountForm.name,
                 description: newCountForm.description || undefined,
@@ -1690,7 +1701,7 @@ export default function CycleCounts() {
             >
               Create
             </Button>
-          </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

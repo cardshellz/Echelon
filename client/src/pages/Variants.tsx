@@ -193,58 +193,62 @@ export default function Variants() {
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Package className="h-6 w-6" />
+          <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
+            <Package className="h-5 w-5 md:h-6 md:w-6" />
             Variants
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Manage sellable SKUs and link them to products
           </p>
         </div>
-        <Button onClick={() => setCreateDialogOpen(true)} data-testid="btn-add-variant">
+        <Button onClick={() => setCreateDialogOpen(true)} className="min-h-[44px] w-full md:w-auto" data-testid="btn-add-variant">
           <Plus className="h-4 w-4 mr-2" />
           Add Variant
         </Button>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-2 md:gap-4">
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold">{stats.total}</div>
-            <div className="text-sm text-muted-foreground">Total Variants</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Total Variants</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold text-green-600">{stats.linked}</div>
-            <div className="text-sm text-muted-foreground">Linked</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-green-600">{stats.linked}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Linked</div>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="text-2xl font-bold text-amber-600">{stats.unlinked}</div>
-            <div className="text-sm text-muted-foreground">Unlinked</div>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-amber-600">{stats.unlinked}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Unlinked</div>
           </CardContent>
         </Card>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-        <div className="flex flex-wrap gap-2 items-center w-full sm:w-auto">
-          <div className="relative w-full sm:w-80">
+      <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
+        <div className="flex flex-wrap gap-2 items-center w-full md:w-auto">
+          <div className="relative w-full md:w-80">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search variants..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 w-full"
+              className="pl-9 w-full h-10"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               data-testid="input-search-variants"
             />
           </div>
           <Select value={linkFilter} onValueChange={setLinkFilter}>
-            <SelectTrigger className="w-36" data-testid="select-link-filter">
+            <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-link-filter">
               <SelectValue placeholder="Filter" />
             </SelectTrigger>
             <SelectContent>
@@ -264,92 +268,138 @@ export default function Variants() {
             {allVariants.length === 0 ? (
               <div className="space-y-4">
                 <Package className="h-12 w-12 mx-auto opacity-50" />
-                <p>No variants found. Sync from Shopify to import variants.</p>
+                <p className="text-sm">No variants found. Sync from Shopify to import variants.</p>
               </div>
             ) : (
-              <p>No variants match your filters.</p>
+              <p className="text-sm">No variants match your filters.</p>
             )}
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Variant SKU</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Units</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Linked Product</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="w-24">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredVariants.map((variant) => (
-                <TableRow key={variant.id} data-testid={`variant-row-${variant.id}`}>
-                  <TableCell className="font-mono text-sm">{variant.sku || '-'}</TableCell>
-                  <TableCell>{variant.name}</TableCell>
-                  <TableCell>{variant.unitsPerVariant}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    {variant.productId ? (
-                      <div>
-                        <p className="font-medium">{getProductName(variant.productId)}</p>
-                        <p className="text-sm text-muted-foreground font-mono">{getProductSku(variant.productId)}</p>
-                      </div>
-                    ) : (
-                      <Badge variant="secondary">Unlinked</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={variant.isActive ? "default" : "secondary"}>
+        <>
+          <div className="md:hidden space-y-2">
+            {filteredVariants.map((variant) => (
+              <Card key={variant.id} data-testid={`variant-card-mobile-${variant.id}`}>
+                <CardContent className="p-3">
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-mono text-sm truncate">{variant.sku || '-'}</p>
+                      <p className="text-sm text-muted-foreground truncate">{variant.name}</p>
+                    </div>
+                    <Badge variant={variant.isActive ? "default" : "secondary"} className="text-xs flex-shrink-0">
                       {variant.isActive ? "Active" : "Inactive"}
                     </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setSelectedVariant(variant);
-                        setSelectedProductId(variant.productId?.toString() || "");
-                        setLinkDialogOpen(true);
-                      }}
-                      data-testid={`btn-link-variant-${variant.id}`}
-                    >
-                      <LinkIcon className="h-4 w-4 mr-1" />
-                      {variant.productId ? "Change" : "Link"}
-                    </Button>
-                  </TableCell>
+                  </div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <Badge variant="outline" className="text-xs">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                    <span className="text-xs text-muted-foreground">Units: {variant.unitsPerVariant}</span>
+                  </div>
+                  {variant.productId ? (
+                    <div className="text-xs mb-2">
+                      <span className="text-muted-foreground">Product: </span>
+                      <span className="font-medium">{getProductName(variant.productId)}</span>
+                    </div>
+                  ) : (
+                    <Badge variant="secondary" className="text-xs mb-2">Unlinked</Badge>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full min-h-[44px]"
+                    onClick={() => {
+                      setSelectedVariant(variant);
+                      setSelectedProductId(variant.productId?.toString() || "");
+                      setLinkDialogOpen(true);
+                    }}
+                    data-testid={`btn-link-variant-mobile-${variant.id}`}
+                  >
+                    <LinkIcon className="h-4 w-4 mr-1" />
+                    {variant.productId ? "Change Link" : "Link to Product"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+          <Card className="hidden md:block">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Variant SKU</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Units</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Linked Product</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+              </TableHeader>
+              <TableBody>
+                {filteredVariants.map((variant) => (
+                  <TableRow key={variant.id} data-testid={`variant-row-${variant.id}`}>
+                    <TableCell className="font-mono text-sm">{variant.sku || '-'}</TableCell>
+                    <TableCell>{variant.name}</TableCell>
+                    <TableCell>{variant.unitsPerVariant}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      {variant.productId ? (
+                        <div>
+                          <p className="font-medium">{getProductName(variant.productId)}</p>
+                          <p className="text-sm text-muted-foreground font-mono">{getProductSku(variant.productId)}</p>
+                        </div>
+                      ) : (
+                        <Badge variant="secondary">Unlinked</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={variant.isActive ? "default" : "secondary"}>
+                        {variant.isActive ? "Active" : "Inactive"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="min-h-[44px]"
+                        onClick={() => {
+                          setSelectedVariant(variant);
+                          setSelectedProductId(variant.productId?.toString() || "");
+                          setLinkDialogOpen(true);
+                        }}
+                        data-testid={`btn-link-variant-${variant.id}`}
+                      >
+                        <LinkIcon className="h-4 w-4 mr-1" />
+                        {variant.productId ? "Change" : "Link"}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Card>
+        </>
       )}
 
-      <div className="text-sm text-muted-foreground">
+      <div className="text-xs md:text-sm text-muted-foreground">
         Showing {filteredVariants.length} of {allVariants.length} variants
       </div>
 
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Link Variant to Product</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div>
-              <Label>Variant</Label>
+              <Label className="text-sm">Variant</Label>
               <p className="text-sm font-mono mt-1">{selectedVariant?.sku}</p>
               <p className="text-sm text-muted-foreground">{selectedVariant?.name}</p>
             </div>
             <div>
-              <Label htmlFor="product-select">Select Product</Label>
+              <Label htmlFor="product-select" className="text-sm">Select Product</Label>
               <Select value={selectedProductId} onValueChange={setSelectedProductId}>
-                <SelectTrigger id="product-select" className="mt-1">
+                <SelectTrigger id="product-select" className="mt-1 h-11">
                   <SelectValue placeholder="Choose a product..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -362,8 +412,8 @@ export default function Variants() {
               </Select>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)} className="min-h-[44px]">
               Cancel
             </Button>
             <Button
@@ -376,6 +426,7 @@ export default function Variants() {
                 }
               }}
               disabled={!selectedProductId || linkMutation.isPending}
+              className="min-h-[44px]"
             >
               {linkMutation.isPending ? "Linking..." : "Link Variant"}
             </Button>
@@ -384,19 +435,19 @@ export default function Variants() {
       </Dialog>
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add New Variant</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>Parent Product *</Label>
+              <Label className="text-sm">Parent Product *</Label>
               <div className="flex gap-2">
                 <Select 
                   value={newVariant.productId} 
                   onValueChange={(val) => setNewVariant({ ...newVariant, productId: val })}
                 >
-                  <SelectTrigger className="flex-1">
+                  <SelectTrigger className="flex-1 h-11">
                     <SelectValue placeholder="Select a product..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -410,6 +461,7 @@ export default function Variants() {
                 <Button 
                   variant="outline" 
                   size="icon"
+                  className="min-h-[44px] min-w-[44px]"
                   onClick={() => setCreateProductDialogOpen(true)}
                   title="Create new product"
                 >
@@ -419,51 +471,71 @@ export default function Variants() {
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="variant-sku">SKU</Label>
+                <Label htmlFor="variant-sku" className="text-sm">SKU</Label>
                 <Input
                   id="variant-sku"
                   value={newVariant.sku}
                   onChange={(e) => setNewVariant({ ...newVariant, sku: e.target.value })}
                   placeholder="e.g., ARM-ENV-SGL-P50"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="variant-barcode">Barcode</Label>
+                <Label htmlFor="variant-barcode" className="text-sm">Barcode</Label>
                 <Input
                   id="variant-barcode"
                   value={newVariant.barcode}
                   onChange={(e) => setNewVariant({ ...newVariant, barcode: e.target.value })}
                   placeholder="UPC/EAN"
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="variant-name">Name *</Label>
+              <Label htmlFor="variant-name" className="text-sm">Name *</Label>
               <Input
                 id="variant-name"
                 value={newVariant.name}
                 onChange={(e) => setNewVariant({ ...newVariant, name: e.target.value })}
                 placeholder="e.g., Pack of 50"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="variant-units">Units per Variant</Label>
+                <Label htmlFor="variant-units" className="text-sm">Units per Variant</Label>
                 <Input
                   id="variant-units"
                   type="number"
                   min={1}
                   value={newVariant.unitsPerVariant}
                   onChange={(e) => setNewVariant({ ...newVariant, unitsPerVariant: parseInt(e.target.value) || 1 })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                 />
               </div>
               <div className="space-y-2">
-                <Label>Type</Label>
+                <Label className="text-sm">Type</Label>
                 <Select 
                   value={newVariant.hierarchyLevel.toString()} 
                   onValueChange={(val) => setNewVariant({ ...newVariant, hierarchyLevel: parseInt(val) })}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="h-11">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -476,13 +548,14 @@ export default function Variants() {
               </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)} className="min-h-[44px]">
               Cancel
             </Button>
             <Button
               onClick={() => createVariantMutation.mutate(newVariant)}
               disabled={!newVariant.productId || !newVariant.name || createVariantMutation.isPending}
+              className="min-h-[44px]"
             >
               {createVariantMutation.isPending ? "Creating..." : "Create Variant"}
             </Button>
@@ -491,36 +564,46 @@ export default function Variants() {
       </Dialog>
 
       <Dialog open={createProductDialogOpen} onOpenChange={setCreateProductDialogOpen}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-sm max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Create New Product</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="new-product-name">Name *</Label>
+              <Label htmlFor="new-product-name" className="text-sm">Name *</Label>
               <Input
                 id="new-product-name"
                 value={newProduct.name}
                 onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
                 placeholder="Product name"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="new-product-sku">SKU</Label>
+              <Label htmlFor="new-product-sku" className="text-sm">SKU</Label>
               <Input
                 id="new-product-sku"
                 value={newProduct.sku}
                 onChange={(e) => setNewProduct({ ...newProduct, sku: e.target.value })}
                 placeholder="e.g., ARM-ENV-SGL"
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
               />
             </div>
             <div className="space-y-2">
-              <Label>Base Unit</Label>
+              <Label className="text-sm">Base Unit</Label>
               <Select 
                 value={newProduct.baseUnit} 
                 onValueChange={(val) => setNewProduct({ ...newProduct, baseUnit: val })}
               >
-                <SelectTrigger>
+                <SelectTrigger className="h-11">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -533,13 +616,14 @@ export default function Variants() {
               </Select>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateProductDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setCreateProductDialogOpen(false)} className="min-h-[44px]">
               Cancel
             </Button>
             <Button
               onClick={() => createProductMutation.mutate(newProduct)}
               disabled={!newProduct.name || createProductMutation.isPending}
+              className="min-h-[44px]"
             >
               {createProductMutation.isPending ? "Creating..." : "Create & Select"}
             </Button>

@@ -161,7 +161,6 @@ export default function WarehouseLocations() {
     warehouseLocationId?: number;
   }
 
-  // Actual inventory at a location (source of truth)
   interface InventoryInBin {
     id: number;
     variantId: number;
@@ -189,7 +188,6 @@ export default function WarehouseLocations() {
     enabled: !!assigningToLocation,
   });
 
-  // Legacy: products assigned (for backward compat)
   const { data: productsInBin = [], refetch: refetchProductsInBin } = useQuery<ProductInBin[]>({
     queryKey: ["/api/warehouse/locations", assigningToLocation?.id, "products"],
     queryFn: async () => {
@@ -198,7 +196,7 @@ export default function WarehouseLocations() {
       if (!res.ok) throw new Error("Failed to fetch products");
       return res.json();
     },
-    enabled: false, // Disabled - using inventory instead
+    enabled: false,
   });
 
 
@@ -483,7 +481,6 @@ export default function WarehouseLocations() {
   };
 
   const parseCsv = (csv: string) => {
-    // Normalize line endings (Windows \r\n, old Mac \r, Unix \n)
     const normalized = csv.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
     const lines = normalized.split('\n').filter(line => line.trim());
     if (lines.length < 2) return [];
@@ -495,7 +492,6 @@ export default function WarehouseLocations() {
       const line = lines[i].trim();
       if (!line) continue;
       
-      // Simple CSV parsing - handles basic quoted values
       const values: string[] = [];
       let current = '';
       let inQuotes = false;
@@ -549,22 +545,19 @@ export default function WarehouseLocations() {
 
   if (!canView) {
     return (
-      <div className="p-8 text-center text-muted-foreground">
+      <div className="p-2 md:p-8 text-center text-muted-foreground">
         You don't have permission to view warehouse locations.
       </div>
     );
   }
 
-  // Filter locations by selected warehouse and search query
   const filteredLocations = useMemo(() => {
     let result = locations;
     
-    // Filter by warehouse
     if (selectedWarehouseId !== "all") {
       result = result.filter(loc => loc.warehouseId === parseInt(selectedWarehouseId));
     }
     
-    // Filter by search query
     if (binSearchQuery.trim()) {
       const query = binSearchQuery.toLowerCase().trim();
       result = result.filter(loc => 
@@ -581,7 +574,6 @@ export default function WarehouseLocations() {
     return result;
   }, [locations, selectedWarehouseId, binSearchQuery]);
 
-  // Helper to get warehouse name
   const getWarehouseName = (warehouseId: number | null) => {
     if (!warehouseId) return "-";
     const wh = warehouses.find(w => w.id === warehouseId);
@@ -589,27 +581,27 @@ export default function WarehouseLocations() {
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <MapPin className="h-6 w-6" />
+          <h1 className="text-xl md:text-2xl font-bold flex items-center gap-2">
+            <MapPin className="h-5 w-5 md:h-6 md:w-6" />
             Bin Locations
           </h1>
-          <p className="text-muted-foreground">
+          <p className="text-xs md:text-sm text-muted-foreground">
             Manage your warehouse bins and set primary SKU slotting
           </p>
         </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
+        <div className="overflow-x-auto -mx-2 px-2 md:mx-0 md:px-0">
           <TabsList className="w-max min-w-full md:w-auto">
-            <TabsTrigger value="locations" data-testid="tab-locations">
+            <TabsTrigger value="locations" className="min-h-[44px]" data-testid="tab-locations">
               <Box className="h-4 w-4 mr-2" />
               Locations ({filteredLocations.length})
             </TabsTrigger>
-            <TabsTrigger value="zones" data-testid="tab-zones">
+            <TabsTrigger value="zones" className="min-h-[44px]" data-testid="tab-zones">
               <Layers className="h-4 w-4 mr-2" />
               Zones ({zones.length})
             </TabsTrigger>
@@ -617,20 +609,24 @@ export default function WarehouseLocations() {
         </div>
 
         <TabsContent value="locations" className="space-y-4">
-          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full sm:w-auto">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 w-full sm:w-auto">
               <div className="relative w-full sm:w-64">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Search bins..."
                   value={binSearchQuery}
                   onChange={(e) => setBinSearchQuery(e.target.value)}
-                  className="pl-9"
+                  className="pl-9 h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-bin-search"
                 />
               </div>
               <Select value={selectedWarehouseId} onValueChange={setSelectedWarehouseId}>
-                <SelectTrigger className="w-full sm:w-48" data-testid="select-warehouse-filter">
+                <SelectTrigger className="w-full sm:w-48 h-11" data-testid="select-warehouse-filter">
                   <SelectValue placeholder="All Warehouses" />
                 </SelectTrigger>
                 <SelectContent>
@@ -642,7 +638,7 @@ export default function WarehouseLocations() {
                   ))}
                 </SelectContent>
               </Select>
-              <div className="text-sm text-muted-foreground">
+              <div className="text-xs text-muted-foreground">
                 <code className="bg-muted px-1 rounded hidden sm:inline">ZONE-AISLE-BAY-LEVEL-BIN</code>
                 {selectedIds.size > 0 && (
                   <span className="sm:ml-4 text-primary font-medium">{selectedIds.size} selected</span>
@@ -657,7 +653,7 @@ export default function WarehouseLocations() {
                     onClick={() => setIsReassignOpen(true)}
                     disabled={bulkReassignMutation.isPending}
                     data-testid="btn-bulk-reassign"
-                    className="flex-1 sm:flex-none"
+                    className="flex-1 sm:flex-none min-h-[44px]"
                   >
                     <MoveRight className="h-4 w-4 mr-2" />
                     <span className="hidden sm:inline">Move Products</span>
@@ -668,7 +664,7 @@ export default function WarehouseLocations() {
                     onClick={handleBulkDelete}
                     disabled={bulkDeleteMutation.isPending}
                     data-testid="btn-bulk-delete"
-                    className="flex-1 sm:flex-none"
+                    className="flex-1 sm:flex-none min-h-[44px]"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
                     <span className="hidden sm:inline">Delete Selected</span>
@@ -676,17 +672,17 @@ export default function WarehouseLocations() {
                   </Button>
                 </>
               )}
-              <Button variant="outline" onClick={handleExportLocations} data-testid="btn-export-csv" className="flex-1 sm:flex-none">
+              <Button variant="outline" onClick={handleExportLocations} data-testid="btn-export-csv" className="flex-1 sm:flex-none min-h-[44px]">
                 <Download className="h-4 w-4 sm:mr-2" />
                 <span className="hidden sm:inline">Export CSV</span>
               </Button>
               {canCreate && (
                 <>
-                  <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv" className="flex-1 sm:flex-none">
+                  <Button variant="outline" onClick={() => setIsImportOpen(true)} data-testid="btn-import-csv" className="flex-1 sm:flex-none min-h-[44px]">
                     <Upload className="h-4 w-4 sm:mr-2" />
                     <span className="hidden sm:inline">Import CSV</span>
                   </Button>
-                  <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location" className="flex-1 sm:flex-none">
+                  <Button onClick={() => setIsCreateLocationOpen(true)} data-testid="btn-create-location" className="flex-1 sm:flex-none min-h-[44px]">
                     <Plus className="h-4 w-4 sm:mr-2" />
                     <span className="hidden sm:inline">Add Location</span>
                   </Button>
@@ -708,7 +704,7 @@ export default function WarehouseLocations() {
             ) : (
               filteredLocations.map((loc) => (
                 <Card key={loc.id} data-testid={`location-card-${loc.id}`} className={selectedIds.has(loc.id) ? "border-primary" : ""}>
-                  <CardContent className="p-4">
+                  <CardContent className="p-3">
                     <div className="flex items-start justify-between">
                       <div className="flex items-start gap-3">
                         {canEdit && (
@@ -720,12 +716,12 @@ export default function WarehouseLocations() {
                           />
                         )}
                         <div className="space-y-1">
-                          <div className="font-mono font-medium text-base">{loc.code}</div>
-                          <div className="flex flex-wrap gap-2">
-                            <Badge variant="outline">{loc.locationType.replace('_', ' ')}</Badge>
-                            {loc.zone && <Badge variant="secondary">{loc.zone}</Badge>}
+                          <div className="font-mono font-medium text-sm">{loc.code}</div>
+                          <div className="flex flex-wrap gap-1">
+                            <Badge variant="outline" className="text-xs">{loc.locationType.replace('_', ' ')}</Badge>
+                            {loc.zone && <Badge variant="secondary" className="text-xs">{loc.zone}</Badge>}
                           </div>
-                          <div className="text-sm text-muted-foreground">
+                          <div className="text-xs text-muted-foreground">
                             {loc.name && <div>{loc.name}</div>}
                             <div>Warehouse: {getWarehouseName(loc.warehouseId)}</div>
                           </div>
@@ -735,7 +731,8 @@ export default function WarehouseLocations() {
                         <div className="flex gap-1">
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="icon"
+                            className="min-h-[44px] min-w-[44px]"
                             onClick={() => setEditingLocation(loc)}
                             data-testid={`btn-edit-location-mobile-${loc.id}`}
                           >
@@ -743,7 +740,8 @@ export default function WarehouseLocations() {
                           </Button>
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="icon"
+                            className="min-h-[44px] min-w-[44px]"
                             onClick={() => deleteLocationMutation.mutate(loc.id)}
                             data-testid={`btn-delete-location-mobile-${loc.id}`}
                           >
@@ -866,40 +864,41 @@ export default function WarehouseLocations() {
 
         <TabsContent value="zones" className="space-y-4">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-            <div className="text-sm text-muted-foreground">
+            <div className="text-xs md:text-sm text-muted-foreground">
               Zones organize your warehouse into logical areas
             </div>
             {canCreate && (
-              <Button onClick={() => setIsCreateZoneOpen(true)} data-testid="btn-create-zone" className="w-full sm:w-auto">
+              <Button onClick={() => setIsCreateZoneOpen(true)} data-testid="btn-create-zone" className="w-full sm:w-auto min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Zone
               </Button>
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
             {zonesLoading ? (
               <div className="col-span-full text-center py-8">Loading...</div>
             ) : zones.length === 0 ? (
               <Card className="col-span-full">
                 <CardContent className="py-8 text-center text-muted-foreground">
                   <p>No zones defined yet.</p>
-                  <p className="text-sm mt-2">Common zones: RCV (Receiving), BULK (Bulk Storage), FWD (Forward Pick), PACK, SHIP</p>
+                  <p className="text-xs md:text-sm mt-2">Common zones: RCV (Receiving), BULK (Bulk Storage), FWD (Forward Pick), PACK, SHIP</p>
                 </CardContent>
               </Card>
             ) : (
               zones.map((zone) => (
                 <Card key={zone.id} data-testid={`zone-card-${zone.id}`}>
-                  <CardHeader className="pb-2">
+                  <CardHeader className="pb-2 p-3 md:p-6">
                     <div className="flex justify-between items-start">
                       <div>
-                        <CardTitle className="text-lg font-mono">{zone.code}</CardTitle>
-                        <CardDescription>{zone.name}</CardDescription>
+                        <CardTitle className="text-base md:text-lg font-mono">{zone.code}</CardTitle>
+                        <CardDescription className="text-xs md:text-sm">{zone.name}</CardDescription>
                       </div>
                       {canEdit && (
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="min-h-[44px] min-w-[44px]"
                           onClick={() => deleteZoneMutation.mutate(zone.id)}
                           data-testid={`btn-delete-zone-${zone.id}`}
                         >
@@ -908,13 +907,13 @@ export default function WarehouseLocations() {
                       )}
                     </div>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="p-3 pt-0 md:p-6 md:pt-0">
                     <div className="flex gap-2">
-                      <Badge variant="outline">{zone.locationType.replace('_', ' ')}</Badge>
-                      {zone.isPickable === 1 && <Badge variant="secondary">Pickable</Badge>}
+                      <Badge variant="outline" className="text-xs">{zone.locationType.replace('_', ' ')}</Badge>
+                      {zone.isPickable === 1 && <Badge variant="secondary" className="text-xs">Pickable</Badge>}
                     </div>
                     {zone.description && (
-                      <p className="text-sm text-muted-foreground mt-2">{zone.description}</p>
+                      <p className="text-xs text-muted-foreground mt-2">{zone.description}</p>
                     )}
                   </CardContent>
                 </Card>
@@ -926,75 +925,97 @@ export default function WarehouseLocations() {
 
       {/* Create Location Dialog */}
       <Dialog open={isCreateLocationOpen} onOpenChange={setIsCreateLocationOpen}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add New Location</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="bg-muted p-3 rounded-lg text-center">
-              <span className="text-sm text-muted-foreground">Preview: </span>
-              <span className="font-mono font-bold text-lg">{previewCode()}</span>
+              <span className="text-xs text-muted-foreground">Preview: </span>
+              <span className="font-mono font-bold text-base md:text-lg">{previewCode()}</span>
             </div>
             
             <div className="grid grid-cols-5 gap-2">
               <div>
-                <Label>Zone</Label>
+                <Label className="text-xs">Zone</Label>
                 <Input
                   placeholder="FWD"
                   value={newLocation.zone}
                   onChange={(e) => setNewLocation({ ...newLocation, zone: e.target.value })}
-                  className="uppercase"
+                  className="uppercase h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-location-zone"
                 />
               </div>
               <div>
-                <Label>Aisle</Label>
+                <Label className="text-xs">Aisle</Label>
                 <Input
                   placeholder="A"
                   value={newLocation.aisle}
                   onChange={(e) => setNewLocation({ ...newLocation, aisle: e.target.value })}
-                  className="uppercase"
+                  className="uppercase h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-location-aisle"
                 />
               </div>
               <div>
-                <Label>Bay</Label>
+                <Label className="text-xs">Bay</Label>
                 <Input
                   placeholder="01"
                   value={newLocation.bay}
                   onChange={(e) => setNewLocation({ ...newLocation, bay: e.target.value })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-location-bay"
                 />
               </div>
               <div>
-                <Label>Level</Label>
+                <Label className="text-xs">Level</Label>
                 <Input
                   placeholder="B"
                   value={newLocation.level}
                   onChange={(e) => setNewLocation({ ...newLocation, level: e.target.value })}
-                  className="uppercase"
+                  className="uppercase h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-location-level"
                 />
               </div>
               <div>
-                <Label>Bin</Label>
+                <Label className="text-xs">Bin</Label>
                 <Input
                   placeholder="1"
                   value={newLocation.bin}
                   onChange={(e) => setNewLocation({ ...newLocation, bin: e.target.value })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-location-bin"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <Label>Warehouse</Label>
+                <Label className="text-xs">Warehouse</Label>
                 <Select
                   value={newLocation.warehouseId}
                   onValueChange={(v) => setNewLocation({ ...newLocation, warehouseId: v })}
                 >
-                  <SelectTrigger data-testid="select-location-warehouse">
+                  <SelectTrigger className="h-11" data-testid="select-location-warehouse">
                     <SelectValue placeholder="Select warehouse..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1007,12 +1028,12 @@ export default function WarehouseLocations() {
                 </Select>
               </div>
               <div>
-                <Label>Location Type</Label>
+                <Label className="text-xs">Location Type</Label>
                 <Select
                   value={newLocation.locationType}
                   onValueChange={(v) => setNewLocation({ ...newLocation, locationType: v })}
                 >
-                  <SelectTrigger data-testid="select-location-type">
+                  <SelectTrigger className="h-11" data-testid="select-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1024,46 +1045,60 @@ export default function WarehouseLocations() {
               </div>
             </div>
 
-            <div>
-              <Label>Friendly Name (optional)</Label>
-              <Input
-                placeholder="Main floor left"
-                value={newLocation.name}
-                onChange={(e) => setNewLocation({ ...newLocation, name: e.target.value })}
-                data-testid="input-location-name"
-              />
-            </div>
+            <details className="group">
+              <summary className="text-xs font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Optional Fields
+              </summary>
+              <div className="space-y-3 pt-2">
+                <div>
+                  <Label className="text-xs">Friendly Name</Label>
+                  <Input
+                    placeholder="Main floor left"
+                    value={newLocation.name}
+                    onChange={(e) => setNewLocation({ ...newLocation, name: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-location-name"
+                  />
+                </div>
 
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <Label>Pick Sequence</Label>
-                <Input
-                  type="number"
-                  placeholder="Auto"
-                  value={newLocation.pickSequence}
-                  onChange={(e) => setNewLocation({ ...newLocation, pickSequence: e.target.value })}
-                  data-testid="input-location-sequence"
-                />
+                <div>
+                  <Label className="text-xs">Pick Sequence</Label>
+                  <Input
+                    type="number"
+                    placeholder="Auto"
+                    value={newLocation.pickSequence}
+                    onChange={(e) => setNewLocation({ ...newLocation, pickSequence: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    data-testid="input-location-sequence"
+                  />
+                </div>
               </div>
-            </div>
+            </details>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 min-h-[44px]">
               <Checkbox
                 id="create-is-pickable"
                 checked={newLocation.isPickable === 1}
                 onCheckedChange={(checked) => setNewLocation({ ...newLocation, isPickable: checked ? 1 : 0 })}
                 data-testid="checkbox-location-pickable"
               />
-              <Label htmlFor="create-is-pickable" className="text-sm font-normal cursor-pointer">
+              <Label htmlFor="create-is-pickable" className="text-xs md:text-sm font-normal cursor-pointer">
                 Forward Pick Location (direct picker access)
               </Label>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateLocationOpen(false)}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setIsCreateLocationOpen(false)} className="min-h-[44px] w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={handleCreateLocation}
               disabled={createLocationMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="btn-save-location"
             >
               Create Location
@@ -1074,65 +1109,87 @@ export default function WarehouseLocations() {
 
       {/* Edit Location Dialog */}
       <Dialog open={!!editingLocation} onOpenChange={(open) => !open && setEditingLocation(null)}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Edit Location</DialogTitle>
           </DialogHeader>
           {editingLocation && (
             <div className="space-y-4">
               <div className="bg-muted p-3 rounded-lg text-center">
-                <span className="font-mono font-bold text-lg">{editingLocation.code}</span>
+                <span className="font-mono font-bold text-base md:text-lg">{editingLocation.code}</span>
               </div>
               
               <div className="grid grid-cols-5 gap-2">
                 <div>
-                  <Label>Zone</Label>
+                  <Label className="text-xs">Zone</Label>
                   <Input
                     value={editingLocation.zone || ""}
                     onChange={(e) => setEditingLocation({ ...editingLocation, zone: e.target.value || null })}
-                    className="uppercase"
+                    className="uppercase h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
                 <div>
-                  <Label>Aisle</Label>
+                  <Label className="text-xs">Aisle</Label>
                   <Input
                     value={editingLocation.aisle || ""}
                     onChange={(e) => setEditingLocation({ ...editingLocation, aisle: e.target.value || null })}
-                    className="uppercase"
+                    className="uppercase h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
                 <div>
-                  <Label>Bay</Label>
+                  <Label className="text-xs">Bay</Label>
                   <Input
                     value={editingLocation.bay || ""}
                     onChange={(e) => setEditingLocation({ ...editingLocation, bay: e.target.value || null })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
                 <div>
-                  <Label>Level</Label>
+                  <Label className="text-xs">Level</Label>
                   <Input
                     value={editingLocation.level || ""}
                     onChange={(e) => setEditingLocation({ ...editingLocation, level: e.target.value || null })}
-                    className="uppercase"
+                    className="uppercase h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
                 <div>
-                  <Label>Bin</Label>
+                  <Label className="text-xs">Bin</Label>
                   <Input
                     value={editingLocation.bin || ""}
                     onChange={(e) => setEditingLocation({ ...editingLocation, bin: e.target.value || null })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <Label>Warehouse</Label>
+                  <Label className="text-xs">Warehouse</Label>
                   <Select
                     value={editingLocation.warehouseId?.toString() || "none"}
                     onValueChange={(v) => setEditingLocation({ ...editingLocation, warehouseId: v && v !== "none" ? parseInt(v) : null })}
                   >
-                    <SelectTrigger data-testid="select-edit-warehouse">
+                    <SelectTrigger className="h-11" data-testid="select-edit-warehouse">
                       <SelectValue placeholder="Select warehouse..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1146,12 +1203,12 @@ export default function WarehouseLocations() {
                   </Select>
                 </div>
                 <div>
-                  <Label>Location Type</Label>
+                  <Label className="text-xs">Location Type</Label>
                   <Select
                     value={editingLocation.locationType}
                     onValueChange={(v) => setEditingLocation({ ...editingLocation, locationType: v })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger className="h-11">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1163,29 +1220,42 @@ export default function WarehouseLocations() {
                 </div>
               </div>
 
-              <div>
-                <Label>Friendly Name</Label>
-                <Input
-                  value={editingLocation.name || ""}
-                  onChange={(e) => setEditingLocation({ ...editingLocation, name: e.target.value || null })}
-                />
-              </div>
+              <details className="group">
+                <summary className="text-xs font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                  <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                  Optional Fields
+                </summary>
+                <div className="space-y-3 pt-2">
+                  <div>
+                    <Label className="text-xs">Friendly Name</Label>
+                    <Input
+                      value={editingLocation.name || ""}
+                      onChange={(e) => setEditingLocation({ ...editingLocation, name: e.target.value || null })}
+                      className="h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                    />
+                  </div>
 
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <Label>Pick Sequence</Label>
-                  <Input
-                    type="number"
-                    value={editingLocation.pickSequence ?? ""}
-                    onChange={(e) => setEditingLocation({ 
-                      ...editingLocation, 
-                      pickSequence: e.target.value ? parseInt(e.target.value) : null 
-                    })}
-                  />
+                  <div>
+                    <Label className="text-xs">Pick Sequence</Label>
+                    <Input
+                      type="number"
+                      value={editingLocation.pickSequence ?? ""}
+                      onChange={(e) => setEditingLocation({ 
+                        ...editingLocation, 
+                        pickSequence: e.target.value ? parseInt(e.target.value) : null 
+                      })}
+                      className="h-11"
+                      autoComplete="off"
+                    />
+                  </div>
                 </div>
-              </div>
+              </details>
 
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 min-h-[44px]">
                 <Checkbox
                   id="edit-is-pickable"
                   checked={editingLocation.isPickable === 1}
@@ -1195,17 +1265,18 @@ export default function WarehouseLocations() {
                   })}
                   data-testid="checkbox-edit-location-pickable"
                 />
-                <Label htmlFor="edit-is-pickable" className="text-sm font-normal cursor-pointer">
+                <Label htmlFor="edit-is-pickable" className="text-xs md:text-sm font-normal cursor-pointer">
                   Forward Pick Location (direct picker access)
                 </Label>
               </div>
             </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditingLocation(null)}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setEditingLocation(null)} className="min-h-[44px] w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={handleUpdateLocation}
               disabled={updateLocationMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
             >
               Save Changes
             </Button>
@@ -1215,49 +1286,73 @@ export default function WarehouseLocations() {
 
       {/* Create Zone Dialog */}
       <Dialog open={isCreateZoneOpen} onOpenChange={setIsCreateZoneOpen}>
-        <DialogContent>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add New Zone</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <Label>Zone Code</Label>
+                <Label className="text-xs">Zone Code</Label>
                 <Input
                   placeholder="FWD"
                   value={newZone.code}
                   onChange={(e) => setNewZone({ ...newZone, code: e.target.value })}
-                  className="uppercase"
+                  className="uppercase h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-zone-code"
                 />
                 <p className="text-xs text-muted-foreground mt-1">Short code like RCV, BULK, FWD</p>
               </div>
               <div>
-                <Label>Zone Name</Label>
+                <Label className="text-xs">Zone Name</Label>
                 <Input
                   placeholder="Forward Pick Area"
                   value={newZone.name}
                   onChange={(e) => setNewZone({ ...newZone, name: e.target.value })}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-zone-name"
                 />
               </div>
             </div>
+            
+            <details className="group">
+              <summary className="text-xs font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Optional Fields
+              </summary>
+              <div className="space-y-3 pt-2">
+                <div>
+                  <Label className="text-xs">Description</Label>
+                  <Input
+                    placeholder="Main picking area for fast-moving items"
+                    value={newZone.description}
+                    onChange={(e) => setNewZone({ ...newZone, description: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-zone-description"
+                  />
+                </div>
+              </div>
+            </details>
+            
             <div>
-              <Label>Description (optional)</Label>
-              <Input
-                placeholder="Main picking area for fast-moving items"
-                value={newZone.description}
-                onChange={(e) => setNewZone({ ...newZone, description: e.target.value })}
-                data-testid="input-zone-description"
-              />
-            </div>
-            <div>
-              <Label>Default Location Type</Label>
+              <Label className="text-xs">Default Location Type</Label>
               <Select
                 value={newZone.locationType}
                 onValueChange={(v) => setNewZone({ ...newZone, locationType: v })}
               >
-                <SelectTrigger data-testid="select-zone-type">
+                <SelectTrigger className="h-11" data-testid="select-zone-type">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1268,11 +1363,12 @@ export default function WarehouseLocations() {
               </Select>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateZoneOpen(false)}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setIsCreateZoneOpen(false)} className="min-h-[44px] w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={() => createZoneMutation.mutate(newZone)}
               disabled={!newZone.code || !newZone.name || createZoneMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="btn-save-zone"
             >
               Create Zone
@@ -1283,25 +1379,25 @@ export default function WarehouseLocations() {
 
       {/* CSV Import Dialog */}
       <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Import Locations from CSV</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-xs md:text-sm text-muted-foreground">
                 Upload a CSV file with location data. Set a default warehouse or include warehouse_id in CSV.
               </p>
-              <Button variant="outline" size="sm" onClick={downloadTemplate} data-testid="btn-download-template">
+              <Button variant="outline" size="sm" onClick={downloadTemplate} className="min-h-[44px]" data-testid="btn-download-template">
                 <Download className="h-4 w-4 mr-2" />
-                Download Template
+                Template
               </Button>
             </div>
 
             <div>
-              <Label>Default Warehouse (applies to rows without warehouse_id)</Label>
+              <Label className="text-xs">Default Warehouse</Label>
               <Select value={importWarehouseId || "none"} onValueChange={(v) => setImportWarehouseId(v === "none" ? "" : v)}>
-                <SelectTrigger data-testid="select-import-warehouse">
+                <SelectTrigger className="h-11" data-testid="select-import-warehouse">
                   <SelectValue placeholder="Select warehouse..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1318,9 +1414,9 @@ export default function WarehouseLocations() {
             <div className="space-y-3">
               <div className="flex items-center gap-4">
                 <Label htmlFor="csv-file-input" className="cursor-pointer">
-                  <div className="flex items-center gap-2 px-4 py-2 border rounded-md hover:bg-accent transition-colors">
+                  <div className="flex items-center gap-2 px-4 py-2 border rounded-md hover:bg-accent transition-colors min-h-[44px]">
                     <Upload className="h-4 w-4" />
-                    <span>Choose CSV File</span>
+                    <span className="text-sm">Choose CSV File</span>
                   </div>
                   <input
                     id="csv-file-input"
@@ -1342,13 +1438,13 @@ export default function WarehouseLocations() {
                     data-testid="input-csv-file"
                   />
                 </Label>
-                <span className="text-sm text-muted-foreground">or paste data below</span>
+                <span className="text-xs text-muted-foreground">or paste data below</span>
               </div>
               
               <div>
-                <Label>CSV Data</Label>
+                <Label className="text-xs">CSV Data</Label>
                 <Textarea
-                  className="font-mono text-sm h-48"
+                  className="font-mono text-xs h-32 md:h-48"
                   placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
 FWD,A,01,A,1,Forward Pick A1,bin,1,1
 BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
@@ -1359,23 +1455,29 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
               </div>
             </div>
 
-            <div className="text-sm text-muted-foreground">
-              <p><strong>Supported columns:</strong></p>
-              <ul className="list-disc list-inside mt-1">
-                <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy (at least one required)</li>
-                <li><code>name</code> - Friendly name (optional)</li>
-                <li><code>location_type</code> - bin, pallet, carton_flow, bulk_reserve, receiving, putaway_staging, packing, shipping_lane, staging, returns, quarantine, crossdock, hazmat, cold_storage, secure (default: bin)</li>
-                <li><code>is_pickable</code> - 1 for pickable, 0 for non-pickable (default: 1)</li>
-                <li><code>pick_sequence</code> - Picking order number (optional)</li>
-                <li><code>warehouse_id</code> - Warehouse ID (optional, overrides default above)</li>
-              </ul>
-            </div>
+            <details className="group">
+              <summary className="text-xs font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Column Reference
+              </summary>
+              <div className="text-xs text-muted-foreground pt-2">
+                <ul className="list-disc list-inside space-y-1">
+                  <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy</li>
+                  <li><code>name</code> - Friendly name (optional)</li>
+                  <li><code>location_type</code> - bin, pallet, bulk_reserve, etc.</li>
+                  <li><code>is_pickable</code> - 1 or 0</li>
+                  <li><code>pick_sequence</code> - Picking order (optional)</li>
+                  <li><code>warehouse_id</code> - Warehouse ID (optional)</li>
+                </ul>
+              </div>
+            </details>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setIsImportOpen(false); setCsvData(""); setImportWarehouseId(""); }}>Cancel</Button>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => { setIsImportOpen(false); setCsvData(""); setImportWarehouseId(""); }} className="min-h-[44px] w-full sm:w-auto">Cancel</Button>
             <Button 
               onClick={handleImport}
               disabled={!csvData.trim() || bulkImportMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="btn-run-import"
             >
               <Upload className="h-4 w-4 mr-2" />
@@ -1393,24 +1495,24 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
           setReassignLocationSearch("");
         }
       }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Move Products to New Location</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs md:text-sm text-muted-foreground">
               Move all products from the {selectedIds.size} selected location(s) to a new location.
               This will update the product-location mappings so you can delete the old locations.
             </p>
             <div>
-              <Label>Target Location (Holding Bin)</Label>
+              <Label className="text-xs">Target Location (Holding Bin)</Label>
               <Popover open={reassignLocationOpen} onOpenChange={setReassignLocationOpen}>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
                     role="combobox"
                     aria-expanded={reassignLocationOpen}
-                    className="w-full justify-between mt-1"
+                    className="w-full justify-between mt-1 h-11"
                     data-testid="select-target-location"
                   >
                     {targetLocationId
@@ -1422,12 +1524,13 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                     <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-[400px] p-0" align="start">
+                <PopoverContent className="w-full p-0" align="start">
                   <Command>
                     <CommandInput
                       placeholder="Search by bin code..."
                       value={reassignLocationSearch}
                       onValueChange={setReassignLocationSearch}
+                      className="h-11"
                       data-testid="input-reassign-location-search"
                     />
                     <CommandList>
@@ -1440,7 +1543,6 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                             (loc.zone && loc.zone.toLowerCase().includes(reassignLocationSearch.toLowerCase()))
                           )
                           .sort((a, b) => {
-                            // Sort staging locations first, then by code
                             if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
                             if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
                             return a.code.localeCompare(b.code);
@@ -1454,10 +1556,10 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                                   setTargetLocationId(loc.id.toString());
                                   setReassignLocationOpen(false);
                                 }}
-                                className="flex justify-between items-center"
+                                className="flex justify-between items-center min-h-[44px]"
                               >
                                 <div className="flex-1 min-w-0">
-                                  <div className="font-medium">{loc.code}</div>
+                                  <div className="font-medium text-sm">{loc.code}</div>
                                   <div className="text-xs text-muted-foreground truncate">
                                     {loc.locationType.replace('_', ' ')}
                                     {loc.zone && ` • Zone ${loc.zone}`}
@@ -1475,8 +1577,8 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
               </p>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); setReassignLocationSearch(""); }}>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); setReassignLocationSearch(""); }} className="min-h-[44px] w-full sm:w-auto">
               Cancel
             </Button>
             <Button 
@@ -1485,6 +1587,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                 targetId: parseInt(targetLocationId) 
               })}
               disabled={!targetLocationId || bulkReassignMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="btn-confirm-reassign"
             >
               <MoveRight className="h-4 w-4 mr-2" />
@@ -1501,7 +1604,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
           setAssigningToLocation(null);
         }
       }}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <MapPin className="h-5 w-5" />
@@ -1510,11 +1613,10 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
           </DialogHeader>
           
           <div className="space-y-4">
-            {/* Actual inventory in this bin */}
             <div>
-              <Label className="text-sm font-medium">Inventory in this location ({inventoryInBin.length} items)</Label>
+              <Label className="text-xs md:text-sm font-medium">Inventory in this location ({inventoryInBin.length} items)</Label>
               {inventoryInBin.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-2">No inventory at this location.</p>
+                <p className="text-xs md:text-sm text-muted-foreground py-2">No inventory at this location.</p>
               ) : (
                 <ScrollArea className="h-48 border rounded-md mt-2">
                   <div className="p-2 space-y-2">
@@ -1525,17 +1627,15 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                             <img src={inv.imageUrl} alt="" className="w-10 h-10 object-cover rounded" />
                           )}
                           <div>
-                            <div className="font-medium text-sm">{inv.sku || inv.variantName || "Unknown"}</div>
+                            <div className="font-medium text-xs md:text-sm">{inv.sku || inv.variantName || "Unknown"}</div>
                             <div className="text-xs text-muted-foreground">
                               {inv.productTitle && <span className="truncate max-w-[200px] block">{inv.productTitle}</span>}
                             </div>
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className="font-bold text-lg">{inv.qty}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {inv.reservedBase > 0 && <span className="text-amber-600">{inv.reservedBase} reserved</span>}
-                          </div>
+                          <div className="font-bold text-sm">{inv.onHandBase}</div>
+                          <div className="text-xs text-muted-foreground">on hand</div>
                         </div>
                       </div>
                     ))}
@@ -1543,31 +1643,15 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                 </ScrollArea>
               )}
             </div>
-
-            {/* Location info */}
-            {assigningToLocation && (
-              <div className="border-t pt-4 text-sm text-muted-foreground">
-                <div className="flex gap-4">
-                  <span>Zone: <strong>{assigningToLocation.zone}</strong></span>
-                  <span>Type: <strong>{assigningToLocation.locationType?.replace('_', ' ') || 'N/A'}</strong></span>
-                  {assigningToLocation.isPickable ? (
-                    <Badge variant="outline" className="text-green-600">Pickable</Badge>
-                  ) : (
-                    <Badge variant="outline" className="text-slate-500">Storage</Badge>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
-
+          
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsAssignProductsOpen(false)}>
+            <Button variant="outline" onClick={() => setIsAssignProductsOpen(false)} className="min-h-[44px] w-full sm:w-auto">
               Close
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
     </div>
   );
 }

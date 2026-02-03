@@ -160,18 +160,18 @@ export default function Reserves() {
   }
 
   return (
-    <div className="space-y-6 p-4 md:p-6" data-testid="page-reserves">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div className="space-y-4 md:space-y-6 p-2 md:p-6" data-testid="page-reserves">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
-            <Package className="h-8 w-8 text-primary" />
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight flex items-center gap-2">
+            <Package className="h-6 w-6 md:h-8 md:w-8 text-primary" />
             Channel Reserves
           </h1>
-          <p className="text-muted-foreground">Allocate inventory to specific sales channels</p>
+          <p className="text-sm md:text-base text-muted-foreground">Allocate inventory to specific sales channels</p>
         </div>
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <Select value={selectedChannelFilter} onValueChange={setSelectedChannelFilter}>
-            <SelectTrigger className="w-full sm:w-[180px]" data-testid="select-channel-filter">
+            <SelectTrigger className="w-full sm:w-[180px] h-11" data-testid="select-channel-filter">
               <SelectValue placeholder="Filter by channel" />
             </SelectTrigger>
             <SelectContent>
@@ -186,23 +186,23 @@ export default function Reserves() {
           {canEdit && (
             <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
               <DialogTrigger asChild>
-                <Button data-testid="button-create-reserve" className="w-full sm:w-auto">
+                <Button data-testid="button-create-reserve" className="w-full sm:w-auto min-h-[44px]">
                   <Plus className="h-4 w-4 mr-2" />
                   Add Reserve
                 </Button>
               </DialogTrigger>
-              <DialogContent>
+              <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
                 <DialogHeader>
                   <DialogTitle>Create Channel Reserve</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
-                    <Label>Channel</Label>
+                    <Label className="text-sm">Channel</Label>
                     <Select
                       value={newReservation.channelId}
                       onValueChange={(value) => setNewReservation(prev => ({ ...prev, channelId: value }))}
                     >
-                      <SelectTrigger data-testid="select-reserve-channel">
+                      <SelectTrigger className="h-11" data-testid="select-reserve-channel">
                         <SelectValue placeholder="Select channel" />
                       </SelectTrigger>
                       <SelectContent>
@@ -215,12 +215,12 @@ export default function Reserves() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label>Inventory Item (SKU)</Label>
+                    <Label className="text-sm">Inventory Item (SKU)</Label>
                     <Select
                       value={newReservation.inventoryItemId}
                       onValueChange={(value) => setNewReservation(prev => ({ ...prev, inventoryItemId: value }))}
                     >
-                      <SelectTrigger data-testid="select-reserve-item">
+                      <SelectTrigger className="h-11" data-testid="select-reserve-item">
                         <SelectValue placeholder="Select item" />
                       </SelectTrigger>
                       <SelectContent>
@@ -234,45 +234,65 @@ export default function Reserves() {
                   </div>
                   <div className="grid grid-cols-3 gap-3">
                     <div className="space-y-2">
-                      <Label>Reserve Qty</Label>
+                      <Label className="text-sm">Reserve Qty</Label>
                       <Input
                         type="number"
+                        className="h-11"
                         value={newReservation.reserveBaseQty}
                         onChange={(e) => setNewReservation(prev => ({ ...prev, reserveBaseQty: parseInt(e.target.value) || 0 }))}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid="input-reserve-qty"
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label>Min Stock</Label>
+                      <Label className="text-sm">Min Stock</Label>
                       <Input
                         type="number"
+                        className="h-11"
                         value={newReservation.minStockBase}
                         onChange={(e) => setNewReservation(prev => ({ ...prev, minStockBase: parseInt(e.target.value) || 0 }))}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid="input-min-stock"
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label>Max Stock</Label>
+                      <Label className="text-sm">Max Stock</Label>
                       <Input
                         type="number"
+                        className="h-11"
                         value={newReservation.maxStockBase}
                         onChange={(e) => setNewReservation(prev => ({ ...prev, maxStockBase: parseInt(e.target.value) || 0 }))}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        spellCheck={false}
                         data-testid="input-max-stock"
                       />
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label>Notes</Label>
+                    <Label className="text-sm">Notes</Label>
                     <Textarea
                       value={newReservation.notes}
                       onChange={(e) => setNewReservation(prev => ({ ...prev, notes: e.target.value }))}
                       placeholder="Optional notes about this reserve"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
                       data-testid="input-reserve-notes"
                     />
                   </div>
                 </div>
                 <DialogFooter>
                   <Button
+                    className="min-h-[44px]"
                     onClick={() => createMutation.mutate(newReservation)}
                     disabled={!newReservation.channelId || !newReservation.inventoryItemId || createMutation.isPending}
                     data-testid="button-submit-reserve"
@@ -351,6 +371,7 @@ export default function Reserves() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          className="min-h-[44px] min-w-[44px]"
                           onClick={() => {
                             if (confirm('Delete this reserve?')) {
                               deleteMutation.mutate(reserve.id);
@@ -363,11 +384,11 @@ export default function Reserves() {
                       )}
                     </div>
                     <div className="space-y-1">
-                      <p className="font-mono text-sm">{reserve.inventoryItem?.baseSku || '-'}</p>
-                      <p className="text-sm text-muted-foreground">{reserve.inventoryItem?.name || '-'}</p>
+                      <p className="font-mono text-xs">{reserve.inventoryItem?.baseSku || '-'}</p>
+                      <p className="text-xs text-muted-foreground">{reserve.inventoryItem?.name || '-'}</p>
                     </div>
                     <div className="flex items-center justify-between pt-2 border-t">
-                      <span className="text-sm text-muted-foreground">Reserved Qty</span>
+                      <span className="text-xs text-muted-foreground">Reserved Qty</span>
                       <span className="font-medium">{reserve.reserveBaseQty.toLocaleString()}</span>
                     </div>
                   </div>

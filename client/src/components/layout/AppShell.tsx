@@ -139,7 +139,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
                 key={index} 
                 href={item.href}
                 className={cn(
-                  "flex items-center gap-3 px-3 py-2 rounded-md transition-colors text-sm font-medium",
+                  "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors text-sm font-medium min-h-[44px]",
                   isActive 
                     ? "bg-sidebar-primary text-sidebar-primary-foreground" 
                     : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -169,10 +169,9 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
         )}
         <Button 
           variant="ghost" 
-          size="sm"
           onClick={handleLogout}
           className={cn(
-            "w-full text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+            "w-full text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent min-h-[44px]",
             collapsed && !mobile ? "justify-center px-2" : "justify-start gap-2"
           )}
         >
@@ -197,9 +196,8 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
       <div className="px-4 pb-4">
         <Button 
           variant="ghost" 
-          size="sm" 
           className={cn(
-            "w-full flex items-center text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+            "w-full flex items-center text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent min-h-[44px]",
             collapsed ? "justify-center px-0" : "justify-start gap-3"
           )}
           onClick={onToggle}
@@ -237,7 +235,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <header className="h-14 border-b bg-card px-4 md:px-6 flex items-center justify-between gap-4 shrink-0 z-10">
           <div className="flex items-center gap-4 flex-1">
             {isMobile && (
-              <Button variant="ghost" size="icon" className="-ml-2" onClick={() => setMobileOpen(true)}>
+              <Button variant="ghost" size="icon" className="-ml-2 min-h-[44px] min-w-[44px]" onClick={() => setMobileOpen(true)}>
                 <Menu className="h-5 w-5" />
               </Button>
             )}
@@ -246,21 +244,21 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input 
                 placeholder="Search..." 
-                className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-9" 
+                className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-10" 
               />
             </div>
             {isMobile && <span className="font-semibold text-lg">Echelon</span>}
           </div>
           
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" className="text-muted-foreground relative">
+            <Button variant="ghost" size="icon" className="text-muted-foreground relative min-h-[44px] min-w-[44px]">
               <Bell size={18} />
               <span className="absolute top-2 right-2.5 w-2 h-2 bg-destructive rounded-full border-2 border-card"></span>
             </Button>
             {isAdmin && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="text-muted-foreground" data-testid="button-settings-menu">
+                  <Button variant="ghost" size="icon" className="text-muted-foreground min-h-[44px] min-w-[44px]" data-testid="button-settings-menu">
                     <Settings size={18} />
                   </Button>
                 </DropdownMenuTrigger>
@@ -299,7 +297,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <Separator orientation="vertical" className="h-6 mx-2 hidden md:block" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-2 px-0 md:px-3">
+                <Button variant="ghost" className="gap-2 px-0 md:px-3 min-h-[44px]">
                   <Avatar className="h-8 w-8 md:h-7 md:w-7 border border-sidebar-border">
                      <AvatarImage src="https://github.com/shadcn.png" />
                      <AvatarFallback>JD</AvatarFallback>

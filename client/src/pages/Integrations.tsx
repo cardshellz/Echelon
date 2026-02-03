@@ -20,27 +20,27 @@ import { Switch } from "@/components/ui/switch";
 export default function Integrations() {
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b bg-card p-4 md:p-6 pb-4">
+      <div className="border-b bg-card p-2 md:p-6 pb-4">
         <div>
           <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
             <Cable className="h-5 w-5 md:h-6 md:w-6 text-primary" />
             System Architecture
           </h1>
-          <p className="text-muted-foreground mt-1 text-sm max-w-2xl">
+          <p className="text-muted-foreground mt-1 text-xs md:text-sm max-w-2xl">
             Configure your modular stack. Replace individual components without disrupting operations 
             by switching data providers.
           </p>
         </div>
       </div>
 
-      <div className="flex-1 p-4 md:p-6 overflow-auto bg-muted/20">
-        <div className="grid gap-6 md:gap-8 max-w-5xl mx-auto">
+      <div className="flex-1 p-2 md:p-6 overflow-auto bg-muted/20">
+        <div className="grid gap-4 md:gap-8 max-w-5xl mx-auto">
           
           {/* SECTION 1: INBOUND (OMS) */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">Inbound</Badge>
-              <h2 className="text-lg font-semibold">Order Sources (OMS)</h2>
+          <div className="space-y-3 md:space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center gap-2">
+              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 w-fit">Inbound</Badge>
+              <h2 className="text-base md:text-lg font-semibold">Order Sources (OMS)</h2>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Active Adapter */}
@@ -86,7 +86,7 @@ export default function Integrations() {
                   <div className="text-sm text-muted-foreground mb-4">
                     Future-state centralized order management. Currently disabled.
                   </div>
-                  <Button variant="outline" size="sm" className="w-full">
+                  <Button variant="outline" size="sm" className="w-full min-h-[44px]">
                     <Plus size={14} className="mr-2" /> Configure
                   </Button>
                 </CardContent>
@@ -99,10 +99,10 @@ export default function Integrations() {
           </div>
 
           {/* SECTION 2: CORE (WMS) */}
-          <div className="space-y-4 relative z-10">
-             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">Core</Badge>
-              <h2 className="text-lg font-semibold">Warehouse Management (WMS)</h2>
+          <div className="space-y-3 md:space-y-4 relative z-10">
+             <div className="flex flex-col md:flex-row md:items-center gap-2">
+              <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200 w-fit">Core</Badge>
+              <h2 className="text-base md:text-lg font-semibold">Warehouse Management (WMS)</h2>
             </div>
             <Card className="border-2 border-primary shadow-md bg-card">
               <CardHeader className="pb-2">
@@ -147,10 +147,10 @@ export default function Integrations() {
           </div>
 
           {/* SECTION 3: OUTBOUND (SHIPPING) */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">Outbound</Badge>
-              <h2 className="text-lg font-semibold">Shipping Engine</h2>
+          <div className="space-y-3 md:space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center gap-2">
+              <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 w-fit">Outbound</Badge>
+              <h2 className="text-base md:text-lg font-semibold">Shipping Engine</h2>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {/* Active Adapter */}
@@ -200,7 +200,7 @@ export default function Integrations() {
                   <div className="text-sm text-muted-foreground mb-4">
                     Future direct integration with UPS/FedEx/USPS. Removes middleman fees.
                   </div>
-                   <Button variant="outline" size="sm" className="w-full">
+                   <Button variant="outline" size="sm" className="w-full min-h-[44px]">
                     <Plus size={14} className="mr-2" /> Configure
                   </Button>
                 </CardContent>

@@ -830,11 +830,11 @@ export default function Replenishment() {
   const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
         <div>
-          <h1 className="text-2xl font-bold">Replenishment</h1>
-          <p className="text-muted-foreground">Manage inventory flow from bulk storage to pick locations</p>
+          <h1 className="text-xl md:text-2xl font-bold">Replenishment</h1>
+          <p className="text-sm text-muted-foreground">Manage inventory flow from bulk storage to pick locations</p>
         </div>
         <div className="flex gap-2">
           {pendingCount > 0 && (
@@ -867,10 +867,10 @@ export default function Replenishment() {
         </TabsList>
 
         <TabsContent value="tasks" className="space-y-4">
-          <div className="flex justify-between items-center">
-            <div className="flex gap-2">
+          <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3">
+            <div className="flex flex-wrap gap-2">
               <Select value={taskFilter} onValueChange={setTaskFilter}>
-                <SelectTrigger className="w-40" data-testid="select-task-filter">
+                <SelectTrigger className="w-32 sm:w-40 h-10" data-testid="select-task-filter">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -882,7 +882,7 @@ export default function Replenishment() {
                 </SelectContent>
               </Select>
               <Select value={modeFilter} onValueChange={setModeFilter}>
-                <SelectTrigger className="w-32" data-testid="select-mode-filter">
+                <SelectTrigger className="w-28 sm:w-32 h-10" data-testid="select-mode-filter">
                   <SelectValue placeholder="Mode" />
                 </SelectTrigger>
                 <SelectContent>
@@ -892,7 +892,7 @@ export default function Replenishment() {
                 </SelectContent>
               </Select>
               <Select value={warehouseFilter} onValueChange={setWarehouseFilter}>
-                <SelectTrigger className="w-40" data-testid="select-warehouse-filter">
+                <SelectTrigger className="w-32 sm:w-40 h-10" data-testid="select-warehouse-filter">
                   <SelectValue placeholder="Warehouse" />
                 </SelectTrigger>
                 <SelectContent>
@@ -907,15 +907,17 @@ export default function Replenishment() {
               <Button 
                 variant="outline" 
                 size="icon"
+                className="h-10 w-10 min-h-[44px]"
                 onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] })}
                 data-testid="button-refresh-tasks"
               >
                 <RefreshCw className="w-4 h-4" />
               </Button>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 w-full sm:w-auto">
               <Button 
                 variant="outline" 
+                className="flex-1 sm:flex-none min-h-[44px]"
                 onClick={() => generateTasksMutation.mutate()}
                 disabled={generateTasksMutation.isPending}
                 data-testid="button-auto-generate"
@@ -925,11 +927,13 @@ export default function Replenishment() {
                 ) : (
                   <AlertCircle className="w-4 h-4 mr-2" />
                 )}
-                Auto-Generate
+                <span className="hidden sm:inline">Auto-Generate</span>
+                <span className="sm:hidden">Generate</span>
               </Button>
-              <Button onClick={() => setShowTaskDialog(true)} data-testid="button-create-task">
+              <Button className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowTaskDialog(true)} data-testid="button-create-task">
                 <Plus className="w-4 h-4 mr-2" />
-                Create Task
+                <span className="hidden sm:inline">Create Task</span>
+                <span className="sm:hidden">Create</span>
               </Button>
             </div>
           </div>
@@ -946,75 +950,77 @@ export default function Replenishment() {
                   <p>No replenishment tasks{(warehouseFilter !== "all" || modeFilter !== "all") ? " matching filters" : ""}</p>
                 </div>
               ) : (
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>From</TableHead>
-                      <TableHead></TableHead>
-                      <TableHead>To</TableHead>
-                      <TableHead>Product</TableHead>
-                      <TableHead>Qty</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Mode</TableHead>
-                      <TableHead>Trigger</TableHead>
-                      <TableHead>Assigned</TableHead>
-                      <TableHead>Actions</TableHead>
+                      <TableHead className="text-xs">From</TableHead>
+                      <TableHead className="hidden sm:table-cell"></TableHead>
+                      <TableHead className="text-xs">To</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Product</TableHead>
+                      <TableHead className="text-xs">Qty</TableHead>
+                      <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs hidden lg:table-cell">Mode</TableHead>
+                      <TableHead className="text-xs hidden lg:table-cell">Trigger</TableHead>
+                      <TableHead className="text-xs hidden xl:table-cell">Assigned</TableHead>
+                      <TableHead className="text-xs">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredTasks.map((task) => (
                       <TableRow key={task.id} data-testid={`row-task-${task.id}`}>
-                        <TableCell>
-                          <div className="font-mono text-sm">
+                        <TableCell className="py-2">
+                          <div className="font-mono text-xs sm:text-sm">
                             {task.fromLocation?.code || `LOC-${task.fromLocationId}`}
                           </div>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="hidden sm:table-cell py-2">
                           <ArrowRight className="w-4 h-4 text-muted-foreground" />
                         </TableCell>
-                        <TableCell>
-                          <div className="font-mono text-sm">
+                        <TableCell className="py-2">
+                          <div className="font-mono text-xs sm:text-sm">
                             {task.toLocation?.code || `LOC-${task.toLocationId}`}
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <div className="text-sm">
+                        <TableCell className="hidden md:table-cell py-2">
+                          <div className="text-xs sm:text-sm">
                             {task.catalogProduct?.sku || task.catalogProduct?.title || "-"}
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <div className="font-medium">
+                        <TableCell className="py-2">
+                          <div className="font-medium text-xs sm:text-sm">
                             {task.qtyCompleted}/{task.qtyTargetUnits}
                           </div>
                         </TableCell>
-                        <TableCell>{getStatusBadge(task.status)}</TableCell>
-                        <TableCell>{getModeBadge(task.executionMode)}</TableCell>
-                        <TableCell>{getTriggerBadge(task.triggeredBy)}</TableCell>
-                        <TableCell>
-                          <span className="text-sm text-muted-foreground">
+                        <TableCell className="py-2">{getStatusBadge(task.status)}</TableCell>
+                        <TableCell className="hidden lg:table-cell py-2">{getModeBadge(task.executionMode)}</TableCell>
+                        <TableCell className="hidden lg:table-cell py-2">{getTriggerBadge(task.triggeredBy)}</TableCell>
+                        <TableCell className="hidden xl:table-cell py-2">
+                          <span className="text-xs sm:text-sm text-muted-foreground">
                             {task.assignedTo || "-"}
                           </span>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="py-2">
                           <div className="flex gap-1">
                             {task.status === "pending" && (
                               <Button
                                 size="sm"
                                 variant="outline"
+                                className="min-h-[36px] text-xs"
                                 onClick={() => updateTaskMutation.mutate({
                                   id: task.id,
                                   data: { status: "in_progress" }
                                 })}
                                 data-testid={`button-start-task-${task.id}`}
                               >
-                                <Play className="w-3 h-3 mr-1" />
-                                Start
+                                <Play className="w-3 h-3 sm:mr-1" />
+                                <span className="hidden sm:inline">Start</span>
                               </Button>
                             )}
                             {task.status === "in_progress" && (
                               <Button
                                 size="sm"
-                                className="bg-green-500 hover:bg-green-600"
+                                className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
                                 onClick={() => updateTaskMutation.mutate({
                                   id: task.id,
                                   data: { 
@@ -1024,8 +1030,8 @@ export default function Replenishment() {
                                 })}
                                 data-testid={`button-complete-task-${task.id}`}
                               >
-                                <CheckCircle className="w-3 h-3 mr-1" />
-                                Complete
+                                <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                <span className="hidden sm:inline">Complete</span>
                               </Button>
                             )}
                           </div>
@@ -1034,6 +1040,7 @@ export default function Replenishment() {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -1042,15 +1049,15 @@ export default function Replenishment() {
         <TabsContent value="rules" className="space-y-6">
           {/* Default Replen Rules Section */}
           <Card>
-            <CardHeader>
-              <div className="flex justify-between items-center">
+            <CardHeader className="p-3 md:p-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
-                  <CardTitle>Default Replen Rules</CardTitle>
-                  <CardDescription>
+                  <CardTitle className="text-base md:text-lg">Default Replen Rules</CardTitle>
+                  <CardDescription className="text-xs md:text-sm">
                     Tier-based rules that apply to all products at each hierarchy level
                   </CardDescription>
                 </div>
-                <Button onClick={() => { resetTierDefaultForm(); setEditingTierDefault(null); setShowTierDefaultDialog(true); }} data-testid="button-add-tier-default">
+                <Button className="w-full sm:w-auto min-h-[44px]" onClick={() => { resetTierDefaultForm(); setEditingTierDefault(null); setShowTierDefaultDialog(true); }} data-testid="button-add-tier-default">
                   <Plus className="w-4 h-4 mr-2" />
                   Add Default Rule
                 </Button>
@@ -1068,57 +1075,59 @@ export default function Replenishment() {
                   <p className="text-sm">Add tier-based rules to define how inventory flows by hierarchy level</p>
                 </div>
               ) : (
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Tier Level</TableHead>
-                      <TableHead>Source Level</TableHead>
-                      <TableHead>Location Types</TableHead>
-                      <TableHead>Priority</TableHead>
-                      <TableHead>Min/Max</TableHead>
-                      <TableHead>Method</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Actions</TableHead>
+                      <TableHead className="text-xs">Tier Level</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Source Level</TableHead>
+                      <TableHead className="text-xs hidden lg:table-cell">Location Types</TableHead>
+                      <TableHead className="text-xs hidden lg:table-cell">Priority</TableHead>
+                      <TableHead className="text-xs hidden sm:table-cell">Min/Max</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Method</TableHead>
+                      <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {tierDefaults.map((tierDefault) => (
                       <TableRow key={tierDefault.id} data-testid={`row-tier-default-${tierDefault.id}`}>
-                        <TableCell>
-                          <Badge className="bg-blue-500">{getHierarchyLabel(tierDefault.hierarchyLevel)}</Badge>
+                        <TableCell className="py-2">
+                          <Badge className="bg-blue-500 text-xs">{getHierarchyLabel(tierDefault.hierarchyLevel)}</Badge>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{getHierarchyLabel(tierDefault.sourceHierarchyLevel)}</Badge>
+                        <TableCell className="hidden md:table-cell py-2">
+                          <Badge variant="outline" className="text-xs">{getHierarchyLabel(tierDefault.sourceHierarchyLevel)}</Badge>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="hidden lg:table-cell py-2">
                           <div className="text-xs space-y-1">
                             <div><Badge variant="outline" className="text-xs">{tierDefault.pickLocationType}</Badge></div>
                             <div className="text-muted-foreground">← {tierDefault.sourceLocationType}</div>
                           </div>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="secondary">{tierDefault.sourcePriority}</Badge>
+                        <TableCell className="hidden lg:table-cell py-2">
+                          <Badge variant="secondary" className="text-xs">{tierDefault.sourcePriority}</Badge>
                         </TableCell>
-                        <TableCell>
-                          <span className="font-mono text-sm">
+                        <TableCell className="hidden sm:table-cell py-2">
+                          <span className="font-mono text-xs">
                             {tierDefault.minQty} / {tierDefault.maxQty ?? "auto"}
                           </span>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{tierDefault.replenMethod}</Badge>
+                        <TableCell className="hidden md:table-cell py-2">
+                          <Badge variant="outline" className="text-xs">{tierDefault.replenMethod}</Badge>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="py-2">
                           {tierDefault.isActive ? (
-                            <Badge className="bg-green-500">Active</Badge>
+                            <Badge className="bg-green-500 text-xs">Active</Badge>
                           ) : (
-                            <Badge variant="secondary">Inactive</Badge>
+                            <Badge variant="secondary" className="text-xs">Inactive</Badge>
                           )}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="py-2">
                           <div className="flex gap-1">
                             <Button
                               size="icon"
                               variant="ghost"
+                              className="h-9 w-9 min-h-[36px]"
                               onClick={() => handleEditTierDefault(tierDefault)}
                               data-testid={`button-edit-tier-default-${tierDefault.id}`}
                             >
@@ -1127,6 +1136,7 @@ export default function Replenishment() {
                             <Button
                               size="icon"
                               variant="ghost"
+                              className="h-9 w-9 min-h-[36px]"
                               onClick={() => {
                                 if (confirm("Delete this default rule?")) {
                                   deleteTierDefaultMutation.mutate(tierDefault.id);
@@ -1142,28 +1152,29 @@ export default function Replenishment() {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               )}
             </CardContent>
           </Card>
 
           {/* SKU Overrides Section */}
           <Card>
-            <CardHeader>
-              <div className="flex justify-between items-center">
+            <CardHeader className="p-3 md:p-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
-                  <CardTitle>SKU Overrides</CardTitle>
-                  <CardDescription>
+                  <CardTitle className="text-base md:text-lg">SKU Overrides</CardTitle>
+                  <CardDescription className="text-xs md:text-sm">
                     Product-specific exceptions that override the default tier rules
                   </CardDescription>
                 </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
-                    <Upload className="w-4 h-4 mr-2" />
-                    Upload CSV
+                <div className="flex gap-2 w-full sm:w-auto">
+                  <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
+                    <Upload className="w-4 h-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Upload CSV</span>
                   </Button>
-                  <Button onClick={() => { resetOverrideForm(); setEditingOverride(null); setShowOverrideDialog(true); }} data-testid="button-add-override">
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Override
+                  <Button className="flex-1 sm:flex-none min-h-[44px]" onClick={() => { resetOverrideForm(); setEditingOverride(null); setShowOverrideDialog(true); }} data-testid="button-add-override">
+                    <Plus className="w-4 h-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Add Override</span>
                   </Button>
                 </div>
               </div>
@@ -1180,47 +1191,49 @@ export default function Replenishment() {
                   <p className="text-sm">Add overrides when a product needs different behavior than its tier default</p>
                 </div>
               ) : (
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Product</TableHead>
-                      <TableHead>Overrides</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Actions</TableHead>
+                      <TableHead className="text-xs">Product</TableHead>
+                      <TableHead className="text-xs hidden sm:table-cell">Overrides</TableHead>
+                      <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {overrides.map((override) => (
                       <TableRow key={override.id} data-testid={`row-override-${override.id}`}>
-                        <TableCell>
+                        <TableCell className="py-2">
                           <div className="flex items-center gap-2">
-                            <Package className="w-4 h-4 text-blue-500" />
-                            <span className="text-sm font-medium">
+                            <Package className="w-4 h-4 text-blue-500 shrink-0" />
+                            <span className="text-xs sm:text-sm font-medium truncate max-w-[120px] sm:max-w-none">
                               {override.catalogProduct?.sku || override.catalogProduct?.title || `Product ${override.catalogProductId}`}
                             </span>
                           </div>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="hidden sm:table-cell py-2">
                           <div className="flex flex-wrap gap-1">
-                            {override.replenMethod && <Badge variant="outline">{override.replenMethod}</Badge>}
-                            {override.minQty !== null && <Badge variant="secondary">Min: {override.minQty}</Badge>}
-                            {override.maxQty !== null && <Badge variant="secondary">Max: {override.maxQty}</Badge>}
-                            {override.sourcePriority && <Badge variant="secondary">{override.sourcePriority}</Badge>}
-                            {override.pickLocationType && <Badge variant="outline">{override.pickLocationType}</Badge>}
+                            {override.replenMethod && <Badge variant="outline" className="text-xs">{override.replenMethod}</Badge>}
+                            {override.minQty !== null && <Badge variant="secondary" className="text-xs">Min: {override.minQty}</Badge>}
+                            {override.maxQty !== null && <Badge variant="secondary" className="text-xs">Max: {override.maxQty}</Badge>}
+                            {override.sourcePriority && <Badge variant="secondary" className="text-xs">{override.sourcePriority}</Badge>}
+                            {override.pickLocationType && <Badge variant="outline" className="text-xs">{override.pickLocationType}</Badge>}
                           </div>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="py-2">
                           {override.isActive ? (
-                            <Badge className="bg-green-500">Active</Badge>
+                            <Badge className="bg-green-500 text-xs">Active</Badge>
                           ) : (
-                            <Badge variant="secondary">Inactive</Badge>
+                            <Badge variant="secondary" className="text-xs">Inactive</Badge>
                           )}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="py-2">
                           <div className="flex gap-1">
                             <Button
                               size="icon"
                               variant="ghost"
+                              className="h-9 w-9 min-h-[36px]"
                               onClick={() => handleEditOverride(override)}
                               data-testid={`button-edit-override-${override.id}`}
                             >
@@ -1229,6 +1242,7 @@ export default function Replenishment() {
                             <Button
                               size="icon"
                               variant="ghost"
+                              className="h-9 w-9 min-h-[36px]"
                               onClick={() => {
                                 if (confirm("Delete this SKU override?")) {
                                   deleteOverrideMutation.mutate(override.id);
@@ -1244,24 +1258,25 @@ export default function Replenishment() {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        <TabsContent value="settings" className="space-y-6">
+        <TabsContent value="settings" className="space-y-4 md:space-y-6">
           <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
+            <CardHeader className="p-3 md:p-6">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div>
-                  <CardTitle>Replenishment Workflow</CardTitle>
-                  <CardDescription>
+                  <CardTitle className="text-base md:text-lg">Replenishment Workflow</CardTitle>
+                  <CardDescription className="text-xs md:text-sm">
                     Configure how replenishment tasks are handled during picking operations
                   </CardDescription>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
                   <Select value={selectedWarehouseId} onValueChange={setSelectedWarehouseId}>
-                    <SelectTrigger className="w-64" data-testid="select-warehouse">
+                    <SelectTrigger className="w-full sm:w-64 h-10" data-testid="select-warehouse">
                       <SelectValue placeholder="Select warehouse..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1275,7 +1290,7 @@ export default function Replenishment() {
                 </div>
               </div>
             </CardHeader>
-            <CardContent className="space-y-6">
+            <CardContent className="p-3 md:p-6 space-y-4 md:space-y-6">
               {settingsLoading ? (
                 <div className="flex justify-center p-8">
                   <Loader2 className="w-6 h-6 animate-spin" />
@@ -1294,58 +1309,58 @@ export default function Replenishment() {
                 <>
                   <div className="space-y-4">
                     <div>
-                      <Label className="text-base font-semibold">Replenishment Mode</Label>
-                      <p className="text-sm text-muted-foreground mb-3">
+                      <Label className="text-sm md:text-base font-semibold">Replenishment Mode</Label>
+                      <p className="text-xs md:text-sm text-muted-foreground mb-3">
                         How should low-stock situations be handled during picking?
                       </p>
                       <div className="grid gap-3">
-                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'inline' ? 'border-primary bg-primary/5' : ''}`}>
+                        <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'inline' ? 'border-primary bg-primary/5' : ''}`}>
                           <input
                             type="radio"
                             name="replenMode"
                             value="inline"
                             checked={settingsForm.replenMode === "inline"}
                             onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
-                            className="mt-1"
+                            className="mt-1 h-5 w-5"
                             data-testid="radio-replen-inline"
                           />
                           <div>
-                            <div className="font-medium">Inline Replenishment</div>
-                            <div className="text-sm text-muted-foreground">
+                            <div className="font-medium text-sm md:text-base">Inline Replenishment</div>
+                            <div className="text-xs md:text-sm text-muted-foreground">
                               Pickers replenish stock themselves when low. Best for small operations.
                             </div>
                           </div>
                         </label>
-                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'queue' ? 'border-primary bg-primary/5' : ''}`}>
+                        <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'queue' ? 'border-primary bg-primary/5' : ''}`}>
                           <input
                             type="radio"
                             name="replenMode"
                             value="queue"
                             checked={settingsForm.replenMode === "queue"}
                             onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
-                            className="mt-1"
+                            className="mt-1 h-5 w-5"
                             data-testid="radio-replen-queue"
                           />
                           <div>
-                            <div className="font-medium">Queue Mode</div>
-                            <div className="text-sm text-muted-foreground">
+                            <div className="font-medium text-sm md:text-base">Queue Mode</div>
+                            <div className="text-xs md:text-sm text-muted-foreground">
                               Replenishment tasks are generated for dedicated replen workers. Best for larger operations with specialized roles.
                             </div>
                           </div>
                         </label>
-                        <label className={`flex items-start gap-3 p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'hybrid' ? 'border-primary bg-primary/5' : ''}`}>
+                        <label className={`flex items-start gap-3 p-3 md:p-4 border rounded-lg cursor-pointer hover:bg-muted/50 ${settingsForm.replenMode === 'hybrid' ? 'border-primary bg-primary/5' : ''}`}>
                           <input
                             type="radio"
                             name="replenMode"
                             value="hybrid"
                             checked={settingsForm.replenMode === "hybrid"}
                             onChange={(e) => setSettingsForm({ ...settingsForm, replenMode: e.target.value })}
-                            className="mt-1"
+                            className="mt-1 h-5 w-5"
                             data-testid="radio-replen-hybrid"
                           />
                           <div>
-                            <div className="font-medium">Hybrid Mode</div>
-                            <div className="text-sm text-muted-foreground">
+                            <div className="font-medium text-sm md:text-base">Hybrid Mode</div>
+                            <div className="text-xs md:text-sm text-muted-foreground">
                               Small replenishments are done inline by pickers, larger ones go to the queue for dedicated workers.
                             </div>
                           </div>
@@ -1354,33 +1369,37 @@ export default function Replenishment() {
                     </div>
 
                     {settingsForm.replenMode === "hybrid" && (
-                      <div className="ml-8 p-4 bg-muted/30 rounded-lg">
-                        <Label htmlFor="inlineReplenMaxUnits">Inline Replen Max Units</Label>
-                        <p className="text-sm text-muted-foreground mb-2">
+                      <div className="ml-0 md:ml-8 p-3 md:p-4 bg-muted/30 rounded-lg">
+                        <Label className="text-xs md:text-sm" htmlFor="inlineReplenMaxUnits">Inline Replen Max Units</Label>
+                        <p className="text-xs md:text-sm text-muted-foreground mb-2">
                           Tasks below this quantity are handled inline, above go to queue
                         </p>
                         <Input
                           id="inlineReplenMaxUnits"
                           type="number"
+                          className="w-full sm:w-32 h-10"
                           value={settingsForm.inlineReplenMaxUnits}
                           onChange={(e) => setSettingsForm({ ...settingsForm, inlineReplenMaxUnits: e.target.value })}
-                          className="w-32"
                           min="1"
+                          autoComplete="off"
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          spellCheck={false}
                           data-testid="input-inline-replen-max-units"
                         />
                       </div>
                     )}
 
                     <div className="pt-4 border-t">
-                      <Label className="text-base font-semibold">Short Pick Action</Label>
-                      <p className="text-sm text-muted-foreground mb-3">
+                      <Label className="text-sm md:text-base font-semibold">Short Pick Action</Label>
+                      <p className="text-xs md:text-sm text-muted-foreground mb-3">
                         What happens when a picker encounters an empty or insufficient pick location?
                       </p>
                       <Select 
                         value={settingsForm.shortPickAction} 
                         onValueChange={(v) => setSettingsForm({ ...settingsForm, shortPickAction: v })}
                       >
-                        <SelectTrigger className="w-80" data-testid="select-short-pick-action">
+                        <SelectTrigger className="w-full sm:w-80 h-10" data-testid="select-short-pick-action">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1395,6 +1414,7 @@ export default function Replenishment() {
 
                   <div className="flex justify-end pt-4 border-t">
                     <Button 
+                      className="w-full sm:w-auto min-h-[44px]"
                       onClick={() => saveSettingsMutation.mutate({
                         replenMode: settingsForm.replenMode,
                         shortPickAction: settingsForm.shortPickAction,
@@ -1422,22 +1442,22 @@ export default function Replenishment() {
 
       {/* Tier Default Dialog */}
       <Dialog open={showTierDefaultDialog} onOpenChange={setShowTierDefaultDialog}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
-            <DialogTitle>{editingTierDefault ? "Edit Default Rule" : "Create Default Rule"}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base md:text-lg">{editingTierDefault ? "Edit Default Rule" : "Create Default Rule"}</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
               Define tier-based replenishment settings by hierarchy level
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Target Tier Level</Label>
+                <Label className="text-xs md:text-sm">Target Tier Level</Label>
                 <Select 
                   value={tierDefaultForm.hierarchyLevel} 
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, hierarchyLevel: v })}
                 >
-                  <SelectTrigger data-testid="select-hierarchy-level">
+                  <SelectTrigger className="h-10" data-testid="select-hierarchy-level">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1448,12 +1468,12 @@ export default function Replenishment() {
                 </Select>
               </div>
               <div>
-                <Label>Source Tier Level</Label>
+                <Label className="text-xs md:text-sm">Source Tier Level</Label>
                 <Select 
                   value={tierDefaultForm.sourceHierarchyLevel} 
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourceHierarchyLevel: v })}
                 >
-                  <SelectTrigger data-testid="select-source-hierarchy-level">
+                  <SelectTrigger className="h-10" data-testid="select-source-hierarchy-level">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1465,14 +1485,14 @@ export default function Replenishment() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Pick Location Type</Label>
+                <Label className="text-xs md:text-sm">Pick Location Type</Label>
                 <Select 
                   value={tierDefaultForm.pickLocationType} 
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, pickLocationType: v })}
                 >
-                  <SelectTrigger data-testid="select-tier-pick-location-type">
+                  <SelectTrigger className="h-10" data-testid="select-tier-pick-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1483,12 +1503,12 @@ export default function Replenishment() {
                 </Select>
               </div>
               <div>
-                <Label>Source Location Type</Label>
+                <Label className="text-xs md:text-sm">Source Location Type</Label>
                 <Select 
                   value={tierDefaultForm.sourceLocationType} 
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourceLocationType: v })}
                 >
-                  <SelectTrigger data-testid="select-tier-source-location-type">
+                  <SelectTrigger className="h-10" data-testid="select-tier-source-location-type">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1501,12 +1521,12 @@ export default function Replenishment() {
             </div>
 
             <div>
-              <Label>Source Priority</Label>
+              <Label className="text-xs md:text-sm">Source Priority</Label>
               <Select 
                 value={tierDefaultForm.sourcePriority} 
                 onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, sourcePriority: v })}
               >
-                <SelectTrigger data-testid="select-tier-source-priority">
+                <SelectTrigger className="h-10" data-testid="select-tier-source-priority">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1519,34 +1539,44 @@ export default function Replenishment() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label>Min Qty (Trigger)</Label>
+                <Label className="text-xs md:text-sm">Min Qty (Trigger)</Label>
                 <Input
                   type="number"
+                  className="h-10"
                   value={tierDefaultForm.minQty}
                   onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, minQty: e.target.value })}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-tier-min-qty"
                 />
               </div>
               <div>
-                <Label>Max Qty (Fill To)</Label>
+                <Label className="text-xs md:text-sm">Max Qty (Fill To)</Label>
                 <Input
                   type="number"
+                  className="h-10"
                   value={tierDefaultForm.maxQty}
                   onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, maxQty: e.target.value })}
                   placeholder="Auto (bin capacity)"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-tier-max-qty"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Replen Method</Label>
+                <Label className="text-xs md:text-sm">Replen Method</Label>
                 <Select 
                   value={tierDefaultForm.replenMethod} 
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, replenMethod: v })}
                 >
-                  <SelectTrigger data-testid="select-tier-replen-method">
+                  <SelectTrigger className="h-10" data-testid="select-tier-replen-method">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1557,23 +1587,29 @@ export default function Replenishment() {
                 </Select>
               </div>
               <div>
-                <Label>Priority (1 = highest)</Label>
+                <Label className="text-xs md:text-sm">Priority (1 = highest)</Label>
                 <Input
                   type="number"
+                  className="h-10"
                   min="1"
                   max="99"
                   value={tierDefaultForm.priority}
                   onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, priority: e.target.value })}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-tier-priority"
                 />
               </div>
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowTierDefaultDialog(false)}>
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowTierDefaultDialog(false)}>
                 Cancel
               </Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={handleSaveTierDefault}
                 data-testid="button-save-tier-default"
               >
@@ -1586,21 +1622,21 @@ export default function Replenishment() {
 
       {/* SKU Override Dialog */}
       <Dialog open={showOverrideDialog} onOpenChange={setShowOverrideDialog}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
-            <DialogTitle>{editingOverride ? "Edit SKU Override" : "Create SKU Override"}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base md:text-lg">{editingOverride ? "Edit SKU Override" : "Create SKU Override"}</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
               Override default tier settings for a specific product (leave fields empty to use tier defaults)
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Product (Required)</Label>
+              <Label className="text-xs md:text-sm">Product (Required)</Label>
               <Select 
                 value={overrideForm.catalogProductId} 
                 onValueChange={(v) => setOverrideForm({ ...overrideForm, catalogProductId: v })}
               >
-                <SelectTrigger data-testid="select-override-product">
+                <SelectTrigger className="h-10" data-testid="select-override-product">
                   <SelectValue placeholder="Select product..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1613,14 +1649,14 @@ export default function Replenishment() {
               </Select>
             </div>
             
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Pick Variant (Optional)</Label>
+                <Label className="text-xs md:text-sm">Pick Variant (Optional)</Label>
                 <Select 
                   value={overrideForm.pickVariantId} 
                   onValueChange={(v) => setOverrideForm({ ...overrideForm, pickVariantId: v })}
                 >
-                  <SelectTrigger data-testid="select-override-pick-variant">
+                  <SelectTrigger className="h-10" data-testid="select-override-pick-variant">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1634,12 +1670,12 @@ export default function Replenishment() {
                 </Select>
               </div>
               <div>
-                <Label>Source Variant (Optional)</Label>
+                <Label className="text-xs md:text-sm">Source Variant (Optional)</Label>
                 <Select 
                   value={overrideForm.sourceVariantId} 
                   onValueChange={(v) => setOverrideForm({ ...overrideForm, sourceVariantId: v })}
                 >
-                  <SelectTrigger data-testid="select-override-source-variant">
+                  <SelectTrigger className="h-10" data-testid="select-override-source-variant">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1654,14 +1690,14 @@ export default function Replenishment() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Replen Method (Optional)</Label>
+                <Label className="text-xs md:text-sm">Replen Method (Optional)</Label>
                 <Select 
                   value={overrideForm.replenMethod} 
                   onValueChange={(v) => setOverrideForm({ ...overrideForm, replenMethod: v })}
                 >
-                  <SelectTrigger data-testid="select-override-replen-method">
+                  <SelectTrigger className="h-10" data-testid="select-override-replen-method">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1673,12 +1709,12 @@ export default function Replenishment() {
                 </Select>
               </div>
               <div>
-                <Label>Source Priority (Optional)</Label>
+                <Label className="text-xs md:text-sm">Source Priority (Optional)</Label>
                 <Select 
                   value={overrideForm.sourcePriority} 
                   onValueChange={(v) => setOverrideForm({ ...overrideForm, sourcePriority: v })}
                 >
-                  <SelectTrigger data-testid="select-override-source-priority">
+                  <SelectTrigger className="h-10" data-testid="select-override-source-priority">
                     <SelectValue placeholder="Use default..." />
                   </SelectTrigger>
                   <SelectContent>
@@ -1693,32 +1729,43 @@ export default function Replenishment() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label>Min Qty Override</Label>
+                <Label className="text-xs md:text-sm">Min Qty Override</Label>
                 <Input
                   type="number"
+                  className="h-10"
                   value={overrideForm.minQty}
                   onChange={(e) => setOverrideForm({ ...overrideForm, minQty: e.target.value })}
                   placeholder="Use default"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-override-min-qty"
                 />
               </div>
               <div>
-                <Label>Max Qty Override</Label>
+                <Label className="text-xs md:text-sm">Max Qty Override</Label>
                 <Input
                   type="number"
+                  className="h-10"
                   value={overrideForm.maxQty}
                   onChange={(e) => setOverrideForm({ ...overrideForm, maxQty: e.target.value })}
                   placeholder="Use default"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-override-max-qty"
                 />
               </div>
             </div>
 
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowOverrideDialog(false)}>
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowOverrideDialog(false)}>
                 Cancel
               </Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={handleSaveOverride}
                 disabled={!overrideForm.catalogProductId}
                 data-testid="button-save-override"
@@ -1732,22 +1779,23 @@ export default function Replenishment() {
 
       {/* CSV Upload Dialog */}
       <Dialog open={showCsvDialog} onOpenChange={setShowCsvDialog}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
-            <DialogTitle>Import Replenishment Rules</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base md:text-lg">Import Replenishment Rules</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
               Bulk import rules from a CSV file. Download the template to get started.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-6">
+          <div className="space-y-4 md:space-y-6">
             {/* Download Template Section */}
-            <div className="flex items-center justify-between p-4 bg-primary/5 border border-primary/20 rounded-lg">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3 md:p-4 bg-primary/5 border border-primary/20 rounded-lg">
               <div>
-                <p className="font-medium">Download Template</p>
-                <p className="text-sm text-muted-foreground">Pre-formatted CSV with headers and example data</p>
+                <p className="font-medium text-sm md:text-base">Download Template</p>
+                <p className="text-xs md:text-sm text-muted-foreground">Pre-formatted CSV with headers and example data</p>
               </div>
               <Button 
-                variant="outline" 
+                variant="outline"
+                className="w-full sm:w-auto min-h-[44px]"
                 onClick={() => {
                   const headers = "product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority";
                   const example = "SHELL-001,SHELL-001-EA,SHELL-001-CS12,forward_pick,bulk_storage,fifo,5,60,case_break,5";
@@ -1769,7 +1817,7 @@ export default function Replenishment() {
             </div>
 
             {/* Field Reference */}
-            <div className="border rounded-lg overflow-hidden">
+            <div className="border rounded-lg overflow-hidden hidden md:block">
               <div className="bg-muted px-4 py-2 border-b">
                 <p className="font-medium text-sm">Column Reference</p>
               </div>
@@ -1844,7 +1892,7 @@ export default function Replenishment() {
               <Button 
                 onClick={() => fileInputRef.current?.click()}
                 disabled={uploadCsvMutation.isPending}
-                className="w-full"
+                className="w-full min-h-[44px]"
                 size="lg"
                 data-testid="button-select-csv"
               >
@@ -1862,21 +1910,21 @@ export default function Replenishment() {
 
       {/* Task Dialog */}
       <Dialog open={showTaskDialog} onOpenChange={setShowTaskDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
-            <DialogTitle>Create Manual Replen Task</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-base md:text-lg">Create Manual Replen Task</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
               Create a task to move inventory between locations
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>From Location (Source)</Label>
+              <Label className="text-xs md:text-sm">From Location (Source)</Label>
               <Select 
                 value={taskForm.fromLocationId} 
                 onValueChange={(v) => setTaskForm({ ...taskForm, fromLocationId: v })}
               >
-                <SelectTrigger data-testid="select-from-location">
+                <SelectTrigger className="h-10" data-testid="select-from-location">
                   <SelectValue placeholder="Select source..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1889,12 +1937,12 @@ export default function Replenishment() {
               </Select>
             </div>
             <div>
-              <Label>To Location (Destination)</Label>
+              <Label className="text-xs md:text-sm">To Location (Destination)</Label>
               <Select 
                 value={taskForm.toLocationId} 
                 onValueChange={(v) => setTaskForm({ ...taskForm, toLocationId: v })}
               >
-                <SelectTrigger data-testid="select-to-location">
+                <SelectTrigger className="h-10" data-testid="select-to-location">
                   <SelectValue placeholder="Select destination..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1907,12 +1955,12 @@ export default function Replenishment() {
               </Select>
             </div>
             <div>
-              <Label>Product (Optional)</Label>
+              <Label className="text-xs md:text-sm">Product (Optional)</Label>
               <Select 
                 value={taskForm.catalogProductId} 
                 onValueChange={(v) => setTaskForm({ ...taskForm, catalogProductId: v })}
               >
-                <SelectTrigger data-testid="select-task-product">
+                <SelectTrigger className="h-10" data-testid="select-task-product">
                   <SelectValue placeholder="Any product..." />
                 </SelectTrigger>
                 <SelectContent>
@@ -1926,29 +1974,40 @@ export default function Replenishment() {
               </Select>
             </div>
             <div>
-              <Label>Quantity (Units)</Label>
+              <Label className="text-xs md:text-sm">Quantity (Units)</Label>
               <Input
                 type="number"
+                className="h-10"
                 value={taskForm.qtyTargetUnits}
                 onChange={(e) => setTaskForm({ ...taskForm, qtyTargetUnits: e.target.value })}
                 placeholder="Enter quantity..."
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-qty"
               />
             </div>
             <div>
-              <Label>Notes (Optional)</Label>
+              <Label className="text-xs md:text-sm">Notes (Optional)</Label>
               <Input
+                className="h-10"
                 value={taskForm.notes}
                 onChange={(e) => setTaskForm({ ...taskForm, notes: e.target.value })}
                 placeholder="Optional notes..."
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-notes"
               />
             </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setShowTaskDialog(false)}>
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowTaskDialog(false)}>
                 Cancel
               </Button>
               <Button 
+                className="min-h-[44px]"
                 onClick={() => createTaskMutation.mutate(taskForm)}
                 disabled={!taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.qtyTargetUnits}
                 data-testid="button-save-task"

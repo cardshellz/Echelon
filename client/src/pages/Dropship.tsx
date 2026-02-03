@@ -70,8 +70,8 @@ export default function Dropship() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="border-b bg-card p-4 md:p-6 pb-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+      <div className="border-b bg-card p-2 md:p-6 pb-4">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-4">
           <div>
             <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
               <Globe className="h-6 w-6 text-primary" />
@@ -82,17 +82,17 @@ export default function Dropship() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" className="gap-2">
+            <Button variant="outline" className="gap-2 min-h-[44px]">
               <RefreshCw size={16} /> Force Sync
             </Button>
             
             <Dialog open={isConnectOpen} onOpenChange={setIsConnectOpen}>
               <DialogTrigger asChild>
-                <Button className="gap-2">
+                <Button className="gap-2 min-h-[44px]">
                   <Plus size={16} /> Connect Store
                 </Button>
               </DialogTrigger>
-              <DialogContent className="sm:max-w-[425px]">
+              <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
                 <DialogHeader>
                   <DialogTitle>Connect New Store</DialogTitle>
                   <DialogDescription>
@@ -102,10 +102,9 @@ export default function Dropship() {
                 <div className="grid gap-4 py-4">
                   <div className="grid grid-cols-1 gap-4">
                      {platforms.map((platform) => (
-                       <Button key={platform.id} variant="outline" className="h-16 justify-start px-4 hover:border-primary hover:bg-primary/5 group relative overflow-hidden">
+                       <Button key={platform.id} variant="outline" className="h-16 min-h-[44px] justify-start px-4 hover:border-primary hover:bg-primary/5 group relative overflow-hidden">
                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-transparent to-primary/5 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000" />
                          <div className="h-8 w-8 mr-4 flex items-center justify-center">
-                            {/* In a real app we'd use proper SVGs, here using external images for the mock */}
                             <img src={platform.icon} alt={platform.name} className="max-h-full max-w-full object-contain" />
                          </div>
                          <div className="flex flex-col items-start">
@@ -127,13 +126,21 @@ export default function Dropship() {
                     </div>
                   </div>
                   <div className="grid w-full items-center gap-1.5">
-                    <Label htmlFor="api-key">Custom API Key</Label>
-                    <Input id="api-key" placeholder="sk_live_..." className="w-full" />
+                    <Label htmlFor="api-key" className="text-sm">Custom API Key</Label>
+                    <Input 
+                      id="api-key" 
+                      placeholder="sk_live_..." 
+                      className="w-full h-11"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                    />
                   </div>
                 </div>
-                <DialogFooter>
-                  <Button variant="outline" onClick={() => setIsConnectOpen(false)}>Cancel</Button>
-                  <Button type="submit">Verify Connection</Button>
+                <DialogFooter className="flex-col gap-2 sm:flex-row">
+                  <Button variant="outline" onClick={() => setIsConnectOpen(false)} className="min-h-[44px]">Cancel</Button>
+                  <Button type="submit" className="min-h-[44px]">Verify Connection</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -141,45 +148,45 @@ export default function Dropship() {
         </div>
 
         {/* Network Stats */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
-          <div className="bg-muted/30 p-3 rounded-lg border">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-2">
+          <div className="bg-muted/30 p-2 md:p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Active Channels</div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">3</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-foreground mt-1">3</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
+          <div className="bg-muted/30 p-2 md:p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Synced Listings</div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">243</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-foreground mt-1">243</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
+          <div className="bg-muted/30 p-2 md:p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Pending Orders</div>
-            <div className="text-2xl font-bold font-mono text-primary mt-1">8</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-primary mt-1">8</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
+          <div className="bg-muted/30 p-2 md:p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Unsettled Balance</div>
-            <div className="text-2xl font-bold font-mono text-emerald-600 mt-1">$5,360.50</div>
+            <div className="text-xl md:text-2xl font-bold font-mono text-emerald-600 mt-1">$5,360.50</div>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
+      <div className="flex-1 p-2 md:p-6 overflow-hidden flex flex-col">
         <Tabs defaultValue="vendors" className="flex-1 flex flex-col">
-          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-6">
+          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-4 md:mb-6 flex-wrap">
             <TabsTrigger 
               value="vendors" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
             >
               Connected Vendors
             </TabsTrigger>
             <TabsTrigger 
               value="catalog" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
             >
               Catalog Sync
             </TabsTrigger>
             <TabsTrigger 
               value="reconciliation" 
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-4 py-2"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 md:px-4 py-2 text-sm"
             >
               Financials
             </TabsTrigger>
@@ -228,7 +235,7 @@ export default function Dropship() {
                       </div>
                     </div>
 
-                    <Button variant="outline" className="w-full mt-4 h-8 text-xs">
+                    <Button variant="outline" className="w-full mt-4 min-h-[44px] text-xs">
                       Manage Settings
                     </Button>
                   </CardContent>
@@ -244,59 +251,106 @@ export default function Dropship() {
                 </div>
                 <h3 className="font-semibold">Add New Vendor</h3>
                 <p className="text-sm text-muted-foreground mt-1 mb-4">Connect an eBay, Shopify, or Amazon account.</p>
-                <Button variant="secondary" size="sm">Connect Store</Button>
+                <Button variant="secondary" size="sm" className="min-h-[44px]">Connect Store</Button>
               </Card>
             </div>
           </TabsContent>
 
-          <TabsContent value="catalog" className="mt-0 flex-1 overflow-auto rounded-md border bg-card">
-            <Table>
-              <TableHeader className="bg-muted/40 sticky top-0">
-                <TableRow>
-                  <TableHead className="w-[180px]">Internal SKU</TableHead>
-                  <TableHead>Product</TableHead>
-                  <TableHead>Vendor</TableHead>
-                  <TableHead>External ID</TableHead>
-                  <TableHead>Price</TableHead>
-                  <TableHead>Sync Status</TableHead>
-                  <TableHead></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {syncCatalog.map((item, i) => (
-                  <TableRow key={i}>
-                    <TableCell className="font-mono-sku font-medium">{item.sku}</TableCell>
-                    <TableCell>{item.name}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                         <span className="text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 text-slate-600 flex items-center gap-1">
-                           {item.vendor.includes("Shopify") || item.vendor.includes("Luxury") ? 
-                             <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-3 h-3 object-contain" alt="" /> : 
-                             <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-3 h-3 object-contain" alt="" />
-                           }
-                           {item.vendor}
-                         </span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground flex items-center gap-1">
-                      {item.extId} <ExternalLink size={10} />
-                    </TableCell>
-                    <TableCell className="font-mono">{item.price}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {item.status.includes("Synced") && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
-                        {item.status.includes("Pending") && <RefreshCw className="h-4 w-4 text-amber-500 animate-spin-slow" />}
-                        {item.status.includes("Error") || item.status.includes("OOS") && <AlertCircle className="h-4 w-4 text-rose-500" />}
-                        <span className="text-sm">{item.status}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="sm" className="h-8">Details</Button>
-                    </TableCell>
+          <TabsContent value="catalog" className="mt-0 flex-1 overflow-auto">
+            {/* Mobile Card Layout */}
+            <div className="md:hidden space-y-3">
+              {syncCatalog.map((item, i) => (
+                <Card key={i} className="p-3">
+                  <div className="flex items-start justify-between mb-2">
+                    <div>
+                      <p className="font-mono text-sm font-medium">{item.sku}</p>
+                      <p className="text-sm text-muted-foreground">{item.name}</p>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {item.status.includes("Synced") && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
+                      {item.status.includes("Pending") && <RefreshCw className="h-4 w-4 text-amber-500 animate-spin-slow" />}
+                      {(item.status.includes("Error") || item.status.includes("OOS")) && <AlertCircle className="h-4 w-4 text-rose-500" />}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs mb-2">
+                    <div>
+                      <span className="text-muted-foreground">Vendor: </span>
+                      <span className="inline-flex items-center gap-1">
+                        {item.vendor.includes("Shopify") || item.vendor.includes("Luxury") ? 
+                          <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-3 h-3 object-contain" alt="" /> : 
+                          <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-3 h-3 object-contain" alt="" />
+                        }
+                        {item.vendor}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Price: </span>
+                      <span className="font-mono">{item.price}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Ext ID: </span>
+                      <span className="font-mono">{item.extId}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Status: </span>
+                      <span>{item.status}</span>
+                    </div>
+                  </div>
+                  <Button variant="ghost" size="sm" className="w-full min-h-[44px]">Details</Button>
+                </Card>
+              ))}
+            </div>
+            
+            {/* Desktop Table Layout */}
+            <div className="hidden md:block rounded-md border bg-card">
+              <Table>
+                <TableHeader className="bg-muted/40 sticky top-0">
+                  <TableRow>
+                    <TableHead className="w-[180px]">Internal SKU</TableHead>
+                    <TableHead>Product</TableHead>
+                    <TableHead>Vendor</TableHead>
+                    <TableHead>External ID</TableHead>
+                    <TableHead>Price</TableHead>
+                    <TableHead>Sync Status</TableHead>
+                    <TableHead></TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {syncCatalog.map((item, i) => (
+                    <TableRow key={i}>
+                      <TableCell className="font-mono-sku font-medium">{item.sku}</TableCell>
+                      <TableCell>{item.name}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                           <span className="text-xs bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200 text-slate-600 flex items-center gap-1">
+                             {item.vendor.includes("Shopify") || item.vendor.includes("Luxury") ? 
+                               <img src="https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg" className="w-3 h-3 object-contain" alt="" /> : 
+                               <img src="https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg" className="w-3 h-3 object-contain" alt="" />
+                             }
+                             {item.vendor}
+                           </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground flex items-center gap-1">
+                        {item.extId} <ExternalLink size={10} />
+                      </TableCell>
+                      <TableCell className="font-mono">{item.price}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          {item.status.includes("Synced") && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
+                          {item.status.includes("Pending") && <RefreshCw className="h-4 w-4 text-amber-500 animate-spin-slow" />}
+                          {(item.status.includes("Error") || item.status.includes("OOS")) && <AlertCircle className="h-4 w-4 text-rose-500" />}
+                          <span className="text-sm">{item.status}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Button variant="ghost" size="sm" className="h-8">Details</Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </TabsContent>
         </Tabs>
       </div>

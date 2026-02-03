@@ -221,7 +221,7 @@ export default function Users() {
             Create and manage picker accounts
           </p>
         </div>
-        <Button onClick={() => setAddDialogOpen(true)} data-testid="button-add-user">
+        <Button onClick={() => setAddDialogOpen(true)} className="min-h-[44px] w-full sm:w-auto" data-testid="button-add-user">
           <Plus className="h-4 w-4 mr-2" />
           Add User
         </Button>
@@ -391,7 +391,7 @@ export default function Users() {
       </Card>
       
       <Dialog open={addDialogOpen} onOpenChange={(open) => { setAddDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Plus className="h-5 w-5" />
@@ -410,43 +410,58 @@ export default function Users() {
             )}
             
             <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
+              <Label htmlFor="username" className="text-sm">Username</Label>
               <Input
                 id="username"
                 placeholder="e.g., picker2"
                 value={newUsername}
                 onChange={(e) => setNewUsername(e.target.value)}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-username"
               />
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password" className="text-sm">Password</Label>
               <Input
                 id="password"
                 type="password"
                 placeholder="Enter password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-password"
               />
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="displayName">Display Name</Label>
+              <Label htmlFor="displayName" className="text-sm">Display Name</Label>
               <Input
                 id="displayName"
                 placeholder="e.g., John Smith"
                 value={newDisplayName}
                 onChange={(e) => setNewDisplayName(e.target.value)}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-displayname"
               />
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="role">Role</Label>
+              <Label htmlFor="role" className="text-sm">Role</Label>
               <Select value={newRole} onValueChange={setNewRole}>
-                <SelectTrigger data-testid="select-role">
+                <SelectTrigger className="h-11" data-testid="select-role">
                   <SelectValue placeholder="Select role" />
                 </SelectTrigger>
                 <SelectContent>
@@ -458,13 +473,14 @@ export default function Users() {
             </div>
           </div>
           
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setAddDialogOpen(false); resetForm(); }}>
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            <Button variant="outline" className="min-h-[44px] w-full sm:w-auto" onClick={() => { setAddDialogOpen(false); resetForm(); }}>
               Cancel
             </Button>
             <Button 
               onClick={handleCreate} 
               disabled={createMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="button-create-user"
             >
               {createMutation.isPending ? "Creating..." : "Create User"}
@@ -474,7 +490,7 @@ export default function Users() {
       </Dialog>
       
       <Dialog open={editDialogOpen} onOpenChange={(open) => { setEditDialogOpen(open); if (!open) resetEditForm(); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Pencil className="h-5 w-5" />
@@ -493,20 +509,25 @@ export default function Users() {
             )}
             
             <div className="space-y-2">
-              <Label htmlFor="edit-displayName">Display Name</Label>
+              <Label htmlFor="edit-displayName" className="text-sm">Display Name</Label>
               <Input
                 id="edit-displayName"
                 placeholder="e.g., John Smith"
                 value={editDisplayName}
                 onChange={(e) => setEditDisplayName(e.target.value)}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-edit-displayname"
               />
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="edit-role">Role</Label>
+              <Label htmlFor="edit-role" className="text-sm">Role</Label>
               <Select value={editRole} onValueChange={setEditRole}>
-                <SelectTrigger data-testid="select-edit-role">
+                <SelectTrigger className="h-11" data-testid="select-edit-role">
                   <SelectValue placeholder="Select role" />
                 </SelectTrigger>
                 <SelectContent>
@@ -518,19 +539,24 @@ export default function Users() {
             </div>
             
             <div className="space-y-2">
-              <Label htmlFor="edit-password">New Password (leave blank to keep current)</Label>
+              <Label htmlFor="edit-password" className="text-sm">New Password (leave blank to keep current)</Label>
               <Input
                 id="edit-password"
                 type="password"
                 placeholder="Enter new password"
                 value={editPassword}
                 onChange={(e) => setEditPassword(e.target.value)}
+                className="h-11"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 data-testid="input-edit-password"
               />
             </div>
             
             <div className="flex items-center justify-between">
-              <Label htmlFor="edit-active">Account Status</Label>
+              <Label htmlFor="edit-active" className="text-sm">Account Status</Label>
               <div className="flex items-center gap-2">
                 <span className={cn("text-sm", editActive ? "text-green-600" : "text-red-600")}>
                   {editActive ? "Active" : "Inactive"}
@@ -539,6 +565,7 @@ export default function Users() {
                   type="button"
                   variant={editActive ? "default" : "destructive"}
                   size="sm"
+                  className="min-h-[44px]"
                   onClick={() => setEditActive(!editActive)}
                   data-testid="button-toggle-active"
                 >
@@ -548,13 +575,14 @@ export default function Users() {
             </div>
           </div>
           
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setEditDialogOpen(false); resetEditForm(); }}>
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
+            <Button variant="outline" className="min-h-[44px] w-full sm:w-auto" onClick={() => { setEditDialogOpen(false); resetEditForm(); }}>
               Cancel
             </Button>
             <Button 
               onClick={handleUpdate} 
               disabled={updateMutation.isPending}
+              className="min-h-[44px] w-full sm:w-auto"
               data-testid="button-save-user"
             >
               {updateMutation.isPending ? "Saving..." : "Save Changes"}

@@ -116,14 +116,14 @@ export default function Settings() {
   ];
 
   return (
-    <div className="p-4 md:p-6 space-y-6">
+    <div className="p-2 md:p-6 space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold" data-testid="text-page-title">General Settings</h1>
           <p className="text-muted-foreground">Configure your organization and system defaults</p>
         </div>
         {canEdit && (
-          <Button onClick={handleSave} disabled={saveMutation.isPending} data-testid="button-save-settings" className="w-full md:w-auto">
+          <Button onClick={handleSave} disabled={saveMutation.isPending} data-testid="button-save-settings" className="w-full md:w-auto min-h-[44px]">
             <Save className="h-4 w-4 mr-2" />
             {saveMutation.isPending ? "Saving..." : "Save Changes"}
           </Button>
@@ -159,23 +159,28 @@ export default function Settings() {
             <CardContent className="space-y-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="company_name">Company Name</Label>
+                  <Label htmlFor="company_name" className="text-sm">Company Name</Label>
                   <Input
                     id="company_name"
                     value={formData.company_name || ""}
                     onChange={(e) => setFormData({ ...formData, company_name: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-company-name"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="default_timezone">Default Timezone</Label>
+                  <Label htmlFor="default_timezone" className="text-sm">Default Timezone</Label>
                   <Select
                     value={formData.default_timezone || "America/New_York"}
                     onValueChange={(val) => setFormData({ ...formData, default_timezone: val })}
                     disabled={!canEdit}
                   >
-                    <SelectTrigger data-testid="select-timezone">
+                    <SelectTrigger className="h-11" data-testid="select-timezone">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -188,54 +193,79 @@ export default function Settings() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="company_address">Address</Label>
+                <Label htmlFor="company_address" className="text-sm">Address</Label>
                 <Input
                   id="company_address"
                   value={formData.company_address || ""}
                   onChange={(e) => setFormData({ ...formData, company_address: e.target.value })}
                   disabled={!canEdit}
+                  className="h-11"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   data-testid="input-company-address"
                 />
               </div>
 
               <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
                 <div className="space-y-2">
-                  <Label htmlFor="company_city">City</Label>
+                  <Label htmlFor="company_city" className="text-sm">City</Label>
                   <Input
                     id="company_city"
                     value={formData.company_city || ""}
                     onChange={(e) => setFormData({ ...formData, company_city: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-company-city"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="company_state">State</Label>
+                  <Label htmlFor="company_state" className="text-sm">State</Label>
                   <Input
                     id="company_state"
                     value={formData.company_state || ""}
                     onChange={(e) => setFormData({ ...formData, company_state: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-company-state"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="company_postal_code">Postal Code</Label>
+                  <Label htmlFor="company_postal_code" className="text-sm">Postal Code</Label>
                   <Input
                     id="company_postal_code"
                     value={formData.company_postal_code || ""}
                     onChange={(e) => setFormData({ ...formData, company_postal_code: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-company-postal"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="company_country">Country</Label>
+                  <Label htmlFor="company_country" className="text-sm">Country</Label>
                   <Input
                     id="company_country"
                     value={formData.company_country || "US"}
                     onChange={(e) => setFormData({ ...formData, company_country: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
                     data-testid="input-company-country"
                   />
                 </div>
@@ -250,13 +280,13 @@ export default function Settings() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                <Label htmlFor="default_warehouse_id">Default Warehouse</Label>
+                <Label htmlFor="default_warehouse_id" className="text-sm">Default Warehouse</Label>
                 <Select
                   value={formData.default_warehouse_id || ""}
                   onValueChange={(val) => setFormData({ ...formData, default_warehouse_id: val })}
                   disabled={!canEdit}
                 >
-                  <SelectTrigger data-testid="select-default-warehouse">
+                  <SelectTrigger className="h-11" data-testid="select-default-warehouse">
                     <SelectValue placeholder="Select default warehouse" />
                   </SelectTrigger>
                   <SelectContent>
@@ -281,28 +311,32 @@ export default function Settings() {
             <CardContent className="space-y-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="low_stock_threshold">Low Stock Threshold (units)</Label>
+                  <Label htmlFor="low_stock_threshold" className="text-sm">Low Stock Threshold (units)</Label>
                   <Input
                     id="low_stock_threshold"
                     type="number"
                     value={formData.low_stock_threshold || "10"}
                     onChange={(e) => setFormData({ ...formData, low_stock_threshold: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
                     data-testid="input-low-stock-threshold"
                   />
-                  <p className="text-sm text-muted-foreground">Items at or below this level are flagged as low stock</p>
+                  <p className="text-xs text-muted-foreground">Items at or below this level are flagged as low stock</p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="critical_stock_threshold">Critical Stock Threshold (units)</Label>
+                  <Label htmlFor="critical_stock_threshold" className="text-sm">Critical Stock Threshold (units)</Label>
                   <Input
                     id="critical_stock_threshold"
                     type="number"
                     value={formData.critical_stock_threshold || "5"}
                     onChange={(e) => setFormData({ ...formData, critical_stock_threshold: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
                     data-testid="input-critical-stock-threshold"
                   />
-                  <p className="text-sm text-muted-foreground">Items at or below this level are flagged as critical</p>
+                  <p className="text-xs text-muted-foreground">Items at or below this level are flagged as critical</p>
                 </div>
               </div>
             </CardContent>
@@ -345,28 +379,32 @@ export default function Settings() {
             <CardContent className="space-y-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="picking_batch_size">Default Batch Size</Label>
+                  <Label htmlFor="picking_batch_size" className="text-sm">Default Batch Size</Label>
                   <Input
                     id="picking_batch_size"
                     type="number"
                     value={formData.picking_batch_size || "20"}
                     onChange={(e) => setFormData({ ...formData, picking_batch_size: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
                     data-testid="input-batch-size"
                   />
-                  <p className="text-sm text-muted-foreground">Maximum orders in a single picking batch</p>
+                  <p className="text-xs text-muted-foreground">Maximum orders in a single picking batch</p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="auto_release_delay_minutes">Auto-Release Delay (minutes)</Label>
+                  <Label htmlFor="auto_release_delay_minutes" className="text-sm">Auto-Release Delay (minutes)</Label>
                   <Input
                     id="auto_release_delay_minutes"
                     type="number"
                     value={formData.auto_release_delay_minutes || "30"}
                     onChange={(e) => setFormData({ ...formData, auto_release_delay_minutes: e.target.value })}
                     disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
                     data-testid="input-release-delay"
                   />
-                  <p className="text-sm text-muted-foreground">Time before unclaimed orders are released back to queue</p>
+                  <p className="text-xs text-muted-foreground">Time before unclaimed orders are released back to queue</p>
                 </div>
               </div>
             </CardContent>
