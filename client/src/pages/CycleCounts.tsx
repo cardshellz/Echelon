@@ -886,111 +886,101 @@ export default function CycleCounts() {
     }
     
     return (
-      <div className="flex flex-col h-full p-4 md:p-6 gap-4">
-        <div className="flex flex-wrap items-center gap-2 md:gap-4">
-          <Button variant="ghost" size="sm" onClick={() => setSelectedCount(null)}>
-            <RotateCcw className="h-4 w-4 mr-2" /> Back
+      <div className="flex flex-col h-full p-2 md:p-6 gap-2 md:gap-4">
+        {/* Compact header */}
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" className="h-8 px-2" onClick={() => setSelectedCount(null)}>
+            <RotateCcw className="h-4 w-4" />
           </Button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-xl md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
-            <p className="text-muted-foreground text-sm">
-              {cycleCountDetail.countedBins} / {cycleCountDetail.totalBins} bins counted
-            </p>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
+              {getStatusBadge(cycleCountDetail.status)}
+            </div>
+            <p className="text-muted-foreground text-xs">{cycleCountDetail.countedBins}/{cycleCountDetail.totalBins} counted</p>
           </div>
-          {getStatusBadge(cycleCountDetail.status)}
-        </div>
-        
-        {/* Action buttons row */}
-        <div className="flex flex-wrap gap-2">
-          {cycleCountDetail.status === "draft" && (
-            <Button 
-              size="lg" 
-              className="flex-1 md:flex-none"
-              onClick={() => initializeMutation.mutate(selectedCount)}
-              disabled={initializeMutation.isPending}
-              data-testid="button-initialize-count"
-            >
-              <Play className="h-4 w-4 mr-2" /> {initializeMutation.isPending ? "Initializing..." : "Initialize Count"}
-            </Button>
-          )}
-          {cycleCountDetail.status === "in_progress" && pendingCount > 0 && (
-            <Button 
-              size="lg" 
-              className="flex-1 md:flex-none"
-              onClick={() => {
-                setCurrentBinIndex(0);
-                // useEffect will handle loading drafts when mobileCountMode becomes true
-                setMobileCountMode(true);
-              }}
-              data-testid="button-start-counting"
-            >
-              <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
-            </Button>
-          )}
-          {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && (
-            <Button onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
-              <CheckCircle className="h-4 w-4 mr-2" /> Complete
-            </Button>
-          )}
           {cycleCountDetail.status !== "completed" && (
             <Button 
-              variant="destructive" 
+              variant="ghost" 
               size="sm"
+              className="h-8 px-2 text-destructive"
               onClick={() => {
-                if (confirm("Are you sure you want to delete this cycle count? This cannot be undone.")) {
+                if (confirm("Delete this cycle count?")) {
                   deleteMutation.mutate(selectedCount);
                 }
               }}
               disabled={deleteMutation.isPending}
             >
-              <Trash2 className="h-4 w-4 mr-2" /> Delete
+              <Trash2 className="h-4 w-4" />
             </Button>
           )}
         </div>
+        
+        {/* Action button - prominent */}
+        {cycleCountDetail.status === "draft" && (
+          <Button 
+            size="default" 
+            className="w-full"
+            onClick={() => initializeMutation.mutate(selectedCount)}
+            disabled={initializeMutation.isPending}
+            data-testid="button-initialize-count"
+          >
+            <Play className="h-4 w-4 mr-2" /> {initializeMutation.isPending ? "Initializing..." : "Initialize Count"}
+          </Button>
+        )}
+        {cycleCountDetail.status === "in_progress" && pendingCount > 0 && (
+          <Button 
+            size="default" 
+            className="w-full"
+            onClick={() => {
+              setCurrentBinIndex(0);
+              setMobileCountMode(true);
+            }}
+            data-testid="button-start-counting"
+          >
+            <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
+          </Button>
+        )}
+        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && (
+          <Button className="w-full" onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
+            <CheckCircle className="h-4 w-4 mr-2" /> Complete
+          </Button>
+        )}
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
-          <Card 
-            className={`cursor-pointer transition-all hover:ring-2 hover:ring-primary/50 ${statusFilter === "all" ? "ring-2 ring-primary" : ""}`}
+        {/* Compact stat row - 4 items in a row */}
+        <div className="grid grid-cols-4 gap-1 md:gap-4">
+          <button 
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "all" ? "bg-primary/10 ring-1 ring-primary" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("all")}
             data-testid="card-filter-all"
           >
-            <CardContent className="pt-4 p-3 md:p-6">
-              <div className="text-xl md:text-2xl font-bold">{cycleCountDetail.totalBins}</div>
-              <div className="text-xs md:text-sm text-muted-foreground">Total</div>
-            </CardContent>
-          </Card>
-          <Card 
-            className={`cursor-pointer transition-all hover:ring-2 hover:ring-blue-500/50 ${statusFilter === "pending" ? "ring-2 ring-blue-500" : ""}`}
+            <div className="text-lg font-bold">{cycleCountDetail.totalBins}</div>
+            <div className="text-[10px] text-muted-foreground">Total</div>
+          </button>
+          <button 
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "pending" ? "bg-blue-100 ring-1 ring-blue-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("pending")}
             data-testid="card-filter-pending"
           >
-            <CardContent className="pt-4 p-3 md:p-6">
-              <div className="text-xl md:text-2xl font-bold">{pendingCount}</div>
-              <div className="text-xs md:text-sm text-muted-foreground">Pending</div>
-            </CardContent>
-          </Card>
-          <Card 
-            className={`cursor-pointer transition-all hover:ring-2 hover:ring-amber-500/50 ${statusFilter === "variance" ? "ring-2 ring-amber-500" : ""}`}
+            <div className="text-lg font-bold">{pendingCount}</div>
+            <div className="text-[10px] text-muted-foreground">Pending</div>
+          </button>
+          <button 
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "variance" ? "bg-amber-100 ring-1 ring-amber-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("variance")}
             data-testid="card-filter-variance"
           >
-            <CardContent className="pt-4 p-3 md:p-6">
-              <div className="text-xl md:text-2xl font-bold text-amber-600">{varianceCount}</div>
-              <div className="text-xs md:text-sm text-muted-foreground">Variances</div>
-            </CardContent>
-          </Card>
-          <Card 
-            className={`cursor-pointer transition-all hover:ring-2 hover:ring-emerald-500/50 ${statusFilter === "ok" ? "ring-2 ring-emerald-500" : ""}`}
+            <div className="text-lg font-bold text-amber-600">{varianceCount}</div>
+            <div className="text-[10px] text-muted-foreground">Variance</div>
+          </button>
+          <button 
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "ok" ? "bg-emerald-100 ring-1 ring-emerald-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("ok")}
             data-testid="card-filter-ok"
           >
-            <CardContent className="pt-4 p-3 md:p-6">
-              <div className="text-xl md:text-2xl font-bold text-emerald-600">
-                {cycleCountDetail.countedBins - varianceCount}
-              </div>
-              <div className="text-xs md:text-sm text-muted-foreground">OK</div>
-            </CardContent>
-          </Card>
+            <div className="text-lg font-bold text-emerald-600">{cycleCountDetail.countedBins - varianceCount}</div>
+            <div className="text-[10px] text-muted-foreground">OK</div>
+          </button>
         </div>
 
         <div className="relative">
