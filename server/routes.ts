@@ -1352,13 +1352,21 @@ export async function registerRoutes(
       .trim();
   }
   
+  function normalizePostalCode(postal: string | null | undefined): string {
+    if (!postal) return "";
+    // Strip +4 extension from US zip codes (keep only first 5 digits)
+    // Also handles formats like "04103-1893" -> "04103"
+    return postal.replace(/[^0-9A-Za-z]/g, "").substring(0, 5).toUpperCase();
+  }
+
   function createAddressHash(order: { shippingAddress?: string | null; shippingCity?: string | null; shippingState?: string | null; shippingPostalCode?: string | null; customerEmail?: string | null; shipping_address?: string | null; shipping_city?: string | null; shipping_state?: string | null; shipping_postal_code?: string | null; customer_email?: string | null }): string {
+    // Match on shipping address only - email can be missing or different
+    // (customers may use different emails for different orders)
     const normalized = [
       normalizeAddress(order.shippingAddress || order.shipping_address),
       normalizeAddress(order.shippingCity || order.shipping_city),
       normalizeAddress(order.shippingState || order.shipping_state),
-      normalizeAddress(order.shippingPostalCode || order.shipping_postal_code),
-      (order.customerEmail || order.customer_email || "").toLowerCase().trim()
+      normalizePostalCode(order.shippingPostalCode || order.shipping_postal_code),
     ].join("|");
     return normalized;
   }
