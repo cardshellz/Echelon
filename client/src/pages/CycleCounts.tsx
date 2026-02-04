@@ -749,6 +749,64 @@ export default function CycleCounts() {
                         >
                           Empty
                         </Button>
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => {
+                            // Toggle wrong SKU mode for this item
+                            const input = document.getElementById(`wrong-sku-${binItem.id}`) as HTMLElement;
+                            if (input) {
+                              input.classList.toggle('hidden');
+                            }
+                          }}
+                        >
+                          <AlertTriangle className="h-3 w-3 mr-1" />
+                          Wrong SKU
+                        </Button>
+                      </div>
+                      {/* Wrong SKU input - hidden by default */}
+                      <div id={`wrong-sku-${binItem.id}`} className="hidden mt-2 bg-amber-50 border border-amber-200 rounded p-2">
+                        <Label className="text-amber-800 text-xs">What SKU is actually here?</Label>
+                        <div className="flex gap-2 mt-1">
+                          <Input
+                            id={`wrong-sku-input-${binItem.id}`}
+                            placeholder="Enter actual SKU..."
+                            className="text-sm h-8 flex-1"
+                          />
+                          <Button
+                            size="sm"
+                            className="h-8 px-2"
+                            onClick={() => {
+                              const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
+                              const wrongSku = (document.getElementById(`wrong-sku-input-${binItem.id}`) as HTMLInputElement)?.value;
+                              if (countVal === "" || !wrongSku) return;
+                              countMutation.mutate({
+                                itemId: binItem.id,
+                                data: {
+                                  countedSku: wrongSku,
+                                  countedQty: parseInt(countVal) || 0,
+                                  notes: `Wrong SKU: Expected ${binItem.expectedSku}, found ${wrongSku}`,
+                                }
+                              }, {
+                                onSuccess: () => {
+                                  playSoundWithHaptic("success", "classic", true);
+                                  const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
+                                  if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
+                                    setTimeout(() => {
+                                      setAddFoundItemMode(false);
+                                      setFoundItemForm({ sku: "", quantity: "" });
+                                      setCurrentBinIndex(currentBinIndex + 1);
+                                    }, 300);
+                                  }
+                                }
+                              });
+                            }}
+                            disabled={countMutation.isPending}
+                          >
+                            <Check className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </div>
                     </>
                   )}
