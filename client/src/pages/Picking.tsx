@@ -847,7 +847,7 @@ export default function Picking() {
   // UI state
   const [scanInput, setScanInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error">("idle");
-  const [scannerActivated, setScannerActivated] = useState(false);
+  const [keyboardDismissed, setKeyboardDismissed] = useState(false);
   const [shortPickOpen, setShortPickOpen] = useState(false);
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
@@ -902,12 +902,17 @@ export default function Picking() {
   // Auto-focus on mount and after any interaction
   useEffect(() => {
     if (view === "picking") {
-      maintainFocus();
+      // On initial load, focus then immediately blur to hide keyboard
+      // Scanner still works because it captures keystrokes globally
+      if (!keyboardDismissed && manualInputRef.current) {
+        manualInputRef.current.focus();
+        setTimeout(() => {
+          manualInputRef.current?.blur();
+          setKeyboardDismissed(true);
+        }, 50);
+      }
       
-      // Set up interval to maintain focus (for scanner devices)
-      const interval = setInterval(maintainFocus, 500);
-      
-      // Refocus on click/touch on the document
+      // Refocus on click/touch on the document (user wants keyboard)
       const handleInteraction = () => {
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
         focusTimeoutRef.current = setTimeout(maintainFocus, 100);
@@ -927,15 +932,15 @@ export default function Picking() {
       document.addEventListener("touchstart", preventBlur);
       
       return () => {
-        clearInterval(interval);
         document.removeEventListener("click", handleInteraction);
         document.removeEventListener("touchend", handleInteraction);
         document.removeEventListener("mousedown", preventBlur);
         document.removeEventListener("touchstart", preventBlur);
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+        setKeyboardDismissed(false);
       };
     }
-  }, [view, maintainFocus]);
+  }, [view, maintainFocus, keyboardDismissed]);
   
   // Refocus after dialogs close
   useEffect(() => {
@@ -3443,6 +3448,7 @@ export default function Picking() {
                 ref={manualInputRef}
                 placeholder="Scan any item barcode..." 
                 className="pl-12 h-12 text-lg font-mono border-2 border-primary/50 focus-visible:ring-primary rounded-lg"
+                inputMode="numeric"
                 value={scanInput}
                 onChange={(e) => setScanInput(e.target.value)}
                 onKeyDown={handleScanKeyDown}
