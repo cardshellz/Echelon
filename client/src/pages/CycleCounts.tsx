@@ -10,6 +10,7 @@ import {
   XCircle, 
   AlertTriangle, 
   ChevronRight,
+  ChevronLeft,
   Search,
   Package,
   MapPin,
@@ -512,9 +513,30 @@ export default function CycleCounts() {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
     const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved").length;
     
-    // Get all items for mobile mode navigation (not filtered - navigate all bins in sequence)
-    const allItems = cycleCountDetail.items;
-    const currentItem = allItems[currentBinIndex];
+    // Group items by location (bin) for multi-SKU support
+    const itemsByLocation = cycleCountDetail.items.reduce((acc, item) => {
+      const locId = item.warehouseLocationId;
+      if (!acc[locId]) {
+        acc[locId] = {
+          locationCode: item.locationCode,
+          warehouseLocationId: locId,
+          items: []
+        };
+      }
+      acc[locId].items.push(item);
+      return acc;
+    }, {} as Record<number, { locationCode: string | undefined; warehouseLocationId: number; items: typeof cycleCountDetail.items }>);
+    
+    // Convert to array sorted by location code for navigation
+    const binGroups = Object.values(itemsByLocation).sort((a, b) => 
+      (a.locationCode || "").localeCompare(b.locationCode || "")
+    );
+    
+    // Get current bin group and items
+    const currentBinGroup = binGroups[currentBinIndex];
+    const currentBinItems = currentBinGroup?.items || [];
+    // For backwards compatibility, currentItem is the first item in the bin
+    const currentItem = currentBinItems[0];
     
     // Quick count submission for mobile
     const handleQuickCount = () => {
@@ -556,7 +578,7 @@ export default function CycleCounts() {
     };
     
     // Mobile counting view
-    if (mobileCountMode && allItems.length > 0) {
+    if (mobileCountMode && binGroups.length > 0) {
       return (
         <div className="flex flex-col h-full bg-slate-50">
           {/* Header - compact */}
@@ -565,7 +587,7 @@ export default function CycleCounts() {
               <RotateCcw className="h-4 w-4 mr-1" /> Exit
             </Button>
             <div className="text-center">
-              <div className="text-xs text-muted-foreground">Bin {currentBinIndex + 1} of {allItems.length}</div>
+              <div className="text-xs text-muted-foreground">Bin {currentBinIndex + 1} of {binGroups.length}</div>
             </div>
             <div className="w-14" />
           </div>
@@ -580,148 +602,163 @@ export default function CycleCounts() {
           
           {/* Main counting area - scrollable, with padding for fixed footer */}
           <div className="flex-1 p-2 overflow-y-auto flex flex-col gap-2 pb-16">
-            {/* Location and SKU info - compact */}
+            {/* Bin header */}
             <div className="bg-white rounded-lg p-3 shadow-sm shrink-0">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="text-xs text-muted-foreground">Bin</div>
                   <div className="text-2xl font-bold font-mono text-blue-600 truncate">
-                    {currentItem?.locationCode}
+                    {currentBinGroup?.locationCode}
                   </div>
                 </div>
                 <div className="text-center bg-slate-100 rounded-lg px-3 py-1 shrink-0">
-                  <div className="text-xs text-muted-foreground">Expected</div>
-                  <div className="text-xl font-bold">{currentItem?.expectedQty}</div>
-                </div>
-              </div>
-              <div className="mt-1">
-                <div className="text-xs text-muted-foreground">SKU</div>
-                <div className="text-sm font-medium truncate">
-                  {currentItem?.expectedSku || "(Empty bin)"}
+                  <div className="text-xs text-muted-foreground">SKUs</div>
+                  <div className="text-xl font-bold">{currentBinItems.length}</div>
                 </div>
               </div>
             </div>
             
-            {/* Quantity input - compact */}
-            <div className="bg-white rounded-lg p-3 shadow-sm shrink-0">
-              <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
-              <div className="flex items-center gap-2 max-w-xs mx-auto">
-                <Button 
-                  variant="outline" 
-                  size="lg"
-                  className="h-12 w-12 text-xl shrink-0"
-                  onClick={() => setQuickCountQty(String(Math.max(0, (parseInt(quickCountQty) || 0) - 1)))}
-                  data-testid="button-decrease-qty"
+            {/* List of SKUs in this bin */}
+            {currentBinItems.map((binItem, idx) => {
+              const isPending = binItem.status === "pending";
+              const isConfirmed = binItem.status !== "pending";
+              return (
+                <div 
+                  key={binItem.id} 
+                  className={`bg-white rounded-lg p-3 shadow-sm shrink-0 ${isConfirmed ? 'border-2 border-emerald-300 bg-emerald-50' : ''}`}
                 >
-                  -
-                </Button>
-                <Input
-                  type="number"
-                  inputMode="numeric"
-                  value={quickCountQty}
-                  onChange={(e) => setQuickCountQty(e.target.value)}
-                  className="h-12 text-xl text-center font-mono flex-1 min-w-0"
-                  placeholder="0"
-                  data-testid="input-quick-count"
-                />
-                <Button 
-                  variant="outline" 
-                  size="lg"
-                  className="h-12 w-12 text-xl shrink-0"
-                  onClick={() => setQuickCountQty(String((parseInt(quickCountQty) || 0) + 1))}
-                  data-testid="button-increase-qty"
-                >
-                  +
-                </Button>
-              </div>
-            </div>
-            
-            {/* Quick actions - compact */}
-            <div className="bg-white rounded-lg p-2 shadow-sm flex gap-2 shrink-0">
-              <Button 
-                variant="secondary" 
-                size="sm"
-                className="flex-1 h-9 text-xs"
-                onClick={() => {
-                  setQuickCountQty(String(currentItem?.expectedQty || 0));
-                  playSoundWithHaptic("success", "classic", true);
-                }}
-                data-testid="button-match-expected"
-              >
-                Matches ({currentItem?.expectedQty})
-              </Button>
-              <Button 
-                variant="outline" 
-                size="sm"
-                className="h-9 text-xs"
-                onClick={() => {
-                  setQuickCountQty("0");
-                }}
-              >
-                Empty
-              </Button>
-              <Button 
-                variant={differentSkuMode ? "default" : "outline"}
-                size="sm"
-                className="h-9 text-xs"
-                onClick={() => {
-                  setDifferentSkuMode(!differentSkuMode);
-                  if (!differentSkuMode) {
-                    setFoundSku("");
-                    setMobileSkuSearch("");
-                    setMobileSkuDropdownOpen(false);
-                  }
-                }}
-                data-testid="button-different-sku"
-              >
-                <AlertTriangle className="h-3 w-3 mr-1" />
-                Wrong SKU
-              </Button>
-            </div>
-            
-            {/* Different SKU input with typeahead */}
-            {differentSkuMode && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 shrink-0">
-                <Label className="text-amber-800 text-sm">What SKU is actually in this bin?</Label>
-                <div className="relative mt-2">
-                  <Input
-                    value={mobileSkuSearch || foundSku}
-                    onChange={(e) => {
-                      setMobileSkuSearch(e.target.value);
-                      setFoundSku(e.target.value);
-                      setMobileSkuDropdownOpen(true);
-                    }}
-                    onFocus={() => setMobileSkuDropdownOpen(true)}
-                    placeholder="Type to search SKUs..."
-                    className="text-base"
-                    autoFocus
-                    data-testid="input-found-sku"
-                  />
-                  {mobileSkuDropdownOpen && mobileSkuResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                      {mobileSkuResults.map((result) => (
-                        <button
-                          key={result.sku}
-                          type="button"
-                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-muted-foreground">SKU {idx + 1} of {currentBinItems.length}</div>
+                      <div className="text-sm font-medium truncate">
+                        {binItem.expectedSku || "(Empty bin)"}
+                      </div>
+                    </div>
+                    <div className="text-center bg-slate-100 rounded-lg px-3 py-1 shrink-0">
+                      <div className="text-xs text-muted-foreground">Expected</div>
+                      <div className="text-lg font-bold">{binItem.expectedQty}</div>
+                    </div>
+                  </div>
+                  
+                  {isConfirmed ? (
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-emerald-600 font-medium flex items-center gap-1">
+                        <Check className="h-4 w-4" /> Counted: {binItem.countedQty}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => {
+                          countMutation.mutate({
+                            itemId: binItem.id,
+                            data: { countedSku: null, countedQty: null, notes: null }
+                          });
+                        }}
+                      >
+                        Recount
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
+                      <div className="flex items-center gap-2">
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="h-10 w-10 text-lg shrink-0"
                           onClick={() => {
-                            setFoundSku(result.sku);
-                            setMobileSkuSearch(result.sku);
-                            setMobileSkuDropdownOpen(false);
+                            const current = parseInt((document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value || "0");
+                            (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(Math.max(0, current - 1));
                           }}
                         >
-                          <div className="font-medium text-sm">{result.sku}</div>
-                          {result.name && <div className="text-xs text-muted-foreground truncate">{result.name}</div>}
-                        </button>
-                      ))}
-                    </div>
+                          -
+                        </Button>
+                        <Input
+                          id={`count-${binItem.id}`}
+                          type="number"
+                          inputMode="numeric"
+                          defaultValue=""
+                          className="h-10 text-lg text-center font-mono flex-1 min-w-0"
+                          placeholder="0"
+                          data-testid={`input-count-${binItem.id}`}
+                        />
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="h-10 w-10 text-lg shrink-0"
+                          onClick={() => {
+                            const current = parseInt((document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value || "0");
+                            (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(current + 1);
+                          }}
+                        >
+                          +
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="h-10 px-3"
+                          onClick={() => {
+                            const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
+                            if (countVal === "") return;
+                            countMutation.mutate({
+                              itemId: binItem.id,
+                              data: {
+                                countedSku: binItem.expectedSku || null,
+                                countedQty: parseInt(countVal) || 0,
+                                notes: null,
+                              }
+                            }, {
+                              onSuccess: () => {
+                                playSoundWithHaptic("success", "classic", true);
+                              }
+                            });
+                          }}
+                          disabled={countMutation.isPending}
+                        >
+                          <Check className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <div className="flex gap-2 mt-2">
+                        <Button 
+                          variant="secondary" 
+                          size="sm"
+                          className="flex-1 h-8 text-xs"
+                          onClick={() => {
+                            (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(binItem.expectedQty);
+                          }}
+                        >
+                          Matches ({binItem.expectedQty})
+                        </Button>
+                        <Button 
+                          variant="outline" 
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => {
+                            (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = "0";
+                          }}
+                        >
+                          Empty
+                        </Button>
+                      </div>
+                    </>
                   )}
                 </div>
-                <p className="text-xs text-amber-600 mt-1">
-                  This will be flagged as a SKU mismatch for review
-                </p>
-              </div>
-            )}
+              );
+            })}
+            
+            {/* Found Extra Item button */}
+            <Button 
+              variant="outline" 
+              size="sm"
+              className="h-9 text-xs shrink-0 w-full"
+              onClick={() => {
+                setAddFoundItemMode(!addFoundItemMode);
+                setFoundItemForm({ sku: "", quantity: "" });
+              }}
+            >
+              <Plus className="h-3 w-3 mr-1" />
+              Found Extra Item
+            </Button>
             
             {/* Add unexpected item found */}
             {addFoundItemMode ? (
@@ -822,58 +859,31 @@ export default function CycleCounts() {
               size="sm"
               className="h-11 px-4"
               onClick={() => {
-                if (quickCountQty !== "" && currentItem) {
-                  const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
-                  saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
-                }
-                // Clear form state for previous bin
-                setQuickCountQty("");
-                setDifferentSkuMode(false);
-                setFoundSku("");
-                setMobileSkuSearch("");
-                setMobileSkuDropdownOpen(false);
                 setAddFoundItemMode(false);
                 setFoundItemForm({ sku: "", quantity: "" });
-                setExtraItemSkuDropdownOpen(false);
                 setCurrentBinIndex(Math.max(0, currentBinIndex - 1));
               }}
               disabled={currentBinIndex === 0}
             >
+              <ChevronLeft className="h-4 w-4 mr-1" />
               Prev
             </Button>
             <Button 
               size="sm"
               className="flex-1 h-11 text-sm"
-              onClick={handleQuickCount}
-              disabled={countMutation.isPending || quickCountQty === ""}
-              data-testid="button-confirm-count"
-            >
-              <Check className="h-4 w-4 mr-1" />
-              Confirm
-            </Button>
-            <Button 
-              variant="outline" 
-              size="sm"
-              className="h-11 px-4"
               onClick={() => {
-                if (quickCountQty !== "" && currentItem) {
-                  const skuToSave = differentSkuMode ? foundSku : currentItem.expectedSku;
-                  saveDraft(cycleCountDetail.id, currentItem.id, quickCountQty, skuToSave || "");
+                // Move to next bin
+                if (currentBinIndex < binGroups.length - 1) {
+                  setCurrentBinIndex(currentBinIndex + 1);
+                  setAddFoundItemMode(false);
+                  setFoundItemForm({ sku: "", quantity: "" });
                 }
-                // Clear form state for next bin
-                setQuickCountQty("");
-                setDifferentSkuMode(false);
-                setFoundSku("");
-                setMobileSkuSearch("");
-                setMobileSkuDropdownOpen(false);
-                setAddFoundItemMode(false);
-                setFoundItemForm({ sku: "", quantity: "" });
-                setExtraItemSkuDropdownOpen(false);
-                setCurrentBinIndex(Math.min(allItems.length - 1, currentBinIndex + 1));
               }}
-              disabled={currentBinIndex === allItems.length - 1}
+              disabled={currentBinIndex === binGroups.length - 1}
+              data-testid="button-next-bin"
             >
-              Skip
+              Next Bin
+              <ChevronRight className="h-4 w-4 ml-1" />
             </Button>
           </div>
         </div>
