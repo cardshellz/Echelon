@@ -1406,36 +1406,31 @@ export async function registerRoutes(
   app.get("/api/orders/combinable", async (req, res) => {
     try {
       // Get all ready orders that aren't already combined and not on hold
-      // Also exclude orders that are cancelled in Shopify (cancelled_at IS NOT NULL)
       let result;
       try {
         result = await db.execute(sql`
-          SELECT o.id, o.order_number, o.customer_name, o.customer_email, 
-                 o.shipping_address, o.shipping_city, o.shipping_state, 
-                 o.shipping_postal_code, o.shipping_country, o.item_count, 
-                 o.unit_count, o.total_amount, o.source, o.created_at,
-                 o.combined_group_id, o.combined_role
-          FROM orders o
-          LEFT JOIN shopify_orders s ON o.source_table_id = CAST(s.id AS TEXT)
-          WHERE o.status = 'ready' 
-            AND o.on_hold = 0
-            AND o.combined_group_id IS NULL
-            AND (s.cancelled_at IS NULL OR s.id IS NULL)
+          SELECT id, order_number, customer_name, customer_email, 
+                 shipping_address, shipping_city, shipping_state, 
+                 shipping_postal_code, shipping_country, item_count, 
+                 unit_count, total_amount, source, created_at,
+                 combined_group_id, combined_role
+          FROM orders 
+          WHERE status = 'ready' 
+            AND on_hold = 0
+            AND combined_group_id IS NULL
         `);
       } catch (columnError: any) {
         // Column doesn't exist yet, get all ready orders without filtering by combined status
         if (columnError?.code === '42703') {
           console.log("Note: combined_group_id column not yet in database, querying without it");
           result = await db.execute(sql`
-            SELECT o.id, o.order_number, o.customer_name, o.customer_email, 
-                   o.shipping_address, o.shipping_city, o.shipping_state, 
-                   o.shipping_postal_code, o.shipping_country, o.item_count, 
-                   o.unit_count, o.total_amount, o.source, o.created_at
-            FROM orders o
-            LEFT JOIN shopify_orders s ON o.source_table_id = CAST(s.id AS TEXT)
-            WHERE o.status = 'ready' 
-              AND o.on_hold = 0
-              AND (s.cancelled_at IS NULL OR s.id IS NULL)
+            SELECT id, order_number, customer_name, customer_email, 
+                   shipping_address, shipping_city, shipping_state, 
+                   shipping_postal_code, shipping_country, item_count, 
+                   unit_count, total_amount, source, created_at
+            FROM orders 
+            WHERE status = 'ready' 
+              AND on_hold = 0
           `);
         } else {
           throw columnError;
@@ -1462,11 +1457,9 @@ export async function registerRoutes(
         .filter(([_, orders]) => orders.length >= 2)
         .map(([hash, groupOrders]) => {
           const first = groupOrders[0];
-          // Find customer name from any order in group (some may have NULL)
-          const customerName = groupOrders.find(o => o.customer_name)?.customer_name || "Customer";
           return {
             addressHash: hash,
-            customerName: customerName,
+            customerName: first.customer_name,
             customerEmail: first.customer_email,
             shippingAddress: first.shipping_address,
             shippingCity: first.shipping_city,
