@@ -138,6 +138,10 @@ export const orders = pgTable("orders", {
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
   batchId: varchar("batch_id", { length: 50 }),
   
+  // ===== ORDER COMBINING =====
+  combinedGroupId: integer("combined_group_id"), // Links orders in same combined group
+  combinedRole: varchar("combined_role", { length: 20 }), // "parent" or "child" - parent is used for shipping label
+  
   // ===== ITEM COUNTS =====
   itemCount: integer("item_count").notNull().default(0), // Total line items
   unitCount: integer("unit_count").notNull().default(0), // Total units (sum of quantities)
@@ -718,6 +722,9 @@ export const warehouseSettings = pgTable("warehouse_settings", {
   maxOrdersPerWave: integer("max_orders_per_wave").default(50),
   maxItemsPerWave: integer("max_items_per_wave").default(500),
   waveAutoRelease: integer("wave_auto_release").default(0), // Auto-release waves when full
+  
+  // Order combining settings
+  enableOrderCombining: integer("enable_order_combining").notNull().default(1), // Show combine badges to pickers
   
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -1498,3 +1505,43 @@ export const insertReceivingLineSchema = createInsertSchema(receivingLines).omit
 
 export type InsertReceivingLine = z.infer<typeof insertReceivingLineSchema>;
 export type ReceivingLine = typeof receivingLines.$inferSelect;
+
+// Combined Order Groups - for picking/shipping multiple orders together
+export const combinedOrderGroups = pgTable("combined_order_groups", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  
+  // Identification
+  groupCode: varchar("group_code", { length: 20 }).notNull().unique(), // e.g., "G-1024" based on parent order
+  
+  // Shared customer/shipping info (denormalized for quick display)
+  customerName: text("customer_name").notNull(),
+  customerEmail: text("customer_email"),
+  shippingAddress: text("shipping_address"),
+  shippingCity: text("shipping_city"),
+  shippingState: text("shipping_state"),
+  shippingPostalCode: text("shipping_postal_code"),
+  shippingCountry: text("shipping_country"),
+  addressHash: varchar("address_hash", { length: 64 }), // Normalized address hash for matching
+  
+  // Aggregates
+  orderCount: integer("order_count").notNull().default(0),
+  totalItems: integer("total_items").notNull().default(0),
+  totalUnits: integer("total_units").notNull().default(0),
+  
+  // Status
+  status: varchar("status", { length: 20 }).notNull().default("active"), // active, picked, shipped, cancelled
+  
+  // Audit
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertCombinedOrderGroupSchema = createInsertSchema(combinedOrderGroups).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertCombinedOrderGroup = z.infer<typeof insertCombinedOrderGroupSchema>;
+export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
