@@ -293,6 +293,9 @@ interface SingleOrder {
   channelProvider?: string | null; // Provider type (shopify, ebay, amazon, manual)
   combinedGroupId?: number | null; // Combined order group ID
   combinedRole?: string | null; // 'parent' or 'child'
+  // For combined orders - contains the individual orders in the group
+  combinedOrders?: { id: string; orderNumber: string; itemCount: number }[];
+  isCombinedGroup?: boolean; // True if this entry represents a combined group
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -552,7 +555,8 @@ export default function Picking() {
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
   
-  const ordersFromApi: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
+  // First, map all API orders to SingleOrder format
+  const allOrdersMapped: SingleOrder[] = apiOrders.map((order): SingleOrder => ({
     id: String(order.id),
     orderNumber: order.orderNumber,
     customer: order.customerName,
@@ -568,6 +572,8 @@ export default function Picking() {
     c2p: formatC2P(order.c2pMs), // Click to Pick time
     channelName: order.channelName || null,
     channelProvider: order.channelProvider || null,
+    combinedGroupId: order.combinedGroupId,
+    combinedRole: order.combinedRole,
     items: order.items.map((item): PickItem => ({
       id: item.id,
       sku: item.sku,
@@ -581,6 +587,60 @@ export default function Picking() {
       barcode: item.barcode || undefined,
     })),
   }));
+
+  // Group combined orders into single entries
+  const ordersFromApi: SingleOrder[] = (() => {
+    const result: SingleOrder[] = [];
+    const processedGroupIds = new Set<number>();
+    
+    for (const order of allOrdersMapped) {
+      // Skip child orders - they'll be merged into the parent
+      if (order.combinedGroupId && order.combinedRole === "child") {
+        continue;
+      }
+      
+      // If this is a parent of a combined group, merge all children
+      if (order.combinedGroupId && order.combinedRole === "parent") {
+        if (processedGroupIds.has(order.combinedGroupId)) continue;
+        processedGroupIds.add(order.combinedGroupId);
+        
+        // Find all orders in this combined group
+        const groupOrders = allOrdersMapped.filter(o => o.combinedGroupId === order.combinedGroupId);
+        
+        // Combine all items from all orders, preserving which order each item belongs to
+        const allItems: PickItem[] = [];
+        const combinedOrdersList: { id: string; orderNumber: string; itemCount: number }[] = [];
+        
+        for (const groupOrder of groupOrders) {
+          combinedOrdersList.push({
+            id: groupOrder.id,
+            orderNumber: groupOrder.orderNumber,
+            itemCount: groupOrder.items.length,
+          });
+          allItems.push(...groupOrder.items);
+        }
+        
+        // Calculate combined totals
+        const totalUnits = allItems.reduce((sum, item) => sum + item.qty, 0);
+        const orderNumbers = groupOrders.map(o => o.orderNumber).join(", ");
+        
+        // Create combined entry using parent's data but with merged items
+        result.push({
+          ...order,
+          id: `combined-${order.combinedGroupId}`, // Special ID for combined group
+          orderNumber: orderNumbers,
+          items: allItems,
+          combinedOrders: combinedOrdersList,
+          isCombinedGroup: true,
+        });
+      } else {
+        // Regular uncombined order
+        result.push(order);
+      }
+    }
+    
+    return result;
+  })();
   
   // Use API data if available, otherwise fall back to mock data
   const hasApiData = ordersFromApi.length > 0 || apiOrders.length === 0;
@@ -1006,6 +1066,50 @@ export default function Picking() {
       setView("picking");
       triggerHaptic("medium");
     } else {
+      // Check if this is a combined order group
+      const isCombinedGroup = id.startsWith("combined-");
+      
+      if (isCombinedGroup) {
+        // Combined order - claim all orders in the group
+        const combinedOrder = ordersFromApi.find(o => o.id === id);
+        if (!combinedOrder || !combinedOrder.combinedOrders) {
+          console.error("Combined order not found:", id);
+          return;
+        }
+        
+        try {
+          // Claim all orders in the combined group
+          for (const subOrder of combinedOrder.combinedOrders) {
+            const subOrderId = parseInt(subOrder.id);
+            if (!isNaN(subOrderId)) {
+              await claimMutation.mutateAsync({ orderId: subOrderId });
+            }
+          }
+          
+          // Success - copy the combined order to local state
+          setLocalSingleQueue(prev => {
+            const existing = prev.find(o => o.id === id);
+            if (existing) {
+              return prev.map(o => o.id === id ? { ...combinedOrder, status: "in_progress" as const, assignee: "You" } : o);
+            } else {
+              return [...prev, { ...combinedOrder, status: "in_progress" as const, assignee: "You" }];
+            }
+          });
+          
+          setActiveOrderId(id);
+          setCurrentItemIndex(0);
+          setView("picking");
+          triggerHaptic("medium");
+        } catch (error: any) {
+          console.error("Failed to claim combined order:", error);
+          setClaimError("One or more orders in this group were claimed by another picker.");
+          refetch();
+          triggerHaptic("heavy");
+          playSound("error");
+        }
+        return;
+      }
+      
       // For single mode, claim the order via API if it's a real order (numeric id)
       const numericId = parseInt(id);
       const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === id);
@@ -2481,8 +2585,9 @@ export default function Picking() {
                 key={order.id} 
                 className={cn(
                   "cursor-pointer hover:border-primary/50 transition-all active:scale-[0.99]",
-                  order.priority === "rush" && "border-l-4 border-l-red-500",
-                  order.priority === "high" && "border-l-4 border-l-amber-500",
+                  order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
+                  !order.isCombinedGroup && order.priority === "rush" && "border-l-4 border-l-red-500",
+                  !order.isCombinedGroup && order.priority === "high" && "border-l-4 border-l-amber-500",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
@@ -2515,38 +2620,59 @@ export default function Picking() {
                         <span className="text-[9px] leading-none mt-0.5">units</span>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
-                          {order.orderNumber}
-                          <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
-                            <Clock size={10} /> {order.age}
-                          </span>
-                        </div>
-                        <div className="text-xs text-muted-foreground truncate">
-                          {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
-                        </div>
-                        {order.orderDate && (
-                          <div className="text-[10px] text-muted-foreground/70">
-                            {order.orderDate}
-                          </div>
-                        )}
-                        {order.status === "completed" && order.pickerName && (
-                          <div className="text-[10px] text-muted-foreground">
-                            Picked by {order.pickerName}
-                          </div>
+                        {order.isCombinedGroup && order.combinedOrders ? (
+                          <>
+                            <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
+                              <Badge className="bg-indigo-600 text-white text-[10px] px-1.5 py-0">
+                                {order.combinedOrders.length} Orders Combined
+                              </Badge>
+                              <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
+                                <Clock size={10} /> {order.age}
+                              </span>
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                              {order.combinedOrders.map((co, idx) => (
+                                <div key={co.id} className="flex items-center gap-1">
+                                  <span className="font-medium text-foreground">{co.orderNumber}</span>
+                                  <span className="text-muted-foreground">({co.itemCount} {co.itemCount === 1 ? "line" : "lines"})</span>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-1">
+                              {order.customer} • {order.items.length} total lines
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="font-semibold flex items-center gap-1.5 text-base md:text-sm flex-wrap">
+                              {order.orderNumber}
+                              <span className="text-xs text-muted-foreground font-normal flex items-center gap-0.5">
+                                <Clock size={10} /> {order.age}
+                              </span>
+                            </div>
+                            <div className="text-xs text-muted-foreground truncate">
+                              {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
+                            </div>
+                            {order.orderDate && (
+                              <div className="text-[10px] text-muted-foreground/70">
+                                {order.orderDate}
+                              </div>
+                            )}
+                            {order.status === "completed" && order.pickerName && (
+                              <div className="text-[10px] text-muted-foreground">
+                                Picked by {order.pickerName}
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
-                        {order.channelProvider && (
+                        {order.channelProvider && !order.isCombinedGroup && (
                           <Badge variant="outline" className={cn("text-[9px] px-1.5 py-0.5", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
                             {getChannelBadgeStyle(order.channelProvider).label}
                           </Badge>
                         )}
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
-                        {order.combinedGroupId && (
-                          <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-indigo-300 text-indigo-700 bg-indigo-50">
-                            {order.combinedRole === "parent" ? "COMBINED" : "CHILD"}
-                          </Badge>
-                        )}
                         {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
                         {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         {order.status === "completed" && order.c2p && (
