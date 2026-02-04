@@ -439,6 +439,24 @@ export default function CycleCounts() {
     enabled: debouncedMobileSkuSearch.length >= 2 && mobileSkuDropdownOpen,
   });
   
+  // Wrong SKU search state (tracks which item has wrong SKU mode open)
+  const [wrongSkuItemId, setWrongSkuItemId] = useState<number | null>(null);
+  const [wrongSkuSearch, setWrongSkuSearch] = useState("");
+  const [wrongSkuDropdownOpen, setWrongSkuDropdownOpen] = useState(false);
+  const debouncedWrongSkuSearch = useDebounce(wrongSkuSearch, 300);
+  
+  // Wrong SKU search query
+  const { data: wrongSkuResults = [] } = useQuery<Array<{ sku: string; name: string }>>({
+    queryKey: ["/api/inventory/skus/search", "wrong", debouncedWrongSkuSearch],
+    queryFn: async () => {
+      if (!debouncedWrongSkuSearch || debouncedWrongSkuSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(debouncedWrongSkuSearch)}&limit=10`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedWrongSkuSearch.length >= 2 && wrongSkuDropdownOpen,
+  });
+  
   // Extra item SKU search
   const [extraItemSkuDropdownOpen, setExtraItemSkuDropdownOpen] = useState(false);
   const debouncedExtraItemSku = useDebounce(foundItemForm.sku, 300);
@@ -717,14 +735,18 @@ export default function CycleCounts() {
                           Empty
                         </Button>
                         <Button 
-                          variant="outline" 
+                          variant={wrongSkuItemId === binItem.id ? "default" : "outline"}
                           size="sm"
                           className="h-8 text-xs"
                           onClick={() => {
-                            // Toggle wrong SKU mode for this item
-                            const input = document.getElementById(`wrong-sku-${binItem.id}`) as HTMLElement;
-                            if (input) {
-                              input.classList.toggle('hidden');
+                            if (wrongSkuItemId === binItem.id) {
+                              setWrongSkuItemId(null);
+                              setWrongSkuSearch("");
+                              setWrongSkuDropdownOpen(false);
+                            } else {
+                              setWrongSkuItemId(binItem.id);
+                              setWrongSkuSearch("");
+                              setWrongSkuDropdownOpen(false);
                             }
                           }}
                         >
@@ -732,6 +754,79 @@ export default function CycleCounts() {
                           Wrong SKU
                         </Button>
                       </div>
+                      
+                      {/* Wrong SKU input with typeahead */}
+                      {wrongSkuItemId === binItem.id && (
+                        <div className="mt-2 bg-amber-50 border border-amber-200 rounded p-2">
+                          <Label className="text-amber-800 text-xs">What SKU is actually here?</Label>
+                          <div className="relative mt-1">
+                            <Input
+                              value={wrongSkuSearch}
+                              onChange={(e) => {
+                                setWrongSkuSearch(e.target.value);
+                                setWrongSkuDropdownOpen(true);
+                              }}
+                              onFocus={() => setWrongSkuDropdownOpen(true)}
+                              placeholder="Type to search SKUs..."
+                              className="text-sm h-9"
+                              autoFocus
+                            />
+                            {wrongSkuDropdownOpen && wrongSkuResults.length > 0 && (
+                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                                {wrongSkuResults.map((result) => (
+                                  <button
+                                    key={result.sku}
+                                    type="button"
+                                    className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                                    onClick={() => {
+                                      setWrongSkuSearch(result.sku);
+                                      setWrongSkuDropdownOpen(false);
+                                    }}
+                                  >
+                                    <div className="font-medium text-sm">{result.sku}</div>
+                                    {result.name && <div className="text-xs text-muted-foreground truncate">{result.name}</div>}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <Button
+                            size="sm"
+                            className="w-full h-9 mt-2"
+                            onClick={() => {
+                              const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
+                              if (countVal === "" || !wrongSkuSearch) return;
+                              countMutation.mutate({
+                                itemId: binItem.id,
+                                data: {
+                                  countedSku: wrongSkuSearch,
+                                  countedQty: parseInt(countVal) || 0,
+                                  notes: `Wrong SKU: Expected ${binItem.expectedSku}, found ${wrongSkuSearch}`,
+                                }
+                              }, {
+                                onSuccess: () => {
+                                  playSoundWithHaptic("success", "classic", true);
+                                  setWrongSkuItemId(null);
+                                  setWrongSkuSearch("");
+                                  const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
+                                  if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
+                                    setTimeout(() => {
+                                      setAddFoundItemMode(false);
+                                      setFoundItemForm({ sku: "", quantity: "" });
+                                      setCurrentBinIndex(currentBinIndex + 1);
+                                    }, 300);
+                                  }
+                                }
+                              });
+                            }}
+                            disabled={countMutation.isPending || !wrongSkuSearch}
+                          >
+                            <Check className="h-4 w-4 mr-1" />
+                            Confirm Wrong SKU
+                          </Button>
+                        </div>
+                      )}
+                      
                       {/* Big Confirm button */}
                       <Button
                         size="lg"
@@ -767,49 +862,6 @@ export default function CycleCounts() {
                         Confirm
                       </Button>
                       
-                      {/* Wrong SKU input - hidden by default */}
-                      <div id={`wrong-sku-${binItem.id}`} className="hidden mt-2 bg-amber-50 border border-amber-200 rounded p-2">
-                        <Label className="text-amber-800 text-xs">What SKU is actually here?</Label>
-                        <div className="flex gap-2 mt-1">
-                          <Input
-                            id={`wrong-sku-input-${binItem.id}`}
-                            placeholder="Enter actual SKU..."
-                            className="text-sm h-8 flex-1"
-                          />
-                          <Button
-                            size="sm"
-                            className="h-8 px-2"
-                            onClick={() => {
-                              const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
-                              const wrongSku = (document.getElementById(`wrong-sku-input-${binItem.id}`) as HTMLInputElement)?.value;
-                              if (countVal === "" || !wrongSku) return;
-                              countMutation.mutate({
-                                itemId: binItem.id,
-                                data: {
-                                  countedSku: wrongSku,
-                                  countedQty: parseInt(countVal) || 0,
-                                  notes: `Wrong SKU: Expected ${binItem.expectedSku}, found ${wrongSku}`,
-                                }
-                              }, {
-                                onSuccess: () => {
-                                  playSoundWithHaptic("success", "classic", true);
-                                  const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
-                                  if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
-                                    setTimeout(() => {
-                                      setAddFoundItemMode(false);
-                                      setFoundItemForm({ sku: "", quantity: "" });
-                                      setCurrentBinIndex(currentBinIndex + 1);
-                                    }, 300);
-                                  }
-                                }
-                              });
-                            }}
-                            disabled={countMutation.isPending}
-                          >
-                            <Check className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
                     </>
                   )}
                 </div>
