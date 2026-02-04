@@ -860,11 +860,12 @@ export class DatabaseStorage implements IStorage {
       SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), s.customer_name) as resolved_customer_name
       FROM orders o
       LEFT JOIN shopify_orders s ON o.source_table_id = s.id
-      WHERE s.cancelled_at IS NULL
+      WHERE (s.cancelled_at IS NULL OR s.id IS NULL)
+        AND o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
           -- Ready/in_progress orders: exclude if already fulfilled in Shopify
           (o.warehouse_status IN ('ready', 'in_progress') 
-           AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled'))
+           AND (s.id IS NULL OR s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled'))
           -- Completed orders: show for 24 hours regardless of fulfillment status (for done queue)
           OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
         )
