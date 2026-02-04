@@ -3139,7 +3139,7 @@ export default function Picking() {
               {pickingMode === "batch" ? "Batch" : "Order"} Complete!
             </h1>
             <p className="text-muted-foreground text-lg">
-              {activeWork?.id} is ready for packing
+              {pickingMode === "single" && activeOrder ? activeOrder.orderNumber : activeWork?.id} is ready for packing
             </p>
           </div>
           
