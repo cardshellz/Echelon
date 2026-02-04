@@ -83,7 +83,7 @@ interface Order {
   source: string;
   channelId: number | null;
   channel: Channel | null;
-  status: string;
+  warehouseStatus: string;
   priority: string;
   itemCount: number;
   pickedCount: number;
