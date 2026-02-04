@@ -926,10 +926,9 @@ export default function Picking() {
         document.removeEventListener("mousedown", preventBlur);
         document.removeEventListener("touchstart", preventBlur);
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
-        setKeyboardDismissed(false);
       };
     }
-  }, [view, maintainFocus, keyboardDismissed]);
+  }, [view, maintainFocus]);
   
   // Refocus after dialogs close
   useEffect(() => {
