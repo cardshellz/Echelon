@@ -124,6 +124,7 @@ export const orders = pgTable("orders", {
   customerEmail: text("customer_email"),
   
   // ===== SHIPPING ADDRESS (for labels) =====
+  shippingName: text("shipping_name"), // Recipient name from shipping address
   shippingAddress: text("shipping_address"), // Legacy single-line format
   shippingCity: text("shipping_city"),
   shippingState: text("shipping_state"),

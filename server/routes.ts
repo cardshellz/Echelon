@@ -2921,6 +2921,7 @@ export async function registerRoutes(
           orderNumber: rawOrder.order_number,
           customerName: rawOrder.customer_name || rawOrder.shipping_name || rawOrder.order_number,
           customerEmail: rawOrder.customer_email,
+          shippingName: rawOrder.shipping_name,
           shippingAddress: rawOrder.shipping_address1,
           shippingCity: rawOrder.shipping_city,
           shippingState: rawOrder.shipping_state,
