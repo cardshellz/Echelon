@@ -694,39 +694,6 @@ export default function CycleCounts() {
                         >
                           +
                         </Button>
-                        <Button
-                          size="sm"
-                          className="h-10 px-3"
-                          onClick={() => {
-                            const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
-                            if (countVal === "") return;
-                            countMutation.mutate({
-                              itemId: binItem.id,
-                              data: {
-                                countedSku: binItem.expectedSku || null,
-                                countedQty: parseInt(countVal) || 0,
-                                notes: null,
-                              }
-                            }, {
-                              onSuccess: () => {
-                                playSoundWithHaptic("success", "classic", true);
-                                // Check if all items in this bin are now confirmed (this one was the last pending)
-                                const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
-                                if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
-                                  // All items in bin confirmed, auto-advance to next bin
-                                  setTimeout(() => {
-                                    setAddFoundItemMode(false);
-                                    setFoundItemForm({ sku: "", quantity: "" });
-                                    setCurrentBinIndex(currentBinIndex + 1);
-                                  }, 300);
-                                }
-                              }
-                            });
-                          }}
-                          disabled={countMutation.isPending}
-                        >
-                          <Check className="h-4 w-4" />
-                        </Button>
                       </div>
                       <div className="flex gap-2 mt-2">
                         <Button 
@@ -765,6 +732,41 @@ export default function CycleCounts() {
                           Wrong SKU
                         </Button>
                       </div>
+                      {/* Big Confirm button */}
+                      <Button
+                        size="lg"
+                        className="w-full h-12 text-base mt-3"
+                        onClick={() => {
+                          const countVal = (document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value;
+                          if (countVal === "") return;
+                          countMutation.mutate({
+                            itemId: binItem.id,
+                            data: {
+                              countedSku: binItem.expectedSku || null,
+                              countedQty: parseInt(countVal) || 0,
+                              notes: null,
+                            }
+                          }, {
+                            onSuccess: () => {
+                              playSoundWithHaptic("success", "classic", true);
+                              const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
+                              if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
+                                setTimeout(() => {
+                                  setAddFoundItemMode(false);
+                                  setFoundItemForm({ sku: "", quantity: "" });
+                                  setCurrentBinIndex(currentBinIndex + 1);
+                                }, 300);
+                              }
+                            }
+                          });
+                        }}
+                        disabled={countMutation.isPending}
+                        data-testid={`button-confirm-${binItem.id}`}
+                      >
+                        <Check className="h-5 w-5 mr-2" />
+                        Confirm
+                      </Button>
+                      
                       {/* Wrong SKU input - hidden by default */}
                       <div id={`wrong-sku-${binItem.id}`} className="hidden mt-2 bg-amber-50 border border-amber-200 rounded p-2">
                         <Label className="text-amber-800 text-xs">What SKU is actually here?</Label>
@@ -813,20 +815,6 @@ export default function CycleCounts() {
                 </div>
               );
             })}
-            
-            {/* Found Extra Item button */}
-            <Button 
-              variant="outline" 
-              size="sm"
-              className="h-9 text-xs shrink-0 w-full"
-              onClick={() => {
-                setAddFoundItemMode(!addFoundItemMode);
-                setFoundItemForm({ sku: "", quantity: "" });
-              }}
-            >
-              <Plus className="h-3 w-3 mr-1" />
-              Found Extra Item
-            </Button>
             
             {/* Add unexpected item found */}
             {addFoundItemMode ? (
