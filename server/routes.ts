@@ -827,19 +827,22 @@ export async function registerRoutes(
         }
       }
       
-      // Collect all unique UNASSIGNED SKUs across all orders for batch lookup
-      const unassignedSkus = new Set<string>();
+      // Collect all unique SKUs that need lookup (UNASSIGNED or missing imageUrl)
+      const skusNeedingLookup = new Set<string>();
       for (const order of filteredOrders) {
         for (const item of order.items) {
-          if (item.location === "UNASSIGNED" && item.sku && item.requiresShipping === 1) {
-            unassignedSkus.add(item.sku);
+          if (item.sku && item.requiresShipping === 1) {
+            // Need lookup if UNASSIGNED or missing imageUrl
+            if (item.location === "UNASSIGNED" || !item.imageUrl) {
+              skusNeedingLookup.add(item.sku);
+            }
           }
         }
       }
       
-      // Batch lookup locations for all UNASSIGNED SKUs (single query instead of per-item)
+      // Batch lookup locations for all SKUs needing data (single query instead of per-item)
       const freshLocationMap = new Map<string, { location: string; zone: string; barcode: string | null; imageUrl: string | null }>();
-      for (const sku of unassignedSkus) {
+      for (const sku of skusNeedingLookup) {
         const freshLocation = await storage.getBinLocationFromInventoryBySku(sku);
         if (freshLocation) {
           freshLocationMap.set(sku, freshLocation);
@@ -863,11 +866,14 @@ export async function registerRoutes(
         
         // Apply fresh locations to UNASSIGNED items using pre-fetched map
         const itemsWithFreshLocations = shippableItems.map((item) => {
+          let updatedItem = { ...item };
+          
+          // Update location for UNASSIGNED items
           if (item.location === "UNASSIGNED" && item.sku) {
             const freshLocation = freshLocationMap.get(item.sku);
             if (freshLocation) {
-              return {
-                ...item,
+              updatedItem = {
+                ...updatedItem,
                 location: freshLocation.location,
                 zone: freshLocation.zone,
                 barcode: freshLocation.barcode || item.barcode,
@@ -875,7 +881,16 @@ export async function registerRoutes(
               };
             }
           }
-          return item;
+          
+          // If still no imageUrl, try to get from freshLocationMap even if location is assigned
+          if (!updatedItem.imageUrl && item.sku) {
+            const freshLocation = freshLocationMap.get(item.sku);
+            if (freshLocation?.imageUrl) {
+              updatedItem.imageUrl = freshLocation.imageUrl;
+            }
+          }
+          
+          return updatedItem;
         });
         
         return {

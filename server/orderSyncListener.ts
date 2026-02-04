@@ -121,6 +121,22 @@ export async function syncNewOrders() {
       for (const item of unfulfilledItems) {
         // Look up bin location from inventory_levels (where stock actually is)
         const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
+        
+        // If no image from inventory, try to get from uom_variants or catalog_products
+        let imageUrl = binLocation?.imageUrl || null;
+        if (!imageUrl && item.sku) {
+          const imageResult = await db.execute<{ image_url: string | null }>(sql`
+            SELECT COALESCE(uv.image_url, cp.image_url) as image_url
+            FROM uom_variants uv
+            LEFT JOIN catalog_products cp ON uv.catalog_product_id = cp.id
+            WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
+            LIMIT 1
+          `);
+          if (imageResult.rows.length > 0 && imageResult.rows[0].image_url) {
+            imageUrl = imageResult.rows[0].image_url;
+          }
+        }
+        
         enrichedItems.push({
           orderId: 0,
           shopifyLineItemId: item.shopify_line_item_id,
@@ -133,7 +149,7 @@ export async function syncNewOrders() {
           status: "pending",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
-          imageUrl: binLocation?.imageUrl || null,
+          imageUrl: imageUrl,
           barcode: binLocation?.barcode || null,
           requiresShipping: item.requires_shipping ? 1 : 0,
         });
