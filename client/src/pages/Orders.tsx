@@ -92,6 +92,8 @@ interface Order {
   createdAt: string;
   orderPlacedAt: string | null;
   items: OrderItem[];
+  combinedGroupId: number | null;
+  combinedRole: string | null;
 }
 
 interface OrdersResponse {
@@ -553,6 +555,12 @@ export default function Orders() {
                             {order.orderNumber}
                             {order.totalAmount && (
                               <span className="text-muted-foreground font-normal">${order.totalAmount}</span>
+                            )}
+                            {order.combinedGroupId && (
+                              <Badge variant="secondary" className="text-xs bg-indigo-100 text-indigo-700 border-indigo-200">
+                                <Merge className="h-3 w-3 mr-1" />
+                                {order.combinedRole === "parent" ? "Combined" : "Child"}
+                              </Badge>
                             )}
                             {order.source === "manual" && (
                               <Badge variant="outline" className="text-xs">Manual</Badge>

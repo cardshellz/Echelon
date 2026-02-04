@@ -911,6 +911,8 @@ export class DatabaseStorage implements IStorage {
       updatedAt: row.updated_at,
       metadata: row.metadata,
       legacyOrderId: row.legacy_order_id,
+      combinedGroupId: row.combined_group_id,
+      combinedRole: row.combined_role,
     }));
     
     if (orderRows.length === 0) {

@@ -291,6 +291,8 @@ interface SingleOrder {
   c2p?: string | null; // Click to Pick time formatted (e.g., "2d 3h")
   channelName?: string | null; // Channel display name
   channelProvider?: string | null; // Provider type (shopify, ebay, amazon, manual)
+  combinedGroupId?: number | null; // Combined order group ID
+  combinedRole?: string | null; // 'parent' or 'child'
 }
 
 const createSingleOrderQueue = (): SingleOrder[] => [
@@ -2540,6 +2542,11 @@ export default function Picking() {
                           </Badge>
                         )}
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
+                        {order.combinedGroupId && (
+                          <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-indigo-300 text-indigo-700 bg-indigo-50">
+                            {order.combinedRole === "parent" ? "COMBINED" : "CHILD"}
+                          </Badge>
+                        )}
                         {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
                         {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
                         {order.status === "completed" && order.c2p && (
