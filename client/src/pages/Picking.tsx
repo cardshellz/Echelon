@@ -2660,8 +2660,69 @@ export default function Picking() {
                               {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
                             </div>
                             {order.orderDate && (
-                              <div className="text-[10px] text-muted-foreground/70">
-                                {order.orderDate}
+                              <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2">
+                                <span>{order.orderDate}</span>
+                                {/* Admin inline Rush/Hold buttons for ready orders */}
+                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority !== "rush" && (
+                                  <button
+                                    className="text-red-600 hover:text-red-700 flex items-center gap-0.5 font-medium"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFlashingOrderId(order.id);
+                                      rushMutation.mutate({ orderId: parseInt(order.id), priority: "rush" });
+                                      setTimeout(() => setFlashingOrderId(null), 600);
+                                    }}
+                                    data-testid={`button-rush-${order.id}`}
+                                  >
+                                    <Zap className="h-3 w-3" />
+                                    Rush
+                                  </button>
+                                )}
+                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority === "rush" && (
+                                  <button
+                                    className="text-slate-500 hover:text-slate-600 flex items-center gap-0.5 font-medium"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFlashingOrderId(order.id);
+                                      rushMutation.mutate({ orderId: parseInt(order.id), priority: "normal" });
+                                      setTimeout(() => setFlashingOrderId(null), 600);
+                                    }}
+                                    data-testid={`button-unrush-${order.id}`}
+                                  >
+                                    <Zap className="h-3 w-3" />
+                                    Unrush
+                                  </button>
+                                )}
+                                {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                                  <button
+                                    className="text-slate-600 hover:text-slate-700 flex items-center gap-0.5 font-medium"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFlashingOrderId(order.id);
+                                      holdMutation.mutate(parseInt(order.id));
+                                      setTimeout(() => setFlashingOrderId(null), 600);
+                                    }}
+                                    data-testid={`button-hold-${order.id}`}
+                                  >
+                                    <Pause className="h-3 w-3" />
+                                    Hold
+                                  </button>
+                                )}
+                                {isAdminOrLead && order.onHold && (
+                                  <button
+                                    className="text-emerald-600 hover:text-emerald-700 flex items-center gap-0.5 font-medium"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFlashingOrderId(order.id);
+                                      releaseHoldMutation.mutate(parseInt(order.id));
+                                      setTimeout(() => setFlashingOrderId(null), 600);
+                                    }}
+                                    data-testid={`button-release-hold-${order.id}`}
+                                  >
+                                    <Play className="h-3 w-3" />
+                                    Release
+                                  </button>
+                                )}
                               </div>
                             )}
                             {order.status === "completed" && order.pickerName && (
@@ -2684,84 +2745,16 @@ export default function Picking() {
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
-                        {order.status === "ready" && !order.onHold && !isAdminOrLead && (
+                        {(order.status === "ready" && !order.onHold && !isAdminOrLead) && (
+                          <ChevronRight className="h-5 w-5 text-muted-foreground" />
+                        )}
+                        {isAdminOrLead && order.status === "ready" && !order.onHold && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
                       </div>
                     </div>
-                    {isAdminOrLead && (order.status === "ready" || order.status === "in_progress") && (
+                    {isAdminOrLead && order.status === "in_progress" && (
                     <div className="flex items-center gap-1 justify-end border-t pt-2 mt-1 flex-wrap">
-                      {order.status === "ready" && !order.onHold && order.priority !== "rush" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-9 px-2 text-red-600 hover:text-red-700 hover:bg-red-50"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFlashingOrderId(order.id);
-                            rushMutation.mutate({ orderId: parseInt(order.id), priority: "rush" });
-                            setTimeout(() => setFlashingOrderId(null), 600);
-                          }}
-                          data-testid={`button-rush-${order.id}`}
-                        >
-                          <Zap className="h-4 w-4 mr-1" />
-                          Rush
-                        </Button>
-                      )}
-                      {order.status === "ready" && !order.onHold && order.priority === "rush" && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-9 px-2 text-slate-500 hover:text-slate-600 hover:bg-slate-50"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFlashingOrderId(order.id);
-                            rushMutation.mutate({ orderId: parseInt(order.id), priority: "normal" });
-                            setTimeout(() => setFlashingOrderId(null), 600);
-                          }}
-                          data-testid={`button-unrush-${order.id}`}
-                        >
-                          <Zap className="h-4 w-4 mr-1" />
-                          Unrush
-                        </Button>
-                      )}
-                      {order.status === "ready" && !order.onHold && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-9 px-2 text-slate-600 hover:text-slate-700 hover:bg-slate-100"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFlashingOrderId(order.id);
-                            holdMutation.mutate(parseInt(order.id));
-                            setTimeout(() => setFlashingOrderId(null), 600);
-                          }}
-                          data-testid={`button-hold-${order.id}`}
-                        >
-                          <Pause className="h-4 w-4 mr-1" />
-                          Hold
-                        </Button>
-                      )}
-                      {order.onHold && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-9 px-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFlashingOrderId(order.id);
-                            releaseHoldMutation.mutate(parseInt(order.id));
-                            setTimeout(() => setFlashingOrderId(null), 600);
-                          }}
-                          data-testid={`button-release-hold-${order.id}`}
-                        >
-                          <Play className="h-4 w-4 mr-1" />
-                          Release
-                        </Button>
-                      )}
-                      {order.status === "ready" && !order.onHold && (
-                        <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                      )}
                       {order.status === "in_progress" && (
                         <>
                           <Button
