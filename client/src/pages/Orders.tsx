@@ -332,6 +332,61 @@ export default function Orders() {
     );
   });
 
+  // Group combined orders into single display entries
+  interface DisplayOrder extends Order {
+    isCombinedGroup?: boolean;
+    combinedOrders?: { id: number; orderNumber: string; itemCount: number; status: string }[];
+    totalItemCount?: number;
+    totalPickedCount?: number;
+  }
+
+  const groupedOrders: DisplayOrder[] = (() => {
+    const result: DisplayOrder[] = [];
+    const processedGroupIds = new Set<number>();
+    
+    for (const order of filteredOrders) {
+      // Skip child orders - they'll be merged into the parent
+      if (order.combinedGroupId && order.combinedRole === "child") {
+        continue;
+      }
+      
+      // If this is a parent of a combined group, merge all children
+      if (order.combinedGroupId && order.combinedRole === "parent") {
+        if (processedGroupIds.has(order.combinedGroupId)) continue;
+        processedGroupIds.add(order.combinedGroupId);
+        
+        // Find all orders in this combined group
+        const groupOrders = filteredOrders.filter(o => o.combinedGroupId === order.combinedGroupId);
+        
+        // Calculate combined totals
+        const totalItemCount = groupOrders.reduce((sum, o) => sum + o.itemCount, 0);
+        const totalPickedCount = groupOrders.reduce((sum, o) => sum + o.pickedCount, 0);
+        const combinedOrdersList = groupOrders.map(o => ({
+          id: o.id,
+          orderNumber: o.orderNumber,
+          itemCount: o.itemCount,
+          status: o.status,
+        }));
+        
+        // Create combined entry using parent's data
+        result.push({
+          ...order,
+          isCombinedGroup: true,
+          combinedOrders: combinedOrdersList,
+          totalItemCount,
+          totalPickedCount,
+          itemCount: totalItemCount,
+          pickedCount: totalPickedCount,
+        });
+      } else {
+        // Regular uncombined order
+        result.push(order);
+      }
+    }
+    
+    return result;
+  })();
+
   const activeCount = orders.filter(o => o.status === "ready" || o.status === "in_progress").length;
   const exceptionCount = orders.filter(o => o.status === "exception").length;
   const completedCount = orders.filter(o => o.status === "completed" || o.status === "shipped").length;
@@ -534,13 +589,25 @@ export default function Orders() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {filteredOrders.map((order) => (
-                <Card key={order.id} className="hover:border-primary/50 transition-colors cursor-pointer group" data-testid={`card-order-${order.id}`}>
+              {groupedOrders.map((order) => (
+                <Card 
+                  key={order.isCombinedGroup ? `combined-${order.combinedGroupId}` : order.id} 
+                  className={cn(
+                    "hover:border-primary/50 transition-colors cursor-pointer group",
+                    order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20"
+                  )}
+                  data-testid={`card-order-${order.id}`}
+                >
                   <CardContent className="p-4">
                     <div className="flex items-start justify-between">
                       <div className="flex items-start gap-4">
-                        <div className="bg-primary/10 p-2 rounded-md group-hover:bg-primary/20 transition-colors flex items-center justify-center w-10 h-10">
-                          {order.source && sourceIcons[order.source] ? (
+                        <div className={cn(
+                          "p-2 rounded-md group-hover:bg-primary/20 transition-colors flex items-center justify-center w-10 h-10",
+                          order.isCombinedGroup ? "bg-indigo-100" : "bg-primary/10"
+                        )}>
+                          {order.isCombinedGroup ? (
+                            <Merge className="h-5 w-5 text-indigo-600" />
+                          ) : order.source && sourceIcons[order.source] ? (
                             <img 
                               src={sourceIcons[order.source]} 
                               className="w-5 h-5 object-contain" 
@@ -551,35 +618,60 @@ export default function Orders() {
                           )}
                         </div>
                         <div>
-                          <div className="font-semibold flex items-center gap-2 flex-wrap">
-                            {order.orderNumber}
-                            {order.totalAmount && (
-                              <span className="text-muted-foreground font-normal">${order.totalAmount}</span>
-                            )}
-                            {order.combinedGroupId && (
-                              <Badge variant="secondary" className="text-xs bg-indigo-100 text-indigo-700 border-indigo-200">
-                                <Merge className="h-3 w-3 mr-1" />
-                                {order.combinedRole === "parent" ? "Combined" : "Child"}
-                              </Badge>
-                            )}
-                            {order.source === "manual" && (
-                              <Badge variant="outline" className="text-xs">Manual</Badge>
-                            )}
-                            {order.priority !== "normal" && (
-                              <Badge className={cn("text-xs", priorityColors[order.priority])}>
-                                {order.priority.toUpperCase()}
-                              </Badge>
-                            )}
-                            <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
-                              {order.status.replace("_", " ")}
-                            </Badge>
-                            {order.onHold === 1 && (
-                              <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
-                            )}
-                          </div>
-                          <div className="text-sm text-muted-foreground mt-1">
-                            {order.customerName} • {order.itemCount} items
-                          </div>
+                          {order.isCombinedGroup && order.combinedOrders ? (
+                            <>
+                              <div className="font-semibold flex items-center gap-2 flex-wrap">
+                                <Badge className="bg-indigo-600 text-white text-xs">
+                                  {order.combinedOrders.length} Orders Combined
+                                </Badge>
+                                {order.priority !== "normal" && (
+                                  <Badge className={cn("text-xs", priorityColors[order.priority])}>
+                                    {order.priority.toUpperCase()}
+                                  </Badge>
+                                )}
+                                <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
+                                  {order.status.replace("_", " ")}
+                                </Badge>
+                              </div>
+                              <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
+                                {order.combinedOrders.map((co) => (
+                                  <div key={co.id} className="flex items-center gap-2">
+                                    <span className="font-medium text-foreground">{co.orderNumber}</span>
+                                    <span className="text-muted-foreground">({co.itemCount} items)</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="text-sm text-muted-foreground mt-1">
+                                {order.customerName} • {order.itemCount} total items
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="font-semibold flex items-center gap-2 flex-wrap">
+                                {order.orderNumber}
+                                {order.totalAmount && (
+                                  <span className="text-muted-foreground font-normal">${order.totalAmount}</span>
+                                )}
+                                {order.source === "manual" && (
+                                  <Badge variant="outline" className="text-xs">Manual</Badge>
+                                )}
+                                {order.priority !== "normal" && (
+                                  <Badge className={cn("text-xs", priorityColors[order.priority])}>
+                                    {order.priority.toUpperCase()}
+                                  </Badge>
+                                )}
+                                <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
+                                  {order.status.replace("_", " ")}
+                                </Badge>
+                                {order.onHold === 1 && (
+                                  <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
+                                )}
+                              </div>
+                              <div className="text-sm text-muted-foreground mt-1">
+                                {order.customerName} • {order.itemCount} items
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                       <div className="text-right">
