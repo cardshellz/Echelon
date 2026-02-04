@@ -879,10 +879,11 @@ export default function CycleCounts() {
               Prev
             </Button>
             <Button 
+              variant="outline"
               size="sm"
-              className="flex-1 h-11 text-sm"
+              className="h-11 px-3"
               onClick={() => {
-                // Move to next bin
+                // Move to next bin (incremental)
                 if (currentBinIndex < binGroups.length - 1) {
                   setCurrentBinIndex(currentBinIndex + 1);
                   setAddFoundItemMode(false);
@@ -892,7 +893,27 @@ export default function CycleCounts() {
               disabled={currentBinIndex === binGroups.length - 1}
               data-testid="button-next-bin"
             >
-              Next Bin
+              Next
+              <ChevronRight className="h-4 w-4 ml-1" />
+            </Button>
+            <Button 
+              size="sm"
+              className="flex-1 h-11 text-sm"
+              onClick={() => {
+                // Find next bin with uncounted items
+                const nextUncountedIdx = binGroups.findIndex((bin, idx) => 
+                  idx > currentBinIndex && bin.items.some(i => i.status === "pending")
+                );
+                if (nextUncountedIdx !== -1) {
+                  setCurrentBinIndex(nextUncountedIdx);
+                  setAddFoundItemMode(false);
+                  setFoundItemForm({ sku: "", quantity: "" });
+                }
+              }}
+              disabled={!binGroups.some((bin, idx) => idx > currentBinIndex && bin.items.some(i => i.status === "pending"))}
+              data-testid="button-next-uncounted"
+            >
+              Next Uncounted
               <ChevronRight className="h-4 w-4 ml-1" />
             </Button>
           </div>
