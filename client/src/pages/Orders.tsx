@@ -13,7 +13,11 @@ import {
   Package,
   Plus,
   Store,
-  RefreshCw
+  RefreshCw,
+  Merge,
+  MapPin,
+  User2,
+  Check
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -97,6 +101,31 @@ interface OrdersResponse {
   offset: number;
 }
 
+interface CombinableOrder {
+  id: number;
+  orderNumber: string;
+  itemCount: number;
+  unitCount: number;
+  totalAmount: string | null;
+  source: string;
+  createdAt: string;
+}
+
+interface CombinableGroup {
+  addressHash: string;
+  customerName: string;
+  customerEmail: string | null;
+  shippingAddress: string | null;
+  shippingCity: string | null;
+  shippingState: string | null;
+  shippingPostalCode: string | null;
+  shippingCountry: string | null;
+  orders: CombinableOrder[];
+  totalOrders: number;
+  totalItems: number;
+  totalUnits: number;
+}
+
 const sourceIcons: Record<string, string> = {
   shopify: "https://upload.wikimedia.org/wikipedia/commons/0/0e/Shopify_logo_2018.svg",
   ebay: "https://upload.wikimedia.org/wikipedia/commons/1/1b/EBay_logo.svg",
@@ -134,6 +163,9 @@ export default function Orders() {
   const [channelFilter, setChannelFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isCombineOpen, setIsCombineOpen] = useState(false);
+  const [selectedCombineGroup, setSelectedCombineGroup] = useState<CombinableGroup | null>(null);
+  const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [newOrder, setNewOrder] = useState({
     orderNumber: "",
     customerName: "",
@@ -170,6 +202,43 @@ export default function Orders() {
 
   const { data: channels } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
+  });
+
+  const { data: combinableGroups = [], isError: combinableError } = useQuery<CombinableGroup[]>({
+    queryKey: ["/api/orders/combinable"],
+    queryFn: async () => {
+      const res = await fetch("/api/orders/combinable");
+      if (!res.ok) throw new Error("Failed to fetch combinable orders");
+      return res.json();
+    },
+    refetchInterval: 30000,
+    retry: 1,
+  });
+
+  const combineOrdersMutation = useMutation({
+    mutationFn: async (orderIds: number[]) => {
+      const res = await fetch("/api/orders/combine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderIds }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to combine orders");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/orders/combinable"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      setIsCombineOpen(false);
+      setSelectedCombineGroup(null);
+      setSelectedOrderIds([]);
+      toast({ title: "Orders combined", description: "The selected orders have been grouped for combined picking and shipping." });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
   });
 
   const createOrderMutation = useMutation({
@@ -352,6 +421,21 @@ export default function Orders() {
               </PopoverContent>
             </Popover>
             
+            {!combinableError && combinableGroups.length > 0 && (
+              <Button 
+                size="sm" 
+                variant="outline"
+                onClick={() => setIsCombineOpen(true)} 
+                data-testid="button-combine-orders" 
+                className="gap-2 border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-700"
+              >
+                <Merge className="h-4 w-4" />
+                <span className="hidden sm:inline">Combine</span>
+                <Badge variant="secondary" className="bg-amber-200 text-amber-800">
+                  {combinableGroups.length}
+                </Badge>
+              </Button>
+            )}
             <Button size="sm" onClick={() => setIsCreateOpen(true)} data-testid="button-create-order" className="hidden sm:flex">
               <Plus className="h-4 w-4 mr-2" />
               Create Order
@@ -775,6 +859,176 @@ export default function Orders() {
             <Button onClick={handleCreateOrder} disabled={createOrderMutation.isPending} className="min-h-[44px]" data-testid="button-submit-order">
               {createOrderMutation.isPending ? "Creating..." : "Create Order"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Combine Orders Dialog */}
+      <Dialog open={isCombineOpen} onOpenChange={setIsCombineOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Merge className="h-5 w-5 text-amber-600" />
+              Combine Orders
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-4">
+            {!selectedCombineGroup ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  These customers have placed multiple orders to the same address. 
+                  Combine them to pick and ship together for efficiency.
+                </p>
+                <div className="space-y-3">
+                  {combinableGroups.map((group) => (
+                    <Card 
+                      key={group.addressHash} 
+                      className="cursor-pointer hover:border-amber-400 transition-colors"
+                      onClick={() => {
+                        setSelectedCombineGroup(group);
+                        setSelectedOrderIds(group.orders.map(o => o.id));
+                      }}
+                      data-testid={`card-combine-group-${group.orders[0]?.id}`}
+                    >
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <User2 className="h-4 w-4 text-muted-foreground" />
+                              <span className="font-medium">{group.customerName}</span>
+                            </div>
+                            {group.shippingAddress && (
+                              <div className="flex items-start gap-2 text-sm text-muted-foreground">
+                                <MapPin className="h-4 w-4 mt-0.5 shrink-0" />
+                                <span>
+                                  {group.shippingAddress}, {group.shippingCity}, {group.shippingState} {group.shippingPostalCode}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+                            {group.totalOrders} orders
+                          </Badge>
+                        </div>
+                        <div className="mt-3 flex gap-4 text-xs text-muted-foreground">
+                          <span>{group.totalItems} items</span>
+                          <span>{group.totalUnits} units</span>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                  {combinableGroups.length === 0 && (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Merge className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                      <p>No combinable orders found</p>
+                      <p className="text-xs mt-1">Orders to the same address will appear here</p>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <User2 className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium">{selectedCombineGroup.customerName}</span>
+                  </div>
+                  {selectedCombineGroup.shippingAddress && (
+                    <div className="flex items-start gap-2 text-sm text-muted-foreground">
+                      <MapPin className="h-4 w-4 mt-0.5 shrink-0" />
+                      <span>
+                        {selectedCombineGroup.shippingAddress}, {selectedCombineGroup.shippingCity}, {selectedCombineGroup.shippingState} {selectedCombineGroup.shippingPostalCode}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">Select orders to combine:</Label>
+                  {selectedCombineGroup.orders.map((order) => (
+                    <div 
+                      key={order.id}
+                      className={cn(
+                        "flex items-center justify-between p-3 border rounded-lg cursor-pointer transition-colors",
+                        selectedOrderIds.includes(order.id) 
+                          ? "border-amber-400 bg-amber-50" 
+                          : "hover:bg-muted/50"
+                      )}
+                      onClick={() => {
+                        if (selectedOrderIds.includes(order.id)) {
+                          if (selectedOrderIds.length > 2) {
+                            setSelectedOrderIds(selectedOrderIds.filter(id => id !== order.id));
+                          }
+                        } else {
+                          setSelectedOrderIds([...selectedOrderIds, order.id]);
+                        }
+                      }}
+                      data-testid={`checkbox-order-${order.id}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={cn(
+                          "h-5 w-5 rounded border-2 flex items-center justify-center",
+                          selectedOrderIds.includes(order.id) 
+                            ? "bg-amber-500 border-amber-500 text-white" 
+                            : "border-gray-300"
+                        )}>
+                          {selectedOrderIds.includes(order.id) && <Check className="h-3 w-3" />}
+                        </div>
+                        <div>
+                          <div className="font-medium">{order.orderNumber}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {order.itemCount} items, {order.unitCount} units
+                          </div>
+                        </div>
+                      </div>
+                      {order.totalAmount && (
+                        <span className="text-sm font-medium">${order.totalAmount}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                
+                {selectedOrderIds.length < 2 && (
+                  <p className="text-sm text-amber-600">Select at least 2 orders to combine</p>
+                )}
+              </>
+            )}
+          </div>
+          
+          <DialogFooter className="gap-2">
+            {selectedCombineGroup ? (
+              <>
+                <Button 
+                  variant="outline" 
+                  onClick={() => {
+                    setSelectedCombineGroup(null);
+                    setSelectedOrderIds([]);
+                  }} 
+                  className="min-h-[44px]"
+                  data-testid="button-back-combine"
+                >
+                  Back
+                </Button>
+                <Button 
+                  onClick={() => combineOrdersMutation.mutate(selectedOrderIds)}
+                  disabled={selectedOrderIds.length < 2 || combineOrdersMutation.isPending}
+                  className="min-h-[44px] bg-amber-600 hover:bg-amber-700"
+                  data-testid="button-confirm-combine"
+                >
+                  {combineOrdersMutation.isPending ? "Combining..." : `Combine ${selectedOrderIds.length} Orders`}
+                </Button>
+              </>
+            ) : (
+              <Button 
+                variant="outline" 
+                onClick={() => setIsCombineOpen(false)} 
+                className="min-h-[44px]"
+                data-testid="button-close-combine"
+              >
+                Close
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

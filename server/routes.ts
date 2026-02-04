@@ -1,10 +1,10 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray, sql, isNull, and } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, orders, combinedOrderGroups, appSettings } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -1329,6 +1329,325 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error force releasing order:", error);
       res.status(500).json({ error: "Failed to force release order" });
+    }
+  });
+
+  // ===== ORDER COMBINING =====
+  
+  // Helper function to normalize address for matching
+  function normalizeAddress(address: string | null | undefined): string {
+    if (!address) return "";
+    return address
+      .toUpperCase()
+      .replace(/[.,#\-]/g, "")
+      .replace(/\s+/g, " ")
+      .replace(/\bSTREET\b/g, "ST")
+      .replace(/\bAVENUE\b/g, "AVE")
+      .replace(/\bROAD\b/g, "RD")
+      .replace(/\bDRIVE\b/g, "DR")
+      .replace(/\bLANE\b/g, "LN")
+      .replace(/\bBOULEVARD\b/g, "BLVD")
+      .replace(/\bAPARTMENT\b/g, "APT")
+      .replace(/\bSUITE\b/g, "STE")
+      .trim();
+  }
+  
+  function createAddressHash(order: { shippingAddress?: string | null; shippingCity?: string | null; shippingState?: string | null; shippingPostalCode?: string | null; customerEmail?: string | null; shipping_address?: string | null; shipping_city?: string | null; shipping_state?: string | null; shipping_postal_code?: string | null; customer_email?: string | null }): string {
+    const normalized = [
+      normalizeAddress(order.shippingAddress || order.shipping_address),
+      normalizeAddress(order.shippingCity || order.shipping_city),
+      normalizeAddress(order.shippingState || order.shipping_state),
+      normalizeAddress(order.shippingPostalCode || order.shipping_postal_code),
+      (order.customerEmail || order.customer_email || "").toLowerCase().trim()
+    ].join("|");
+    return normalized;
+  }
+  
+  // Get combinable orders setting
+  app.get("/api/settings/order-combining", async (req, res) => {
+    try {
+      const setting = await db.select().from(appSettings).where(eq(appSettings.key, "enable_order_combining")).limit(1);
+      const enabled = setting.length > 0 ? setting[0].value === "true" : true;
+      res.json({ enabled });
+    } catch (error) {
+      console.error("Error fetching order combining setting:", error);
+      res.json({ enabled: true }); // Default to enabled
+    }
+  });
+  
+  // Update combinable orders setting (admin only)
+  app.post("/api/settings/order-combining", async (req, res) => {
+    try {
+      if (!req.session.user || req.session.user.role !== "admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      
+      const { enabled } = req.body;
+      await db.update(appSettings)
+        .set({ value: enabled ? "true" : "false", updatedAt: new Date() })
+        .where(eq(appSettings.key, "enable_order_combining"));
+      
+      res.json({ enabled });
+    } catch (error) {
+      console.error("Error updating order combining setting:", error);
+      res.status(500).json({ error: "Failed to update setting" });
+    }
+  });
+  
+  // Get combinable orders grouped by address
+  app.get("/api/orders/combinable", async (req, res) => {
+    try {
+      // Get all ready orders that aren't already combined and not on hold
+      // Using raw SQL to avoid schema sync issues
+      // Check if combined_group_id column exists, if not just get all ready orders
+      let result;
+      try {
+        result = await db.execute(sql`
+          SELECT id, order_number, customer_name, customer_email, 
+                 shipping_address, shipping_city, shipping_state, 
+                 shipping_postal_code, shipping_country, item_count, 
+                 unit_count, total_amount, source, created_at,
+                 combined_group_id, combined_role
+          FROM orders 
+          WHERE status = 'ready' 
+            AND on_hold = 0
+            AND combined_group_id IS NULL
+        `);
+      } catch (columnError: any) {
+        // Column doesn't exist yet, get all ready orders without filtering by combined status
+        if (columnError?.code === '42703') {
+          console.log("Note: combined_group_id column not yet in database, querying without it");
+          result = await db.execute(sql`
+            SELECT id, order_number, customer_name, customer_email, 
+                   shipping_address, shipping_city, shipping_state, 
+                   shipping_postal_code, shipping_country, item_count, 
+                   unit_count, total_amount, source, created_at
+            FROM orders 
+            WHERE status = 'ready' 
+              AND on_hold = 0
+          `);
+        } else {
+          throw columnError;
+        }
+      }
+      const readyOrders = result.rows as any[];
+      
+      // Group by address hash
+      const groupedByAddress = new Map<string, typeof readyOrders>();
+      
+      for (const order of readyOrders) {
+        const hash = createAddressHash(order);
+        // Skip orders without valid shipping addresses (all pipes = no address data)
+        if (!hash || hash === "||||" || !hash.replace(/\|/g, '').trim()) continue;
+        
+        if (!groupedByAddress.has(hash)) {
+          groupedByAddress.set(hash, []);
+        }
+        groupedByAddress.get(hash)!.push(order);
+      }
+      
+      // Only return groups with 2+ orders
+      const combinableGroups = Array.from(groupedByAddress.entries())
+        .filter(([_, orders]) => orders.length >= 2)
+        .map(([hash, groupOrders]) => {
+          const first = groupOrders[0];
+          return {
+            addressHash: hash,
+            customerName: first.customer_name,
+            customerEmail: first.customer_email,
+            shippingAddress: first.shipping_address,
+            shippingCity: first.shipping_city,
+            shippingState: first.shipping_state,
+            shippingPostalCode: first.shipping_postal_code,
+            shippingCountry: first.shipping_country,
+            orders: groupOrders.map(o => ({
+              id: o.id,
+              orderNumber: o.order_number,
+              itemCount: o.item_count,
+              unitCount: o.unit_count,
+              totalAmount: o.total_amount,
+              source: o.source,
+              createdAt: o.created_at,
+            })),
+            totalOrders: groupOrders.length,
+            totalItems: groupOrders.reduce((sum, o) => sum + (o.item_count || 0), 0),
+            totalUnits: groupOrders.reduce((sum, o) => sum + (o.unit_count || 0), 0),
+          };
+        })
+        .sort((a, b) => b.totalOrders - a.totalOrders);
+      
+      res.json(combinableGroups);
+    } catch (error) {
+      console.error("Error fetching combinable orders:", error);
+      res.status(500).json({ error: "Failed to fetch combinable orders" });
+    }
+  });
+  
+  // Create a combined order group
+  app.post("/api/orders/combine", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const { orderIds } = req.body;
+      
+      if (!orderIds || !Array.isArray(orderIds) || orderIds.length < 2) {
+        return res.status(400).json({ error: "At least 2 order IDs required" });
+      }
+      
+      // Get the orders
+      const ordersToGroup = await db.select().from(orders).where(inArray(orders.id, orderIds));
+      
+      if (ordersToGroup.length !== orderIds.length) {
+        return res.status(400).json({ error: "Some orders not found" });
+      }
+      
+      // Validate all orders are ready and not already combined
+      for (const order of ordersToGroup) {
+        if (order.status !== "ready") {
+          return res.status(400).json({ error: `Order ${order.orderNumber} is not in ready status` });
+        }
+        if (order.combinedGroupId) {
+          return res.status(400).json({ error: `Order ${order.orderNumber} is already in a combined group` });
+        }
+        if (order.onHold) {
+          return res.status(400).json({ error: `Order ${order.orderNumber} is on hold` });
+        }
+      }
+      
+      // Use the first order as the parent
+      const parentOrder = ordersToGroup[0];
+      const groupCode = `G-${parentOrder.orderNumber.replace("#", "")}`;
+      
+      // Create the combined group
+      const [group] = await db.insert(combinedOrderGroups).values({
+        groupCode,
+        customerName: parentOrder.customerName,
+        customerEmail: parentOrder.customerEmail,
+        shippingAddress: parentOrder.shippingAddress,
+        shippingCity: parentOrder.shippingCity,
+        shippingState: parentOrder.shippingState,
+        shippingPostalCode: parentOrder.shippingPostalCode,
+        shippingCountry: parentOrder.shippingCountry,
+        addressHash: createAddressHash(parentOrder),
+        orderCount: ordersToGroup.length,
+        totalItems: ordersToGroup.reduce((sum, o) => sum + (o.itemCount || 0), 0),
+        totalUnits: ordersToGroup.reduce((sum, o) => sum + (o.unitCount || 0), 0),
+        createdBy: req.session.user.id,
+      }).returning();
+      
+      // Update orders with the group ID
+      for (let i = 0; i < ordersToGroup.length; i++) {
+        await db.update(orders)
+          .set({
+            combinedGroupId: group.id,
+            combinedRole: i === 0 ? "parent" : "child"
+          })
+          .where(eq(orders.id, ordersToGroup[i].id));
+      }
+      
+      res.json({
+        group,
+        orders: ordersToGroup.map((o, i) => ({
+          id: o.id,
+          orderNumber: o.orderNumber,
+          role: i === 0 ? "parent" : "child"
+        }))
+      });
+    } catch (error) {
+      console.error("Error combining orders:", error);
+      res.status(500).json({ error: "Failed to combine orders" });
+    }
+  });
+  
+  // Uncombine an order from its group
+  app.post("/api/orders/:id/uncombine", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+      
+      const orderId = parseInt(req.params.id);
+      const order = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      
+      if (!order.length) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      
+      if (!order[0].combinedGroupId) {
+        return res.status(400).json({ error: "Order is not in a combined group" });
+      }
+      
+      const groupId = order[0].combinedGroupId;
+      
+      // Remove order from group
+      await db.update(orders)
+        .set({ combinedGroupId: null, combinedRole: null })
+        .where(eq(orders.id, orderId));
+      
+      // Check how many orders remain in the group
+      const remaining = await db.select().from(orders).where(eq(orders.combinedGroupId, groupId));
+      
+      if (remaining.length < 2) {
+        // Dissolve the group if less than 2 orders remain
+        for (const o of remaining) {
+          await db.update(orders)
+            .set({ combinedGroupId: null, combinedRole: null })
+            .where(eq(orders.id, o.id));
+        }
+        await db.delete(combinedOrderGroups).where(eq(combinedOrderGroups.id, groupId));
+        res.json({ dissolved: true, orderId });
+      } else {
+        // Update group counts
+        await db.update(combinedOrderGroups)
+          .set({
+            orderCount: remaining.length,
+            totalItems: remaining.reduce((sum, o) => sum + (o.itemCount || 0), 0),
+            totalUnits: remaining.reduce((sum, o) => sum + (o.unitCount || 0), 0),
+            updatedAt: new Date()
+          })
+          .where(eq(combinedOrderGroups.id, groupId));
+        
+        // If the parent was removed, promote first remaining to parent
+        if (order[0].combinedRole === "parent") {
+          await db.update(orders)
+            .set({ combinedRole: "parent" })
+            .where(eq(orders.id, remaining[0].id));
+        }
+        
+        res.json({ dissolved: false, orderId, remainingCount: remaining.length });
+      }
+    } catch (error) {
+      console.error("Error uncombining order:", error);
+      res.status(500).json({ error: "Failed to uncombine order" });
+    }
+  });
+  
+  // Get all combined groups
+  app.get("/api/orders/combined-groups", async (req, res) => {
+    try {
+      const groups = await db.select().from(combinedOrderGroups).where(eq(combinedOrderGroups.status, "active"));
+      
+      const groupsWithOrders = await Promise.all(groups.map(async (group) => {
+        const groupOrders = await db.select().from(orders).where(eq(orders.combinedGroupId, group.id));
+        return {
+          ...group,
+          orders: groupOrders.map(o => ({
+            id: o.id,
+            orderNumber: o.orderNumber,
+            role: o.combinedRole,
+            status: o.status,
+            itemCount: o.itemCount,
+            unitCount: o.unitCount,
+          }))
+        };
+      }));
+      
+      res.json(groupsWithOrders);
+    } catch (error) {
+      console.error("Error fetching combined groups:", error);
+      res.status(500).json({ error: "Failed to fetch combined groups" });
     }
   });
 

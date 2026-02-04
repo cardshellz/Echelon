@@ -7,6 +7,7 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener } from "./orderSyncListener";
+import { runStartupMigrations } from "./db";
 import type { SafeUser } from "@shared/schema";
 
 declare module "express-session" {
@@ -107,6 +108,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Run startup migrations to ensure database schema is up to date
+  await runStartupMigrations();
+  
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

@@ -1545,3 +1545,16 @@ export const insertCombinedOrderGroupSchema = createInsertSchema(combinedOrderGr
 
 export type InsertCombinedOrderGroup = z.infer<typeof insertCombinedOrderGroupSchema>;
 export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
+
+// App Settings - key-value store for application configuration
+export const appSettings = pgTable("app_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  key: varchar("key", { length: 100 }).notNull().unique(),
+  value: text("value"),
+  type: varchar("type", { length: 20 }), // boolean, string, number, json
+  category: varchar("category", { length: 50 }), // picking, shipping, sync, etc.
+  description: text("description"),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type AppSetting = typeof appSettings.$inferSelect;

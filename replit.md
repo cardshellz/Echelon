@@ -84,6 +84,22 @@ Automates inventory flow from bulk to forward pick locations using a two-tier ar
 - `inlineReplenMaxUnits`: Threshold for hybrid mode
 - Additional wave planning and pick path settings
 
+### Order Combining
+Allows grouping multiple orders to the same customer/address for efficient picking and shipping. The system:
+- Automatically detects orders with matching addresses using normalized address hashing (email + normalized street/city/state/zip)
+- Shows a "Combine" badge on the Orders page when combinable orders exist
+- Provides a dialog to view and select orders to combine into a group
+- Uses `combined_order_groups` table for group metadata and `combined_group_id`/`combined_role` fields on orders
+- Parent/child relationship preserves original orders (non-destructive)
+
+API Endpoints:
+- `GET /api/orders/combinable` - Get orders grouped by address that can be combined
+- `POST /api/orders/combine` - Create a combined order group
+- `POST /api/orders/:id/uncombine` - Remove an order from its group
+- `GET /api/orders/combined-groups` - Get all combined groups
+
+Startup migrations in `server/db.ts` ensure the required columns/tables exist.
+
 ### Sync Health Monitoring
 The system monitors order sync health and alerts when issues are detected via an API endpoint (`/api/sync/health`), a dashboard alert banner, and optional email alerts. Thresholds are configured for detecting sync gaps, unsynced orders, and consecutive errors.
 
