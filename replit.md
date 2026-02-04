@@ -98,7 +98,7 @@ API Endpoints:
 - `POST /api/orders/:id/uncombine` - Remove an order from its group
 - `GET /api/orders/combined-groups` - Get all combined groups
 
-Startup migrations in `server/db.ts` ensure the required columns/tables exist.
+Database migrations are stored in `migrations/` folder as numbered SQL files. Startup migrations in `server/db.ts` also ensure the required columns/tables exist as a fallback.
 
 ### Sync Health Monitoring
 The system monitors order sync health and alerts when issues are detected via an API endpoint (`/api/sync/health`), a dashboard alert banner, and optional email alerts. Thresholds are configured for detecting sync gaps, unsynced orders, and consecutive errors.
