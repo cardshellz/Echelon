@@ -482,9 +482,9 @@ export default function CycleCounts() {
     localStorage.removeItem(getDraftKey(cycleCountId, itemId));
   };
   
-  // Get pending items for mobile mode (must be outside conditional for hook dependencies)
-  const pendingItemsForHook = cycleCountDetail?.items.filter(i => i.status === "pending") || [];
-  const currentItemForHook = pendingItemsForHook[currentBinIndex];
+  // Get all items for mobile mode navigation (must be outside conditional for hook dependencies)
+  const allItemsForHook = cycleCountDetail?.items || [];
+  const currentItemForHook = allItemsForHook[currentBinIndex];
   
   // Centralized draft loading via useEffect - MUST be at top level, not inside conditional
   useEffect(() => {
@@ -512,9 +512,9 @@ export default function CycleCounts() {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
     const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved").length;
     
-    // Get pending items for mobile mode
-    const pendingItems = cycleCountDetail.items.filter(i => i.status === "pending");
-    const currentItem = pendingItems[currentBinIndex];
+    // Get all items for mobile mode navigation (not filtered - navigate all bins in sequence)
+    const allItems = cycleCountDetail.items;
+    const currentItem = allItems[currentBinIndex];
     
     // Quick count submission for mobile
     const handleQuickCount = () => {
@@ -532,7 +532,7 @@ export default function CycleCounts() {
           // Clear the draft after successful submit
           clearDraft(cycleCountDetail.id, currentItem.id);
           // Check if this was the last item
-          if (pendingItems.length <= 1) {
+          if (pendingCount <= 1) {
             playSoundWithHaptic("complete", "classic", true); // All done!
           } else {
             playSoundWithHaptic("success", "classic", true); // Count saved
@@ -556,7 +556,7 @@ export default function CycleCounts() {
     };
     
     // Mobile counting view
-    if (mobileCountMode && pendingItems.length > 0) {
+    if (mobileCountMode && allItems.length > 0) {
       return (
         <div className="flex flex-col h-full bg-slate-50">
           {/* Header - compact */}
@@ -565,7 +565,7 @@ export default function CycleCounts() {
               <RotateCcw className="h-4 w-4 mr-1" /> Exit
             </Button>
             <div className="text-center">
-              <div className="text-xs text-muted-foreground">Bin {currentBinIndex + 1} of {pendingItems.length}</div>
+              <div className="text-xs text-muted-foreground">Bin {currentBinIndex + 1} of {allItems.length}</div>
             </div>
             <div className="w-14" />
           </div>
@@ -869,9 +869,9 @@ export default function CycleCounts() {
                 setAddFoundItemMode(false);
                 setFoundItemForm({ sku: "", quantity: "" });
                 setExtraItemSkuDropdownOpen(false);
-                setCurrentBinIndex(Math.min(pendingItems.length - 1, currentBinIndex + 1));
+                setCurrentBinIndex(Math.min(allItems.length - 1, currentBinIndex + 1));
               }}
-              disabled={currentBinIndex === pendingItems.length - 1}
+              disabled={currentBinIndex === allItems.length - 1}
             >
               Skip
             </Button>
@@ -881,7 +881,7 @@ export default function CycleCounts() {
     }
     
     // Mobile done state
-    if (mobileCountMode && pendingItems.length === 0) {
+    if (mobileCountMode && pendingCount === 0) {
       return (
         <div className="flex flex-col h-full items-center justify-center p-6 gap-6">
           <CheckCircle className="h-20 w-20 text-emerald-500" />
