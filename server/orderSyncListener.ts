@@ -158,7 +158,13 @@ export async function syncNewOrders() {
         shopifyFulfillmentStatus: rawOrder.fulfillment_status,
         cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
         priority: "normal",
-        warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
+        warehouseStatus: rawOrder.cancelled_at 
+          ? "cancelled" 
+          : rawOrder.fulfillment_status === "fulfilled"
+            ? "shipped"
+            : hasShippableItems 
+              ? "ready" 
+              : "completed",
         itemCount: enrichedItems.length,
         unitCount: totalUnits,
         totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
