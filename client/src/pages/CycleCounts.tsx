@@ -710,6 +710,16 @@ export default function CycleCounts() {
                             }, {
                               onSuccess: () => {
                                 playSoundWithHaptic("success", "classic", true);
+                                // Check if all items in this bin are now confirmed (this one was the last pending)
+                                const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
+                                if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
+                                  // All items in bin confirmed, auto-advance to next bin
+                                  setTimeout(() => {
+                                    setAddFoundItemMode(false);
+                                    setFoundItemForm({ sku: "", quantity: "" });
+                                    setCurrentBinIndex(currentBinIndex + 1);
+                                  }, 300);
+                                }
                               }
                             });
                           }}
