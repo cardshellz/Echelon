@@ -926,9 +926,16 @@ export async function registerRoutes(
       }
       
       const orderBefore = await storage.getOrderById(id);
+      console.log(`[CLAIM DEBUG] Order ${id} before claim:`, orderBefore ? {
+        warehouseStatus: orderBefore.warehouseStatus,
+        assignedPickerId: orderBefore.assignedPickerId,
+        onHold: orderBefore.onHold
+      } : 'NOT FOUND');
+      
       const order = await storage.claimOrder(id, pickerId);
       
       if (!order) {
+        console.log(`[CLAIM DEBUG] Order ${id} claim FAILED - order not available`);
         return res.status(409).json({ error: "Order is no longer available" });
       }
       
@@ -941,8 +948,8 @@ export async function registerRoutes(
         pickerRole: picker?.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_claimed:", err.message));
@@ -978,8 +985,8 @@ export async function registerRoutes(
         pickerRole: picker?.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         reason: reason || (resetProgress ? "Progress reset" : "Progress preserved"),
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
@@ -1147,8 +1154,8 @@ export async function registerRoutes(
         pickerRole: picker?.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_completed:", err.message));
@@ -1194,8 +1201,8 @@ export async function registerRoutes(
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         reason: req.body?.reason,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
@@ -1231,8 +1238,8 @@ export async function registerRoutes(
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log order_unhold:", err.message));
@@ -1273,8 +1280,8 @@ export async function registerRoutes(
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         reason: `Priority changed from ${orderBefore?.priority || 'normal'} to ${priority}`,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
@@ -1317,8 +1324,8 @@ export async function registerRoutes(
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         reason: "Admin force release",
         notes: resetProgress ? "Progress was reset" : "Progress preserved",
         deviceType: req.headers["x-device-type"] as string || "desktop",
@@ -1724,8 +1731,8 @@ export async function registerRoutes(
         pickerRole: req.session.user.role,
         orderId: id,
         orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.status,
-        orderStatusAfter: order.status,
+        orderStatusBefore: orderBefore?.warehouseStatus,
+        orderStatusAfter: order.warehouseStatus,
         reason: resolution,
         notes,
         deviceType: req.headers["x-device-type"] as string || "desktop",
