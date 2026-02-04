@@ -548,9 +548,9 @@ export default function OrderHistory() {
                           </div>
                           <p className="text-sm text-muted-foreground">{order.customerName}</p>
                         </div>
-                        <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>
-                          {getStatusIcon(order.status)}
-                          {order.status}
+                        <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
+                          {getStatusIcon(order.warehouseStatus)}
+                          {order.warehouseStatus}
                         </Badge>
                       </div>
                       <div className="flex items-center justify-between text-sm">
@@ -619,9 +619,9 @@ export default function OrderHistory() {
                         </TableCell>
                         <TableCell>{order.pickerName || "—"}</TableCell>
                         <TableCell>
-                          <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>
-                            {getStatusIcon(order.status)}
-                            {order.status}
+                          <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
+                            {getStatusIcon(order.warehouseStatus)}
+                            {order.warehouseStatus}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground">
@@ -751,9 +751,9 @@ function OrderDetailPanel({
           <CardContent className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Status</span>
-              <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>
-                {getStatusIcon(order.status)}
-                {order.status}
+              <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
+                {getStatusIcon(order.warehouseStatus)}
+                {order.warehouseStatus}
               </Badge>
             </div>
             {order.priority !== "normal" && (

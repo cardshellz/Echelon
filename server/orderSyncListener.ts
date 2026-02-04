@@ -67,6 +67,9 @@ export async function syncNewOrders() {
       currency: string | null;
       order_date: Date | null;
       created_at: Date | null;
+      financial_status: string | null;
+      fulfillment_status: string | null;
+      cancelled_at: Date | null;
     }>(sql`
       SELECT * FROM shopify_orders 
       WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
@@ -151,8 +154,11 @@ export async function syncNewOrders() {
         shippingState: rawOrder.shipping_state,
         shippingPostalCode: rawOrder.shipping_postal_code,
         shippingCountry: rawOrder.shipping_country,
+        financialStatus: rawOrder.financial_status,
+        shopifyFulfillmentStatus: rawOrder.fulfillment_status,
+        cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
         priority: "normal",
-        status: hasShippableItems ? "ready" : "completed",
+        warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
         itemCount: enrichedItems.length,
         unitCount: totalUnits,
         totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
@@ -189,6 +195,46 @@ export async function syncNewOrders() {
   }
 }
 
+async function syncOrderUpdate(shopifyOrderId: string) {
+  try {
+    console.log(`[ORDER SYNC] Processing update for shopify order: ${shopifyOrderId}`);
+    
+    const rawOrder = await db.execute<{
+      id: string;
+      financial_status: string | null;
+      fulfillment_status: string | null;
+      cancelled_at: Date | null;
+      customer_name: string | null;
+      shipping_name: string | null;
+    }>(sql`
+      SELECT id, financial_status, fulfillment_status, cancelled_at, customer_name, shipping_name
+      FROM shopify_orders 
+      WHERE id = ${shopifyOrderId}
+    `);
+    
+    if (rawOrder.rows.length === 0) {
+      console.log(`[ORDER SYNC] Shopify order ${shopifyOrderId} not found`);
+      return;
+    }
+    
+    const shopifyOrder = rawOrder.rows[0];
+    
+    await db.execute(sql`
+      UPDATE orders SET
+        financial_status = ${shopifyOrder.financial_status},
+        shopify_fulfillment_status = ${shopifyOrder.fulfillment_status},
+        cancelled_at = ${shopifyOrder.cancelled_at},
+        customer_name = COALESCE(NULLIF(${shopifyOrder.customer_name}, ''), NULLIF(${shopifyOrder.shipping_name}, ''), customer_name),
+        shipping_name = COALESCE(${shopifyOrder.shipping_name}, shipping_name)
+      WHERE source_table_id = ${shopifyOrderId}
+    `);
+    
+    console.log(`[ORDER SYNC] Updated order from shopify order ${shopifyOrderId}`);
+  } catch (error) {
+    console.error(`[ORDER SYNC] Error syncing update for ${shopifyOrderId}:`, error);
+  }
+}
+
 export async function setupOrderSyncListener() {
   try {
     listenerClient = new Client({
@@ -199,6 +245,7 @@ export async function setupOrderSyncListener() {
     await listenerClient.connect();
     console.log("[ORDER SYNC] Connected to database for LISTEN");
     
+    // INSERT trigger for new orders
     await listenerClient.query(`
       CREATE OR REPLACE FUNCTION notify_new_shopify_order()
       RETURNS TRIGGER AS $$
@@ -220,17 +267,43 @@ export async function setupOrderSyncListener() {
       EXECUTE FUNCTION notify_new_shopify_order();
     `);
     
-    console.log("[ORDER SYNC] Created trigger on shopify_orders");
+    // UPDATE trigger for status changes
+    await listenerClient.query(`
+      CREATE OR REPLACE FUNCTION notify_shopify_order_update()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        PERFORM pg_notify('shopify_order_update', NEW.id::text);
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    
+    await listenerClient.query(`
+      DROP TRIGGER IF EXISTS shopify_order_update_trigger ON shopify_orders;
+    `);
+    
+    await listenerClient.query(`
+      CREATE TRIGGER shopify_order_update_trigger
+      AFTER UPDATE ON shopify_orders
+      FOR EACH ROW
+      EXECUTE FUNCTION notify_shopify_order_update();
+    `);
+    
+    console.log("[ORDER SYNC] Created INSERT and UPDATE triggers on shopify_orders");
     
     listenerClient.on("notification", async (msg) => {
       if (msg.channel === "new_shopify_order") {
-        console.log(`[ORDER SYNC] Received notification for order: ${msg.payload}`);
+        console.log(`[ORDER SYNC] Received INSERT notification for order: ${msg.payload}`);
         setTimeout(() => syncNewOrders(), 500);
+      } else if (msg.channel === "shopify_order_update" && msg.payload) {
+        console.log(`[ORDER SYNC] Received UPDATE notification for order: ${msg.payload}`);
+        setTimeout(() => syncOrderUpdate(msg.payload!), 500);
       }
     });
     
     await listenerClient.query("LISTEN new_shopify_order");
-    console.log("[ORDER SYNC] Listening for new_shopify_order notifications");
+    await listenerClient.query("LISTEN shopify_order_update");
+    console.log("[ORDER SYNC] Listening for new_shopify_order and shopify_order_update notifications");
     
     listenerClient.on("error", (err) => {
       console.error("[ORDER SYNC] Database connection error:", err);

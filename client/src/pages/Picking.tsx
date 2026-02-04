@@ -563,8 +563,8 @@ export default function Picking() {
     priority: order.priority as "rush" | "high" | "normal",
     age: getOrderAge(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
     orderDate: formatOrderDate(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
-    status: order.status === "in_progress" ? "in_progress" : 
-            (order.status === "completed" || order.status === "ready_to_ship" || order.status === "shipped") ? "completed" : "ready",
+    status: order.warehouseStatus === "in_progress" ? "in_progress" : 
+            (order.warehouseStatus === "completed" || order.warehouseStatus === "ready_to_ship" || order.warehouseStatus === "shipped") ? "completed" : "ready",
     assignee: order.assignedPickerId,
     onHold: order.onHold === 1,
     pickerName: order.pickerName || null,
@@ -1587,7 +1587,7 @@ export default function Picking() {
           });
           
           const allDone = checkAndHandleCompletion(newItems);
-          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.warehouseStatus };
         });
       });
     }
@@ -1665,7 +1665,7 @@ export default function Picking() {
           }
           
           console.log("[PICK] Updated items:", newItems.map(i => ({ sku: i.sku, status: i.status })));
-          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.warehouseStatus };
         });
       });
     }
@@ -2588,19 +2588,19 @@ export default function Picking() {
                   order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
                   !order.isCombinedGroup && order.priority === "rush" && "border-l-4 border-l-red-500",
                   !order.isCombinedGroup && order.priority === "high" && "border-l-4 border-l-amber-500",
-                  order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
+                  order.warehouseStatus === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
                 onClick={() => {
-                  console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold);
-                  if (order.status === "ready" && !order.onHold) {
+                  console.log("Card clicked:", order.id, "status:", order.warehouseStatus, "onHold:", order.onHold);
+                  if (order.warehouseStatus === "ready" && !order.onHold) {
                     handleStartPicking(order.id);
-                  } else if (order.status === "completed") {
+                  } else if (order.warehouseStatus === "completed") {
                     console.log("Opening completed order dialog:", order.orderNumber, order);
                     toast({ title: "Opening order details", description: order.orderNumber });
                     setSelectedCompletedOrder(order);
-                  } else if (order.status === "in_progress") {
+                  } else if (order.warehouseStatus === "in_progress") {
                     // For in-progress orders, resume picking
                     handleStartPicking(order.id);
                   }
@@ -2613,8 +2613,8 @@ export default function Picking() {
                       <div className={cn(
                         "h-12 w-12 md:h-10 md:w-10 rounded-lg flex flex-col items-center justify-center shrink-0 text-center",
                         order.onHold ? "bg-slate-200 text-slate-600" : 
-                        order.status === "completed" ? "bg-emerald-100 text-emerald-700" :
-                        order.status === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
+                        order.warehouseStatus === "completed" ? "bg-emerald-100 text-emerald-700" :
+                        order.warehouseStatus === "in_progress" ? "bg-amber-100 text-amber-700" : "bg-primary/10 text-primary"
                       )}>
                         <span className="text-base md:text-sm font-bold leading-none">{order.items.reduce((sum, i) => sum + i.qty, 0)}</span>
                         <span className="text-[9px] leading-none mt-0.5">units</span>
@@ -2658,7 +2658,7 @@ export default function Picking() {
                                 {order.orderDate}
                               </div>
                             )}
-                            {order.status === "completed" && order.pickerName && (
+                            {order.warehouseStatus === "completed" && order.pickerName && (
                               <div className="text-[10px] text-muted-foreground">
                                 Picked by {order.pickerName}
                               </div>
@@ -2675,17 +2675,17 @@ export default function Picking() {
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
                         {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
                         {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
-                        {order.status === "completed" && order.c2p && (
+                        {order.warehouseStatus === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
-                        {order.status === "ready" && !order.onHold && !isAdminOrLead && (
+                        {order.warehouseStatus === "ready" && !order.onHold && !isAdminOrLead && (
                           <ChevronRight className="h-5 w-5 text-muted-foreground" />
                         )}
                       </div>
                     </div>
-                    {isAdminOrLead && (order.status === "ready" || order.status === "in_progress") && (
+                    {isAdminOrLead && (order.warehouseStatus === "ready" || order.warehouseStatus === "in_progress") && (
                     <div className="flex items-center gap-1 justify-end border-t pt-2 mt-1 flex-wrap">
-                      {order.status === "ready" && !order.onHold && order.priority !== "rush" && (
+                      {order.warehouseStatus === "ready" && !order.onHold && order.priority !== "rush" && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -2702,7 +2702,7 @@ export default function Picking() {
                           Rush
                         </Button>
                       )}
-                      {order.status === "ready" && !order.onHold && order.priority === "rush" && (
+                      {order.warehouseStatus === "ready" && !order.onHold && order.priority === "rush" && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -2719,7 +2719,7 @@ export default function Picking() {
                           Unrush
                         </Button>
                       )}
-                      {order.status === "ready" && !order.onHold && (
+                      {order.warehouseStatus === "ready" && !order.onHold && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -2753,10 +2753,10 @@ export default function Picking() {
                           Release
                         </Button>
                       )}
-                      {order.status === "ready" && !order.onHold && (
+                      {order.warehouseStatus === "ready" && !order.onHold && (
                         <ChevronRight className="h-5 w-5 text-muted-foreground" />
                       )}
-                      {order.status === "in_progress" && (
+                      {order.warehouseStatus === "in_progress" && (
                         <>
                           <Button
                             variant="ghost"

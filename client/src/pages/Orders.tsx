@@ -629,8 +629,8 @@ export default function Orders() {
                                     {order.priority.toUpperCase()}
                                   </Badge>
                                 )}
-                                <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
-                                  {order.status.replace("_", " ")}
+                                <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
+                                  {order.warehouseStatus.replace("_", " ")}
                                 </Badge>
                               </div>
                               <div className="text-sm text-muted-foreground mt-1 space-y-0.5">
@@ -660,8 +660,8 @@ export default function Orders() {
                                     {order.priority.toUpperCase()}
                                   </Badge>
                                 )}
-                                <Badge variant="outline" className={cn("text-xs", statusColors[order.status] || "")}>
-                                  {order.status.replace("_", " ")}
+                                <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
+                                  {order.warehouseStatus.replace("_", " ")}
                                 </Badge>
                                 {order.onHold === 1 && (
                                   <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
@@ -694,7 +694,7 @@ export default function Orders() {
                       </div>
                     </div>
                     
-                    {order.status !== "completed" && order.status !== "shipped" && order.itemCount > 0 && (
+                    {order.warehouseStatus !== "completed" && order.warehouseStatus !== "shipped" && order.itemCount > 0 && (
                       <div className="mt-4 flex items-center gap-3">
                         <div className="flex-1">
                           <div className="flex justify-between text-xs mb-1.5 text-muted-foreground">

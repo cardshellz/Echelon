@@ -706,9 +706,9 @@ export async function registerRoutes(
       // Get all active orders (not shipped/cancelled) with their items
       const allOrders = await storage.getOrdersWithItems();
       const activeOrders = allOrders.filter(o => 
-        o.status !== "shipped" && 
-        o.status !== "cancelled" &&
-        o.status !== "completed"
+        o.warehouseStatus !== "shipped" && 
+        o.warehouseStatus !== "cancelled" &&
+        o.warehouseStatus !== "completed"
       );
       
       let updated = 0;
@@ -769,11 +769,11 @@ export async function registerRoutes(
     try {
       // Raw SQL to bypass Drizzle type mapping
       const result = await db.execute(`
-        SELECT o.id as order_id, o.status, o.order_number,
+        SELECT o.id as order_id, o.warehouse_status, o.order_number,
                oi.id as item_id, oi.sku, oi.requires_shipping
         FROM orders o
         LEFT JOIN order_items oi ON oi.order_id = o.id
-        WHERE o.status IN ('ready', 'in_progress')
+        WHERE o.warehouse_status IN ('ready', 'in_progress')
         LIMIT 5
       `);
       res.json({ rows: result.rows, count: result.rows?.length || 0 });
@@ -1643,7 +1643,7 @@ export async function registerRoutes(
             id: o.id,
             orderNumber: o.orderNumber,
             role: o.combinedRole,
-            status: o.status,
+            status: o.warehouseStatus,
             itemCount: o.itemCount,
             unitCount: o.unitCount,
           }))
@@ -2831,6 +2831,7 @@ export async function registerRoutes(
         shipping_state: string | null;
         shipping_postal_code: string | null;
         shipping_country: string | null;
+        cancelled_at: Date | null;
       }>(sql`
         SELECT * FROM shopify_orders 
         WHERE fulfillment_status IS NULL 
@@ -2927,8 +2928,11 @@ export async function registerRoutes(
           shippingState: rawOrder.shipping_state,
           shippingPostalCode: rawOrder.shipping_postal_code,
           shippingCountry: rawOrder.shipping_country,
+          financialStatus: rawOrder.financial_status,
+          shopifyFulfillmentStatus: rawOrder.fulfillment_status,
+          cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
           priority: "normal",
-          status: hasShippableItems ? "ready" : "completed",
+          warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
           totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
@@ -2963,7 +2967,7 @@ export async function registerRoutes(
         FROM shopify_orders s
         WHERE o.source_table_id = s.id
           AND s.fulfillment_status = 'fulfilled'
-          AND o.status != 'completed'
+          AND o.warehouse_status != 'completed'
       `);
       
       // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where Shopify item is fulfilled
@@ -3249,8 +3253,8 @@ export async function registerRoutes(
     
     // Filter to non-terminal orders that have Shopify IDs
     const activeOrders = allOrders.filter(o => 
-      o.status !== "shipped" && 
-      o.status !== "cancelled" && 
+      o.warehouseStatus !== "shipped" && 
+      o.warehouseStatus !== "cancelled" && 
       o.shopifyOrderId
     );
     
@@ -3314,8 +3318,8 @@ export async function registerRoutes(
     // Get all active orders (not shipped/cancelled) with their items
     const allOrders = await storage.getOrdersWithItems();
     const activeOrders = allOrders.filter(o => 
-      o.status !== "shipped" && 
-      o.status !== "cancelled"
+      o.warehouseStatus !== "shipped" && 
+      o.warehouseStatus !== "cancelled"
     );
     
     let updated = 0;
@@ -5674,7 +5678,7 @@ export async function registerRoutes(
         shippingPostalCode: data.shippingPostalCode || null,
         shippingCountry: data.shippingCountry || null,
         notes: data.notes || null,
-        status: "ready" as const,
+        warehouseStatus: "ready" as const,
         itemCount: data.items.reduce((sum, item) => sum + item.quantity, 0),
         orderPlacedAt: new Date(),
         shopifyOrderId: null, // Manual orders don't have Shopify ID
@@ -6474,7 +6478,7 @@ export async function registerRoutes(
           COALESCE(SUM(oi.quantity), 0) as committed_qty
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
-        WHERE o.status IN ('pending', 'ready', 'assigned')
+        WHERE o.warehouse_status IN ('pending', 'ready', 'assigned')
           AND oi.requires_shipping = 1
           AND COALESCE(oi.picked_quantity, 0) = 0
         GROUP BY oi.sku
@@ -6491,7 +6495,7 @@ export async function registerRoutes(
           COALESCE(SUM(oi.picked_quantity), 0) as picked_qty
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
-        WHERE o.status IN ('pending', 'ready', 'assigned', 'picking', 'picked', 'packing')
+        WHERE o.warehouse_status IN ('pending', 'ready', 'assigned', 'picking', 'picked', 'packing')
           AND oi.requires_shipping = 1
           AND COALESCE(oi.picked_quantity, 0) > 0
         GROUP BY oi.sku

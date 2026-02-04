@@ -131,9 +131,14 @@ export const orders = pgTable("orders", {
   shippingPostalCode: text("shipping_postal_code"),
   shippingCountry: text("shipping_country"),
   
+  // ===== SHOPIFY STATUS (mirrored from shopify_orders) =====
+  financialStatus: varchar("financial_status", { length: 30 }), // pending, authorized, paid, partially_refunded, refunded, voided
+  shopifyFulfillmentStatus: varchar("shopify_fulfillment_status", { length: 30 }), // null, partial, fulfilled
+  cancelledAt: timestamp("cancelled_at"), // When order was cancelled in Shopify
+  
   // ===== WAREHOUSE OPERATIONS =====
   priority: varchar("priority", { length: 20 }).notNull().default("normal"), // rush, high, normal
-  status: varchar("status", { length: 20 }).notNull().default("ready"), // ready, in_progress, completed, exception, shipped, cancelled
+  warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),

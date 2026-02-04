@@ -818,7 +818,7 @@ export class DatabaseStorage implements IStorage {
     let query = db.select().from(orders);
     
     if (status && status.length > 0) {
-      query = query.where(inArray(orders.status, status)) as any;
+      query = query.where(inArray(orders.warehouseStatus, status)) as any;
     }
     
     const orderList = await query.orderBy(desc(orders.createdAt));
@@ -863,10 +863,10 @@ export class DatabaseStorage implements IStorage {
       WHERE s.cancelled_at IS NULL
         AND (
           -- Ready/in_progress orders: exclude if already fulfilled in Shopify
-          (o.status IN ('ready', 'in_progress') 
+          (o.warehouse_status IN ('ready', 'in_progress') 
            AND (s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled'))
           -- Completed orders: show for 24 hours regardless of fulfillment status (for done queue)
-          OR (o.status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
+          OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
         )
       ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
@@ -989,14 +989,14 @@ export class DatabaseStorage implements IStorage {
     const result = await db
       .update(orders)
       .set({
-        status: "in_progress" as OrderStatus,
+        warehouseStatus: "in_progress" as OrderStatus,
         assignedPickerId: pickerId,
         startedAt: new Date(),
       })
       .where(
         and(
           eq(orders.id, orderId),
-          eq(orders.status, "ready"),
+          eq(orders.warehouseStatus, "ready"),
           isNull(orders.assignedPickerId),
           eq(orders.onHold, 0) // Cannot claim held orders
         )
@@ -1008,7 +1008,7 @@ export class DatabaseStorage implements IStorage {
 
   async releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order | null> {
     const orderUpdates: any = {
-      status: "ready" as OrderStatus,
+      warehouseStatus: "ready" as OrderStatus,
       assignedPickerId: null,
       startedAt: null,
     };
@@ -1037,7 +1037,7 @@ export class DatabaseStorage implements IStorage {
   async forceReleaseOrder(orderId: number, resetProgress: boolean = false): Promise<Order | null> {
     // Force release clears assignment and hold status, optionally resets progress
     const orderUpdates: any = {
-      status: "ready" as OrderStatus,
+      warehouseStatus: "ready" as OrderStatus,
       assignedPickerId: null,
       startedAt: null,
       onHold: 0,
@@ -1066,7 +1066,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateOrderStatus(orderId: number, status: OrderStatus): Promise<Order | null> {
-    const updates: any = { status };
+    const updates: any = { warehouseStatus: status };
     if (status === "completed" || status === "ready_to_ship") {
       updates.completedAt = new Date();
     }
@@ -1248,7 +1248,7 @@ export class DatabaseStorage implements IStorage {
     const exceptionOrders = await db
       .select()
       .from(orders)
-      .where(eq(orders.status, "exception"))
+      .where(eq(orders.warehouseStatus, "exception"))
       .orderBy(desc(orders.exceptionAt));
     
     const result: (Order & { items: OrderItem[] })[] = [];
@@ -2349,7 +2349,7 @@ export class DatabaseStorage implements IStorage {
       .select({ count: sql<number>`count(*)::int` })
       .from(orders)
       .where(and(
-        eq(orders.status, 'completed'),
+        eq(orders.warehouseStatus, 'completed'),
         gte(orders.completedAt, startDate),
         lte(orders.completedAt, endDate)
       ));
@@ -2360,7 +2360,7 @@ export class DatabaseStorage implements IStorage {
       .select({ count: sql<number>`count(*)::int` })
       .from(orders)
       .where(and(
-        eq(orders.status, 'completed'),
+        eq(orders.warehouseStatus, 'completed'),
         gte(orders.completedAt, startDate),
         lte(orders.completedAt, endDate),
         isNotNull(orders.exceptionAt)
@@ -2394,7 +2394,7 @@ export class DatabaseStorage implements IStorage {
       FROM orders o
       LEFT JOIN picking_logs cl ON cl.order_id = o.id AND cl.action_type = 'order_claimed'
       LEFT JOIN picking_logs c ON c.order_id = o.id AND c.action_type = 'order_completed'
-      WHERE o.status = 'completed' 
+      WHERE o.warehouse_status = 'completed' 
         AND o.completed_at >= ${startDate} 
         AND o.completed_at <= ${endDate}
         AND cl.timestamp IS NOT NULL
@@ -2508,7 +2508,7 @@ export class DatabaseStorage implements IStorage {
     // Default to completed/shipped/cancelled orders (historical)
     const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
     const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
-    conditions.push(inArray(orders.status, statuses as any));
+    conditions.push(inArray(orders.warehouseStatus, statuses as any));
     
     if (filters.orderNumber) {
       conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
@@ -2597,7 +2597,7 @@ export class DatabaseStorage implements IStorage {
     
     const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
     const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
-    conditions.push(inArray(orders.status, statuses as any));
+    conditions.push(inArray(orders.warehouseStatus, statuses as any));
     
     if (filters.orderNumber) {
       conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
