@@ -115,7 +115,7 @@ export async function syncNewOrders() {
       }
       
       const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
-      const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping === true);
+      const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping !== false);
       
       const enrichedItems: InsertOrderItem[] = [];
       for (const item of unfulfilledItems) {
