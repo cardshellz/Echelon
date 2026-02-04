@@ -847,7 +847,6 @@ export default function Picking() {
   // UI state
   const [scanInput, setScanInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error">("idle");
-  const [keyboardDismissed, setKeyboardDismissed] = useState(false);
   const [shortPickOpen, setShortPickOpen] = useState(false);
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
@@ -902,17 +901,7 @@ export default function Picking() {
   // Auto-focus on mount and after any interaction
   useEffect(() => {
     if (view === "picking") {
-      // On initial load, focus then immediately blur to hide keyboard
-      // Scanner still works because it captures keystrokes globally
-      if (!keyboardDismissed && manualInputRef.current) {
-        manualInputRef.current.focus();
-        setTimeout(() => {
-          manualInputRef.current?.blur();
-          setKeyboardDismissed(true);
-        }, 50);
-      }
-      
-      // Refocus on click/touch on the document (user wants keyboard)
+      // Refocus on click/touch on the document
       const handleInteraction = () => {
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
         focusTimeoutRef.current = setTimeout(maintainFocus, 100);
