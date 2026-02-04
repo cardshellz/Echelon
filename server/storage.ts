@@ -862,11 +862,11 @@ export class DatabaseStorage implements IStorage {
       LEFT JOIN shopify_orders s ON o.source_table_id = s.id
       WHERE (s.cancelled_at IS NULL OR s.id IS NULL)
         AND o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
+        AND (s.id IS NULL OR s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
         AND (
-          -- Ready/in_progress orders: exclude if already fulfilled in Shopify
-          (o.warehouse_status IN ('ready', 'in_progress') 
-           AND (s.id IS NULL OR s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled'))
-          -- Completed orders: show for 24 hours regardless of fulfillment status (for done queue)
+          -- Ready/in_progress orders: show in pick queue
+          o.warehouse_status IN ('ready', 'in_progress')
+          -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
         )
       ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
