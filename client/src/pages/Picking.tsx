@@ -551,7 +551,14 @@ export default function Picking() {
   // Transform API orders to SingleOrder format for UI
   const formatOrderDate = (dateInput: string | Date | undefined | null): string => {
     if (!dateInput) return "";
-    const date = typeof dateInput === "string" ? new Date(dateInput) : dateInput;
+    let date: Date;
+    if (typeof dateInput === "string") {
+      // If no timezone indicator, treat as UTC by appending Z
+      const hasTimezone = dateInput.includes('Z') || dateInput.includes('+') || /\d{2}:\d{2}:\d{2}-\d{2}/.test(dateInput);
+      date = new Date(hasTimezone ? dateInput : dateInput.replace(' ', 'T') + 'Z');
+    } else {
+      date = dateInput;
+    }
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
   
