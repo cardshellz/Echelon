@@ -1459,9 +1459,11 @@ export async function registerRoutes(
         .filter(([_, orders]) => orders.length >= 2)
         .map(([hash, groupOrders]) => {
           const first = groupOrders[0];
+          // Find customer name from any order in group (some may have NULL)
+          const customerName = groupOrders.find(o => o.customer_name)?.customer_name || "Customer";
           return {
             addressHash: hash,
-            customerName: first.customer_name,
+            customerName: customerName,
             customerEmail: first.customer_email,
             shippingAddress: first.shipping_address,
             shippingCity: first.shipping_city,
