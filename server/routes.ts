@@ -1360,13 +1360,13 @@ export async function registerRoutes(
   }
 
   function createAddressHash(order: { shippingAddress?: string | null; shippingCity?: string | null; shippingState?: string | null; shippingPostalCode?: string | null; customerEmail?: string | null; shipping_address?: string | null; shipping_city?: string | null; shipping_state?: string | null; shipping_postal_code?: string | null; customer_email?: string | null }): string {
-    // Match on shipping address only - email can be missing or different
-    // (customers may use different emails for different orders)
+    const email = (order.customerEmail || order.customer_email || "").toLowerCase().trim();
     const normalized = [
       normalizeAddress(order.shippingAddress || order.shipping_address),
       normalizeAddress(order.shippingCity || order.shipping_city),
       normalizeAddress(order.shippingState || order.shipping_state),
       normalizePostalCode(order.shippingPostalCode || order.shipping_postal_code),
+      email
     ].join("|");
     return normalized;
   }
