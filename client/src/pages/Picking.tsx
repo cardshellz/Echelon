@@ -847,6 +847,7 @@ export default function Picking() {
   // UI state
   const [scanInput, setScanInput] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "success" | "error">("idle");
+  const [scannerActivated, setScannerActivated] = useState(false);
   const [shortPickOpen, setShortPickOpen] = useState(false);
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
