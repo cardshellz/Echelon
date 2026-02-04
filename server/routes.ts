@@ -3018,6 +3018,7 @@ export async function registerRoutes(
       const startTime = Date.now();
       
       // Single efficient UPDATE using JOIN - processes ALL orders at once
+      // Match on source_table_id OR shopify_order_id (various formats)
       const result = await db.execute(sql`
         UPDATE orders o SET
           customer_name = COALESCE(s.customer_name, s.shipping_name, o.customer_name),
@@ -3030,7 +3031,8 @@ export async function registerRoutes(
         FROM shopify_orders s
         WHERE o.source = 'shopify'
           AND (
-            o.shopify_order_id = s.id 
+            o.source_table_id = CAST(s.id AS TEXT)
+            OR o.shopify_order_id = s.id 
             OR o.shopify_order_id = REPLACE(s.id, 'gid://shopify/Order/', '')
             OR CONCAT('gid://shopify/Order/', o.shopify_order_id) = s.id
           )
