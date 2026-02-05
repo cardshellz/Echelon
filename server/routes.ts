@@ -4914,6 +4914,68 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================
+  // BIN-TO-BIN TRANSFERS
+  // ============================================
+  
+  app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { fromLocationId, toLocationId, variantId, quantity, notes } = req.body;
+      
+      if (!fromLocationId || !toLocationId || !variantId || !quantity) {
+        return res.status(400).json({ error: "Missing required fields: fromLocationId, toLocationId, variantId, quantity" });
+      }
+      
+      if (fromLocationId === toLocationId) {
+        return res.status(400).json({ error: "Source and destination must be different" });
+      }
+      
+      if (quantity <= 0) {
+        return res.status(400).json({ error: "Quantity must be positive" });
+      }
+      
+      const userId = req.session.user?.id || "system";
+      
+      const transaction = await storage.executeTransfer({
+        fromLocationId: parseInt(fromLocationId),
+        toLocationId: parseInt(toLocationId),
+        variantId: parseInt(variantId),
+        quantity: parseInt(quantity),
+        userId,
+        notes
+      });
+      
+      res.json({ success: true, transaction });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(400).json({ error: String(error) });
+    }
+  });
+  
+  app.get("/api/inventory/transfers", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const transfers = await storage.getTransferHistory(limit);
+      res.json(transfers);
+    } catch (error) {
+      console.error("Get transfers error:", error);
+      res.status(500).json({ error: "Failed to get transfer history" });
+    }
+  });
+  
+  app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const transactionId = parseInt(req.params.id);
+      const userId = req.session.user?.id || "system";
+      
+      const transaction = await storage.undoTransfer(transactionId, userId);
+      res.json({ success: true, transaction });
+    } catch (error) {
+      console.error("Undo transfer error:", error);
+      res.status(400).json({ error: String(error) });
+    }
+  });
+
   // Inventory Transactions History
   app.get("/api/inventory/transactions", async (req, res) => {
     try {
