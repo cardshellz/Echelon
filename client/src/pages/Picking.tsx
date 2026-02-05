@@ -2595,7 +2595,7 @@ export default function Picking() {
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
                 )}
                 onClick={() => {
-                  console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold);
+                  console.log("Card clicked:", order.id, "status:", order.status, "onHold:", order.onHold, "assignee:", order.assignee);
                   if (order.status === "ready" && !order.onHold) {
                     handleStartPicking(order.id);
                   } else if (order.status === "completed") {
@@ -2603,8 +2603,26 @@ export default function Picking() {
                     toast({ title: "Opening order details", description: order.orderNumber });
                     setSelectedCompletedOrder(order);
                   } else if (order.status === "in_progress") {
-                    // For in-progress orders, resume picking
-                    handleStartPicking(order.id);
+                    // Check if this order is assigned to the current picker or is unassigned
+                    const isMyOrder = order.assignee === pickerId || !order.assignee;
+                    if (isMyOrder) {
+                      // Resume picking own order
+                      handleStartPicking(order.id);
+                    } else if (isAdminOrLead) {
+                      // Admin/lead can force release and take over
+                      toast({
+                        title: "Order in progress",
+                        description: `This order is being picked by ${order.pickerName || 'another user'}. Use Force Release to take over.`,
+                        variant: "default"
+                      });
+                    } else {
+                      // Another picker has this order
+                      toast({
+                        title: "Order unavailable",
+                        description: `This order is being picked by ${order.pickerName || 'another user'}`,
+                        variant: "destructive"
+                      });
+                    }
                   }
                 }}
                 data-testid={`card-order-${order.id}`}
@@ -2655,6 +2673,13 @@ export default function Picking() {
                             <div className="text-xs text-muted-foreground truncate">
                               {order.customer} • {order.items.length} {order.items.length === 1 ? "line" : "lines"}
                             </div>
+                            {/* Show who is picking this order if in_progress and assigned to another user */}
+                            {order.status === "in_progress" && order.assignee && order.assignee !== pickerId && (
+                              <div className="text-[10px] text-amber-600 flex items-center gap-1 mt-0.5">
+                                <User size={10} />
+                                <span>Being picked by {order.pickerName || 'another user'}</span>
+                              </div>
+                            )}
                             {order.orderDate && (
                               <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2">
                                 <span>{order.orderDate}</span>

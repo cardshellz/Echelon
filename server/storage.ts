@@ -1005,10 +1005,22 @@ export class DatabaseStorage implements IStorage {
     
     if (existingOrder.length > 0) {
       // Picker already owns this order - return it so they can continue
+      console.log(`[CLAIM] Picker ${pickerId} already owns order ${orderId}, returning existing`);
       return existingOrder[0];
     }
     
-    // Otherwise, try to claim an unassigned ready order
+    // Check current order state for debugging
+    const currentOrder = await db.select().from(orders).where(eq(orders.id, orderId));
+    if (currentOrder.length > 0) {
+      console.log(`[CLAIM] Order ${orderId} current state:`, {
+        warehouseStatus: currentOrder[0].warehouseStatus,
+        assignedPickerId: currentOrder[0].assignedPickerId,
+        onHold: currentOrder[0].onHold
+      });
+    }
+    
+    // Try to claim an unassigned order that is ready OR in_progress but unassigned
+    // (handles edge case where release set status but picker ID update was partial)
     const result = await db
       .update(orders)
       .set({
@@ -1019,17 +1031,39 @@ export class DatabaseStorage implements IStorage {
       .where(
         and(
           eq(orders.id, orderId),
-          eq(orders.warehouseStatus, "ready"),
+          or(
+            // Normal case: ready order with no picker
+            eq(orders.warehouseStatus, "ready"),
+            // Edge case: in_progress but no picker assigned (incomplete release)
+            and(
+              eq(orders.warehouseStatus, "in_progress"),
+              isNull(orders.assignedPickerId)
+            )
+          ),
           isNull(orders.assignedPickerId),
           eq(orders.onHold, 0) // Cannot claim held orders
         )
       )
       .returning();
     
+    if (result.length === 0) {
+      console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
+    } else {
+      console.log(`[CLAIM] Order ${orderId} claimed successfully by picker ${pickerId}`);
+    }
+    
     return result[0] || null;
   }
 
   async releaseOrder(orderId: number, resetProgress: boolean = true): Promise<Order | null> {
+    // Get current state for logging
+    const beforeOrder = await db.select().from(orders).where(eq(orders.id, orderId));
+    console.log(`[RELEASE] Order ${orderId} before release:`, {
+      warehouseStatus: beforeOrder[0]?.warehouseStatus,
+      assignedPickerId: beforeOrder[0]?.assignedPickerId,
+      resetProgress
+    });
+    
     const orderUpdates: any = {
       warehouseStatus: "ready" as OrderStatus,
       assignedPickerId: null,
@@ -1046,6 +1080,11 @@ export class DatabaseStorage implements IStorage {
       .set(orderUpdates)
       .where(eq(orders.id, orderId))
       .returning();
+    
+    console.log(`[RELEASE] Order ${orderId} after release:`, {
+      warehouseStatus: result[0]?.warehouseStatus,
+      assignedPickerId: result[0]?.assignedPickerId
+    });
     
     if (resetProgress) {
       await db
