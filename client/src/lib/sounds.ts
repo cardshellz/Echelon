@@ -1,4 +1,4 @@
-export type SoundType = "success" | "error" | "complete";
+export type SoundType = "success" | "error" | "complete" | "scan";
 export type SoundTheme = "classic" | "modern" | "arcade" | "gentle" | "silent";
 
 interface SoundConfig {
@@ -27,6 +27,12 @@ const soundThemes: Record<SoundTheme, Record<SoundType, SoundConfig>> = {
       durations: [0.12, 0.12, 0.12, 0.25],
       volume: 0.3,
       waveType: "sine"
+    },
+    scan: {
+      frequencies: [1200],
+      durations: [0.05],
+      volume: 0.2,
+      waveType: "sine"
     }
   },
   modern: {
@@ -46,6 +52,12 @@ const soundThemes: Record<SoundTheme, Record<SoundType, SoundConfig>> = {
       frequencies: [440, 554, 659, 880, 1108],
       durations: [0.1, 0.1, 0.1, 0.15, 0.3],
       volume: 0.25,
+      waveType: "triangle"
+    },
+    scan: {
+      frequencies: [800, 1000],
+      durations: [0.03, 0.04],
+      volume: 0.2,
       waveType: "triangle"
     }
   },
@@ -67,6 +79,12 @@ const soundThemes: Record<SoundTheme, Record<SoundType, SoundConfig>> = {
       durations: [0.08, 0.08, 0.08, 0.08, 0.08, 0.1, 0.35],
       volume: 0.2,
       waveType: "square"
+    },
+    scan: {
+      frequencies: [1400, 1800],
+      durations: [0.03, 0.03],
+      volume: 0.15,
+      waveType: "square"
     }
   },
   gentle: {
@@ -87,12 +105,19 @@ const soundThemes: Record<SoundTheme, Record<SoundType, SoundConfig>> = {
       durations: [0.2, 0.2, 0.2, 0.4],
       volume: 0.15,
       waveType: "sine"
+    },
+    scan: {
+      frequencies: [500],
+      durations: [0.08],
+      volume: 0.1,
+      waveType: "sine"
     }
   },
   silent: {
     success: { frequencies: [], durations: [], volume: 0, waveType: "sine" },
     error: { frequencies: [], durations: [], volume: 0, waveType: "sine" },
-    complete: { frequencies: [], durations: [], volume: 0, waveType: "sine" }
+    complete: { frequencies: [], durations: [], volume: 0, waveType: "sine" },
+    scan: { frequencies: [], durations: [], volume: 0, waveType: "sine" }
   }
 };
 
@@ -166,7 +191,8 @@ export function playSoundWithHaptic(
     const hapticMap: Record<SoundType, HapticType> = {
       success: "success",
       error: "error",
-      complete: "complete"
+      complete: "complete",
+      scan: "light"
     };
     triggerHaptic(hapticMap[soundType]);
   }

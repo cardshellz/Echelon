@@ -227,7 +227,7 @@ export default function Transfers() {
                     const loc = locations.find(l => l.code.toUpperCase() === sourceLocationCode);
                     if (loc) {
                       setFromLocationId(loc.id);
-                      playSoundWithHaptic("success", "classic", true);
+                      playSoundWithHaptic("scan", "classic", true);
                       setMobileStep("sku");
                     }
                   }}
@@ -396,7 +396,7 @@ export default function Transfers() {
                     const loc = locations.find(l => l.code.toUpperCase() === destLocationCode);
                     if (loc) {
                       setToLocationId(loc.id);
-                      playSoundWithHaptic("success", "classic", true);
+                      playSoundWithHaptic("scan", "classic", true);
                       setMobileStep("confirm");
                     }
                   }}

@@ -440,10 +440,11 @@ export default function Picking() {
       playSoundLib(type, soundTheme);
     }
     if (hapticEnabled) {
-      const hapticMap: Record<SoundType, "success" | "error" | "complete"> = {
-        success: "success",
-        error: "error", 
-        complete: "complete"
+      const hapticMap: Record<SoundType, "light" | "medium" | "heavy"> = {
+        success: "medium",
+        error: "heavy", 
+        complete: "heavy",
+        scan: "light"
       };
       triggerHapticLib(hapticMap[type]);
     }
@@ -1232,7 +1233,7 @@ export default function Picking() {
     // Check for match (SKU or barcode)
     if (normalizedInput === normalizedSku || normalizedInput === normalizedBarcode) {
       setScanStatus("success");
-      playSound("success");
+      playSound("scan");
       triggerHaptic("medium");
       
       if (currentItem.qty > 1) {
