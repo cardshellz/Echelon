@@ -116,7 +116,7 @@ export default function Transfers() {
       resetForm();
     },
     onError: (error: Error) => {
-      playSoundWithHaptic("error", "error", true);
+      playSoundWithHaptic("error", "classic", true);
       toast({ title: "Transfer Failed", description: error.message, variant: "destructive" });
     }
   });
@@ -270,7 +270,7 @@ export default function Transfers() {
                       onClick={() => {
                         setSelectedSku(item);
                         setVariantId(item.variantId);
-                        playSoundWithHaptic("tap", "classic", true);
+                        playSoundWithHaptic("success", "classic", true);
                       }}
                       data-testid={`button-select-sku-${item.sku}`}
                     >

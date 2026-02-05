@@ -4922,27 +4922,48 @@ export async function registerRoutes(
     try {
       const { fromLocationId, toLocationId, variantId, quantity, notes } = req.body;
       
+      // Validate required fields exist
       if (!fromLocationId || !toLocationId || !variantId || !quantity) {
         return res.status(400).json({ error: "Missing required fields: fromLocationId, toLocationId, variantId, quantity" });
       }
       
-      if (fromLocationId === toLocationId) {
+      // Parse and validate as integers
+      const fromLocId = parseInt(String(fromLocationId));
+      const toLocId = parseInt(String(toLocationId));
+      const varId = parseInt(String(variantId));
+      const qty = parseInt(String(quantity));
+      
+      if (isNaN(fromLocId) || isNaN(toLocId) || isNaN(varId) || isNaN(qty)) {
+        return res.status(400).json({ error: "All numeric fields must be valid integers" });
+      }
+      
+      if (fromLocId === toLocId) {
         return res.status(400).json({ error: "Source and destination must be different" });
       }
       
-      if (quantity <= 0) {
+      if (qty <= 0) {
         return res.status(400).json({ error: "Quantity must be positive" });
+      }
+      
+      // Validate locations exist
+      const fromLoc = await storage.getWarehouseLocationById(fromLocId);
+      const toLoc = await storage.getWarehouseLocationById(toLocId);
+      if (!fromLoc) {
+        return res.status(400).json({ error: "Source location not found" });
+      }
+      if (!toLoc) {
+        return res.status(400).json({ error: "Destination location not found" });
       }
       
       const userId = req.session.user?.id || "system";
       
       const transaction = await storage.executeTransfer({
-        fromLocationId: parseInt(fromLocationId),
-        toLocationId: parseInt(toLocationId),
-        variantId: parseInt(variantId),
-        quantity: parseInt(quantity),
+        fromLocationId: fromLocId,
+        toLocationId: toLocId,
+        variantId: varId,
+        quantity: qty,
         userId,
-        notes
+        notes: typeof notes === "string" ? notes : undefined
       });
       
       res.json({ success: true, transaction });
@@ -4952,7 +4973,7 @@ export async function registerRoutes(
     }
   });
   
-  app.get("/api/inventory/transfers", async (req, res) => {
+  app.get("/api/inventory/transfers", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
       const transfers = await storage.getTransferHistory(limit);
