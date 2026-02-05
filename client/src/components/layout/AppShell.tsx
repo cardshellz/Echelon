@@ -28,7 +28,8 @@ import {
   Cog,
   ShoppingBag,
   Layers,
-  RefreshCw
+  RefreshCw,
+  ArrowLeftRight
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -71,6 +72,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
     { type: 'link', label: "Inventory (WMS)", icon: Box, href: "/inventory", roles: ["admin", "lead"] },
     { type: 'link', label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", roles: ["admin", "lead"] },
+    { type: 'link', label: "Transfers", icon: ArrowLeftRight, href: "/transfers", roles: ["admin", "lead"] },
     { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
     { type: 'link', label: "Replenishment", icon: RefreshCw, href: "/replenishment", roles: ["admin", "lead"] },
     { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },

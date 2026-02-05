@@ -27,6 +27,7 @@ import Products from "@/pages/Products";
 import ProductDetail from "@/pages/ProductDetail";
 import Variants from "@/pages/Variants";
 import CycleCounts from "@/pages/CycleCounts";
+import Transfers from "@/pages/Transfers";
 import ProductCatalog from "@/pages/ProductCatalog";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
@@ -96,6 +97,9 @@ function Router() {
         </Route>
         <Route path="/cycle-counts">
           <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/transfers">
+          <ProtectedRoute component={Transfers} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/orders">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
