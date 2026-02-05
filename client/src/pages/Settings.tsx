@@ -9,7 +9,9 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Building2, Package, Bell, Clock, Save } from "lucide-react";
+import { Building2, Package, Bell, Clock, Save, Volume2 } from "lucide-react";
+import { useSettings } from "@/lib/settings";
+import { themeNames, themeDescriptions, previewTheme, type SoundTheme } from "@/lib/sounds";
 
 interface Settings {
   [key: string]: string | null;
@@ -26,6 +28,7 @@ export default function Settings() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { soundTheme, setSoundTheme } = useSettings();
 
   const [formData, setFormData] = useState<Settings>({
     company_name: "",
@@ -406,6 +409,45 @@ export default function Settings() {
                   />
                   <p className="text-xs text-muted-foreground">Time before unclaimed orders are released back to queue</p>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Volume2 className="h-5 w-5" />
+                Sound & Haptic Feedback
+              </CardTitle>
+              <CardDescription>Choose sounds for picking confirmations</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                <Label className="text-sm">Sound Theme</Label>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+                  {(Object.keys(themeNames) as SoundTheme[]).map((theme) => (
+                    <button
+                      key={theme}
+                      type="button"
+                      onClick={() => {
+                        setSoundTheme(theme);
+                        if (theme !== "silent") {
+                          setTimeout(() => previewTheme(theme), 100);
+                        }
+                      }}
+                      className={`p-3 rounded-lg border text-left transition-colors ${
+                        soundTheme === theme 
+                          ? "border-primary bg-primary/10" 
+                          : "border-slate-200 hover:bg-slate-50"
+                      }`}
+                      data-testid={`button-sound-${theme}`}
+                    >
+                      <div className="font-medium text-sm">{themeNames[theme]}</div>
+                      <div className="text-xs text-muted-foreground">{themeDescriptions[theme]}</div>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">Click a theme to preview and apply it</p>
               </div>
             </CardContent>
           </Card>
