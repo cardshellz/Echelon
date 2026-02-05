@@ -128,7 +128,8 @@ export async function syncNewOrders() {
           const imageResult = await db.execute<{ image_url: string | null }>(sql`
             SELECT COALESCE(uv.image_url, cp.image_url) as image_url
             FROM uom_variants uv
-            LEFT JOIN catalog_products cp ON uv.catalog_product_id = cp.id
+            LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+            LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
             WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
             LIMIT 1
           `);
