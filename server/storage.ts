@@ -268,6 +268,28 @@ export interface IStorage {
     offset?: number;
   }): Promise<InventoryTransaction[]>;
   
+  // Bin-to-Bin Transfers
+  executeTransfer(params: {
+    fromLocationId: number;
+    toLocationId: number;
+    variantId: number;
+    quantity: number;
+    userId: string;
+    notes?: string;
+  }): Promise<InventoryTransaction>;
+  getTransferHistory(limit?: number): Promise<{
+    id: number;
+    fromLocation: string;
+    toLocation: string;
+    sku: string;
+    productName: string;
+    quantity: number;
+    userId: string;
+    createdAt: Date;
+    canUndo: boolean;
+  }[]>;
+  undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction>;
+  
   // Adjustment Reasons
   getAllAdjustmentReasons(): Promise<AdjustmentReason[]>;
   getActiveAdjustmentReasons(): Promise<AdjustmentReason[]>;
@@ -2098,6 +2120,212 @@ export class DatabaseStorage implements IStorage {
     }
     
     return await query;
+  }
+
+  // Bin-to-Bin Transfers
+  async executeTransfer(params: {
+    fromLocationId: number;
+    toLocationId: number;
+    variantId: number;
+    quantity: number;
+    userId: string;
+    notes?: string;
+  }): Promise<InventoryTransaction> {
+    const { fromLocationId, toLocationId, variantId, quantity, userId, notes } = params;
+    
+    // Get source inventory level
+    const sourceLevel = await db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.warehouseLocationId, fromLocationId),
+        eq(inventoryLevels.variantId, variantId)
+      ))
+      .limit(1);
+    
+    if (!sourceLevel.length || sourceLevel[0].variantQty < quantity) {
+      throw new Error(`Insufficient inventory at source location. Available: ${sourceLevel[0]?.variantQty || 0}`);
+    }
+    
+    // Get variant info for base unit calculation
+    const variant = await db.select().from(uomVariants).where(eq(uomVariants.id, variantId)).limit(1);
+    if (!variant.length) {
+      throw new Error("Variant not found");
+    }
+    const unitsPerVariant = variant[0].unitsPerVariant;
+    const inventoryItemId = variant[0].inventoryItemId;
+    
+    // Decrease source location
+    await db
+      .update(inventoryLevels)
+      .set({ 
+        variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
+        onHandBase: sql`${inventoryLevels.onHandBase} - ${quantity * unitsPerVariant}`,
+        updatedAt: new Date()
+      })
+      .where(eq(inventoryLevels.id, sourceLevel[0].id));
+    
+    // Increase or create destination inventory level
+    const destLevel = await db
+      .select()
+      .from(inventoryLevels)
+      .where(and(
+        eq(inventoryLevels.warehouseLocationId, toLocationId),
+        eq(inventoryLevels.variantId, variantId)
+      ))
+      .limit(1);
+    
+    if (destLevel.length) {
+      await db
+        .update(inventoryLevels)
+        .set({ 
+          variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
+          onHandBase: sql`${inventoryLevels.onHandBase} + ${quantity * unitsPerVariant}`,
+          updatedAt: new Date()
+        })
+        .where(eq(inventoryLevels.id, destLevel[0].id));
+    } else {
+      await db.insert(inventoryLevels).values({
+        warehouseLocationId: toLocationId,
+        variantId: variantId,
+        inventoryItemId: inventoryItemId,
+        variantQty: quantity,
+        onHandBase: quantity * unitsPerVariant,
+        reservedBase: 0,
+        pickedBase: 0,
+        packedBase: 0,
+        backorderBase: 0
+      });
+    }
+    
+    // Create audit transaction
+    const batchId = `TRANSFER-${Date.now()}`;
+    const transaction = await db.insert(inventoryTransactions).values({
+      inventoryItemId,
+      variantId,
+      fromLocationId,
+      toLocationId,
+      transactionType: "transfer",
+      variantQtyDelta: quantity,
+      variantQtyBefore: sourceLevel[0].variantQty,
+      variantQtyAfter: sourceLevel[0].variantQty - quantity,
+      batchId,
+      sourceState: "on_hand",
+      targetState: "on_hand",
+      notes: notes || `Transfer by ${userId}`,
+      userId
+    }).returning();
+    
+    return transaction[0];
+  }
+
+  async getTransferHistory(limit: number = 50): Promise<{
+    id: number;
+    fromLocation: string;
+    toLocation: string;
+    sku: string;
+    productName: string;
+    quantity: number;
+    userId: string;
+    createdAt: Date;
+    canUndo: boolean;
+  }[]> {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
+    const results = await db
+      .select({
+        id: inventoryTransactions.id,
+        fromLocationId: inventoryTransactions.fromLocationId,
+        toLocationId: inventoryTransactions.toLocationId,
+        variantId: inventoryTransactions.variantId,
+        quantity: inventoryTransactions.variantQtyDelta,
+        userId: inventoryTransactions.userId,
+        createdAt: inventoryTransactions.createdAt,
+        batchId: inventoryTransactions.batchId
+      })
+      .from(inventoryTransactions)
+      .where(eq(inventoryTransactions.transactionType, "transfer"))
+      .orderBy(desc(inventoryTransactions.createdAt))
+      .limit(limit);
+    
+    // Enrich with location codes and SKU info
+    const enriched = await Promise.all(results.map(async (row) => {
+      const fromLoc = row.fromLocationId 
+        ? await db.select().from(warehouseLocations).where(eq(warehouseLocations.id, row.fromLocationId)).limit(1)
+        : [];
+      const toLoc = row.toLocationId 
+        ? await db.select().from(warehouseLocations).where(eq(warehouseLocations.id, row.toLocationId)).limit(1)
+        : [];
+      const variant = row.variantId
+        ? await db.select().from(uomVariants).where(eq(uomVariants.id, row.variantId)).limit(1)
+        : [];
+      
+      // Check if already reversed
+      const reverseExists = await db
+        .select()
+        .from(inventoryTransactions)
+        .where(and(
+          eq(inventoryTransactions.transactionType, "transfer"),
+          eq(inventoryTransactions.notes, `Undo of transfer ${row.id}`)
+        ))
+        .limit(1);
+      
+      return {
+        id: row.id,
+        fromLocation: fromLoc[0]?.code || "Unknown",
+        toLocation: toLoc[0]?.code || "Unknown",
+        sku: variant[0]?.sku || "Unknown",
+        productName: variant[0]?.name || "Unknown",
+        quantity: row.quantity || 0,
+        userId: row.userId || "system",
+        createdAt: row.createdAt,
+        canUndo: row.createdAt > fiveMinutesAgo && reverseExists.length === 0
+      };
+    }));
+    
+    return enriched;
+  }
+
+  async undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction> {
+    // Get original transaction
+    const original = await db
+      .select()
+      .from(inventoryTransactions)
+      .where(eq(inventoryTransactions.id, transactionId))
+      .limit(1);
+    
+    if (!original.length) {
+      throw new Error("Transaction not found");
+    }
+    
+    const txn = original[0];
+    if (txn.transactionType !== "transfer") {
+      throw new Error("Can only undo transfer transactions");
+    }
+    
+    // Check if already undone
+    const alreadyUndone = await db
+      .select()
+      .from(inventoryTransactions)
+      .where(and(
+        eq(inventoryTransactions.transactionType, "transfer"),
+        eq(inventoryTransactions.notes, `Undo of transfer ${transactionId}`)
+      ))
+      .limit(1);
+    
+    if (alreadyUndone.length) {
+      throw new Error("This transfer has already been undone");
+    }
+    
+    // Execute reverse transfer
+    return await this.executeTransfer({
+      fromLocationId: txn.toLocationId!,
+      toLocationId: txn.fromLocationId!,
+      variantId: txn.variantId!,
+      quantity: txn.variantQtyDelta || 0,
+      userId,
+      notes: `Undo of transfer ${transactionId}`
+    });
   }
 
   // Adjustment Reasons
