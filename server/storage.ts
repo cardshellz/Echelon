@@ -503,6 +503,16 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
+  private async getProductVariantIdFromUomVariantId(uomVariantId: number): Promise<number | null> {
+    const result = await db.execute(
+      sql`SELECT product_variant_id FROM uom_to_pv_mapping WHERE uom_variant_id = ${uomVariantId} LIMIT 1`
+    );
+    if (result.rows && result.rows.length > 0) {
+      return (result.rows[0] as any).product_variant_id as number;
+    }
+    return null;
+  }
+
   // User methods
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id));
@@ -2051,6 +2061,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
+    if (level.variantId && !level.productVariantId) {
+      const pvId = await this.getProductVariantIdFromUomVariantId(level.variantId);
+      if (pvId) {
+        level = { ...level, productVariantId: pvId };
+      }
+    }
     const result = await db.insert(inventoryLevels).values(level).returning();
     return result[0];
   }
@@ -2059,6 +2075,13 @@ export class DatabaseStorage implements IStorage {
     // Check if exists by variantId + location (variantId is the source of truth)
     if (!level.variantId) {
       throw new Error("variantId is required for upsertInventoryLevel");
+    }
+    
+    if (level.variantId && !level.productVariantId) {
+      const pvId = await this.getProductVariantIdFromUomVariantId(level.variantId);
+      if (pvId) {
+        level = { ...level, productVariantId: pvId };
+      }
     }
     
     const existing = await db
@@ -2162,6 +2185,12 @@ export class DatabaseStorage implements IStorage {
 
   // Inventory Transactions
   async createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
+    if (transaction.variantId && !transaction.productVariantId) {
+      const pvId = await this.getProductVariantIdFromUomVariantId(transaction.variantId);
+      if (pvId) {
+        transaction = { ...transaction, productVariantId: pvId };
+      }
+    }
     const result = await db.insert(inventoryTransactions).values(transaction).returning();
     return result[0];
   }
@@ -2236,6 +2265,9 @@ export class DatabaseStorage implements IStorage {
     const unitsPerVariant = variant[0].unitsPerVariant;
     const inventoryItemId = variant[0].inventoryItemId;
     
+    // Look up the product_variant_id from the mapping table
+    const productVariantId = await this.getProductVariantIdFromUomVariantId(variantId);
+    
     // Decrease source location
     await db
       .update(inventoryLevels)
@@ -2269,6 +2301,7 @@ export class DatabaseStorage implements IStorage {
       await db.insert(inventoryLevels).values({
         warehouseLocationId: toLocationId,
         variantId: variantId,
+        productVariantId: productVariantId,
         inventoryItemId: inventoryItemId,
         variantQty: quantity,
         onHandBase: quantity * unitsPerVariant,
@@ -2284,6 +2317,7 @@ export class DatabaseStorage implements IStorage {
     const transaction = await db.insert(inventoryTransactions).values({
       inventoryItemId,
       variantId,
+      productVariantId,
       fromLocationId,
       toLocationId,
       transactionType: "transfer",
@@ -2505,6 +2539,7 @@ export class DatabaseStorage implements IStorage {
       .select({
         id: channelFeeds.id,
         variantId: channelFeeds.variantId,
+        productVariantId: channelFeeds.productVariantId,
         channelType: channelFeeds.channelType,
         channelVariantId: channelFeeds.channelVariantId,
         channelProductId: channelFeeds.channelProductId,
