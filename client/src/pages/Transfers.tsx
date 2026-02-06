@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2 } from "lucide-react";
+import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
@@ -508,20 +508,40 @@ export default function Transfers() {
           <CardContent className="space-y-4">
             <div className="space-y-2">
               <Label>Source Location</Label>
-              <div className="relative">
-                <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={locationSearch}
-                  onChange={(e) => {
-                    setLocationSearch(e.target.value);
-                    const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
-                    if (match) setFromLocationId(match.id);
-                  }}
-                  placeholder="Search bin location..."
-                  className="pl-10"
-                  data-testid="input-source-search"
-                />
-              </div>
+              {fromLocationId ? (
+                <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
+                  <MapPin className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium flex-1">{locations.find(l => l.id === fromLocationId)?.code}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFromLocationId(null);
+                      setLocationSearch("");
+                      setVariantId(null);
+                      setSkuSearch("");
+                    }}
+                    className="p-1 hover:bg-slate-200 rounded"
+                    data-testid="button-clear-source"
+                  >
+                    <X className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    value={locationSearch}
+                    onChange={(e) => {
+                      setLocationSearch(e.target.value);
+                      const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
+                      if (match) setFromLocationId(match.id);
+                    }}
+                    placeholder="Search bin location..."
+                    className="pl-10"
+                    data-testid="input-source-search"
+                  />
+                </div>
+              )}
               {locationSearch && filteredLocations.length > 0 && !fromLocationId && (
                 <div className="border rounded-md max-h-32 overflow-y-auto">
                   {filteredLocations.slice(0, 10).map(loc => (
@@ -539,53 +559,85 @@ export default function Transfers() {
                   ))}
                 </div>
               )}
-              {fromLocationId && (
-                <Badge variant="secondary">
-                  Selected: {locations.find(l => l.id === fromLocationId)?.code}
-                </Badge>
-              )}
             </div>
             
             <div className="space-y-2">
               <Label>SKU</Label>
-              <div className="relative">
-                <Package className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={skuSearch}
-                  onChange={(e) => {
-                    setSkuSearch(e.target.value);
-                    setSkuDropdownOpen(true);
-                  }}
-                  onFocus={() => setSkuDropdownOpen(true)}
-                  placeholder="Search SKU..."
-                  className="pl-10"
-                  data-testid="input-sku-search"
-                />
-                {skuDropdownOpen && skuResults.length > 0 && (
-                  <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                    {skuResults.map((result) => (
-                      <button
-                        key={result.sku}
-                        type="button"
-                        className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
-                        onClick={() => {
-                          setSkuSearch(result.sku);
-                          setVariantId(result.variantId);
-                          setSkuDropdownOpen(false);
-                        }}
-                      >
-                        <div className="font-medium">{result.sku}</div>
-                        <div className="text-xs text-muted-foreground truncate">{result.name}</div>
-                        <div className="text-xs text-green-600">Available: {result.available}</div>
-                      </button>
-                    ))}
+              {variantId ? (
+                <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
+                  <Package className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium flex-1">{skuSearch}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVariantId(null);
+                      setSkuSearch("");
+                    }}
+                    className="p-1 hover:bg-slate-200 rounded"
+                    data-testid="button-clear-sku"
+                  >
+                    <X className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <Package className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    value={skuSearch}
+                    onChange={(e) => {
+                      setSkuSearch(e.target.value);
+                      setSkuDropdownOpen(true);
+                    }}
+                    onFocus={() => setSkuDropdownOpen(true)}
+                    placeholder="Search SKU..."
+                    className="pl-10"
+                    data-testid="input-sku-search"
+                  />
+                  {skuDropdownOpen && skuResults.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {skuResults.map((result) => (
+                        <button
+                          key={result.sku}
+                          type="button"
+                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                          onClick={() => {
+                            setSkuSearch(result.sku);
+                            setVariantId(result.variantId);
+                            setSkuDropdownOpen(false);
+                          }}
+                        >
+                          <div className="font-medium">{result.sku}</div>
+                          <div className="text-xs text-muted-foreground truncate">{result.name}</div>
+                          <div className="text-xs text-green-600">Available: {result.available}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {fromLocationId && !variantId && skusAtLocation.length > 0 && !skuSearch && (
+                <div className="border rounded-md max-h-48 overflow-y-auto">
+                  <div className="px-3 py-1.5 text-xs text-muted-foreground bg-slate-50 border-b font-medium">
+                    SKUs in this bin
                   </div>
-                )}
-              </div>
-              {variantId && (
-                <Badge variant="secondary">
-                  Selected: {skuSearch}
-                </Badge>
+                  {skusAtLocation.map((result) => (
+                    <button
+                      key={result.variantId}
+                      type="button"
+                      className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                      onClick={() => {
+                        setSkuSearch(result.sku);
+                        setVariantId(result.variantId);
+                        setSkuDropdownOpen(false);
+                      }}
+                      data-testid={`sku-at-location-${result.variantId}`}
+                    >
+                      <div className="font-medium">{result.sku}</div>
+                      <div className="text-xs text-muted-foreground truncate">{result.name}</div>
+                      <div className="text-xs text-green-600">Available: {result.available}</div>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
             
@@ -603,20 +655,38 @@ export default function Transfers() {
             
             <div className="space-y-2">
               <Label>Destination Location</Label>
-              <div className="relative">
-                <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={destLocationSearch}
-                  onChange={(e) => {
-                    setDestLocationSearch(e.target.value);
-                    const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
-                    if (match && match.id !== fromLocationId) setToLocationId(match.id);
-                  }}
-                  placeholder="Search destination..."
-                  className="pl-10"
-                  data-testid="input-dest-search"
-                />
-              </div>
+              {toLocationId ? (
+                <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
+                  <MapPin className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium flex-1">{locations.find(l => l.id === toLocationId)?.code}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToLocationId(null);
+                      setDestLocationSearch("");
+                    }}
+                    className="p-1 hover:bg-slate-200 rounded"
+                    data-testid="button-clear-dest"
+                  >
+                    <X className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    value={destLocationSearch}
+                    onChange={(e) => {
+                      setDestLocationSearch(e.target.value);
+                      const match = locations.find(l => l.code.toLowerCase() === e.target.value.toLowerCase());
+                      if (match && match.id !== fromLocationId) setToLocationId(match.id);
+                    }}
+                    placeholder="Search destination..."
+                    className="pl-10"
+                    data-testid="input-dest-search"
+                  />
+                </div>
+              )}
               {destLocationSearch && filteredDestLocations.length > 0 && !toLocationId && (
                 <div className="border rounded-md max-h-32 overflow-y-auto">
                   {filteredDestLocations.slice(0, 10).map(loc => (
@@ -633,11 +703,6 @@ export default function Transfers() {
                     </button>
                   ))}
                 </div>
-              )}
-              {toLocationId && (
-                <Badge variant="secondary">
-                  Selected: {locations.find(l => l.id === toLocationId)?.code}
-                </Badge>
               )}
             </div>
             
