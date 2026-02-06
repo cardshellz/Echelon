@@ -1273,14 +1273,12 @@ export class DatabaseStorage implements IStorage {
     
     const updates: any = { pickedCount };
     if (allDone) {
-      // If any items are short, move to exception status for lead review
-      // Otherwise, move to completed status
       if (hasShortItems) {
-        updates.status = "exception" as OrderStatus;
+        updates.warehouseStatus = "exception" as OrderStatus;
         updates.exceptionAt = new Date();
-        updates.completedAt = new Date(); // Still record when picking finished
+        updates.completedAt = new Date();
       } else {
-        updates.status = "completed" as OrderStatus;
+        updates.warehouseStatus = "completed" as OrderStatus;
         updates.completedAt = new Date();
       }
     }
