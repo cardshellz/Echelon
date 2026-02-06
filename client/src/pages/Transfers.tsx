@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ArrowRight, ArrowLeftRight, Undo2, Check, ChevronLeft, ChevronRight, Search, Package, MapPin, ScanLine, Loader2, X } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
@@ -51,12 +52,16 @@ export default function Transfers() {
   const [fromLocationId, setFromLocationId] = useState<number | null>(null);
   const [toLocationId, setToLocationId] = useState<number | null>(null);
   const [variantId, setVariantId] = useState<number | null>(null);
+  const [selectedSkuLabel, setSelectedSkuLabel] = useState("");
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
-  const [skuSearch, setSkuSearch] = useState("");
-  const [skuDropdownOpen, setSkuDropdownOpen] = useState(false);
+  const [skuFilter, setSkuFilter] = useState("");
   const [locationSearch, setLocationSearch] = useState("");
   const [destLocationSearch, setDestLocationSearch] = useState("");
+  
+  // SKU Lookup modal state
+  const [lookupOpen, setLookupOpen] = useState(false);
+  const [lookupSearch, setLookupSearch] = useState("");
   
   // Mobile wizard state
   const [mobileStep, setMobileStep] = useState<MobileStep>("source");
@@ -81,18 +86,6 @@ export default function Transfers() {
     queryKey: ["/api/warehouse/locations"]
   });
   
-  const { data: skuResults = [] } = useQuery<SkuResult[]>({
-    queryKey: ["/api/inventory/skus/search", skuSearch, fromLocationId],
-    queryFn: async () => {
-      if (!skuSearch || skuSearch.length < 2) return [];
-      const params = new URLSearchParams({ q: skuSearch });
-      if (fromLocationId) params.append("locationId", fromLocationId.toString());
-      const res = await fetch(`/api/inventory/skus/search?${params}`);
-      return res.json();
-    },
-    enabled: skuSearch.length >= 2
-  });
-  
   const { data: skusAtLocation = [] } = useQuery<SkuResult[]>({
     queryKey: ["/api/inventory/skus/search", "location", fromLocationId],
     queryFn: async () => {
@@ -101,6 +94,25 @@ export default function Transfers() {
       return res.json();
     },
     enabled: !!fromLocationId
+  });
+  
+  const { data: lookupResults = [] } = useQuery<Array<{
+    sku: string;
+    name: string;
+    variantId: number;
+    location: string;
+    zone: string | null;
+    locationType: string | null;
+    available: number;
+    locationId: number;
+  }>>({
+    queryKey: ["/api/inventory/sku-locations", lookupSearch],
+    queryFn: async () => {
+      if (!lookupSearch || lookupSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/sku-locations?q=${encodeURIComponent(lookupSearch)}`);
+      return res.json();
+    },
+    enabled: lookupOpen && lookupSearch.length >= 2
   });
   
   const transferMutation = useMutation({
@@ -141,9 +153,10 @@ export default function Transfers() {
     setFromLocationId(null);
     setToLocationId(null);
     setVariantId(null);
+    setSelectedSkuLabel("");
     setQuantity("");
     setNotes("");
-    setSkuSearch("");
+    setSkuFilter("");
     setLocationSearch("");
     setDestLocationSearch("");
     setMobileStep("source");
@@ -249,16 +262,20 @@ export default function Transfers() {
                 </div>
                 <p className="text-sm text-muted-foreground">Items in bin {sourceLocationCode}:</p>
                 
-                <Input
-                  value={skuSearch}
-                  onChange={(e) => setSkuSearch(e.target.value)}
-                  placeholder="Search SKU..."
-                  className="h-12"
-                  data-testid="input-search-sku"
-                />
+                {skusAtLocation.length > 5 && (
+                  <Input
+                    value={skuFilter}
+                    onChange={(e) => setSkuFilter(e.target.value)}
+                    placeholder="Filter SKUs in this bin..."
+                    className="h-12"
+                    data-testid="input-filter-sku"
+                  />
+                )}
                 
                 <div className="max-h-[300px] overflow-y-auto space-y-2">
-                  {(skuSearch ? skuResults : skusAtLocation).map((item) => (
+                  {skusAtLocation
+                    .filter(item => !skuFilter || item.sku.toLowerCase().includes(skuFilter.toLowerCase()) || item.name.toLowerCase().includes(skuFilter.toLowerCase()))
+                    .map((item) => (
                     <button
                       key={item.sku}
                       type="button"
@@ -279,7 +296,7 @@ export default function Transfers() {
                       <div className="text-sm text-green-600">Available: {item.available}</div>
                     </button>
                   ))}
-                  {skusAtLocation.length === 0 && !skuSearch && (
+                  {skusAtLocation.length === 0 && (
                     <p className="text-center text-muted-foreground py-4">No items in this bin</p>
                   )}
                 </div>
@@ -518,7 +535,7 @@ export default function Transfers() {
                       setFromLocationId(null);
                       setLocationSearch("");
                       setVariantId(null);
-                      setSkuSearch("");
+                      setSelectedSkuLabel("");
                     }}
                     className="p-1 hover:bg-slate-200 rounded"
                     data-testid="button-clear-source"
@@ -562,16 +579,28 @@ export default function Transfers() {
             </div>
             
             <div className="space-y-2">
-              <Label>SKU</Label>
+              <div className="flex items-center justify-between">
+                <Label>SKU</Label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs h-6 px-2"
+                  onClick={() => setLookupOpen(true)}
+                  data-testid="button-open-lookup"
+                >
+                  <Search className="h-3 w-3 mr-1" />
+                  Look up SKU
+                </Button>
+              </div>
               {variantId ? (
                 <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
                   <Package className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium flex-1">{skuSearch}</span>
+                  <span className="font-medium flex-1">{selectedSkuLabel}</span>
                   <button
                     type="button"
                     onClick={() => {
                       setVariantId(null);
-                      setSkuSearch("");
+                      setSelectedSkuLabel("");
                     }}
                     className="p-1 hover:bg-slate-200 rounded"
                     data-testid="button-clear-sku"
@@ -579,56 +608,20 @@ export default function Transfers() {
                     <X className="h-4 w-4 text-muted-foreground" />
                   </button>
                 </div>
+              ) : !fromLocationId ? (
+                <p className="text-sm text-muted-foreground py-2">Select a source bin first</p>
+              ) : skusAtLocation.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-2">No inventory in this bin</p>
               ) : (
-                <div className="relative">
-                  <Package className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    value={skuSearch}
-                    onChange={(e) => {
-                      setSkuSearch(e.target.value);
-                      setSkuDropdownOpen(true);
-                    }}
-                    onFocus={() => setSkuDropdownOpen(true)}
-                    placeholder="Search SKU..."
-                    className="pl-10"
-                    data-testid="input-sku-search"
-                  />
-                  {skuDropdownOpen && skuResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                      {skuResults.map((result) => (
-                        <button
-                          key={result.sku}
-                          type="button"
-                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
-                          onClick={() => {
-                            setSkuSearch(result.sku);
-                            setVariantId(result.variantId);
-                            setSkuDropdownOpen(false);
-                          }}
-                        >
-                          <div className="font-medium">{result.sku}</div>
-                          <div className="text-xs text-muted-foreground truncate">{result.name}</div>
-                          <div className="text-xs text-green-600">Available: {result.available}</div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-              {fromLocationId && !variantId && skusAtLocation.length > 0 && !skuSearch && (
                 <div className="border rounded-md max-h-48 overflow-y-auto">
-                  <div className="px-3 py-1.5 text-xs text-muted-foreground bg-slate-50 border-b font-medium">
-                    SKUs in this bin
-                  </div>
                   {skusAtLocation.map((result) => (
                     <button
                       key={result.variantId}
                       type="button"
                       className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
                       onClick={() => {
-                        setSkuSearch(result.sku);
+                        setSelectedSkuLabel(result.sku);
                         setVariantId(result.variantId);
-                        setSkuDropdownOpen(false);
                       }}
                       data-testid={`sku-at-location-${result.variantId}`}
                     >
@@ -785,6 +778,78 @@ export default function Transfers() {
           </CardContent>
         </Card>
       </div>
+      
+      <Dialog open={lookupOpen} onOpenChange={(open) => { setLookupOpen(open); if (!open) setLookupSearch(""); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Search className="h-5 w-5" />
+              SKU Lookup
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                value={lookupSearch}
+                onChange={(e) => setLookupSearch(e.target.value)}
+                placeholder="Search by SKU or name..."
+                className="pl-10"
+                autoFocus
+                data-testid="input-lookup-search"
+              />
+            </div>
+            
+            {lookupSearch.length >= 2 && lookupResults.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-4">No inventory found for this SKU</p>
+            )}
+            
+            {lookupResults.length > 0 && (
+              <div className="border rounded-md max-h-80 overflow-y-auto">
+                <div className="grid grid-cols-[1fr_auto_auto] gap-2 px-3 py-2 bg-slate-50 border-b text-xs font-medium text-muted-foreground sticky top-0">
+                  <span>Location</span>
+                  <span>Type</span>
+                  <span className="text-right">Qty</span>
+                </div>
+                {(() => {
+                  const grouped = lookupResults.reduce((acc, r) => {
+                    if (!acc[r.sku]) acc[r.sku] = { name: r.name, locations: [] };
+                    acc[r.sku].locations.push(r);
+                    return acc;
+                  }, {} as Record<string, { name: string; locations: typeof lookupResults }>);
+                  
+                  return Object.entries(grouped).map(([sku, data]) => (
+                    <div key={sku}>
+                      <div className="px-3 py-2 bg-slate-50/50 border-b">
+                        <div className="font-medium text-sm">{sku}</div>
+                        <div className="text-xs text-muted-foreground truncate">{data.name}</div>
+                        <div className="text-xs font-medium text-blue-600">
+                          Total: {data.locations.reduce((sum, l) => sum + l.available, 0)} units across {data.locations.length} location{data.locations.length !== 1 ? 's' : ''}
+                        </div>
+                      </div>
+                      {data.locations.map((loc) => (
+                        <div key={`${sku}-${loc.locationId}`} className="grid grid-cols-[1fr_auto_auto] gap-2 px-3 py-2 border-b last:border-b-0 text-sm items-center">
+                          <div className="flex items-center gap-1.5">
+                            <MapPin className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                            <span className="font-medium">{loc.location}</span>
+                            {loc.zone && <span className="text-xs text-muted-foreground">({loc.zone})</span>}
+                          </div>
+                          <Badge variant="outline" className="text-xs">{loc.locationType || 'N/A'}</Badge>
+                          <span className="text-right font-medium">{loc.available}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ));
+                })()}
+              </div>
+            )}
+            
+            <p className="text-xs text-muted-foreground">
+              This is for informational purposes only. To transfer inventory, select a source bin on the transfer form.
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

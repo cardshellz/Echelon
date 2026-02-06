@@ -4939,7 +4939,28 @@ export async function registerRoutes(
   app.get("/api/inventory/skus/search", async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
+      const locationId = req.query.locationId ? parseInt(String(req.query.locationId)) : null;
       const limit = parseInt(String(req.query.limit)) || 20;
+      
+      if (locationId) {
+        const result = await db.execute(sql`
+          SELECT 
+            uv.sku as sku,
+            uv.name as name,
+            uv.id as "variantId",
+            il.quantity as available,
+            wl.id as "locationId",
+            wl.code as location
+          FROM inventory_levels il
+          JOIN uom_variants uv ON uv.id = il.uom_variant_id
+          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+          WHERE il.warehouse_location_id = ${locationId}
+            AND il.quantity > 0
+          ORDER BY uv.sku
+          LIMIT ${limit}
+        `);
+        return res.json(result.rows);
+      }
       
       if (!query) {
         return res.json([]);
@@ -4947,17 +4968,7 @@ export async function registerRoutes(
       
       const searchPattern = `%${query}%`;
       
-      // Source of truth: uom_variants (sellable SKUs with inventory_item linkage)
-      // Join with catalog_products to get catalogProductId if available
-      const result = await db.execute<{
-        sku: string;
-        name: string;
-        source: string;
-        catalogProductId: number | null;
-        inventoryItemId: number;
-        uomVariantId: number;
-        unitsPerVariant: number;
-      }>(sql`
+      const result = await db.execute(sql`
         SELECT 
           uv.sku as sku,
           uv.name as name,
@@ -4982,6 +4993,43 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error searching SKUs:", error);
       res.status(500).json({ error: "Failed to search SKUs" });
+    }
+  });
+
+  app.get("/api/inventory/sku-locations", async (req, res) => {
+    try {
+      const query = String(req.query.q || "").trim().toLowerCase();
+      if (!query || query.length < 2) {
+        return res.json([]);
+      }
+      
+      const searchPattern = `%${query}%`;
+      
+      const result = await db.execute(sql`
+        SELECT 
+          uv.sku,
+          uv.name,
+          uv.id as "variantId",
+          wl.code as location,
+          wl.zone,
+          wl.location_type as "locationType",
+          il.quantity as available,
+          il.warehouse_location_id as "locationId"
+        FROM inventory_levels il
+        JOIN uom_variants uv ON uv.id = il.uom_variant_id
+        JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+        WHERE il.quantity > 0
+          AND (
+            LOWER(uv.sku) LIKE ${searchPattern} OR
+            LOWER(uv.name) LIKE ${searchPattern}
+          )
+        ORDER BY uv.sku, wl.code
+      `);
+      
+      res.json(result.rows);
+    } catch (error) {
+      console.error("Error fetching SKU locations:", error);
+      res.status(500).json({ error: "Failed to fetch SKU locations" });
     }
   });
 
