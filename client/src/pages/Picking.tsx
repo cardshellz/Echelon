@@ -808,7 +808,6 @@ export default function Picking() {
       pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
     }) => updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod),
     onSuccess: (updatedItem) => {
-      // Update the query cache with the new item status
       queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
         if (!oldData) return oldData;
         return oldData.map(order => ({
@@ -818,6 +817,7 @@ export default function Picking() {
           )
         }));
       });
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
     },
   });
   

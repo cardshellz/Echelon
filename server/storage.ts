@@ -922,7 +922,7 @@ export class DatabaseStorage implements IStorage {
       shippingPostalCode: row.shipping_postal_code,
       shippingCountry: row.shipping_country,
       priority: row.priority,
-      status: row.status,
+      warehouseStatus: row.warehouse_status,
       onHold: row.on_hold,
       heldAt: row.held_at,
       heldBy: row.held_by,
