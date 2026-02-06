@@ -510,6 +510,7 @@ export class DatabaseStorage implements IStorage {
     if (result.rows && result.rows.length > 0) {
       return (result.rows[0] as any).product_variant_id as number;
     }
+    console.warn(`[Migration] No product_variant_id mapping found for uom_variant_id=${uomVariantId}`);
     return null;
   }
 

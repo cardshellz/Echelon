@@ -43,10 +43,20 @@ Configurable settings are stored in the `app_settings` table (key-value) and man
 ### Inventory Management System (WMS)
 Echelon acts as the source of truth for inventory, managing on-hand and available-to-promise (ATP) calculations. It supports base unit tracking, UOM variants, and a multi-location model (Forward Pick, Bulk Storage, Receiving Dock) with replenishment chains. Inventory states include On Hand, Reserved, Picked, Packed, Shipped, and ATP. ATP calculation is based on total on-hand minus reserved and picked quantities across all locations. Pickable quantity is an operational metric for inventory in forward pick locations.
 
+### Variant Migration (In Progress)
+The system is migrating from `uom_variants` (legacy) to `product_variants` (new). Current state:
+- **Mapping table**: `uom_to_pv_mapping` maps all 198 uom_variant IDs to product_variant IDs by SKU
+- **Dual-write**: All dependent tables now have both legacy columns and new `product_variant_id` columns
+- **Backfilled**: All existing data in inventory_levels, inventory_transactions, catalog_products, receiving_lines has both IDs populated
+- **Storage layer**: `createInventoryLevel`, `upsertInventoryLevel`, `createInventoryTransaction`, `executeTransfer` all dual-write to both columns
+- **Phase**: Code still primarily reads from uom_variants. Next phase will switch reads to product_variants, then drop legacy columns.
+- **Key difference**: `product_variants` links to `products` table (not `inventory_items`), has Shopify options, pricing, and cleaner types (boolean instead of integer for active)
+- Tables migrated: inventory_levels, inventory_transactions, catalog_products, receiving_lines, channel_feeds, channel_listings, channel_pricing, channel_variant_overrides, replen_rules, replen_tasks
+
 ### Dimensional Standards (Cube-Based Capacity)
 All physical dimensions use **millimeters (mm)** for consistency and clean integer math:
 - `warehouse_locations`: `width_mm`, `height_mm`, `depth_mm`, `capacity_cubic_mm`, `max_weight_g`
-- `uom_variants`: `width_mm`, `height_mm`, `depth_mm`, `weight_g`
+- `product_variants`: `length_mm`, `width_mm`, `height_mm`, `weight_grams` (replaces uom_variants dimensions)
 
 Capacity calculation: `max_units = floor(location.capacity_cubic_mm / variant_cubic_mm)`. This allows the same bin to correctly hold different quantities based on item size (e.g., 100 packs OR 10 cases). Weight constraints use grams (g). Replenishment triggers (minQty/maxQty) live in `replen_rules`, not on locations.
 
