@@ -129,7 +129,7 @@ export async function syncNewOrders() {
             SELECT COALESCE(uv.image_url, cp.image_url) as image_url
             FROM uom_variants uv
             LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-            LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
+            LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
             WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
             LIMIT 1
           `);

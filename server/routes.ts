@@ -4348,7 +4348,7 @@ export async function registerRoutes(
         FROM inventory_levels il
         JOIN uom_variants uv ON il.variant_id = uv.id
         LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-        LEFT JOIN catalog_products cp ON ii.catalog_product_id = cp.id
+        LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
         WHERE il.warehouse_location_id = ${warehouseLocationId}
           AND il.variant_qty > 0
         ORDER BY uv.sku
