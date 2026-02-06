@@ -6282,7 +6282,7 @@ export async function registerRoutes(
   });
 
   // Manually trigger order sync from shopify_orders to orders (admin only)
-  app.post("/api/sync/trigger", requirePermission("system", "admin"), async (req, res) => {
+  app.post("/api/sync/trigger", requirePermission("shopify", "sync"), async (req, res) => {
     try {
       const { syncNewOrders } = await import("./orderSyncListener");
       await syncNewOrders();
@@ -6294,7 +6294,7 @@ export async function registerRoutes(
   });
   
   // Legacy debug endpoint - redirect to authenticated version
-  app.post("/api/debug/trigger-sync", requirePermission("system", "admin"), async (req, res) => {
+  app.post("/api/debug/trigger-sync", requirePermission("shopify", "sync"), async (req, res) => {
     try {
       const { syncNewOrders } = await import("./orderSyncListener");
       await syncNewOrders();
