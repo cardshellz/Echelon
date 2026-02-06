@@ -946,9 +946,45 @@ export class DatabaseStorage implements IStorage {
     const orderIds = orderRows.map(o => o.id);
     const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
     
+    // Enrich items missing imageUrl by looking up from uom_variants/inventory_items
+    const skusMissingImages = [...new Set(
+      allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
+    )];
+    
+    const imageMap = new Map<string, string>();
+    if (skusMissingImages.length > 0) {
+      try {
+        const imageResults = await db.execute<{ sku: string; image_url: string }>(sql`
+          SELECT UPPER(uv.sku) as sku, COALESCE(uv.image_url, ii.image_url) as image_url
+          FROM uom_variants uv
+          LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+          WHERE UPPER(uv.sku) = ANY(${skusMissingImages})
+            AND COALESCE(uv.image_url, ii.image_url) IS NOT NULL
+        `);
+        for (const row of imageResults.rows) {
+          if (row.image_url) {
+            imageMap.set(row.sku, row.image_url);
+          }
+        }
+      } catch (err) {
+        console.warn("[PickQueue] Failed to enrich images:", (err as Error).message);
+      }
+    }
+    
+    // Apply enriched images to items missing them
+    const enrichedItems = allItems.map(item => {
+      if (!item.imageUrl && item.sku) {
+        const foundImage = imageMap.get(item.sku.toUpperCase());
+        if (foundImage) {
+          return { ...item, imageUrl: foundImage };
+        }
+      }
+      return item;
+    });
+    
     // Group items by orderId
     const itemsByOrderId = new Map<number, OrderItem[]>();
-    for (const item of allItems) {
+    for (const item of enrichedItems) {
       const existing = itemsByOrderId.get(item.orderId) || [];
       existing.push(item);
       itemsByOrderId.set(item.orderId, existing);
