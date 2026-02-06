@@ -1295,13 +1295,15 @@ export class DatabaseStorage implements IStorage {
   async updateOrderProgress(orderId: number): Promise<Order | null> {
     const items = await this.getOrderItems(orderId);
     const shippableItems = items.filter(item => item.requiresShipping === 1);
-    const pickedCount = items.reduce((sum, item) => sum + item.pickedQuantity, 0);
+    const pickedCount = shippableItems.reduce((sum, item) => sum + item.pickedQuantity, 0);
+    const itemCount = items.length;
+    const unitCount = items.reduce((sum, item) => sum + item.quantity, 0);
     
     const allShippableDone = shippableItems.length > 0 && 
       shippableItems.every(item => item.status === "completed" || item.status === "short");
     const hasShortItems = shippableItems.some(item => item.status === "short");
     
-    const updates: any = { pickedCount };
+    const updates: any = { pickedCount, itemCount, unitCount };
     if (allShippableDone) {
       if (hasShortItems) {
         updates.warehouseStatus = "exception" as OrderStatus;

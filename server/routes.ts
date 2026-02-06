@@ -794,7 +794,60 @@ export async function registerRoutes(
         JOIN orders o ON o.id = oi.order_id
         WHERE o.order_number = ${orderNumber}
       `);
-      res.json({ orderNumber, items: result.rows });
+      const orderResult = await db.execute(sql`
+        SELECT id, order_number, item_count, unit_count, picked_count, warehouse_status
+        FROM orders WHERE order_number = ${orderNumber}
+      `);
+      res.json({ order: orderResult.rows[0], items: result.rows });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Diagnostic: find orders where picked_count > unit_count (double counting)
+  app.get("/api/picking/diagnose-overcounted", async (req, res) => {
+    try {
+      const result = await db.execute(sql`
+        SELECT o.id, o.order_number, o.item_count, o.unit_count, o.picked_count,
+               o.warehouse_status,
+               (SELECT SUM(oi.picked_quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
+               (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
+        FROM orders o
+        WHERE o.picked_count > o.unit_count
+          AND o.warehouse_status NOT IN ('cancelled')
+        ORDER BY o.picked_count - o.unit_count DESC
+        LIMIT 20
+      `);
+      res.json(result.rows);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Fix stale item_count/unit_count on all orders
+  app.post("/api/picking/fix-order-counts", async (req, res) => {
+    try {
+      const result = await db.execute(sql`
+        UPDATE orders o
+        SET 
+          item_count = sub.actual_item_count,
+          unit_count = sub.actual_unit_count,
+          picked_count = sub.actual_picked_count
+        FROM (
+          SELECT 
+            oi.order_id,
+            COUNT(*) as actual_item_count,
+            COALESCE(SUM(oi.quantity), 0) as actual_unit_count,
+            COALESCE(SUM(CASE WHEN oi.requires_shipping = 1 THEN oi.picked_quantity ELSE 0 END), 0) as actual_picked_count
+          FROM order_items oi
+          GROUP BY oi.order_id
+        ) sub
+        WHERE o.id = sub.order_id
+          AND (o.item_count != sub.actual_item_count 
+               OR o.unit_count != sub.actual_unit_count 
+               OR o.picked_count != sub.actual_picked_count)
+      `);
+      res.json({ message: "Order counts recalculated", rowsUpdated: result.rowCount });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
