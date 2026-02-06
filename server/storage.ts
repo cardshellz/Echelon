@@ -1007,6 +1007,24 @@ export class DatabaseStorage implements IStorage {
       itemsByOrderId.set(item.orderId, existing);
     }
     
+    // Auto-fix stuck orders: if all items are done but warehouse_status is still in_progress
+    for (const order of orderRows) {
+      if (order.warehouseStatus === "in_progress") {
+        const items = itemsByOrderId.get(order.id) || [];
+        if (items.length > 0 && items.every(i => i.status === "completed" || i.status === "short")) {
+          const hasShort = items.some(i => i.status === "short");
+          const fixedStatus = hasShort ? "exception" : "completed";
+          await db.update(orders).set({ 
+            warehouseStatus: fixedStatus, 
+            completedAt: new Date() 
+          }).where(eq(orders.id, order.id));
+          order.warehouseStatus = fixedStatus;
+          order.completedAt = new Date();
+          console.log(`[PickQueue] Auto-fixed stuck order ${order.orderNumber}: in_progress → ${fixedStatus}`);
+        }
+      }
+    }
+
     // Combine orders with their items
     return orderRows.map(order => ({
       ...order,
