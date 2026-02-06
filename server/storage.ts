@@ -1007,20 +1007,30 @@ export class DatabaseStorage implements IStorage {
       itemsByOrderId.set(item.orderId, existing);
     }
     
-    // Auto-fix stuck orders: if all items are done but warehouse_status is still in_progress
+    // Auto-fix stuck orders: if all shippable items are done but warehouse_status is still in_progress
     for (const order of orderRows) {
       if (order.warehouseStatus === "in_progress") {
         const items = itemsByOrderId.get(order.id) || [];
-        if (items.length > 0 && items.every(i => i.status === "completed" || i.status === "short")) {
-          const hasShort = items.some(i => i.status === "short");
+        const shippableItems = items.filter(i => i.requiresShipping === 1);
+        const allShippableDone = shippableItems.length > 0 && 
+          shippableItems.every(i => i.status === "completed" || i.status === "short");
+        if (allShippableDone) {
+          const hasShort = shippableItems.some(i => i.status === "short");
           const fixedStatus = hasShort ? "exception" : "completed";
-          await db.update(orders).set({ 
-            warehouseStatus: fixedStatus, 
-            completedAt: new Date() 
-          }).where(eq(orders.id, order.id));
-          order.warehouseStatus = fixedStatus;
-          order.completedAt = new Date();
-          console.log(`[PickQueue] Auto-fixed stuck order ${order.orderNumber}: in_progress → ${fixedStatus}`);
+          try {
+            await db.execute(
+              sql`UPDATE orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
+            );
+            const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
+            for (const item of nonShippablePending) {
+              await db.execute(sql`UPDATE order_items SET status = 'completed' WHERE id = ${item.id}`);
+              item.status = "completed";
+            }
+            order.warehouseStatus = fixedStatus;
+            order.completedAt = new Date();
+          } catch (err) {
+            console.error(`[PickQueue] Failed to auto-fix order ${order.orderNumber}:`, err);
+          }
         }
       }
     }
@@ -1284,13 +1294,15 @@ export class DatabaseStorage implements IStorage {
 
   async updateOrderProgress(orderId: number): Promise<Order | null> {
     const items = await this.getOrderItems(orderId);
+    const shippableItems = items.filter(item => item.requiresShipping === 1);
     const pickedCount = items.reduce((sum, item) => sum + item.pickedQuantity, 0);
-    const totalCount = items.reduce((sum, item) => sum + item.quantity, 0);
-    const allDone = items.every(item => item.status === "completed" || item.status === "short");
-    const hasShortItems = items.some(item => item.status === "short");
+    
+    const allShippableDone = shippableItems.length > 0 && 
+      shippableItems.every(item => item.status === "completed" || item.status === "short");
+    const hasShortItems = shippableItems.some(item => item.status === "short");
     
     const updates: any = { pickedCount };
-    if (allDone) {
+    if (allShippableDone) {
       if (hasShortItems) {
         updates.warehouseStatus = "exception" as OrderStatus;
         updates.exceptionAt = new Date();
@@ -1298,6 +1310,11 @@ export class DatabaseStorage implements IStorage {
       } else {
         updates.warehouseStatus = "completed" as OrderStatus;
         updates.completedAt = new Date();
+      }
+      
+      const nonShippablePending = items.filter(item => item.requiresShipping !== 1 && item.status === "pending");
+      for (const item of nonShippablePending) {
+        await db.update(orderItems).set({ status: "completed" }).where(eq(orderItems.id, item.id));
       }
     }
     

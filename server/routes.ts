@@ -783,6 +783,72 @@ export async function registerRoutes(
   });
   
   // Get orders for picking queue (including completed for Done count)
+  // Diagnostic endpoint to inspect a specific order's items
+  app.get("/api/picking/diagnose/:orderNumber", async (req, res) => {
+    try {
+      const orderNumber = '#' + req.params.orderNumber;
+      const result = await db.execute(sql`
+        SELECT oi.id, oi.order_id, oi.sku, oi.name, oi.status, oi.quantity, 
+               oi.picked_quantity, oi.requires_shipping, oi.location
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.order_number = ${orderNumber}
+      `);
+      res.json({ orderNumber, items: result.rows });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Diagnostic endpoint to fix stuck orders (considers only shippable items)
+  app.post("/api/picking/fix-stuck-orders", async (req, res) => {
+    try {
+      const result = await db.execute(sql`
+        SELECT o.id, o.order_number, o.warehouse_status, o.item_count,
+          (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
+          (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
+          (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
+        FROM orders o
+        WHERE o.warehouse_status = 'in_progress'
+      `);
+      const stuckOrders = result.rows as any[];
+      const fixed: string[] = [];
+      
+      for (const row of stuckOrders) {
+        const shippableCount = Number(row.shippable_count);
+        const shippableDoneCount = Number(row.shippable_done_count);
+        if (shippableCount > 0 && shippableDoneCount === shippableCount) {
+          const hasShort = Number(row.short_count) > 0;
+          const newStatus = hasShort ? 'exception' : 'completed';
+          await db.execute(sql`
+            UPDATE orders 
+            SET warehouse_status = ${newStatus}, completed_at = NOW()
+            WHERE id = ${row.id}
+          `);
+          await db.execute(sql`
+            UPDATE order_items 
+            SET status = 'completed' 
+            WHERE order_id = ${row.id} AND requires_shipping = 0 AND status = 'pending'
+          `);
+          fixed.push(`${row.order_number}: in_progress → ${newStatus} (${shippableDoneCount}/${shippableCount} shippable items done)`);
+        }
+      }
+      
+      res.json({ 
+        inProgressOrders: stuckOrders.map(r => ({
+          orderNumber: r.order_number,
+          itemCount: r.item_count,
+          shippableCount: r.shippable_count,
+          shippableDoneCount: r.shippable_done_count,
+          shortCount: r.short_count,
+        })),
+        fixed 
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get("/api/picking/queue", async (req, res) => {
     try {
       // Only fetch orders that need to be in pick queue (ready/in_progress, plus recent completed)
