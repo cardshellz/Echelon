@@ -2916,6 +2916,29 @@ export async function registerRoutes(
         const enrichedItems: InsertOrderItem[] = [];
         for (const item of unfulfilledItems) {
           const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
+          
+          // Look up image from product_locations first (best source), then products/inventory_items
+          let itemImageUrl = binLocation?.imageUrl || null;
+          if (!itemImageUrl && item.sku) {
+            const imgResult = await db.execute<{ image_url: string | null }>(sql`
+              SELECT image_url FROM (
+                SELECT pl.image_url FROM product_locations pl
+                WHERE UPPER(pl.sku) = ${item.sku.toUpperCase()} AND pl.image_url IS NOT NULL
+                UNION ALL
+                SELECT COALESCE(ii.image_url, p.image_url) as image_url
+                FROM uom_variants uv
+                LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+                LEFT JOIN products p ON UPPER(p.sku) = UPPER(uv.sku)
+                WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
+                  AND COALESCE(ii.image_url, p.image_url) IS NOT NULL
+              ) sub
+              LIMIT 1
+            `);
+            if (imgResult.rows.length > 0 && imgResult.rows[0].image_url) {
+              itemImageUrl = imgResult.rows[0].image_url;
+            }
+          }
+          
           enrichedItems.push({
             orderId: 0,
             shopifyLineItemId: item.shopify_line_item_id,
@@ -2928,7 +2951,7 @@ export async function registerRoutes(
             status: "pending",
             location: binLocation?.location || "UNASSIGNED",
             zone: binLocation?.zone || "U",
-            imageUrl: binLocation?.imageUrl || null,
+            imageUrl: itemImageUrl,
             barcode: binLocation?.barcode || null,
             requiresShipping: item.requires_shipping ? 1 : 0,
           });

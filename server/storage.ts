@@ -946,7 +946,7 @@ export class DatabaseStorage implements IStorage {
     const orderIds = orderRows.map(o => o.id);
     const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
     
-    // Enrich items missing imageUrl by looking up from uom_variants/inventory_items
+    // Enrich items missing imageUrl by looking up from product_locations, products, inventory_items
     const skusMissingImages = [...new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
     )];
@@ -955,14 +955,20 @@ export class DatabaseStorage implements IStorage {
     if (skusMissingImages.length > 0) {
       try {
         const imageResults = await db.execute<{ sku: string; image_url: string }>(sql`
-          SELECT UPPER(uv.sku) as sku, COALESCE(uv.image_url, ii.image_url) as image_url
-          FROM uom_variants uv
-          LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-          WHERE UPPER(uv.sku) = ANY(${skusMissingImages})
-            AND COALESCE(uv.image_url, ii.image_url) IS NOT NULL
+          SELECT UPPER(sku) as sku, image_url FROM (
+            SELECT pl.sku, pl.image_url FROM product_locations pl
+            WHERE UPPER(pl.sku) = ANY(${skusMissingImages}) AND pl.image_url IS NOT NULL
+            UNION ALL
+            SELECT uv.sku, COALESCE(ii.image_url, p.image_url) as image_url
+            FROM uom_variants uv
+            LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+            LEFT JOIN products p ON UPPER(p.sku) = UPPER(uv.sku)
+            WHERE UPPER(uv.sku) = ANY(${skusMissingImages})
+              AND COALESCE(ii.image_url, p.image_url) IS NOT NULL
+          ) sub
         `);
         for (const row of imageResults.rows) {
-          if (row.image_url) {
+          if (row.image_url && !imageMap.has(row.sku)) {
             imageMap.set(row.sku, row.image_url);
           }
         }
