@@ -1279,6 +1279,8 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
@@ -1291,6 +1293,9 @@ export default function Picking() {
             status: newStatus as "pending" | "in_progress" | "completed" | "short"
           };
         });
+        
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
         
         return { ...batch, items: newItems };
       }));
@@ -1307,7 +1312,10 @@ export default function Picking() {
           };
         });
         
-        return { ...order, items: newItems };
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        
+        return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
       }));
     }
     
@@ -1316,10 +1324,24 @@ export default function Picking() {
     setMultiQtyOpen(false);
     setPickQty(1);
     
-    setTimeout(() => {
-      advanceToNext();
-      maintainFocus();
-    }, 300);
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
+    } else {
+      setTimeout(() => {
+        advanceToNext();
+        maintainFocus();
+      }, 300);
+    }
   };
   
   // Short pick - works for both card view (currentItem) and list view (shortPickListIndex)
@@ -1347,6 +1369,8 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
@@ -1359,6 +1383,9 @@ export default function Picking() {
             status: "short" as const
           };
         });
+        
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
         
         return { ...batch, items: newItems };
       }));
@@ -1375,7 +1402,10 @@ export default function Picking() {
           };
         });
         
-        return { ...order, items: newItems };
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        
+        return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
       }));
     }
     
@@ -1387,8 +1417,19 @@ export default function Picking() {
     setShortPickQty("0");
     setShortPickListIndex(null);
     
-    // Only advance to next in card view, not list view
-    if (!isListView) {
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
+    } else if (!isListView) {
       setTimeout(() => {
         advanceToNext();
         maintainFocus();
