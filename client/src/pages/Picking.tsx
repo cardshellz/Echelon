@@ -703,7 +703,7 @@ export default function Picking() {
     },
   });
   
-  // Mutation for putting orders on hold (admin/lead only)
+  // Mutation for putting orders on hold
   const holdMutation = useMutation({
     mutationFn: (orderId: number) => {
       console.log("[HOLD] Attempting to hold order:", orderId);
@@ -729,7 +729,7 @@ export default function Picking() {
     },
   });
   
-  // Mutation for releasing hold on orders (admin/lead only)
+  // Mutation for releasing hold on orders
   const releaseHoldMutation = useMutation({
     mutationFn: (orderId: number) => releaseHoldOrder(orderId),
     onSuccess: (data) => {
@@ -1588,7 +1588,8 @@ export default function Picking() {
           triggerHaptic("heavy");
           setActiveOrderId(null);
           setActiveBatchId(null);
-          setView("queue");
+          setCurrentItemIndex(0);
+          setView("complete");
         }, 500);
       }
       return allDone;
@@ -1661,26 +1662,23 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
         
         const newItems = batch.items.map((it, i) => {
           if (i !== idx) return it;
-          return {
-            ...it,
-            picked: qty,
-            status: "completed" as const
-          };
+          return { ...it, picked: qty, status: "completed" as const };
         });
         
-        return { ...batch, items: newItems };
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
       }));
     } else {
-      // Update localSingleQueue directly - this is the source of truth during picking
-      console.log("[PICK] Updating localSingleQueue for order:", activeOrderId);
       setLocalSingleQueue(prev => {
-        // If the order isn't in local state yet, add it from singleQueue
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
         
@@ -1689,28 +1687,28 @@ export default function Picking() {
           
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
-            return {
-              ...it,
-              picked: qty,
-              status: "completed" as const
-            };
+            return { ...it, picked: qty, status: "completed" as const };
           });
           
-          // Check if order is now complete
           const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-          if (allDone) {
-            setTimeout(() => {
-              playSound("complete");
-              triggerHaptic("heavy");
-              setActiveOrderId(null);
-              setView("queue");
-            }, 500);
-          }
-          
-          console.log("[PICK] Updated items:", newItems.map(i => ({ sku: i.sku, status: i.status })));
+          if (allDone) orderCompleted = true;
           return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
   };
   
@@ -1865,36 +1863,48 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
-      setQueue(prev => {
-        const updated = prev.map(batch => {
-          if (batch.id !== activeBatchId) return batch;
-          const newItems = batch.items.map((it, i) => {
-            if (i !== idx) return it;
-            return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
-          });
-          return { ...batch, items: newItems };
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        const newItems = batch.items.map((it, i) => {
+          if (i !== idx) return it;
+          return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
-      });
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
+      }));
     } else {
       setLocalSingleQueue(prev => {
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        const updated = base.map(order => {
+        return base.map(order => {
           if (order.id !== activeOrderId) return order;
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
             return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
           });
-          return { ...order, items: newItems };
+          const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+          if (allDone) orderCompleted = true;
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
   };
   
@@ -1922,24 +1932,19 @@ export default function Picking() {
     }
     
     if (pickingMode === "batch") {
-      setQueue(prev => {
-        const updated = prev.map(batch => {
-          if (batch.id !== activeBatchId) return batch;
-          const newItems = batch.items.map((it, i) => {
-            if (i !== idx) return it;
-            return { ...it, picked: newPicked, status: newStatus };
-          });
-          return { ...batch, items: newItems };
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        const newItems = batch.items.map((it, i) => {
+          if (i !== idx) return it;
+          return { ...it, picked: newPicked, status: newStatus };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
-      });
+        return { ...batch, items: newItems };
+      }));
     } else {
       setLocalSingleQueue(prev => {
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        const updated = base.map(order => {
+        return base.map(order => {
           if (order.id !== activeOrderId) return order;
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
@@ -1947,9 +1952,6 @@ export default function Picking() {
           });
           return { ...order, items: newItems };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
       });
     }
   };
@@ -1989,71 +1991,54 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
-      setQueue(prev => {
-        const updated = prev.map(batch => {
-          if (batch.id !== activeBatchId) return batch;
-          const newItems = batch.items.map((it, i) => {
-            if (i !== editQtyIdx) return it;
-            return { ...it, picked: newPicked, status: newStatus };
-          });
-          return { ...batch, items: newItems };
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        const newItems = batch.items.map((it, i) => {
+          if (i !== editQtyIdx) return it;
+          return { ...it, picked: newPicked, status: newStatus };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
-      });
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
+      }));
     } else {
       setLocalSingleQueue(prev => {
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        const updated = base.map(order => {
+        return base.map(order => {
           if (order.id !== activeOrderId) return order;
           const newItems = order.items.map((it, i) => {
             if (i !== editQtyIdx) return it;
             return { ...it, picked: newPicked, status: newStatus };
           });
-          return { ...order, items: newItems };
+          const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+          if (allDone) orderCompleted = true;
+          return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
-        // Check completion after state update
-        setTimeout(() => checkAndCompleteWork(), 100);
-        return updated;
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
     
     setEditQtyOpen(false);
     setEditQtyIdx(null);
   };
   
-  // Check if all items are done and complete the work (used by list view)
-  const checkAndCompleteWork = () => {
-    // Re-fetch current state to check completion
-    const currentWork = pickingMode === "batch"
-      ? queue.find(b => b.id === activeBatchId)
-      : singleQueue.find(o => o.id === activeOrderId);
-    
-    if (!currentWork) return;
-    
-    const allDone = currentWork.items.every(i => i.status === "completed" || i.status === "short");
-    
-    if (allDone) {
-      if (pickingMode === "batch") {
-        setQueue(prev => prev.map(b =>
-          b.id === activeBatchId ? { ...b, status: "completed" as const } : b
-        ));
-        setActiveBatchId(null);
-      } else {
-        setSingleQueue(prev => prev.map(o =>
-          o.id === activeOrderId ? { ...o, status: "completed" as const } : o
-        ));
-        setActiveOrderId(null);
-      }
-      playSound("complete");
-      triggerHaptic("heavy");
-      setCurrentItemIndex(0);
-      setView("complete");
-    }
-  };
   
   // Advance to next item
   const advanceToNext = () => {
@@ -2276,7 +2261,7 @@ export default function Picking() {
       // By default, hide completed items unless filtering for "done"
       if (activeFilter !== "done" && item.status === "completed") return false;
       
-      // By default, hide held items unless filtering for "hold" (admin only)
+      // By default, hide held items unless filtering for "hold"
       const itemOnHold = "onHold" in item && item.onHold;
       if (activeFilter !== "hold" && itemOnHold) return false;
       
@@ -2478,7 +2463,7 @@ export default function Picking() {
             >
               <span className="font-bold">{readyItems.filter(item => item.priority === "rush").length}</span> Rush
             </button>
-            {isAdminOrLead && holdItems.length > 0 && (
+            {holdItems.length > 0 && (
               <button 
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
@@ -2755,7 +2740,7 @@ export default function Picking() {
                                     Unrush
                                   </button>
                                 )}
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                                {order.status === "ready" && !order.onHold && (
                                   <button
                                     className="text-slate-600 hover:text-slate-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
@@ -2770,7 +2755,7 @@ export default function Picking() {
                                     Hold
                                   </button>
                                 )}
-                                {isAdminOrLead && order.onHold && (
+                                {order.onHold && (
                                   <button
                                     className="text-emerald-600 hover:text-emerald-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {

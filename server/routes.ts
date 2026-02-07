@@ -915,11 +915,6 @@ export async function registerRoutes(
           return false;
         }
         
-        // Filter on-hold orders for non-admins
-        if (order.onHold === 1 && !isAdminOrLead) {
-          return false;
-        }
-        
         return true;
       });
       
@@ -1303,11 +1298,11 @@ export async function registerRoutes(
     }
   });
 
-  // Hold an order (admin/lead only)
+  // Hold an order (any authenticated user)
   app.post("/api/orders/:id/hold", async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
-        return res.status(403).json({ error: "Admin or lead access required" });
+      if (!req.session.user) {
+        return res.status(401).json({ error: "Authentication required" });
       }
       
       const id = parseInt(req.params.id);
@@ -1340,11 +1335,11 @@ export async function registerRoutes(
     }
   });
 
-  // Release hold on an order (admin/lead only)
+  // Release hold on an order (any authenticated user)
   app.post("/api/orders/:id/release-hold", async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
-        return res.status(403).json({ error: "Admin or lead access required" });
+      if (!req.session.user) {
+        return res.status(401).json({ error: "Authentication required" });
       }
       
       const id = parseInt(req.params.id);
