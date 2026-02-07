@@ -166,7 +166,7 @@ interface VariantLocationLevel {
 
 function VariantLocationRows({ variantId }: { variantId: number }) {
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
-    queryKey: [`/api/product-variants/${variantId}/locations`],
+    queryKey: [`/api/inventory/variants/${variantId}/locations`],
   });
 
   if (isLoading) {
