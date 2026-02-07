@@ -264,6 +264,8 @@ async function syncOrderUpdate(shopifyOrderId: string) {
   }
 }
 
+let syncInterval: ReturnType<typeof setInterval> | null = null;
+
 export async function setupOrderSyncListener() {
   try {
     listenerClient = new Client({
@@ -273,6 +275,18 @@ export async function setupOrderSyncListener() {
     
     await listenerClient.connect();
     console.log("[ORDER SYNC] Connected to database for LISTEN");
+    
+    // Sync any orders that arrived while server was down
+    setTimeout(() => {
+      console.log("[ORDER SYNC] Running startup sync for missed orders...");
+      syncNewOrders();
+    }, 2000);
+    
+    // Periodic polling every 5 minutes as a safety net
+    if (syncInterval) clearInterval(syncInterval);
+    syncInterval = setInterval(() => {
+      syncNewOrders();
+    }, 5 * 60 * 1000);
     
     // INSERT trigger for new orders
     await listenerClient.query(`
@@ -346,6 +360,10 @@ export async function setupOrderSyncListener() {
 }
 
 export function stopOrderSyncListener() {
+  if (syncInterval) {
+    clearInterval(syncInterval);
+    syncInterval = null;
+  }
   if (listenerClient) {
     listenerClient.end();
     listenerClient = null;

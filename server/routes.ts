@@ -6508,7 +6508,13 @@ export async function registerRoutes(
           (SELECT MAX(created_at) FROM orders WHERE source = 'shopify') as latest_synced_order,
           (SELECT COUNT(*) FROM shopify_orders so 
            WHERE NOT EXISTS(SELECT 1 FROM orders WHERE source_table_id = so.id)
-           AND so.created_at > NOW() - INTERVAL '24 hours') as unsynced_24h
+           AND so.created_at > NOW() - INTERVAL '24 hours'
+           AND so.cancelled_at IS NULL
+           AND EXISTS(
+             SELECT 1 FROM shopify_order_items soi 
+             WHERE soi.order_id = so.id 
+             AND (soi.fulfillment_status IS NULL OR soi.fulfillment_status != 'fulfilled')
+           )) as unsynced_24h
       `);
       
       const row = unsyncedCheck.rows[0] as any;
@@ -6526,10 +6532,8 @@ export async function registerRoutes(
       }
       
       // Determine alert status
-      // Alert if: gap > 30 minutes, or unsynced orders > 5, or sync errors
-      const needsAlert = (syncGapMinutes !== null && syncGapMinutes > 30) || 
-                        unsynced24h > 5 || 
-                        health.status === "error";
+      // Only alert on actual problems: unsynced actionable orders or sync errors
+      const needsAlert = unsynced24h > 0 || health.status === "error";
       
       res.json({
         ...health,
@@ -6541,7 +6545,6 @@ export async function registerRoutes(
         alertMessage: needsAlert ? 
           health.status === "error" ? `Sync error: ${health.lastSyncError}` :
           unsynced24h > 0 ? `${unsynced24h} orders waiting to sync` :
-          syncGapMinutes && syncGapMinutes > 60 ? `Sync is ${syncGapMinutes} minutes behind` :
           null : null,
       });
     } catch (error) {
