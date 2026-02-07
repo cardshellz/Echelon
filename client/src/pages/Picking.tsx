@@ -703,7 +703,7 @@ export default function Picking() {
     },
   });
   
-  // Mutation for putting orders on hold (admin/lead only)
+  // Mutation for putting orders on hold
   const holdMutation = useMutation({
     mutationFn: (orderId: number) => {
       console.log("[HOLD] Attempting to hold order:", orderId);
@@ -729,7 +729,7 @@ export default function Picking() {
     },
   });
   
-  // Mutation for releasing hold on orders (admin/lead only)
+  // Mutation for releasing hold on orders
   const releaseHoldMutation = useMutation({
     mutationFn: (orderId: number) => releaseHoldOrder(orderId),
     onSuccess: (data) => {
@@ -2276,7 +2276,7 @@ export default function Picking() {
       // By default, hide completed items unless filtering for "done"
       if (activeFilter !== "done" && item.status === "completed") return false;
       
-      // By default, hide held items unless filtering for "hold" (admin only)
+      // By default, hide held items unless filtering for "hold"
       const itemOnHold = "onHold" in item && item.onHold;
       if (activeFilter !== "hold" && itemOnHold) return false;
       
@@ -2478,7 +2478,7 @@ export default function Picking() {
             >
               <span className="font-bold">{readyItems.filter(item => item.priority === "rush").length}</span> Rush
             </button>
-            {isAdminOrLead && holdItems.length > 0 && (
+            {holdItems.length > 0 && (
               <button 
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
@@ -2755,7 +2755,7 @@ export default function Picking() {
                                     Unrush
                                   </button>
                                 )}
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && (
+                                {order.status === "ready" && !order.onHold && (
                                   <button
                                     className="text-slate-600 hover:text-slate-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
@@ -2770,7 +2770,7 @@ export default function Picking() {
                                     Hold
                                   </button>
                                 )}
-                                {isAdminOrLead && order.onHold && (
+                                {order.onHold && (
                                   <button
                                     className="text-emerald-600 hover:text-emerald-700 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
