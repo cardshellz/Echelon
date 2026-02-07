@@ -10,7 +10,7 @@ import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
-import { inventoryService } from "./inventory";
+import { calculateRemainingCapacity, findOverflowBin } from "./inventory-utils";
 import multer from "multer";
 import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
 
@@ -1222,13 +1222,14 @@ export async function registerRoutes(
             const pickableLevel = sortedLevels[0];
 
             if (pickableLevel) {
-              await inventoryService.pickItem(
-                productVariant.id,
-                pickableLevel.warehouseLocationId,
-                baseUnitsToDecrement,
-                item.orderId,
-                req.session.user?.id
-              );
+              const { inventoryCore: pickCore } = req.app.locals.services as any;
+              await pickCore.pickItem({
+                productVariantId: productVariant.id,
+                warehouseLocationId: pickableLevel.warehouseLocationId,
+                baseUnits: baseUnitsToDecrement,
+                orderId: item.orderId,
+                userId: req.session.user?.id,
+              });
               console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of variant ${productVariant.id} from location ${pickableLevel.warehouseLocationId}`);
               
               // Sync to Shopify (async - don't block response)
@@ -4820,7 +4821,8 @@ export async function registerRoutes(
   app.get("/api/inventory/items/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const summary = await inventoryService.getInventoryItemSummary(id);
+      const { atp } = req.app.locals.services as any;
+      const summary = await atp.getInventoryItemSummary(id);
       if (!summary) {
         return res.status(404).json({ error: "Item not found" });
       }
@@ -5354,7 +5356,8 @@ export async function registerRoutes(
           const variantQtyDelta = targetQty - variantQtyBefore;
 
           // Log with Full WMS fields
-          await inventoryService.logTransaction({
+          const { inventoryCore: csvCore } = req.app.locals.services as any;
+          await csvCore.logTransaction({
             productVariantId: variant?.id,
             toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
             transactionType: "csv_upload",
@@ -5507,14 +5510,32 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Missing required fields" });
       }
 
-      const result = await inventoryService.replenishLocation(
-        replenVariantId,
-        targetLocationId,
-        requestedUnits,
-        userId
-      );
-      
-      res.json({ 
+      const { inventoryCore: replenCore } = req.app.locals.services as any;
+
+      // Find parent (bulk) location for the target
+      const targetLocation = await storage.getWarehouseLocationById(targetLocationId);
+      if (!targetLocation?.parentLocationId) {
+        return res.json({ success: false, replenished: 0, sourceLocationId: null });
+      }
+
+      const parentLevel = await replenCore.getLevel(replenVariantId, targetLocation.parentLocationId);
+      if (!parentLevel || parentLevel.onHandBase <= 0) {
+        return res.json({ success: false, replenished: 0, sourceLocationId: targetLocation.parentLocationId });
+      }
+
+      const replenishAmount = Math.min(requestedUnits, parentLevel.onHandBase);
+      await replenCore.transfer({
+        productVariantId: replenVariantId,
+        fromLocationId: targetLocation.parentLocationId,
+        toLocationId: targetLocationId,
+        baseUnits: replenishAmount,
+        userId,
+        notes: `Replenished from location ${targetLocation.parentLocationId}`,
+      });
+
+      const result = { replenished: replenishAmount, sourceLocationId: targetLocation.parentLocationId };
+
+      res.json({
         success: result.replenished > 0,
         replenished: result.replenished,
         sourceLocationId: result.sourceLocationId,
@@ -5529,7 +5550,29 @@ export async function registerRoutes(
   app.get("/api/inventory/replenishment-needed", async (req, res) => {
     try {
       const productVariantId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
-      const locations = await inventoryService.getLocationsNeedingReplenishment(productVariantId);
+      // Inline the replenishment-needed query (formerly on inventoryService)
+      const allLocations = await storage.getAllWarehouseLocations() as any[];
+      const locationsWithMinQty = allLocations.filter((l: any) => l.minQty !== null && l.minQty > 0);
+      const locations: any[] = [];
+
+      for (const location of locationsWithMinQty) {
+        const allLevels = await storage.getAllInventoryLevels();
+        const levelsAtLocation = allLevels.filter(l => l.warehouseLocationId === location.id);
+
+        for (const level of levelsAtLocation) {
+          if (productVariantId && level.productVariantId !== productVariantId) continue;
+          if (level.onHandBase < (location.minQty || 0)) {
+            locations.push({
+              locationId: location.id,
+              locationCode: location.code,
+              productVariantId: level.productVariantId,
+              currentQty: level.onHandBase,
+              minQty: location.minQty || 0,
+              parentLocationId: location.parentLocationId,
+            });
+          }
+        }
+      }
       res.json(locations);
     } catch (error) {
       console.error("Error fetching replenishment needs:", error);
@@ -5541,7 +5584,19 @@ export async function registerRoutes(
   app.get("/api/inventory/backorder-status/:itemId", async (req, res) => {
     try {
       const itemId = parseInt(req.params.itemId);
-      const status = await inventoryService.checkBackorderStatus(itemId);
+      const { atp: atpSvc } = req.app.locals.services as any;
+      const variant = await storage.getProductVariantById(itemId);
+      let status;
+      if (!variant) {
+        status = { isBackordered: false, backorderQty: 0, atp: 0 };
+      } else {
+        const atpBase = await atpSvc.getAtpBase(variant.productId);
+        status = {
+          isBackordered: atpBase < 0,
+          backorderQty: atpBase < 0 ? Math.abs(atpBase) : 0,
+          atp: atpBase,
+        };
+      }
       res.json(status);
     } catch (error) {
       console.error("Error checking backorder status:", error);
@@ -5675,7 +5730,7 @@ export async function registerRoutes(
         // Original behavior: full summary across all warehouses
         const products = await storage.getAllProducts();
         const summaries = await Promise.all(
-          products.map(product => inventoryService.getInventoryItemSummary(product.id))
+          products.map(product => (req.app.locals.services as any).atp.getInventoryItemSummary(product.id))
         );
         res.json(summaries.filter(Boolean));
       }
@@ -5710,7 +5765,7 @@ export async function registerRoutes(
 
           if (shopifyFeed) {
             // Calculate availability for this variant
-            const summary = await inventoryService.getInventoryItemSummary(product.id);
+            const summary = await (req.app.locals.services as any).atp.getInventoryItemSummary(product.id);
             const variantAvail = summary?.variants.find(v => v.variantId === variant.id);
 
             if (variantAvail) {
@@ -7119,13 +7174,14 @@ export async function registerRoutes(
             const targetBaseUnits = variantQty * variant.unitsPerVariant;
             const delta = targetBaseUnits - existingLevel.onHandBase;
             if (delta !== 0) {
-              await inventoryService.adjustInventory(
-                variant.id,
-                location.id,
-                delta,
-                "CSV_UPLOAD",
-                userId
-              );
+              const { inventoryCore: csvAdjCore } = req.app.locals.services as any;
+              await csvAdjCore.adjustInventory({
+                productVariantId: variant.id,
+                warehouseLocationId: location.id,
+                baseUnitsDelta: delta,
+                reason: "CSV_UPLOAD",
+                userId,
+              });
               // Update variant qty
               await storage.updateInventoryLevel(existingLevel.id, {
                 variantQty: variantQty,
@@ -7585,14 +7641,14 @@ export async function registerRoutes(
       
       // Apply inventory adjustment if we have a product variant
       if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
-        await inventoryService.adjustInventory(
-          item.productVariantId,
-          item.warehouseLocationId,
-          item.varianceQty,
-          reasonCode || "CYCLE_COUNT",
+        const { inventoryCore: ccCore } = req.app.locals.services as any;
+        await ccCore.adjustInventory({
+          productVariantId: item.productVariantId,
+          warehouseLocationId: item.warehouseLocationId,
+          baseUnitsDelta: item.varianceQty,
+          reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`,
           userId,
-          `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`
-        );
+        });
         adjustmentsMade.push({
           sku: item.expectedSku || item.countedSku,
           type: item.mismatchType || item.varianceType,
@@ -7616,14 +7672,13 @@ export async function registerRoutes(
         if (relatedItem && relatedItem.status !== "approved") {
           // Apply adjustment for the related item too
           if (relatedItem.productVariantId && relatedItem.varianceQty !== null && relatedItem.varianceQty !== 0) {
-            await inventoryService.adjustInventory(
-              relatedItem.productVariantId,
-              relatedItem.warehouseLocationId,
-              relatedItem.varianceQty,
-              reasonCode || "CYCLE_COUNT",
+            await ccCore.adjustInventory({
+              productVariantId: relatedItem.productVariantId,
+              warehouseLocationId: relatedItem.warehouseLocationId,
+              baseUnitsDelta: relatedItem.varianceQty,
+              reason: `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`,
               userId,
-              `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`
-            );
+            });
             adjustmentsMade.push({
               sku: relatedItem.expectedSku || relatedItem.countedSku,
               type: relatedItem.mismatchType || relatedItem.varianceType,
@@ -7657,14 +7712,13 @@ export async function registerRoutes(
         if (reverseItem && reverseItem.status !== "approved") {
           // Apply adjustment for the reverse-linked item
           if (reverseItem.productVariantId && reverseItem.varianceQty !== null && reverseItem.varianceQty !== 0) {
-            await inventoryService.adjustInventory(
-              reverseItem.productVariantId,
-              reverseItem.warehouseLocationId,
-              reverseItem.varianceQty,
-              reasonCode || "CYCLE_COUNT",
+            await ccCore.adjustInventory({
+              productVariantId: reverseItem.productVariantId,
+              warehouseLocationId: reverseItem.warehouseLocationId,
+              baseUnitsDelta: reverseItem.varianceQty,
+              reason: `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`,
               userId,
-              `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`
-            );
+            });
             adjustmentsMade.push({
               sku: reverseItem.expectedSku || reverseItem.countedSku,
               type: reverseItem.mismatchType || reverseItem.varianceType,
@@ -9413,7 +9467,7 @@ export async function registerRoutes(
           const isFullCaseMethod = effectiveReplenMethod === "full_case" || effectiveReplenMethod === "pallet_drop";
           
           if (destLocation && pickVariant) {
-            const capacity = await inventoryService.calculateRemainingCapacity(
+            const capacity = calculateRemainingCapacity(
               destLocation,
               pickVariant,
               inventoryLevels,
@@ -9458,7 +9512,7 @@ export async function registerRoutes(
             // For full_case methods, require overflow bin to fit entire unit
             const minUnitsRequired = isFullCaseMethod ? overflowQtyTargetUnits : undefined;
             
-            const overflowBin = await inventoryService.findOverflowBin(
+            const overflowBin = findOverflowBin(
               destLocation?.warehouseId || null,
               pickVariant,
               overflowQtyTargetUnits,

@@ -354,7 +354,99 @@ class InventoryAtpService {
   }
 
   // --------------------------------------------------------------------------
-  // 6. getBulkAtp
+  // 6. getInventoryItemSummary (backward-compatible shape)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Returns an inventory summary in the legacy shape expected by existing
+   * client pages (Inventory.tsx, etc.).
+   *
+   * Unlike `getProductSummary` (which returns fungible ATP and physicalQty),
+   * this method includes per-variant onHandBase, reservedBase, and
+   * per-variant atpBase so the client can render per-variant detail.
+   *
+   * @param productId - The product to summarise.
+   * @returns Legacy-shaped summary, or `null` if product not found.
+   */
+  async getInventoryItemSummary(productId: number): Promise<{
+    productId: number;
+    baseSku: string;
+    name: string;
+    totalOnHandBase: number;
+    totalReservedBase: number;
+    totalAtpBase: number;
+    variants: Array<{
+      productVariantId: number;
+      sku: string;
+      name: string;
+      unitsPerVariant: number;
+      available: number;
+      onHandBase: number;
+      reservedBase: number;
+      atpBase: number;
+      variantQty: number;
+    }>;
+  } | null> {
+    const [product] = await this.db
+      .select({ id: products.id, sku: products.sku, name: products.name })
+      .from(products)
+      .where(eq(products.id, productId));
+
+    if (!product) return null;
+
+    const variantRows = await this.db
+      .select({
+        productVariantId: productVariants.id,
+        sku: productVariants.sku,
+        name: productVariants.name,
+        unitsPerVariant: productVariants.unitsPerVariant,
+        onHandBase: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)`,
+        reservedBase: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)`,
+        variantQty: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)`,
+      })
+      .from(productVariants)
+      .leftJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
+      .where(eq(productVariants.productId, productId))
+      .groupBy(
+        productVariants.id,
+        productVariants.sku,
+        productVariants.name,
+        productVariants.unitsPerVariant,
+      );
+
+    const variants = variantRows.map((v: any) => {
+      const onHand = Number(v.onHandBase);
+      const reserved = Number(v.reservedBase);
+      const atp = onHand - reserved;
+      return {
+        productVariantId: v.productVariantId,
+        sku: v.sku ?? "",
+        name: v.name,
+        unitsPerVariant: v.unitsPerVariant,
+        available: Math.floor(atp / v.unitsPerVariant),
+        onHandBase: onHand,
+        reservedBase: reserved,
+        atpBase: atp,
+        variantQty: Number(v.variantQty),
+      };
+    });
+
+    const totalOnHand = variants.reduce((s: number, v: any) => s + v.onHandBase, 0);
+    const totalReserved = variants.reduce((s: number, v: any) => s + v.reservedBase, 0);
+
+    return {
+      productId: product.id,
+      baseSku: product.sku ?? "",
+      name: product.name,
+      totalOnHandBase: totalOnHand,
+      totalReservedBase: totalReserved,
+      totalAtpBase: totalOnHand - totalReserved,
+      variants,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // 7. getBulkAtp
   // --------------------------------------------------------------------------
 
   /**

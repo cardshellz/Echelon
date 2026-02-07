@@ -507,10 +507,11 @@ class ChannelSyncService {
  *
  * ```ts
  * import { db } from "../db";
- * import { inventoryService } from "../inventory";
+ * import { createInventoryAtpService } from "./services/inventory-atp";
  * import { createChannelSyncService } from "./services/channel-sync";
  *
- * const channelSync = createChannelSyncService(db, inventoryService);
+ * const atp = createInventoryAtpService(db);
+ * const channelSync = createChannelSyncService(db, atp);
  * await channelSync.syncProduct(42);
  * ```
  */
