@@ -1588,7 +1588,8 @@ export default function Picking() {
           triggerHaptic("heavy");
           setActiveOrderId(null);
           setActiveBatchId(null);
-          setView("queue");
+          setCurrentItemIndex(0);
+          setView("complete");
         }, 500);
       }
       return allDone;
@@ -1661,29 +1662,19 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
         
         const newItems = batch.items.map((it, i) => {
           if (i !== idx) return it;
-          return {
-            ...it,
-            picked: qty,
-            status: "completed" as const
-          };
+          return { ...it, picked: qty, status: "completed" as const };
         });
         
         const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-        if (allDone) {
-          setTimeout(() => {
-            setActiveBatchId(null);
-            playSound("complete");
-            triggerHaptic("heavy");
-            setCurrentItemIndex(0);
-            setView("complete");
-          }, 500);
-        }
+        if (allDone) orderCompleted = true;
         return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
       }));
     } else {
@@ -1696,27 +1687,28 @@ export default function Picking() {
           
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
-            return {
-              ...it,
-              picked: qty,
-              status: "completed" as const
-            };
+            return { ...it, picked: qty, status: "completed" as const };
           });
           
           const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-          if (allDone) {
-            setTimeout(() => {
-              setActiveOrderId(null);
-              playSound("complete");
-              triggerHaptic("heavy");
-              setCurrentItemIndex(0);
-              setView("complete");
-            }, 500);
-          }
-          
+          if (allDone) orderCompleted = true;
           return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
   };
   
@@ -1871,52 +1863,48 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
-      setQueue(prev => {
-        const updated = prev.map(batch => {
-          if (batch.id !== activeBatchId) return batch;
-          const newItems = batch.items.map((it, i) => {
-            if (i !== idx) return it;
-            return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
-          });
-          const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-          if (allDone) {
-            setTimeout(() => {
-              setActiveBatchId(null);
-              playSound("complete");
-              triggerHaptic("heavy");
-              setCurrentItemIndex(0);
-              setView("complete");
-            }, 500);
-          }
-          return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
+      setQueue(prev => prev.map(batch => {
+        if (batch.id !== activeBatchId) return batch;
+        const newItems = batch.items.map((it, i) => {
+          if (i !== idx) return it;
+          return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
         });
-        return updated;
-      });
+        const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
+        if (allDone) orderCompleted = true;
+        return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
+      }));
     } else {
       setLocalSingleQueue(prev => {
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        const updated = base.map(order => {
+        return base.map(order => {
           if (order.id !== activeOrderId) return order;
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
             return { ...it, picked: newPicked, status: isItemComplete ? "completed" as const : "in_progress" as const };
           });
           const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-          if (allDone) {
-            setTimeout(() => {
-              setActiveOrderId(null);
-              playSound("complete");
-              triggerHaptic("heavy");
-              setCurrentItemIndex(0);
-              setView("complete");
-            }, 500);
-          }
+          if (allDone) orderCompleted = true;
           return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
-        return updated;
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
   };
   
@@ -2003,6 +1991,8 @@ export default function Picking() {
       });
     }
     
+    let orderCompleted = false;
+    
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
@@ -2011,15 +2001,7 @@ export default function Picking() {
           return { ...it, picked: newPicked, status: newStatus };
         });
         const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-        if (allDone) {
-          setTimeout(() => {
-            setActiveBatchId(null);
-            playSound("complete");
-            triggerHaptic("heavy");
-            setCurrentItemIndex(0);
-            setView("complete");
-          }, 500);
-        }
+        if (allDone) orderCompleted = true;
         return { ...batch, items: newItems, status: allDone ? "completed" as const : batch.status };
       }));
     } else {
@@ -2033,53 +2015,30 @@ export default function Picking() {
             return { ...it, picked: newPicked, status: newStatus };
           });
           const allDone = newItems.every(it => it.status === "completed" || it.status === "short");
-          if (allDone) {
-            setTimeout(() => {
-              setActiveOrderId(null);
-              playSound("complete");
-              triggerHaptic("heavy");
-              setCurrentItemIndex(0);
-              setView("complete");
-            }, 500);
-          }
+          if (allDone) orderCompleted = true;
           return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
       });
+    }
+    
+    if (orderCompleted) {
+      setTimeout(() => {
+        if (pickingMode === "batch") {
+          setActiveBatchId(null);
+        } else {
+          setActiveOrderId(null);
+        }
+        playSound("complete");
+        triggerHaptic("heavy");
+        setCurrentItemIndex(0);
+        setView("complete");
+      }, 500);
     }
     
     setEditQtyOpen(false);
     setEditQtyIdx(null);
   };
   
-  // Check if all items are done and complete the work (used by list view)
-  const checkAndCompleteWork = () => {
-    // Re-fetch current state to check completion
-    const currentWork = pickingMode === "batch"
-      ? queue.find(b => b.id === activeBatchId)
-      : singleQueue.find(o => o.id === activeOrderId);
-    
-    if (!currentWork) return;
-    
-    const allDone = currentWork.items.every(i => i.status === "completed" || i.status === "short");
-    
-    if (allDone) {
-      if (pickingMode === "batch") {
-        setQueue(prev => prev.map(b =>
-          b.id === activeBatchId ? { ...b, status: "completed" as const } : b
-        ));
-        setActiveBatchId(null);
-      } else {
-        setSingleQueue(prev => prev.map(o =>
-          o.id === activeOrderId ? { ...o, status: "completed" as const } : o
-        ));
-        setActiveOrderId(null);
-      }
-      playSound("complete");
-      triggerHaptic("heavy");
-      setCurrentItemIndex(0);
-      setView("complete");
-    }
-  };
   
   // Advance to next item
   const advanceToNext = () => {
