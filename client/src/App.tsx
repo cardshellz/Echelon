@@ -32,6 +32,7 @@ import ProductCatalog from "@/pages/ProductCatalog";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
+import Returns from "@/pages/Returns";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -158,6 +159,9 @@ function Router() {
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/returns">
+          <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/inventory/history">
           <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />

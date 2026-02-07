@@ -9821,6 +9821,68 @@ export async function registerRoutes(
     }
   });
 
+  // --- Returns: Order Lookup (enriches items with productVariantId) ---
+
+  app.get("/api/returns/order-lookup/:orderNumber", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { returns } = req.app.locals.services;
+      const orderNumber = req.params.orderNumber;
+
+      // Find order by order number
+      const allOrders = await storage.getOrders();
+      const order = allOrders.find((o: any) => o.orderNumber === orderNumber);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      // Get order items
+      const items = await storage.getOrderItems(order.id);
+
+      // Resolve SKU → productVariantId for each item
+      const enrichedItems = await Promise.all(
+        items.map(async (item: any) => {
+          let productVariantId: number | null = null;
+          if (item.sku) {
+            const variant = await storage.getProductVariantBySku(item.sku);
+            productVariantId = variant?.id ?? null;
+          }
+          return {
+            id: item.id,
+            sku: item.sku,
+            name: item.name,
+            quantity: item.quantity,
+            pickedQuantity: item.pickedQuantity,
+            fulfilledQuantity: item.fulfilledQuantity,
+            status: item.status,
+            productVariantId,
+          };
+        })
+      );
+
+      // Get existing return history
+      const returnHistory = await returns.getReturnHistory(order.id);
+
+      res.json({
+        order: {
+          id: order.id,
+          orderNumber: order.orderNumber,
+          customerName: order.customerName,
+          customerEmail: order.customerEmail,
+          orderPlacedAt: order.orderPlacedAt,
+          warehouseStatus: order.warehouseStatus,
+          financialStatus: order.financialStatus,
+          itemCount: order.itemCount,
+          totalAmount: order.totalAmount,
+        },
+        items: enrichedItems,
+        returnHistory,
+      });
+    } catch (error: any) {
+      console.error("Error looking up order for return:", error);
+      res.status(500).json({ error: error.message || "Failed to look up order" });
+    }
+  });
+
   // --- Order Reservation Routes ---
 
   app.post("/api/orders/:id/reserve", requirePermission("inventory", "adjust"), async (req, res) => {

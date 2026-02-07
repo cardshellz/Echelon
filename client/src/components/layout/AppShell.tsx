@@ -29,7 +29,8 @@ import {
   ShoppingBag,
   Layers,
   RefreshCw,
-  ArrowLeftRight
+  ArrowLeftRight,
+  RotateCcw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -83,6 +84,7 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
     { type: "separator", label: "Orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
     { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
+    { type: 'link', label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
     { type: "separator", label: "Fulfillment" },
     { type: 'link', label: "Picking Queue", icon: ClipboardList, href: "/picking" },
     { type: 'link', label: "Picking Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
