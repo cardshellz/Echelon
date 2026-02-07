@@ -76,7 +76,7 @@ export default function ProductCatalog() {
 
   const updateVariantMutation = useMutation({
     mutationFn: async ({ variantId, unitsPerVariant }: { variantId: number; unitsPerVariant: number }) => {
-      const response = await apiRequest("PATCH", `/api/product-variants/${variantId}`, { unitsPerVariant });
+      const response = await apiRequest("PUT", `/api/product-variants/${variantId}`, { unitsPerVariant });
       return response.json();
     },
     onSuccess: () => {

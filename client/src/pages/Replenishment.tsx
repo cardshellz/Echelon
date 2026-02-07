@@ -264,11 +264,11 @@ export default function Replenishment() {
   });
 
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
-    queryKey: ["/api/warehouse-locations"],
+    queryKey: ["/api/warehouse/locations"],
   });
 
   const { data: products = [] } = useQuery<CatalogProduct[]>({
-    queryKey: ["/api/catalog-products"],
+    queryKey: ["/api/catalog/products"],
   });
 
   const { data: variants = [] } = useQuery<ProductVariant[]>({
