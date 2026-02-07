@@ -21,10 +21,6 @@ import {
   type InsertProduct,
   type ProductVariant,
   type InsertProductVariant,
-  type InventoryItem,
-  type InsertInventoryItem,
-  type UomVariant,
-  type InsertUomVariant,
   type InventoryLevel,
   type InsertInventoryLevel,
   type InventoryTransaction,
@@ -76,8 +72,6 @@ import {
   warehouseZones,
   products,
   productVariants,
-  inventoryItems,
-  uomVariants,
   inventoryLevels,
   inventoryTransactions,
   channelFeeds,
@@ -188,7 +182,7 @@ export interface IStorage {
   // Catalog Products
   getAllCatalogProducts(): Promise<CatalogProduct[]>;
   getCatalogProductById(id: number): Promise<CatalogProduct | undefined>;
-  getCatalogProductByInventoryItemId(inventoryItemId: number): Promise<CatalogProduct | undefined>;
+  getCatalogProductByProductVariantId(productVariantId: number): Promise<CatalogProduct | undefined>;
   createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct>;
   updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null>;
   deleteCatalogProduct(id: number): Promise<boolean>;
@@ -215,50 +209,27 @@ export interface IStorage {
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
   
-  // Inventory Items (LEGACY - Master SKUs)
-  getAllInventoryItems(): Promise<InventoryItem[]>;
-  getInventoryItemById(id: number): Promise<InventoryItem | undefined>;
-  getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined>;
-  getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined>;
-  getInventoryItemByShopifyVariantId(variantId: number): Promise<InventoryItem | undefined>;
-  getInventoryItemByShopifyProductId(productId: number): Promise<InventoryItem | undefined>;
-  createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
-  upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem>;
-  upsertInventoryItemByVariantId(variantId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem>;
-  upsertInventoryItemByProductId(productId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem>;
-  updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null>;
-  
   // Catalog Products - additional methods
   getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
   getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined>;
-  upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
-  upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct> & { uomVariantId?: number }): Promise<CatalogProduct>;
+  upsertCatalogProductBySku(sku: string, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
+  upsertCatalogProductByVariantId(variantId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
   deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
-  
-  // UOM Variants
-  getAllUomVariants(): Promise<UomVariant[]>;
-  getUomVariantById(id: number): Promise<UomVariant | undefined>;
-  getUomVariantBySku(sku: string): Promise<UomVariant | undefined>;
-  getUomVariantByShopifyVariantId(shopifyVariantId: number): Promise<UomVariant | undefined>;
-  getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]>;
-  createUomVariant(variant: InsertUomVariant): Promise<UomVariant>;
-  upsertUomVariantByShopifyVariantId(shopifyVariantId: number, inventoryItemId: number, data: Partial<InsertUomVariant>): Promise<UomVariant>;
-  updateUomVariant(id: number, updates: { unitsPerVariant?: number; name?: string; barcode?: string }): Promise<UomVariant | null>;
   
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
-  getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
-  getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined>;
+  getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
+  getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number): Promise<InventoryLevel | undefined>;
   createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
   adjustInventoryLevel(id: number, adjustments: { variantQty?: number; onHandBase?: number; reservedBase?: number; pickedBase?: number; backorderBase?: number }): Promise<InventoryLevel | null>;
-  updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null>;
-  getTotalOnHandByVariantId(variantId: number, pickableOnly?: boolean): Promise<number>;
-  getTotalReservedByVariantId(variantId: number): Promise<number>;
+  updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null>;
+  getTotalOnHandByProductVariantId(productVariantId: number, pickableOnly?: boolean): Promise<number>;
+  getTotalReservedByProductVariantId(productVariantId: number): Promise<number>;
   
   // Inventory Transactions
   createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction>;
-  getInventoryTransactionsByItemId(inventoryItemId: number, limit?: number): Promise<InventoryTransaction[]>;
+  getInventoryTransactionsByProductVariantId(productVariantId: number, limit?: number): Promise<InventoryTransaction[]>;
   getInventoryTransactions(filters: {
     batchId?: string;
     transactionType?: string;
@@ -272,7 +243,7 @@ export interface IStorage {
   executeTransfer(params: {
     fromLocationId: number;
     toLocationId: number;
-    variantId: number;
+    productVariantId: number;
     quantity: number;
     userId: string;
     notes?: string;
@@ -299,11 +270,11 @@ export interface IStorage {
   updateAdjustmentReason(id: number, updates: Partial<InsertAdjustmentReason>): Promise<AdjustmentReason | null>;
   
   // Channel Feeds
-  getChannelFeedsByVariantId(variantId: number): Promise<ChannelFeed[]>;
-  getChannelFeedByVariantAndChannel(variantId: number, channelType: string): Promise<ChannelFeed | undefined>;
+  getChannelFeedsByProductVariantId(productVariantId: number): Promise<ChannelFeed[]>;
+  getChannelFeedByVariantAndChannel(productVariantId: number, channelType: string): Promise<ChannelFeed | undefined>;
   upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed>;
   updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null>;
-  getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: UomVariant })[]>;
+  getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: ProductVariant })[]>;
   
   // ============================================
   // PICKING LOGS (Audit Trail)
@@ -408,8 +379,8 @@ export interface IStorage {
   upsertPartnerProfile(profile: InsertPartnerProfile): Promise<PartnerProfile>;
   
   // Channel Reservations
-  getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; inventoryItem?: InventoryItem })[]>;
-  getChannelReservationByChannelAndItem(channelId: number, inventoryItemId: number): Promise<ChannelReservation | undefined>;
+  getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; productVariant?: ProductVariant })[]>;
+  getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number): Promise<ChannelReservation | undefined>;
   upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation>;
   deleteChannelReservation(id: number): Promise<boolean>;
   
@@ -451,7 +422,7 @@ export interface IStorage {
   // SKU Overrides (product-specific exceptions)
   getAllReplenRules(): Promise<ReplenRule[]>;
   getReplenRuleById(id: number): Promise<ReplenRule | undefined>;
-  getReplenRulesForVariant(pickVariantId: number): Promise<ReplenRule[]>;
+  getReplenRulesForVariant(pickProductVariantId: number): Promise<ReplenRule[]>;
   getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]>;
   createReplenRule(data: InsertReplenRule): Promise<ReplenRule>;
   updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
@@ -503,17 +474,6 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
-  private async getProductVariantIdFromUomVariantId(uomVariantId: number): Promise<number | null> {
-    const result = await db.execute(
-      sql`SELECT product_variant_id FROM uom_to_pv_mapping WHERE uom_variant_id = ${uomVariantId} LIMIT 1`
-    );
-    if (result.rows && result.rows.length > 0) {
-      return (result.rows[0] as any).product_variant_id as number;
-    }
-    console.warn(`[Migration] No product_variant_id mapping found for uom_variant_id=${uomVariantId}`);
-    return null;
-  }
-
   // User methods
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id));
@@ -584,8 +544,8 @@ export class DatabaseStorage implements IStorage {
     barcode: string | null;
     imageUrl: string | null;
   } | undefined> {
-    // Look up variant by SKU, then find any inventory level for that variant
-    // barcode and image_url are on uom_variants, not catalog_products
+    // Look up product variant by SKU, then find any inventory level for that variant
+    // barcode and image_url are on product_variants / products
     // Priority: forward_pick first, then bulk_storage, then by pick sequence, then by quantity
     const result = await db.execute<{
       location_code: string;
@@ -593,24 +553,24 @@ export class DatabaseStorage implements IStorage {
       barcode: string | null;
       image_url: string | null;
     }>(sql`
-      SELECT 
+      SELECT
         wl.code as location_code,
         wl.zone,
-        uv.barcode,
-        COALESCE(uv.image_url, ii.image_url) as image_url
-      FROM uom_variants uv
-      JOIN inventory_levels il ON il.variant_id = uv.id
+        pv.barcode,
+        COALESCE(pv.image_url, p.image_url) as image_url
+      FROM product_variants pv
+      JOIN inventory_levels il ON il.product_variant_id = pv.id
       JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-      LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-      WHERE UPPER(uv.sku) = ${sku.toUpperCase()}
+      LEFT JOIN products p ON pv.product_id = p.id
+      WHERE UPPER(pv.sku) = ${sku.toUpperCase()}
         AND il.variant_qty > 0
         AND wl.is_pickable = 1
-      ORDER BY 
-        CASE wl.location_type 
-          WHEN 'forward_pick' THEN 1 
+      ORDER BY
+        CASE wl.location_type
+          WHEN 'forward_pick' THEN 1
           WHEN 'overflow' THEN 2
-          WHEN 'bulk_storage' THEN 3 
-          ELSE 4 
+          WHEN 'bulk_storage' THEN 3
+          ELSE 4
         END,
         wl.is_pickable DESC,
         wl.pick_sequence ASC NULLS LAST,
@@ -957,11 +917,11 @@ export class DatabaseStorage implements IStorage {
     const orderIds = orderRows.map(o => o.id);
     const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
     
-    // Enrich items missing imageUrl by looking up from product_locations, products, inventory_items
+    // Enrich items missing imageUrl by looking up from product_locations, product_variants, products
     const skusMissingImages = [...new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
     )];
-    
+
     const imageMap = new Map<string, string>();
     if (skusMissingImages.length > 0) {
       try {
@@ -970,12 +930,11 @@ export class DatabaseStorage implements IStorage {
             SELECT pl.sku, pl.image_url FROM product_locations pl
             WHERE UPPER(pl.sku) = ANY(${skusMissingImages}) AND pl.image_url IS NOT NULL
             UNION ALL
-            SELECT uv.sku, COALESCE(ii.image_url, p.image_url) as image_url
-            FROM uom_variants uv
-            LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-            LEFT JOIN products p ON UPPER(p.sku) = UPPER(uv.sku)
-            WHERE UPPER(uv.sku) = ANY(${skusMissingImages})
-              AND COALESCE(ii.image_url, p.image_url) IS NOT NULL
+            SELECT pv.sku, COALESCE(pv.image_url, p.image_url) as image_url
+            FROM product_variants pv
+            LEFT JOIN products p ON pv.product_id = p.id
+            WHERE UPPER(pv.sku) = ANY(${skusMissingImages})
+              AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
           ) sub
         `);
         for (const row of imageResults.rows) {
@@ -1595,7 +1554,6 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  // Inventory Items (Master SKUs)
   // Catalog Products
   async getAllCatalogProducts(): Promise<CatalogProduct[]> {
     return await db.select().from(catalogProducts).orderBy(desc(catalogProducts.updatedAt));
@@ -1606,8 +1564,8 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getCatalogProductByInventoryItemId(inventoryItemId: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.inventoryItemId, inventoryItemId));
+  async getCatalogProductByProductVariantId(productVariantId: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.productVariantId, productVariantId));
     return result[0];
   }
 
@@ -1724,12 +1682,6 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  // ============================================================================
-  // Inventory Items (LEGACY - Master SKUs)
-  // ============================================================================
-  async getAllInventoryItems(): Promise<InventoryItem[]> {
-    return await db.select().from(inventoryItems).orderBy(asc(inventoryItems.baseSku));
-  }
 
   async getAllCatalogProductsWithLocations(): Promise<{
     id: number;
@@ -1748,6 +1700,7 @@ export class DatabaseStorage implements IStorage {
   }[]> {
     // Get ALL catalog products with their locations (if assigned)
     // Join to warehouse_locations to get warehouseId for filtering
+    // Join to product_variants/products for imageUrl
     const result = await db
       .select({
         id: catalogProducts.id,
@@ -1761,11 +1714,12 @@ export class DatabaseStorage implements IStorage {
         warehouseLocationId: productLocations.warehouseLocationId,
         warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
-        imageUrl: inventoryItems.imageUrl,
+        imageUrl: sql<string | null>`COALESCE(${productVariants.imageUrl}, ${products.imageUrl})`.as('image_url'),
         updatedAt: productLocations.updatedAt,
       })
       .from(catalogProducts)
-      .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
+      .leftJoin(productVariants, eq(catalogProducts.productVariantId, productVariants.id))
+      .leftJoin(products, eq(productVariants.productId, products.id))
       .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
       .leftJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
       .orderBy(asc(catalogProducts.title));
@@ -1786,115 +1740,15 @@ export class DatabaseStorage implements IStorage {
         shopifyVariantId: catalogProducts.shopifyVariantId,
         sku: catalogProducts.sku,
         title: catalogProducts.title,
-        imageUrl: inventoryItems.imageUrl,
+        imageUrl: sql<string | null>`COALESCE(${productVariants.imageUrl}, ${products.imageUrl})`.as('image_url'),
       })
       .from(catalogProducts)
-      .leftJoin(inventoryItems, eq(catalogProducts.inventoryItemId, inventoryItems.id))
+      .leftJoin(productVariants, eq(catalogProducts.productVariantId, productVariants.id))
+      .leftJoin(products, eq(productVariants.productId, products.id))
       .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
       .where(isNull(productLocations.id))
       .orderBy(asc(catalogProducts.title));
     return result;
-  }
-
-  async getInventoryItemById(id: number): Promise<InventoryItem | undefined> {
-    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.id, id));
-    return result[0];
-  }
-
-  async getInventoryItemByBaseSku(baseSku: string): Promise<InventoryItem | undefined> {
-    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.baseSku, baseSku.toUpperCase()));
-    return result[0];
-  }
-
-  async getInventoryItemByShopifyVariantId(variantId: number): Promise<InventoryItem | undefined> {
-    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.shopifyVariantId, variantId));
-    return result[0];
-  }
-
-  async getInventoryItemByShopifyProductId(productId: number): Promise<InventoryItem | undefined> {
-    const result = await db.select().from(inventoryItems).where(eq(inventoryItems.shopifyProductId, productId));
-    return result[0];
-  }
-
-  async getInventoryItemBySku(sku: string): Promise<InventoryItem | undefined> {
-    // First try to match as a base SKU
-    const byBase = await this.getInventoryItemByBaseSku(sku);
-    if (byBase) return byBase;
-    
-    // Then try to find via variant SKU
-    const variant = await this.getUomVariantBySku(sku);
-    if (variant) {
-      const result = await db.select().from(inventoryItems).where(eq(inventoryItems.id, variant.inventoryItemId));
-      return result[0];
-    }
-    
-    return undefined;
-  }
-
-  async createInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
-    const result = await db.insert(inventoryItems).values({
-      ...item,
-      baseSku: item.baseSku?.toUpperCase() || null,
-    }).returning();
-    return result[0];
-  }
-
-  async upsertInventoryItem(item: InsertInventoryItem): Promise<InventoryItem> {
-    // If we have a SKU, use that for matching
-    if (item.baseSku) {
-      const sku = item.baseSku.toUpperCase();
-      const existing = await this.getInventoryItemByBaseSku(sku);
-      if (existing) {
-        const updated = await this.updateInventoryItem(existing.id, item);
-        return updated || existing;
-      }
-    }
-    return await this.createInventoryItem(item);
-  }
-
-  async upsertInventoryItemByVariantId(variantId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem> {
-    const existing = await this.getInventoryItemByShopifyVariantId(variantId);
-    if (existing) {
-      const updated = await this.updateInventoryItem(existing.id, { ...item, shopifyVariantId: variantId });
-      return updated || existing;
-    }
-    // Create new item with variant ID
-    const result = await db.insert(inventoryItems).values({
-      ...item,
-      shopifyVariantId: variantId,
-      baseSku: item.baseSku?.toUpperCase() || null,
-      baseUnit: item.baseUnit || "each",
-    }).returning();
-    return result[0];
-  }
-
-  async upsertInventoryItemByProductId(productId: number, item: Partial<InsertInventoryItem> & { name: string }): Promise<InventoryItem> {
-    const existing = await this.getInventoryItemByShopifyProductId(productId);
-    if (existing) {
-      const updated = await this.updateInventoryItem(existing.id, { ...item, shopifyProductId: productId });
-      return updated || existing;
-    }
-    // Create new item with product ID (no variant ID - this is the parent)
-    const result = await db.insert(inventoryItems).values({
-      ...item,
-      shopifyProductId: productId,
-      shopifyVariantId: null, // Parent items don't have a variant ID
-      baseSku: item.baseSku?.toUpperCase() || null,
-      baseUnit: item.baseUnit || "each",
-    }).returning();
-    return result[0];
-  }
-
-  async updateInventoryItem(id: number, updates: Partial<InsertInventoryItem>): Promise<InventoryItem | null> {
-    const result = await db.update(inventoryItems)
-      .set({
-        ...updates,
-        baseSku: updates.baseSku?.toUpperCase(),
-        updatedAt: new Date(),
-      })
-      .where(eq(inventoryItems.id, id))
-      .returning();
-    return result[0] || null;
   }
 
   async getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined> {
@@ -1907,10 +1761,10 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async upsertCatalogProductBySku(sku: string, inventoryItemId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
+  async upsertCatalogProductBySku(sku: string, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
     const normalizedSku = sku.toUpperCase();
     const existing = await this.getCatalogProductBySku(normalizedSku);
-    
+
     if (existing) {
       const result = await db.update(catalogProducts)
         .set({
@@ -1921,9 +1775,9 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return result[0];
     }
-    
+
     const result = await db.insert(catalogProducts).values({
-      inventoryItemId,
+      productVariantId: data.productVariantId,
       sku: normalizedSku,
       title: data.title || normalizedSku,
       description: data.description,
@@ -1936,26 +1790,24 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async upsertCatalogProductByVariantId(variantId: number, inventoryItemId: number, data: Partial<InsertCatalogProduct> & { uomVariantId?: number }): Promise<CatalogProduct> {
+  async upsertCatalogProductByVariantId(variantId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
     const existing = await this.getCatalogProductByVariantId(variantId);
-    
+
     if (existing) {
       const result = await db.update(catalogProducts)
         .set({
           ...data,
           sku: data.sku?.toUpperCase() || existing.sku,
           shopifyVariantId: variantId,
-          uomVariantId: data.uomVariantId ?? existing.uomVariantId,
           updatedAt: new Date(),
         })
         .where(eq(catalogProducts.id, existing.id))
         .returning();
       return result[0];
     }
-    
+
     const result = await db.insert(catalogProducts).values({
-      inventoryItemId,
-      uomVariantId: data.uomVariantId ?? null,
+      productVariantId: data.productVariantId,
       shopifyVariantId: variantId,
       sku: data.sku?.toUpperCase() || null,
       title: data.title || "Untitled Product",
@@ -1974,160 +1826,48 @@ export class DatabaseStorage implements IStorage {
     return result.length;
   }
 
-  // UOM Variants
-  async getAllUomVariants(): Promise<UomVariant[]> {
-    return await db.select().from(uomVariants).orderBy(asc(uomVariants.sku));
-  }
-
-  async getUomVariantById(id: number): Promise<UomVariant | undefined> {
-    const result = await db.select().from(uomVariants).where(eq(uomVariants.id, id));
-    return result[0];
-  }
-
-  async getUomVariantBySku(sku: string): Promise<UomVariant | undefined> {
-    const result = await db.select().from(uomVariants).where(eq(uomVariants.sku, sku.toUpperCase()));
-    return result[0];
-  }
-
-  async getUomVariantByShopifyVariantId(shopifyVariantId: number): Promise<UomVariant | undefined> {
-    const result = await db.select().from(uomVariants).where(eq(uomVariants.shopifyVariantId, shopifyVariantId));
-    return result[0];
-  }
-
-  async getUomVariantsByInventoryItemId(inventoryItemId: number): Promise<UomVariant[]> {
-    return await db
-      .select()
-      .from(uomVariants)
-      .where(eq(uomVariants.inventoryItemId, inventoryItemId))
-      .orderBy(asc(uomVariants.hierarchyLevel));
-  }
-
-  async createUomVariant(variant: InsertUomVariant): Promise<UomVariant> {
-    const result = await db.insert(uomVariants).values({
-      ...variant,
-      sku: variant.sku ? variant.sku.toUpperCase() : null,
-    }).returning();
-    return result[0];
-  }
-
-  async upsertUomVariantByShopifyVariantId(shopifyVariantId: number, inventoryItemId: number, data: Partial<InsertUomVariant>): Promise<UomVariant> {
-    const existing = await this.getUomVariantByShopifyVariantId(shopifyVariantId);
-    
-    if (existing) {
-      const setValues: any = {
-        updatedAt: new Date(),
-      };
-      if (data.sku !== undefined) setValues.sku = data.sku ? data.sku.toUpperCase() : null;
-      if (data.name !== undefined) setValues.name = data.name;
-      if (data.unitsPerVariant !== undefined) setValues.unitsPerVariant = data.unitsPerVariant;
-      if (data.hierarchyLevel !== undefined) setValues.hierarchyLevel = data.hierarchyLevel;
-      if (data.barcode !== undefined) setValues.barcode = data.barcode;
-      if (data.imageUrl !== undefined) setValues.imageUrl = data.imageUrl;
-      if (data.active !== undefined) setValues.active = data.active;
-      
-      const result = await db
-        .update(uomVariants)
-        .set(setValues)
-        .where(eq(uomVariants.id, existing.id))
-        .returning();
-      return result[0];
-    }
-    
-    const result = await db.insert(uomVariants).values({
-      shopifyVariantId,
-      inventoryItemId,
-      sku: data.sku ? data.sku.toUpperCase() : null,
-      name: data.name || 'Unknown Variant',
-      unitsPerVariant: data.unitsPerVariant || 1,
-      hierarchyLevel: data.hierarchyLevel || 1,
-      barcode: data.barcode,
-      imageUrl: data.imageUrl,
-      active: data.active ?? 1,
-    }).returning();
-    return result[0];
-  }
-
-  async updateUomVariant(id: number, updates: { unitsPerVariant?: number; name?: string; barcode?: string }): Promise<UomVariant | null> {
-    const setValues: any = {};
-    
-    if (updates.unitsPerVariant !== undefined) {
-      setValues.unitsPerVariant = updates.unitsPerVariant;
-    }
-    if (updates.name !== undefined) {
-      setValues.name = updates.name;
-    }
-    if (updates.barcode !== undefined) {
-      setValues.barcode = updates.barcode;
-    }
-    
-    if (Object.keys(setValues).length === 0) {
-      const existing = await this.getUomVariantById(id);
-      return existing || null;
-    }
-    
-    const result = await db
-      .update(uomVariants)
-      .set(setValues)
-      .where(eq(uomVariants.id, id))
-      .returning();
-    return result[0] || null;
-  }
-
   // Inventory Levels
   async getAllInventoryLevels(): Promise<InventoryLevel[]> {
     return await db.select().from(inventoryLevels);
   }
 
-  async getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]> {
+  async getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]> {
     return await db
       .select()
       .from(inventoryLevels)
-      .where(eq(inventoryLevels.variantId, variantId));
+      .where(eq(inventoryLevels.productVariantId, productVariantId));
   }
 
-  async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, variantId: number): Promise<InventoryLevel | undefined> {
+  async getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number): Promise<InventoryLevel | undefined> {
     const result = await db
       .select()
       .from(inventoryLevels)
       .where(and(
         eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
-        eq(inventoryLevels.variantId, variantId)
+        eq(inventoryLevels.productVariantId, productVariantId)
       ));
     return result[0];
   }
 
   async createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
-    if (level.variantId && !level.productVariantId) {
-      const pvId = await this.getProductVariantIdFromUomVariantId(level.variantId);
-      if (pvId) {
-        level = { ...level, productVariantId: pvId };
-      }
-    }
     const result = await db.insert(inventoryLevels).values(level).returning();
     return result[0];
   }
 
   async upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
-    // Check if exists by variantId + location (variantId is the source of truth)
-    if (!level.variantId) {
-      throw new Error("variantId is required for upsertInventoryLevel");
+    // Check if exists by productVariantId + location
+    if (!level.productVariantId) {
+      throw new Error("productVariantId is required for upsertInventoryLevel");
     }
-    
-    if (level.variantId && !level.productVariantId) {
-      const pvId = await this.getProductVariantIdFromUomVariantId(level.variantId);
-      if (pvId) {
-        level = { ...level, productVariantId: pvId };
-      }
-    }
-    
+
     const existing = await db
       .select()
       .from(inventoryLevels)
       .where(and(
-        eq(inventoryLevels.variantId, level.variantId),
+        eq(inventoryLevels.productVariantId, level.productVariantId),
         eq(inventoryLevels.warehouseLocationId, level.warehouseLocationId)
       ));
-    
+
     if (existing[0]) {
       const result = await db
         .update(inventoryLevels)
@@ -2169,12 +1909,12 @@ export class DatabaseStorage implements IStorage {
     return result[0] || null;
   }
 
-  async updateInventoryLevel(id: number, updates: { variantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null> {
+  async updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number; onHandBase?: number }): Promise<InventoryLevel | null> {
     const setValues: any = { updatedAt: new Date() };
-    
+
     // Absolute updates: set values directly (not delta-based)
-    if (updates.variantId !== undefined) {
-      setValues.variantId = updates.variantId;
+    if (updates.productVariantId !== undefined) {
+      setValues.productVariantId = updates.productVariantId;
     }
     if (updates.variantQty !== undefined) {
       setValues.variantQty = updates.variantQty;
@@ -2191,14 +1931,14 @@ export class DatabaseStorage implements IStorage {
     return result[0] || null;
   }
 
-  async getTotalOnHandByVariantId(variantId: number, pickableOnly: boolean = false): Promise<number> {
+  async getTotalOnHandByProductVariantId(productVariantId: number, pickableOnly: boolean = false): Promise<number> {
     if (pickableOnly) {
       const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)` })
         .from(inventoryLevels)
         .innerJoin(warehouseLocations, eq(inventoryLevels.warehouseLocationId, warehouseLocations.id))
         .where(and(
-          eq(inventoryLevels.variantId, variantId),
+          eq(inventoryLevels.productVariantId, productVariantId),
           eq(warehouseLocations.isPickable, 1)
         ));
       return result[0]?.total || 0;
@@ -2206,36 +1946,30 @@ export class DatabaseStorage implements IStorage {
       const result = await db
         .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)` })
         .from(inventoryLevels)
-        .where(eq(inventoryLevels.variantId, variantId));
+        .where(eq(inventoryLevels.productVariantId, productVariantId));
       return result[0]?.total || 0;
     }
   }
 
-  async getTotalReservedByVariantId(variantId: number): Promise<number> {
+  async getTotalReservedByProductVariantId(productVariantId: number): Promise<number> {
     const result = await db
       .select({ total: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)` })
       .from(inventoryLevels)
-      .where(eq(inventoryLevels.variantId, variantId));
+      .where(eq(inventoryLevels.productVariantId, productVariantId));
     return result[0]?.total || 0;
   }
 
   // Inventory Transactions
   async createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
-    if (transaction.variantId && !transaction.productVariantId) {
-      const pvId = await this.getProductVariantIdFromUomVariantId(transaction.variantId);
-      if (pvId) {
-        transaction = { ...transaction, productVariantId: pvId };
-      }
-    }
     const result = await db.insert(inventoryTransactions).values(transaction).returning();
     return result[0];
   }
 
-  async getInventoryTransactionsByItemId(inventoryItemId: number, limit: number = 100): Promise<InventoryTransaction[]> {
+  async getInventoryTransactionsByProductVariantId(productVariantId: number, limit: number = 100): Promise<InventoryTransaction[]> {
     return await db
       .select()
       .from(inventoryTransactions)
-      .where(eq(inventoryTransactions.inventoryItemId, inventoryItemId))
+      .where(eq(inventoryTransactions.productVariantId, productVariantId))
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(limit);
   }
@@ -2272,62 +2006,58 @@ export class DatabaseStorage implements IStorage {
   async executeTransfer(params: {
     fromLocationId: number;
     toLocationId: number;
-    variantId: number;
+    productVariantId: number;
     quantity: number;
     userId: string;
     notes?: string;
   }): Promise<InventoryTransaction> {
-    const { fromLocationId, toLocationId, variantId, quantity, userId, notes } = params;
-    
+    const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
+
     // Get source inventory level
     const sourceLevel = await db
       .select()
       .from(inventoryLevels)
       .where(and(
         eq(inventoryLevels.warehouseLocationId, fromLocationId),
-        eq(inventoryLevels.variantId, variantId)
+        eq(inventoryLevels.productVariantId, productVariantId)
       ))
       .limit(1);
-    
+
     if (!sourceLevel.length || sourceLevel[0].variantQty < quantity) {
       throw new Error(`Insufficient inventory at source location. Available: ${sourceLevel[0]?.variantQty || 0}`);
     }
-    
+
     // Get variant info for base unit calculation
-    const variant = await db.select().from(uomVariants).where(eq(uomVariants.id, variantId)).limit(1);
+    const variant = await db.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
     if (!variant.length) {
       throw new Error("Variant not found");
     }
     const unitsPerVariant = variant[0].unitsPerVariant;
-    const inventoryItemId = variant[0].inventoryItemId;
-    
-    // Look up the product_variant_id from the mapping table
-    const productVariantId = await this.getProductVariantIdFromUomVariantId(variantId);
-    
+
     // Decrease source location
     await db
       .update(inventoryLevels)
-      .set({ 
+      .set({
         variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
         onHandBase: sql`${inventoryLevels.onHandBase} - ${quantity * unitsPerVariant}`,
         updatedAt: new Date()
       })
       .where(eq(inventoryLevels.id, sourceLevel[0].id));
-    
+
     // Increase or create destination inventory level
     const destLevel = await db
       .select()
       .from(inventoryLevels)
       .where(and(
         eq(inventoryLevels.warehouseLocationId, toLocationId),
-        eq(inventoryLevels.variantId, variantId)
+        eq(inventoryLevels.productVariantId, productVariantId)
       ))
       .limit(1);
-    
+
     if (destLevel.length) {
       await db
         .update(inventoryLevels)
-        .set({ 
+        .set({
           variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
           onHandBase: sql`${inventoryLevels.onHandBase} + ${quantity * unitsPerVariant}`,
           updatedAt: new Date()
@@ -2336,9 +2066,7 @@ export class DatabaseStorage implements IStorage {
     } else {
       await db.insert(inventoryLevels).values({
         warehouseLocationId: toLocationId,
-        variantId: variantId,
         productVariantId: productVariantId,
-        inventoryItemId: inventoryItemId,
         variantQty: quantity,
         onHandBase: quantity * unitsPerVariant,
         reservedBase: 0,
@@ -2347,12 +2075,10 @@ export class DatabaseStorage implements IStorage {
         backorderBase: 0
       });
     }
-    
+
     // Create audit transaction
     const batchId = `TRANSFER-${Date.now()}`;
     const transaction = await db.insert(inventoryTransactions).values({
-      inventoryItemId,
-      variantId,
       productVariantId,
       fromLocationId,
       toLocationId,
@@ -2366,7 +2092,7 @@ export class DatabaseStorage implements IStorage {
       notes: notes || `Transfer by ${userId}`,
       userId
     }).returning();
-    
+
     return transaction[0];
   }
 
@@ -2388,7 +2114,7 @@ export class DatabaseStorage implements IStorage {
         id: inventoryTransactions.id,
         fromLocationId: inventoryTransactions.fromLocationId,
         toLocationId: inventoryTransactions.toLocationId,
-        variantId: inventoryTransactions.variantId,
+        productVariantId: inventoryTransactions.productVariantId,
         quantity: inventoryTransactions.variantQtyDelta,
         userId: inventoryTransactions.userId,
         createdAt: inventoryTransactions.createdAt,
@@ -2398,17 +2124,17 @@ export class DatabaseStorage implements IStorage {
       .where(eq(inventoryTransactions.transactionType, "transfer"))
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(limit);
-    
+
     // Enrich with location codes and SKU info
     const enriched = await Promise.all(results.map(async (row) => {
-      const fromLoc = row.fromLocationId 
+      const fromLoc = row.fromLocationId
         ? await db.select().from(warehouseLocations).where(eq(warehouseLocations.id, row.fromLocationId)).limit(1)
         : [];
-      const toLoc = row.toLocationId 
+      const toLoc = row.toLocationId
         ? await db.select().from(warehouseLocations).where(eq(warehouseLocations.id, row.toLocationId)).limit(1)
         : [];
-      const variant = row.variantId
-        ? await db.select().from(uomVariants).where(eq(uomVariants.id, row.variantId)).limit(1)
+      const variant = row.productVariantId
+        ? await db.select().from(productVariants).where(eq(productVariants.id, row.productVariantId)).limit(1)
         : [];
       
       // Check if already reversed
@@ -2472,7 +2198,7 @@ export class DatabaseStorage implements IStorage {
     return await this.executeTransfer({
       fromLocationId: txn.toLocationId!,
       toLocationId: txn.fromLocationId!,
-      variantId: txn.variantId!,
+      productVariantId: txn.productVariantId!,
       quantity: txn.variantQtyDelta || 0,
       userId,
       notes: `Undo of transfer ${transactionId}`
@@ -2523,26 +2249,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Channel Feeds
-  async getChannelFeedsByVariantId(variantId: number): Promise<ChannelFeed[]> {
+  async getChannelFeedsByProductVariantId(productVariantId: number): Promise<ChannelFeed[]> {
     return await db
       .select()
       .from(channelFeeds)
-      .where(eq(channelFeeds.variantId, variantId));
+      .where(eq(channelFeeds.productVariantId, productVariantId));
   }
 
-  async getChannelFeedByVariantAndChannel(variantId: number, channelType: string): Promise<ChannelFeed | undefined> {
+  async getChannelFeedByVariantAndChannel(productVariantId: number, channelType: string): Promise<ChannelFeed | undefined> {
     const result = await db
       .select()
       .from(channelFeeds)
       .where(and(
-        eq(channelFeeds.variantId, variantId),
+        eq(channelFeeds.productVariantId, productVariantId),
         eq(channelFeeds.channelType, channelType)
       ));
     return result[0];
   }
 
   async upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed> {
-    const existing = await this.getChannelFeedByVariantAndChannel(feed.variantId, feed.channelType || "shopify");
+    const existing = await this.getChannelFeedByVariantAndChannel(feed.productVariantId, feed.channelType || "shopify");
     
     if (existing) {
       const result = await db
@@ -2570,11 +2296,10 @@ export class DatabaseStorage implements IStorage {
     return result[0] || null;
   }
 
-  async getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: UomVariant })[]> {
+  async getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: ProductVariant })[]> {
     const result = await db
       .select({
         id: channelFeeds.id,
-        variantId: channelFeeds.variantId,
         productVariantId: channelFeeds.productVariantId,
         channelType: channelFeeds.channelType,
         channelVariantId: channelFeeds.channelVariantId,
@@ -2585,12 +2310,12 @@ export class DatabaseStorage implements IStorage {
         lastSyncedQty: channelFeeds.lastSyncedQty,
         createdAt: channelFeeds.createdAt,
         updatedAt: channelFeeds.updatedAt,
-        variant: uomVariants
+        variant: productVariants
       })
       .from(channelFeeds)
-      .innerJoin(uomVariants, eq(channelFeeds.variantId, uomVariants.id))
+      .innerJoin(productVariants, eq(channelFeeds.productVariantId, productVariants.id))
       .where(eq(channelFeeds.channelType, channelType));
-    return result as (ChannelFeed & { variant: UomVariant })[];
+    return result as (ChannelFeed & { variant: ProductVariant })[];
   }
 
   // ============================================
@@ -3131,39 +2856,39 @@ export class DatabaseStorage implements IStorage {
   }
   
   // Channel Reservations
-  async getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; inventoryItem?: InventoryItem })[]> {
+  async getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; productVariant?: ProductVariant })[]> {
     let query = db.select({
       reservation: channelReservations,
       channel: channels,
-      inventoryItem: inventoryItems
+      productVariant: productVariants
     })
     .from(channelReservations)
     .leftJoin(channels, eq(channelReservations.channelId, channels.id))
-    .leftJoin(inventoryItems, eq(channelReservations.inventoryItemId, inventoryItems.id));
-    
+    .leftJoin(productVariants, eq(channelReservations.productVariantId, productVariants.id));
+
     if (channelId) {
       query = query.where(eq(channelReservations.channelId, channelId)) as any;
     }
-    
+
     const results = await query.orderBy(asc(channels.name));
     return results.map(r => ({
       ...r.reservation,
       channel: r.channel || undefined,
-      inventoryItem: r.inventoryItem || undefined
+      productVariant: r.productVariant || undefined
     }));
   }
-  
-  async getChannelReservationByChannelAndItem(channelId: number, inventoryItemId: number): Promise<ChannelReservation | undefined> {
+
+  async getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number): Promise<ChannelReservation | undefined> {
     const result = await db.select().from(channelReservations)
       .where(and(
         eq(channelReservations.channelId, channelId),
-        eq(channelReservations.inventoryItemId, inventoryItemId)
+        eq(channelReservations.productVariantId, productVariantId)
       ));
     return result[0];
   }
-  
+
   async upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation> {
-    const existing = await this.getChannelReservationByChannelAndItem(reservation.channelId, reservation.inventoryItemId);
+    const existing = await this.getChannelReservationByChannelAndProductVariant(reservation.channelId, reservation.productVariantId!);
     if (existing) {
       const result = await db.update(channelReservations)
         .set({ ...reservation, updatedAt: new Date() })
@@ -3484,10 +3209,10 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
   
-  async getReplenRulesForVariant(pickVariantId: number): Promise<ReplenRule[]> {
+  async getReplenRulesForVariant(pickProductVariantId: number): Promise<ReplenRule[]> {
     return await db.select().from(replenRules)
       .where(and(
-        eq(replenRules.pickVariantId, pickVariantId),
+        eq(replenRules.pickProductVariantId, pickProductVariantId),
         eq(replenRules.isActive, 1)
       ))
       .orderBy(asc(replenRules.priority));

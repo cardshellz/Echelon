@@ -66,16 +66,16 @@ interface CatalogProduct {
   title: string | null;
 }
 
-interface UomVariant {
+interface ProductVariant {
   id: number;
   sku: string | null;
   name: string;
-  inventoryItemId: number;
+  productId: number;
   unitsPerVariant: number;
   hierarchyLevel: number;
 }
 
-interface InventoryItem {
+interface Product {
   id: number;
   baseSku: string | null;
 }
@@ -112,8 +112,8 @@ interface ReplenRule {
   createdAt: string;
   updatedAt: string;
   catalogProduct?: CatalogProduct;
-  pickVariant?: UomVariant;
-  sourceVariant?: UomVariant;
+  pickVariant?: ProductVariant;
+  sourceVariant?: ProductVariant;
 }
 
 interface ReplenTask {
@@ -271,12 +271,8 @@ export default function Replenishment() {
     queryKey: ["/api/catalog-products"],
   });
 
-  const { data: variants = [] } = useQuery<UomVariant[]>({
-    queryKey: ["/api/uom-variants"],
-  });
-
-  const { data: inventoryItems = [] } = useQuery<InventoryItem[]>({
-    queryKey: ["/api/inventory-items"],
+  const { data: variants = [] } = useQuery<ProductVariant[]>({
+    queryKey: ["/api/product-variants"],
   });
 
   interface WarehouseType {
@@ -381,26 +377,11 @@ export default function Replenishment() {
   });
 
   // Filter variants by selected product
-  // Links: product.inventoryItemId -> inventoryItem.id -> variant.inventoryItemId
+  // product_variants have a direct productId linking to products
   const getVariantsForProduct = (productId: string) => {
     if (!productId || productId === "none") return [];
-    const product = products.find(p => p.id === parseInt(productId));
-    if (!product) return [];
-    
-    // Find product's inventoryItemId via matching (product's sku can match inventoryItem's baseSku)
-    // Or we can match via the link in catalog_products
-    // For now, we find all variants that share an inventoryItemId with this product
-    const productInventoryItemId = (product as any).inventoryItemId;
-    if (!productInventoryItemId) {
-      // Fallback: match by baseSku if product doesn't have direct inventoryItemId
-      const matchingItem = inventoryItems.find(i => i.baseSku === product.sku);
-      if (matchingItem) {
-        return variants.filter(v => v.inventoryItemId === matchingItem.id);
-      }
-      return [];
-    }
-    
-    return variants.filter(v => v.inventoryItemId === productInventoryItemId);
+    const id = parseInt(productId);
+    return variants.filter(v => v.productId === id);
   };
 
   // Tier Default mutations

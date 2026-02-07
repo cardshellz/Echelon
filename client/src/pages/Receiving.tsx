@@ -74,8 +74,7 @@ interface ReceivingLine {
   expectedQty: number;
   receivedQty: number;
   damagedQty: number;
-  inventoryItemId: number | null;
-  uomVariantId: number | null;
+  productVariantId: number | null;
   catalogProductId: number | null;
   putawayLocationId: number | null;
   putawayComplete: number;
@@ -232,11 +231,10 @@ export default function Receiving() {
     expectedQty: "1",
     putawayLocationId: "",
     catalogProductId: null as number | null,
-    inventoryItemId: null as number | null,
-    uomVariantId: null as number | null,
+    productVariantId: null as number | null,
   });
   const [skuSearch, setSkuSearch] = useState("");
-  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number | null; inventoryItemId: number; uomVariantId: number; unitsPerVariant: number}[]>([]);
+  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number | null; productVariantId: number; unitsPerVariant: number}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
   const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const [locationSearch, setLocationSearch] = useState("");
@@ -295,8 +293,8 @@ DEF-456,25,,,5.00,,Location TBD`;
     queryKey: ["/api/warehouse/locations"],
   });
 
-  const { data: variants = [] } = useQuery<{ id: number; sku: string; name: string; inventoryItemId: number }[]>({
-    queryKey: ["/api/inventory/variants"],
+  const { data: variants = [] } = useQuery<{ id: number; sku: string; name: string; productId: number }[]>({
+    queryKey: ["/api/product-variants"],
   });
 
   // Mutations
@@ -463,8 +461,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         expectedQty: "1",
         putawayLocationId: "",
         catalogProductId: null,
-        inventoryItemId: null,
-        uomVariantId: null,
+        productVariantId: null,
       });
       setSkuSearch("");
       setSkuResults([]);
@@ -1609,7 +1606,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
                     {skuResults.map((item) => (
                       <button
-                        key={item.uomVariantId}
+                        key={item.productVariantId}
                         type="button"
                         className="w-full px-3 py-3 text-left hover:bg-gray-100 active:bg-gray-200 text-sm min-h-[44px]"
                         onClick={() => {
@@ -1618,8 +1615,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                             sku: item.sku,
                             productName: item.name,
                             catalogProductId: item.catalogProductId,
-                            inventoryItemId: item.inventoryItemId,
-                            uomVariantId: item.uomVariantId,
+                            productVariantId: item.productVariantId,
                           });
                           setSkuSearch(item.sku);
                           setShowSkuDropdown(false);
@@ -1729,8 +1725,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   expectedQty: "1",
                   putawayLocationId: "",
                   catalogProductId: null,
-                  inventoryItemId: null,
-                  uomVariantId: null,
+                  productVariantId: null,
                 });
               }}>
                 Cancel
@@ -1751,8 +1746,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       status: isBlind ? "complete" : "pending",
                       putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
                       catalogProductId: newLine.catalogProductId,
-                      inventoryItemId: newLine.inventoryItemId,
-                      uomVariantId: newLine.uomVariantId,
+                      productVariantId: newLine.productVariantId,
                     },
                   });
                 }}

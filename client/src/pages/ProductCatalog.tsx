@@ -30,10 +30,10 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 
-interface UomVariant {
+interface ProductVariant {
   id: number;
   sku: string;
-  inventoryItemId: number;
+  productId: number;
   name: string;
   unitsPerVariant: number;
   hierarchyLevel: number;
@@ -42,7 +42,7 @@ interface UomVariant {
   active: number;
 }
 
-interface InventoryItem {
+interface Product {
   id: number;
   baseSku: string;
   name: string;
@@ -53,8 +53,8 @@ interface InventoryItem {
 }
 
 interface ProductWithVariants {
-  item: InventoryItem;
-  variants: UomVariant[];
+  item: Product;
+  variants: ProductVariant[];
 }
 
 export default function ProductCatalog() {
@@ -66,22 +66,22 @@ export default function ProductCatalog() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const { data: items = [], isLoading: loadingItems } = useQuery<InventoryItem[]>({
-    queryKey: ["/api/inventory/items"],
+  const { data: items = [], isLoading: loadingItems } = useQuery<Product[]>({
+    queryKey: ["/api/products"],
   });
 
-  const { data: variants = [], isLoading: loadingVariants } = useQuery<UomVariant[]>({
-    queryKey: ["/api/inventory/variants"],
+  const { data: variants = [], isLoading: loadingVariants } = useQuery<ProductVariant[]>({
+    queryKey: ["/api/product-variants"],
   });
 
   const updateVariantMutation = useMutation({
     mutationFn: async ({ variantId, unitsPerVariant }: { variantId: number; unitsPerVariant: number }) => {
-      const response = await apiRequest("PATCH", `/api/inventory/variants/${variantId}`, { unitsPerVariant });
+      const response = await apiRequest("PATCH", `/api/product-variants/${variantId}`, { unitsPerVariant });
       return response.json();
     },
     onSuccess: () => {
       toast({ title: "Variant updated successfully" });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/variants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
       setEditingVariant(null);
     },
     onError: (error: Error) => {
@@ -90,13 +90,13 @@ export default function ProductCatalog() {
   });
 
   const parentItemsOnly = items.filter(item => {
-    const itemVariants = variants.filter(v => v.inventoryItemId === item.id);
+    const itemVariants = variants.filter(v => v.productId === item.id);
     return itemVariants.some(v => v.hierarchyLevel === 1);
   });
 
   const productsWithVariants: ProductWithVariants[] = parentItemsOnly.map(item => ({
     item,
-    variants: variants.filter(v => v.inventoryItemId === item.id).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
+    variants: variants.filter(v => v.productId === item.id).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
   }));
 
   const filteredProducts = productsWithVariants.filter(p =>
@@ -117,7 +117,7 @@ export default function ProductCatalog() {
     });
   };
 
-  const startEdit = (variant: UomVariant) => {
+  const startEdit = (variant: ProductVariant) => {
     setEditingVariant(variant.id);
     setEditValue(variant.unitsPerVariant.toString());
   };

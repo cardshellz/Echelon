@@ -7,7 +7,8 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener } from "./orderSyncListener";
-import { runStartupMigrations } from "./db";
+import { runStartupMigrations, db } from "./db";
+import { createServices } from "./services";
 import type { SafeUser } from "@shared/schema";
 
 declare module "express-session" {
@@ -110,7 +111,11 @@ app.use((req, res, next) => {
 (async () => {
   // Run startup migrations to ensure database schema is up to date
   await runStartupMigrations();
-  
+
+  // Create WMS service container and attach to app for route handlers
+  const services = createServices(db);
+  app.locals.services = services;
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

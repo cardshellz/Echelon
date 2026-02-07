@@ -1,14 +1,14 @@
 import { storage } from "./storage";
-import type { 
-  InventoryItem, 
-  UomVariant, 
-  InventoryLevel, 
+import type {
+  Product,
+  ProductVariant,
+  InventoryLevel,
   InventoryTransaction,
-  InsertInventoryTransaction 
+  InsertInventoryTransaction
 } from "@shared/schema";
 
 export interface VariantAvailability {
-  variantId: number;
+  productVariantId: number;
   sku: string;
   name: string;
   unitsPerVariant: number;
@@ -19,8 +19,8 @@ export interface VariantAvailability {
   variantQty: number; // Physical count of this variant across all locations
 }
 
-export interface InventoryItemSummary {
-  inventoryItemId: number;
+export interface ProductInventorySummary {
+  productId: number;
   baseSku: string;
   name: string;
   totalOnHandBase: number;
@@ -29,38 +29,41 @@ export interface InventoryItemSummary {
   variants: VariantAvailability[];
 }
 
+// Backward-compatible alias for callers still using the old name
+export type InventoryItemSummary = ProductInventorySummary;
+
 export class InventoryService {
-  
+
   /**
-   * Calculate Available-to-Promise (ATP) for a base inventory item
+   * Calculate Available-to-Promise (ATP) for a product variant
    * ATP = On Hand (pickable locations) - Reserved
    */
-  async calculateATP(inventoryItemId: number): Promise<number> {
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
-    const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
+  async calculateATP(productVariantId: number): Promise<number> {
+    const onHand = await storage.getTotalOnHandByProductVariantId(productVariantId, false);
+    const reserved = await storage.getTotalReservedByProductVariantId(productVariantId);
     return onHand - reserved;
   }
 
   /**
-   * Calculate available quantity for each UOM variant based on base ATP
+   * Calculate available quantity for each product variant of a product based on ATP
    * Returns floor(ATP / units_per_variant) for each variant
    * Also includes physical variant quantity from inventory levels
    */
-  async calculateVariantAvailability(inventoryItemId: number): Promise<VariantAvailability[]> {
-    const variants = await storage.getUomVariantsByInventoryItemId(inventoryItemId);
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
-    const atp = await this.calculateATP(inventoryItemId);
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
-    const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
-    
-    return variants.map(variant => {
+  async calculateVariantAvailability(productId: number): Promise<VariantAvailability[]> {
+    const variants = await storage.getProductVariantsByProductId(productId);
+
+    return await Promise.all(variants.map(async (variant) => {
+      const levels = await storage.getInventoryLevelsByProductVariantId(variant.id);
+      const atp = await this.calculateATP(variant.id);
+      const onHand = await storage.getTotalOnHandByProductVariantId(variant.id, false);
+      const reserved = await storage.getTotalReservedByProductVariantId(variant.id);
+
       // Sum variantQty across all locations for this variant
-      const variantLevels = levels.filter(l => l.variantId === variant.id);
-      const totalVariantQty = variantLevels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
-      
+      const totalVariantQty = levels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
+
       return {
-        variantId: variant.id,
-        sku: variant.sku,
+        productVariantId: variant.id,
+        sku: variant.sku || '',
         name: variant.name,
         unitsPerVariant: variant.unitsPerVariant,
         available: Math.floor(atp / variant.unitsPerVariant),
@@ -69,30 +72,36 @@ export class InventoryService {
         atpBase: atp,
         variantQty: totalVariantQty,
       };
-    });
+    }));
   }
 
   /**
-   * Get full inventory summary for an item including all variant availability
+   * Get full inventory summary for a product including all variant availability
    */
-  async getInventoryItemSummary(inventoryItemId: number): Promise<InventoryItemSummary | null> {
-    const items = await storage.getAllInventoryItems();
-    const item = items.find(i => i.id === inventoryItemId);
-    if (!item) return null;
+  async getProductInventorySummary(productId: number): Promise<ProductInventorySummary | null> {
+    const product = await storage.getProductById(productId);
+    if (!product) return null;
 
-    const variants = await this.calculateVariantAvailability(inventoryItemId);
-    const onHand = await storage.getTotalOnHandByItemId(inventoryItemId, false);
-    const reserved = await storage.getTotalReservedByItemId(inventoryItemId);
-    
+    const variants = await this.calculateVariantAvailability(productId);
+
+    // Aggregate totals across all variants
+    const totalOnHandBase = variants.reduce((sum, v) => sum + v.onHandBase, 0);
+    const totalReservedBase = variants.reduce((sum, v) => sum + v.reservedBase, 0);
+
     return {
-      inventoryItemId: item.id,
-      baseSku: item.baseSku,
-      name: item.name,
-      totalOnHandBase: onHand,
-      totalReservedBase: reserved,
-      totalAtpBase: onHand - reserved,
+      productId: product.id,
+      baseSku: product.sku,
+      name: product.name,
+      totalOnHandBase,
+      totalReservedBase,
+      totalAtpBase: totalOnHandBase - totalReservedBase,
       variants,
     };
+  }
+
+  /** @deprecated Use getProductInventorySummary instead */
+  async getInventoryItemSummary(productId: number): Promise<ProductInventorySummary | null> {
+    return this.getProductInventorySummary(productId);
   }
 
   /**
@@ -102,33 +111,31 @@ export class InventoryService {
    * Returns true if reservation successful
    */
   async reserveForOrder(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     orderId: number,
     orderItemId: number,
     userId?: string
   ): Promise<boolean> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (!levelAtLocation) {
-      console.log(`[Inventory] No inventory level at location ${warehouseLocationId} for item ${inventoryItemId}`);
+      console.log(`[Inventory] No inventory level at location ${warehouseLocationId} for variant ${productVariantId}`);
       return false;
     }
 
     // Delta: add to reserved (storage adds this to current value)
-    await storage.adjustInventoryLevel(levelAtLocation.id, { 
-      reservedBase: baseUnits 
+    await storage.adjustInventoryLevel(levelAtLocation.id, {
+      reservedBase: baseUnits
     });
 
     // Reserve is a state change only, not a physical movement - no variantQtyDelta
     await this.logTransaction({
-      inventoryItemId,
-      warehouseLocationId, // Legacy
+      productVariantId,
       transactionType: "reserve",
       variantQtyDelta: 0, // No physical movement
-      baseQtyDelta: baseUnits, // Legacy - tracks reservation amount
       sourceState: "on_hand",
       targetState: "committed", // Use "committed" not "reserved" per WMS spec
       orderId,
@@ -146,7 +153,7 @@ export class InventoryService {
    * Decreases reservedBase, increasing ATP
    */
   async releaseReservation(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     orderId: number,
@@ -154,9 +161,9 @@ export class InventoryService {
     reason: string,
     userId?: string
   ): Promise<void> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (levelAtLocation) {
       // Delta: subtract from reserved (negative delta)
       await storage.adjustInventoryLevel(levelAtLocation.id, { reservedBase: -baseUnits });
@@ -164,11 +171,9 @@ export class InventoryService {
 
     // Unreserve is a state change only, not a physical movement
     await this.logTransaction({
-      inventoryItemId,
-      warehouseLocationId, // Legacy
+      productVariantId,
       transactionType: "unreserve",
       variantQtyDelta: 0, // No physical movement
-      baseQtyDelta: -baseUnits, // Legacy - tracks released amount
       sourceState: "committed", // Was "committed" (reserved)
       targetState: "on_hand", // Back to available
       orderId,
@@ -186,27 +191,27 @@ export class InventoryService {
    * If there was a reservation, also decrements reserved
    */
   async pickItem(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     orderId: number,
     userId?: string
   ): Promise<boolean> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (!levelAtLocation) {
-      console.log(`[Inventory] No inventory level at location ${warehouseLocationId} for item ${inventoryItemId}`);
+      console.log(`[Inventory] No inventory level at location ${warehouseLocationId} for variant ${productVariantId}`);
       return false;
     }
 
     // Deltas for picking:
     // - onHand decreases (negative delta)
     // - picked increases (positive delta)
-    // - If reserved exists, decrease it (negative delta) 
+    // - If reserved exists, decrease it (negative delta)
     const reservedToRelease = Math.min(levelAtLocation.reservedBase, baseUnits);
 
-    await storage.adjustInventoryLevel(levelAtLocation.id, { 
+    await storage.adjustInventoryLevel(levelAtLocation.id, {
       onHandBase: -baseUnits,
       pickedBase: baseUnits,
       reservedBase: -reservedToRelease
@@ -215,19 +220,17 @@ export class InventoryService {
     // Log transaction with Full WMS fields
     const variantQtyBefore = levelAtLocation.variantQty || 0;
     const variantQtyAfter = Math.max(0, variantQtyBefore - baseUnits);
-    
+
     // sourceState depends on whether we had a reservation (committed) or not (on_hand)
     const sourceState = reservedToRelease > 0 ? "committed" : "on_hand";
-    
+
     await this.logTransaction({
-      inventoryItemId,
+      productVariantId,
       fromLocationId: warehouseLocationId, // Pick = FROM location
-      warehouseLocationId, // Legacy compatibility
       transactionType: "pick",
       variantQtyDelta: -baseUnits,
       variantQtyBefore,
       variantQtyAfter,
-      baseQtyDelta: -baseUnits,
       sourceState, // committed (was reserved) or on_hand (immediate pick)
       targetState: "picked",
       orderId,
@@ -244,32 +247,30 @@ export class InventoryService {
    * Decrements picked (items leave the building)
    */
   async recordShipment(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     orderId: number,
     orderItemId: number,
     userId?: string
   ): Promise<void> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     const variantQtyBefore = levelAtLocation?.variantQty || 0;
-    
+
     if (levelAtLocation) {
       // Delta: subtract from picked (negative delta)
       await storage.adjustInventoryLevel(levelAtLocation.id, { pickedBase: -baseUnits });
     }
 
     await this.logTransaction({
-      inventoryItemId,
+      productVariantId,
       fromLocationId: warehouseLocationId, // Ship = FROM location (items leave)
-      warehouseLocationId, // Legacy compatibility
       transactionType: "ship",
       variantQtyDelta: -baseUnits,
       variantQtyBefore,
       variantQtyAfter: Math.max(0, variantQtyBefore - baseUnits),
-      baseQtyDelta: -baseUnits,
       sourceState: "picked",
       targetState: "shipped",
       orderId,
@@ -284,22 +285,18 @@ export class InventoryService {
    * Receive inventory from PO
    */
   async receiveInventory(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     referenceId: string,
     notes?: string,
     userId?: string,
-    variantId?: number,
     variantQty?: number
   ): Promise<void> {
-    const existing = await storage.getInventoryLevelsByItemId(inventoryItemId);
-    
-    // If receiving by variant, find/create level for that specific variant
-    const levelAtLocation = variantId 
-      ? existing.find(l => l.warehouseLocationId === warehouseLocationId && l.variantId === variantId)
-      : existing.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+    const existing = await storage.getInventoryLevelsByProductVariantId(productVariantId);
+
+    const levelAtLocation = existing.find(l => l.warehouseLocationId === warehouseLocationId);
+
     if (levelAtLocation) {
       // Delta: add to onHand (positive delta) and variantQty if provided
       const adjustments: any = { onHandBase: baseUnits };
@@ -309,9 +306,8 @@ export class InventoryService {
       await storage.adjustInventoryLevel(levelAtLocation.id, adjustments);
     } else {
       await storage.upsertInventoryLevel({
-        inventoryItemId,
+        productVariantId,
         warehouseLocationId,
-        variantId: variantId || null,
         variantQty: variantQty || 0,
         onHandBase: baseUnits,
         reservedBase: 0,
@@ -323,17 +319,14 @@ export class InventoryService {
 
     const variantQtyBefore = levelAtLocation?.variantQty || 0;
     const variantQtyDelta = variantQty || baseUnits;
-    
+
     await this.logTransaction({
-      inventoryItemId,
+      productVariantId,
       toLocationId: warehouseLocationId, // Receive = TO location
-      warehouseLocationId, // Legacy compatibility
-      variantId: variantId || undefined,
       transactionType: "receipt",
       variantQtyDelta,
       variantQtyBefore,
       variantQtyAfter: variantQtyBefore + variantQtyDelta,
-      baseQtyDelta: baseUnits,
       sourceState: "external",
       targetState: "on_hand",
       referenceType: "po",
@@ -348,22 +341,22 @@ export class InventoryService {
    * Manual adjustment (cycle count, write-off, etc.)
    */
   async adjustInventory(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnitsDelta: number,
     reason: string,
     userId?: string
   ): Promise<void> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (levelAtLocation) {
       // Delta adjustment in base units only
       // variantQty is managed separately based on actual variant count changes
       await storage.adjustInventoryLevel(levelAtLocation.id, { onHandBase: baseUnitsDelta });
     } else if (baseUnitsDelta > 0) {
       await storage.upsertInventoryLevel({
-        inventoryItemId,
+        productVariantId,
         warehouseLocationId,
         onHandBase: baseUnitsDelta,
         reservedBase: 0,
@@ -375,17 +368,15 @@ export class InventoryService {
 
     const variantQtyBefore = levelAtLocation?.variantQty || 0;
     const variantQtyAfter = Math.max(0, variantQtyBefore + baseUnitsDelta);
-    
+
     await this.logTransaction({
-      inventoryItemId,
+      productVariantId,
       fromLocationId: baseUnitsDelta < 0 ? warehouseLocationId : undefined, // Negative = taking from
       toLocationId: baseUnitsDelta > 0 ? warehouseLocationId : undefined, // Positive = adding to
-      warehouseLocationId, // Legacy compatibility
       transactionType: "adjustment",
       variantQtyDelta: baseUnitsDelta,
       variantQtyBefore,
       variantQtyAfter,
-      baseQtyDelta: baseUnitsDelta,
       sourceState: "on_hand",
       targetState: "on_hand",
       notes: reason,
@@ -395,24 +386,21 @@ export class InventoryService {
   }
 
   /**
-   * Get sibling variant IDs (other variants of the same base SKU)
+   * Get sibling variant IDs (other variants of the same product)
    */
-  async getSiblingVariants(variantId: number): Promise<UomVariant[]> {
-    const allVariants = await storage.getAllUomVariants();
-    const variant = allVariants.find(v => v.id === variantId);
+  async getSiblingVariants(productVariantId: number): Promise<ProductVariant[]> {
+    const variant = await storage.getProductVariantById(productVariantId);
     if (!variant) return [];
-    
-    return allVariants.filter(v => 
-      v.inventoryItemId === variant.inventoryItemId && v.id !== variantId
-    );
+
+    const siblings = await storage.getProductVariantsByProductId(variant.productId);
+    return siblings.filter(v => v.id !== productVariantId);
   }
 
   /**
    * Convert variant quantity to base units
    */
-  async convertToBaseUnits(variantId: number, quantity: number): Promise<number> {
-    const allVariants = await storage.getAllUomVariants();
-    const variant = allVariants.find(v => v.id === variantId);
+  async convertToBaseUnits(productVariantId: number, quantity: number): Promise<number> {
+    const variant = await storage.getProductVariantById(productVariantId);
     if (!variant) return 0;
     return quantity * variant.unitsPerVariant;
   }
@@ -423,7 +411,7 @@ export class InventoryService {
    * Returns the number of base units replenished
    */
   async replenishLocation(
-    inventoryItemId: number,
+    productVariantId: number,
     targetLocationId: number,
     requestedUnits: number,
     userId?: string
@@ -443,11 +431,11 @@ export class InventoryService {
     }
 
     // Check parent location inventory
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const parentLevel = levels.find(l => l.warehouseLocationId === parentLocationId);
-    
+
     if (!parentLevel || parentLevel.onHandBase <= 0) {
-      console.log(`[Replenish] Parent location has no stock for item ${inventoryItemId}`);
+      console.log(`[Replenish] Parent location has no stock for variant ${productVariantId}`);
       return { replenished: 0, sourceLocationId: parentLocationId };
     }
 
@@ -463,7 +451,7 @@ export class InventoryService {
       await storage.adjustInventoryLevel(targetLevel.id, { onHandBase: replenishAmount });
     } else {
       await storage.upsertInventoryLevel({
-        inventoryItemId,
+        productVariantId,
         warehouseLocationId: targetLocationId,
         onHandBase: replenishAmount,
         reservedBase: 0,
@@ -475,13 +463,11 @@ export class InventoryService {
 
     // Log the replenishment transaction with Full WMS fields
     await this.logTransaction({
-      inventoryItemId,
+      productVariantId,
       fromLocationId: parentLocationId, // Source location
       toLocationId: targetLocationId, // Destination location
-      warehouseLocationId: targetLocationId, // Legacy
       transactionType: "replenish",
       variantQtyDelta: replenishAmount,
-      baseQtyDelta: replenishAmount,
       sourceState: "on_hand",
       targetState: "on_hand",
       notes: `Replenished from location ${parentLocationId}`,
@@ -494,41 +480,41 @@ export class InventoryService {
   }
 
   /**
-   * Check if an inventory item has negative ATP (backorder situation)
+   * Check if a product variant has negative ATP (backorder situation)
    * Returns the backorder quantity if negative, otherwise 0
    */
-  async checkBackorderStatus(inventoryItemId: number): Promise<{ 
-    isBackordered: boolean; 
+  async checkBackorderStatus(productVariantId: number): Promise<{
+    isBackordered: boolean;
     backorderQty: number;
     atp: number;
   }> {
-    const atp = await this.calculateATP(inventoryItemId);
+    const atp = await this.calculateATP(productVariantId);
     const isBackordered = atp < 0;
     const backorderQty = isBackordered ? Math.abs(atp) : 0;
-    
+
     return { isBackordered, backorderQty, atp };
   }
 
   /**
-   * Record backorder demand for an item at a location
+   * Record backorder demand for a variant at a location
    * Used when we accept orders we can't immediately fulfill
    */
   async recordBackorder(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     orderId: number,
     orderItemId: number,
     userId?: string
   ): Promise<void> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (levelAtLocation) {
       await storage.adjustInventoryLevel(levelAtLocation.id, { backorderBase: baseUnits });
     } else {
       await storage.upsertInventoryLevel({
-        inventoryItemId,
+        productVariantId,
         warehouseLocationId,
         onHandBase: 0,
         reservedBase: 0,
@@ -540,11 +526,9 @@ export class InventoryService {
 
     // Backorder is a demand-only record, no physical movement and no existing stock
     await this.logTransaction({
-      inventoryItemId,
-      warehouseLocationId, // Legacy
+      productVariantId,
       transactionType: "reserve",
       variantQtyDelta: 0, // No physical movement - demand tracking only
-      baseQtyDelta: baseUnits, // Legacy - tracks backorder demand
       sourceState: "external", // No stock exists - demand from external/future source
       targetState: "committed", // Committed demand (backordered)
       orderId,
@@ -555,36 +539,36 @@ export class InventoryService {
       isImplicit: 0,
     });
 
-    console.log(`[Backorder] Recorded ${baseUnits} base units backorder for item ${inventoryItemId}`);
+    console.log(`[Backorder] Recorded ${baseUnits} base units backorder for variant ${productVariantId}`);
   }
 
   /**
    * Clear backorder when stock is received
    */
   async clearBackorder(
-    inventoryItemId: number,
+    productVariantId: number,
     warehouseLocationId: number,
     baseUnits: number,
     userId?: string
   ): Promise<void> {
-    const levels = await storage.getInventoryLevelsByItemId(inventoryItemId);
+    const levels = await storage.getInventoryLevelsByProductVariantId(productVariantId);
     const levelAtLocation = levels.find(l => l.warehouseLocationId === warehouseLocationId);
-    
+
     if (levelAtLocation && levelAtLocation.backorderBase > 0) {
       const toClear = Math.min(baseUnits, levelAtLocation.backorderBase);
       await storage.adjustInventoryLevel(levelAtLocation.id, { backorderBase: -toClear });
-      
-      console.log(`[Backorder] Cleared ${toClear} base units backorder for item ${inventoryItemId}`);
+
+      console.log(`[Backorder] Cleared ${toClear} base units backorder for variant ${productVariantId}`);
     }
   }
 
   /**
    * Get locations with low stock that need replenishment
    */
-  async getLocationsNeedingReplenishment(inventoryItemId?: number): Promise<{
+  async getLocationsNeedingReplenishment(productVariantId?: number): Promise<{
     locationId: number;
     locationCode: string;
-    inventoryItemId: number;
+    productVariantId: number;
     currentQty: number;
     minQty: number;
     parentLocationId: number | null;
@@ -593,7 +577,7 @@ export class InventoryService {
     const results: {
       locationId: number;
       locationCode: string;
-      inventoryItemId: number;
+      productVariantId: number;
       currentQty: number;
       minQty: number;
       parentLocationId: number | null;
@@ -608,13 +592,13 @@ export class InventoryService {
       const levelsAtLocation = allLevels.filter(l => l.warehouseLocationId === location.id);
 
       for (const level of levelsAtLocation) {
-        if (inventoryItemId && level.inventoryItemId !== inventoryItemId) continue;
-        
+        if (productVariantId && level.productVariantId !== productVariantId) continue;
+
         if (level.onHandBase < (location.minQty || 0)) {
           results.push({
             locationId: location.id,
             locationCode: location.code,
-            inventoryItemId: level.inventoryItemId,
+            productVariantId: level.productVariantId,
             currentQty: level.onHandBase,
             minQty: location.minQty || 0,
             parentLocationId: location.parentLocationId,
@@ -637,9 +621,9 @@ export class InventoryService {
    * Calculate cubic volume for a variant in mm³
    * Returns null if dimensions not set
    */
-  getVariantCubicMm(variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null }): number | null {
-    if (variant.widthMm && variant.heightMm && variant.depthMm) {
-      return variant.widthMm * variant.heightMm * variant.depthMm;
+  getVariantCubicMm(variant: { widthMm: number | null; heightMm: number | null; lengthMm?: number | null }): number | null {
+    if (variant.widthMm && variant.heightMm && variant.lengthMm) {
+      return variant.widthMm * variant.heightMm * variant.lengthMm;
     }
     return null;
   }
@@ -648,11 +632,11 @@ export class InventoryService {
    * Calculate total capacity of a location in mm³
    * Uses capacityCubicMm if set, otherwise calculates from dimensions
    */
-  getLocationCapacityCubicMm(location: { 
-    capacityCubicMm: number | null; 
-    widthMm: number | null; 
-    heightMm: number | null; 
-    depthMm: number | null 
+  getLocationCapacityCubicMm(location: {
+    capacityCubicMm: number | null;
+    widthMm: number | null;
+    heightMm: number | null;
+    depthMm: number | null
   }): number | null {
     if (location.capacityCubicMm) {
       return location.capacityCubicMm;
@@ -670,23 +654,23 @@ export class InventoryService {
   async getLocationOccupiedCubicMm(
     locationId: number,
     inventoryLevels: InventoryLevel[],
-    variantMap: Map<number, UomVariant>
+    variantMap: Map<number, ProductVariant>
   ): Promise<number> {
     let occupied = 0;
-    
+
     for (const level of inventoryLevels) {
       if (level.warehouseLocationId !== locationId) continue;
-      if (!level.variantId || level.variantQty <= 0) continue;
-      
-      const variant = variantMap.get(level.variantId);
+      if (!level.productVariantId || level.variantQty <= 0) continue;
+
+      const variant = variantMap.get(level.productVariantId);
       if (!variant) continue;
-      
+
       const variantCube = this.getVariantCubicMm(variant);
       if (variantCube) {
         occupied += variantCube * level.variantQty;
       }
     }
-    
+
     return occupied;
   }
 
@@ -695,27 +679,27 @@ export class InventoryService {
    * Returns: { remainingCubicMm, maxUnits } or null if capacity not set
    */
   async calculateRemainingCapacity(
-    location: { 
+    location: {
       id: number;
-      capacityCubicMm: number | null; 
-      widthMm: number | null; 
-      heightMm: number | null; 
-      depthMm: number | null 
+      capacityCubicMm: number | null;
+      widthMm: number | null;
+      heightMm: number | null;
+      depthMm: number | null
     },
     variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null },
     inventoryLevels: InventoryLevel[],
-    variantMap: Map<number, UomVariant>
+    variantMap: Map<number, ProductVariant>
   ): Promise<{ remainingCubicMm: number; maxUnits: number } | null> {
     const locationCapacity = this.getLocationCapacityCubicMm(location);
     if (!locationCapacity) return null; // Capacity not enforced
-    
+
     const variantCube = this.getVariantCubicMm(variant);
     if (!variantCube) return null; // Variant dimensions not set
-    
+
     const occupied = await this.getLocationOccupiedCubicMm(location.id, inventoryLevels, variantMap);
     const remaining = Math.max(0, locationCapacity - occupied);
     const maxUnits = Math.floor(remaining / variantCube);
-    
+
     return { remainingCubicMm: remaining, maxUnits };
   }
 
@@ -729,7 +713,7 @@ export class InventoryService {
     variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null },
     requiredUnits: number,
     inventoryLevels: InventoryLevel[],
-    variantMap: Map<number, UomVariant>,
+    variantMap: Map<number, ProductVariant>,
     allLocations: Array<{
       id: number;
       warehouseId: number | null;
@@ -743,21 +727,21 @@ export class InventoryService {
   ): Promise<{ locationId: number; maxUnits: number } | null> {
     const variantCube = this.getVariantCubicMm(variant);
     if (!variantCube) return null;
-    
-    const overflowLocations = allLocations.filter(l => 
-      l.locationType === "overflow" && 
+
+    const overflowLocations = allLocations.filter(l =>
+      l.locationType === "overflow" &&
       (warehouseId === null || l.warehouseId === warehouseId)
     );
-    
+
     let bestBin: { locationId: number; maxUnits: number; remainingCube: number } | null = null;
-    
+
     for (const loc of overflowLocations) {
       const capacity = await this.calculateRemainingCapacity(loc, variant, inventoryLevels, variantMap);
       if (!capacity || capacity.maxUnits <= 0) continue;
-      
+
       // If minUnitsRequired is set, only consider bins that can fit that many
       if (minUnitsRequired && capacity.maxUnits < minUnitsRequired) continue;
-      
+
       if (!bestBin || capacity.remainingCubicMm > bestBin.remainingCube) {
         bestBin = {
           locationId: loc.id,
@@ -766,7 +750,7 @@ export class InventoryService {
         };
       }
     }
-    
+
     return bestBin ? { locationId: bestBin.locationId, maxUnits: bestBin.maxUnits } : null;
   }
 }

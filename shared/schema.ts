@@ -518,76 +518,11 @@ export const insertProductVariantSchema = createInsertSchema(productVariants).om
 export type InsertProductVariant = z.infer<typeof insertProductVariantSchema>;
 export type ProductVariant = typeof productVariants.$inferSelect;
 
-// ============================================================================
-// LEGACY TABLES - Keep for backward compatibility during migration
-// ============================================================================
-
-// Master inventory items (LEGACY - use products instead)
-export const inventoryItems = pgTable("inventory_items", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  baseSku: varchar("base_sku", { length: 100 }),
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(),
-  shopifyProductId: bigint("shopify_product_id", { mode: "number" }),
-  name: text("name").notNull(),
-  description: text("description"),
-  baseUnit: varchar("base_unit", { length: 20 }).notNull().default("each"),
-  costPerUnit: integer("cost_per_unit"),
-  imageUrl: text("image_url"),
-  active: integer("active").notNull().default(1),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
-
-export const insertInventoryItemSchema = createInsertSchema(inventoryItems).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
-
-export type InsertInventoryItem = z.infer<typeof insertInventoryItemSchema>;
-export type InventoryItem = typeof inventoryItems.$inferSelect;
-
-// UOM Variants (LEGACY - use productVariants instead)
-export const uomVariants = pgTable("uom_variants", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  sku: varchar("sku", { length: 100 }),
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(),
-  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
-  name: text("name").notNull(),
-  unitsPerVariant: integer("units_per_variant").notNull().default(1),
-  hierarchyLevel: integer("hierarchy_level").notNull().default(1),
-  parentVariantId: integer("parent_variant_id"),
-  barcode: varchar("barcode", { length: 100 }),
-  imageUrl: text("image_url"),
-  active: integer("active").notNull().default(1),
-  
-  // Physical dimensions for cube calculations and slotting (all in mm/grams)
-  widthMm: integer("width_mm"),
-  heightMm: integer("height_mm"),
-  depthMm: integer("depth_mm"),
-  weightG: integer("weight_g"), // Weight in grams
-  
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
-
-export const insertUomVariantSchema = createInsertSchema(uomVariants).omit({
-  id: true,
-  createdAt: true,
-  updatedAt: true,
-});
-
-export type InsertUomVariant = z.infer<typeof insertUomVariantSchema>;
-export type UomVariant = typeof uomVariants.$inferSelect;
-
-// Inventory levels per location - tracks both physical variant count and base units
-// variantId is the source of truth (links to sellable SKU), inventoryItemId is legacy
+// Inventory levels per location - tracks physical variant counts and state buckets
 export const inventoryLevels = pgTable("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id), // Legacy - will be removed
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
-  variantId: integer("variant_id").notNull().references(() => uomVariants.id), // Legacy - points to uom_variants
-  productVariantId: integer("product_variant_id").references(() => productVariants.id), // New - points to product_variants
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   variantQty: integer("variant_qty").notNull().default(0), // Physical count of variant units (e.g., 5 boxes)
   onHandBase: integer("on_hand_base").notNull().default(0), // Derived: variantQty * unitsPerVariant
   reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders (in base units)
@@ -604,6 +539,10 @@ export const insertInventoryLevelSchema = createInsertSchema(inventoryLevels).om
 
 export type InsertInventoryLevel = z.infer<typeof insertInventoryLevelSchema>;
 export type InventoryLevel = typeof inventoryLevels.$inferSelect;
+
+// Legacy type aliases for backward compatibility during code migration
+export type InventoryItem = Product;
+export type UomVariant = ProductVariant;
 
 // Transaction types for audit trail
 export const transactionTypeEnum = [
@@ -647,36 +586,31 @@ export type AdjustmentReason = typeof adjustmentReasons.$inferSelect;
 // Every inventory movement is logged here for complete audit trail
 export const inventoryTransactions = pgTable("inventory_transactions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id),
-  variantId: integer("variant_id").references(() => uomVariants.id), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id), // New
-  
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
+
   // Location tracking - for transfers, both are used; for receive/pick, one is null
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
   toLocationId: integer("to_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
-  warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // Legacy - kept for compatibility
-  
+
   transactionType: varchar("transaction_type", { length: 30 }).notNull(), // receipt, pick, adjustment, transfer, ship, return
   reasonId: integer("reason_id").references(() => adjustmentReasons.id),
-  
-  // Quantity changes - variant units only (no base units needed for display)
+
+  // Quantity changes in variant units
   variantQtyDelta: integer("variant_qty_delta").notNull().default(0), // Positive = add, negative = remove
   variantQtyBefore: integer("variant_qty_before"), // Snapshot: variant qty before at location
   variantQtyAfter: integer("variant_qty_after"), // Snapshot: variant qty after at location
-  baseQtyDelta: integer("base_qty_delta").notNull().default(0), // Legacy - kept for compatibility
-  baseQtyBefore: integer("base_qty_before"), // Legacy
-  baseQtyAfter: integer("base_qty_after"), // Legacy
-  
+
   batchId: varchar("batch_id", { length: 50 }), // Groups transactions from same operation
   sourceState: varchar("source_state", { length: 20 }), // "on_hand", "committed", "picked", etc.
   targetState: varchar("target_state", { length: 20 }), // "committed", "picked", "shipped", etc.
-  
+
   // Reference links - which operation triggered this transaction
   orderId: integer("order_id").references(() => orders.id),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id), // Link to receiving
   cycleCountId: integer("cycle_count_id").references(() => cycleCounts.id), // Link to cycle count
-  
+  shipmentId: integer("shipment_id").references(() => shipments.id), // Link to shipment
+
   referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
   referenceId: varchar("reference_id", { length: 100 }), // External reference ID
   notes: text("notes"),
@@ -800,10 +734,8 @@ export type ReplenTierDefault = typeof replenTierDefaults.$inferSelect;
 export const replenRules = pgTable("replen_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id), // Which product this override applies to
-  pickVariantId: integer("pick_variant_id").references(() => uomVariants.id), // Legacy
-  sourceVariantId: integer("source_variant_id").references(() => uomVariants.id), // Legacy
-  pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id), // New
-  sourceProductVariantId: integer("source_product_variant_id").references(() => productVariants.id), // New
+  pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id),
+  sourceProductVariantId: integer("source_product_variant_id").references(() => productVariants.id),
   pickLocationType: varchar("pick_location_type", { length: 30 }), // Override: different pick location type
   sourceLocationType: varchar("source_location_type", { length: 30 }), // Override: different source location type
   sourcePriority: varchar("source_priority", { length: 20 }), // Override: different priority (fifo, smallest_first)
@@ -832,10 +764,8 @@ export const replenTasks = pgTable("replen_tasks", {
   fromLocationId: integer("from_location_id").notNull().references(() => warehouseLocations.id),
   toLocationId: integer("to_location_id").notNull().references(() => warehouseLocations.id),
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
-  sourceVariantId: integer("source_variant_id").references(() => uomVariants.id), // Legacy
-  pickVariantId: integer("pick_variant_id").references(() => uomVariants.id), // Legacy
-  sourceProductVariantId: integer("source_product_variant_id").references(() => productVariants.id), // New
-  pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id), // New
+  sourceProductVariantId: integer("source_product_variant_id").references(() => productVariants.id),
+  pickProductVariantId: integer("pick_product_variant_id").references(() => productVariants.id),
   qtySourceUnits: integer("qty_source_units").notNull().default(1), // How many cases to pick
   qtyTargetUnits: integer("qty_target_units").notNull(), // How many eaches to put (after conversion)
   qtyCompleted: integer("qty_completed").notNull().default(0), // Eaches actually put
@@ -867,8 +797,7 @@ export type ChannelType = typeof channelTypeEnum[number];
 
 export const channelFeeds = pgTable("channel_feeds", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  variantId: integer("variant_id").notNull().references(() => uomVariants.id), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id), // New
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   channelType: varchar("channel_type", { length: 30 }).notNull().default("shopify"),
   channelVariantId: varchar("channel_variant_id", { length: 100 }).notNull(), // Shopify variant ID
   channelProductId: varchar("channel_product_id", { length: 100 }), // Shopify product ID
@@ -985,7 +914,7 @@ export type PartnerProfile = typeof partnerProfiles.$inferSelect;
 export const channelReservations = pgTable("channel_reservations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
-  inventoryItemId: integer("inventory_item_id").notNull().references(() => inventoryItems.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
   reserveBaseQty: integer("reserve_base_qty").notNull().default(0), // Base units reserved for this channel
   minStockBase: integer("min_stock_base").default(0), // Minimum stock to maintain (alert threshold)
   maxStockBase: integer("max_stock_base"), // Maximum to list (cap availability)
@@ -993,7 +922,7 @@ export const channelReservations = pgTable("channel_reservations", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_reservations_channel_item_idx").on(table.channelId, table.inventoryItemId),
+  uniqueIndex("channel_reservations_channel_pv_idx").on(table.channelId, table.productVariantId),
 ]);
 
 export const insertChannelReservationSchema = createInsertSchema(channelReservations).omit({
@@ -1012,9 +941,7 @@ export type ChannelReservation = typeof channelReservations.$inferSelect;
 // Catalog products - master listing content (source of truth)
 export const catalogProducts = pgTable("catalog_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id, { onDelete: "set null" }), // Legacy - being deprecated in favor of uomVariantId
-  uomVariantId: integer("uom_variant_id").references(() => uomVariants.id, { onDelete: "set null" }), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // New - replaces uomVariantId
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Primary key for Shopify sync
   sku: varchar("sku", { length: 100 }), // Optional - products may not have SKU yet
   title: varchar("title", { length: 500 }).notNull(),
@@ -1095,8 +1022,7 @@ export type ChannelProductOverride = typeof channelProductOverrides.$inferSelect
 export const channelPricing = pgTable("channel_pricing", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
-  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // New
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
   price: integer("price").notNull(), // In cents
   compareAtPrice: integer("compare_at_price"), // MSRP / strikethrough price
   cost: integer("cost"), // For margin tracking
@@ -1104,7 +1030,7 @@ export const channelPricing = pgTable("channel_pricing", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_pricing_channel_variant_idx").on(table.channelId, table.variantId),
+  uniqueIndex("channel_pricing_channel_pv_idx").on(table.channelId, table.productVariantId),
 ]);
 
 export const insertChannelPricingSchema = createInsertSchema(channelPricing).omit({
@@ -1120,8 +1046,7 @@ export type ChannelPricing = typeof channelPricing.$inferSelect;
 export const channelListings = pgTable("channel_listings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
-  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // New
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
   externalProductId: varchar("external_product_id", { length: 100 }),
   externalVariantId: varchar("external_variant_id", { length: 100 }),
   externalSku: varchar("external_sku", { length: 100 }),
@@ -1134,7 +1059,7 @@ export const channelListings = pgTable("channel_listings", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_listings_channel_variant_idx").on(table.channelId, table.variantId),
+  uniqueIndex("channel_listings_channel_pv_idx").on(table.channelId, table.productVariantId),
 ]);
 
 export const insertChannelListingSchema = createInsertSchema(channelListings).omit({
@@ -1150,8 +1075,7 @@ export type ChannelListing = typeof channelListings.$inferSelect;
 export const channelVariantOverrides = pgTable("channel_variant_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
-  variantId: integer("variant_id").notNull().references(() => uomVariants.id, { onDelete: "cascade" }), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // New
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
   nameOverride: varchar("name_override", { length: 500 }), // NULL = use master
   skuOverride: varchar("sku_override", { length: 100 }), // Channel-specific SKU
   barcodeOverride: varchar("barcode_override", { length: 100 }),
@@ -1160,7 +1084,7 @@ export const channelVariantOverrides = pgTable("channel_variant_overrides", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("channel_variant_overrides_channel_variant_idx").on(table.channelId, table.variantId),
+  uniqueIndex("channel_variant_overrides_channel_pv_idx").on(table.channelId, table.productVariantId),
 ]);
 
 export const insertChannelVariantOverrideSchema = createInsertSchema(channelVariantOverrides).omit({
@@ -1362,7 +1286,7 @@ export const cycleCountItems = pgTable("cycle_count_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   cycleCountId: integer("cycle_count_id").notNull().references(() => cycleCounts.id, { onDelete: "cascade" }),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
-  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id), // Expected item (null if bin should be empty)
+  productVariantId: integer("product_variant_id").references(() => productVariants.id), // Expected variant (null if bin should be empty)
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id), // Link to catalog
   
   // Expected (system) values at time of count
@@ -1497,9 +1421,7 @@ export const receivingLines = pgTable("receiving_lines", {
   receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
   
   // Product reference
-  inventoryItemId: integer("inventory_item_id").references(() => inventoryItems.id),
-  uomVariantId: integer("uom_variant_id").references(() => uomVariants.id), // Legacy
-  productVariantId: integer("product_variant_id").references(() => productVariants.id), // New - replaces uomVariantId
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
   catalogProductId: integer("catalog_product_id").references(() => catalogProducts.id),
   
   // Product info (cached for display)
@@ -1578,6 +1500,63 @@ export const insertCombinedOrderGroupSchema = createInsertSchema(combinedOrderGr
 
 export type InsertCombinedOrderGroup = z.infer<typeof insertCombinedOrderGroupSchema>;
 export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
+
+// ============================================
+// SHIPMENTS & FULFILLMENT
+// ============================================
+
+// Shipment source types
+export const shipmentSourceEnum = ["shopify_webhook", "manual", "api"] as const;
+export type ShipmentSource = typeof shipmentSourceEnum[number];
+
+// Shipment status workflow
+export const shipmentStatusEnum = ["pending", "packed", "shipped", "delivered"] as const;
+export type ShipmentStatus = typeof shipmentStatusEnum[number];
+
+// Shipments - tracks fulfillment from warehouse through carrier delivery
+export const shipments = pgTable("shipments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").references(() => orders.id),
+  channelId: integer("channel_id").references(() => channels.id),
+  externalFulfillmentId: varchar("external_fulfillment_id", { length: 200 }), // Shopify fulfillment ID or external reference
+  source: varchar("source", { length: 30 }).notNull().default("shopify_webhook"), // shopify_webhook, manual, api
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, packed, shipped, delivered
+  carrier: varchar("carrier", { length: 100 }),
+  trackingNumber: varchar("tracking_number", { length: 200 }),
+  trackingUrl: text("tracking_url"),
+  shippedAt: timestamp("shipped_at"),
+  deliveredAt: timestamp("delivered_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertShipmentSchema = createInsertSchema(shipments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertShipment = z.infer<typeof insertShipmentSchema>;
+export type Shipment = typeof shipments.$inferSelect;
+
+// Shipment items - individual items within a shipment
+export const shipmentItems = pgTable("shipment_items", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  shipmentId: integer("shipment_id").notNull().references(() => shipments.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").references(() => orderItems.id),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
+  qty: integer("qty").notNull().default(1),
+  fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertShipmentItemSchema = createInsertSchema(shipmentItems).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertShipmentItem = z.infer<typeof insertShipmentItemSchema>;
+export type ShipmentItem = typeof shipmentItems.$inferSelect;
 
 // App Settings - key-value store for application configuration
 export const appSettings = pgTable("app_settings", {

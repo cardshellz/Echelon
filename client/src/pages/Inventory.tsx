@@ -78,7 +78,7 @@ interface VariantAvailability {
 }
 
 interface InventoryItemSummary {
-  inventoryItemId: number;
+  productVariantId: number;
   baseSku: string;
   name: string;
   totalOnHandBase: number;
@@ -87,7 +87,7 @@ interface InventoryItemSummary {
   variants: VariantAvailability[];
 }
 
-interface InventoryItem {
+interface Product {
   id: number;
   baseSku: string;
   name: string;
@@ -121,10 +121,10 @@ interface Warehouse {
   isActive: number;
 }
 
-interface UomVariant {
+interface ProductVariant {
   id: number;
   sku: string;
-  inventoryItemId: number;
+  productId: number;
   name: string;
   unitsPerVariant: number;
   hierarchyLevel: number;
@@ -166,7 +166,7 @@ interface VariantLocationLevel {
 
 function VariantLocationRows({ variantId }: { variantId: number }) {
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
-    queryKey: [`/api/inventory/variants/${variantId}/locations`],
+    queryKey: [`/api/product-variants/${variantId}/locations`],
   });
 
   if (isLoading) {
@@ -372,8 +372,8 @@ export default function Inventory() {
     queryKey: ["/api/inventory/locations"],
   });
 
-  const { data: variants = [] } = useQuery<UomVariant[]>({
-    queryKey: ["/api/inventory/variants"],
+  const { data: variants = [] } = useQuery<ProductVariant[]>({
+    queryKey: ["/api/product-variants"],
   });
 
   const { data: variantLevels = [], isLoading: loadingVariantLevels } = useQuery<VariantLevel[]>({
@@ -390,7 +390,7 @@ export default function Inventory() {
 
   const createItemMutation = useMutation({
     mutationFn: async (data: { baseSku: string; name: string; description?: string }) => {
-      const response = await apiRequest("POST", "/api/inventory/items", data);
+      const response = await apiRequest("POST", "/api/products", data);
       return response.json();
     },
     onSuccess: () => {
@@ -405,7 +405,7 @@ export default function Inventory() {
   });
 
   const adjustInventoryMutation = useMutation({
-    mutationFn: async (data: { inventoryItemId: number; warehouseLocationId: number; baseUnitsDelta: number; reason: string }) => {
+    mutationFn: async (data: { productVariantId: number; warehouseLocationId: number; baseUnitsDelta: number; reason: string }) => {
       const response = await apiRequest("POST", "/api/inventory/adjust", data);
       return response.json();
     },
@@ -497,7 +497,7 @@ export default function Inventory() {
     }
     
     adjustInventoryMutation.mutate({
-      inventoryItemId: selectedItem.inventoryItemId,
+      productVariantId: selectedItem.productVariantId,
       warehouseLocationId: firstLocation.id,
       baseUnitsDelta: parseInt(adjustmentQty),
       reason: adjustmentReason,

@@ -122,7 +122,7 @@ export async function syncNewOrders() {
         // Look up bin location from inventory_levels (where stock actually is)
         const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
         
-        // If no image from inventory, try product_locations first (best source), then products/inventory_items
+        // If no image from inventory, try product_locations first (best source), then product_variants/products
         let imageUrl = binLocation?.imageUrl || null;
         if (!imageUrl && item.sku) {
           const imageResult = await db.execute<{ image_url: string | null }>(sql`
@@ -130,12 +130,11 @@ export async function syncNewOrders() {
               SELECT pl.image_url FROM product_locations pl
               WHERE UPPER(pl.sku) = ${item.sku.toUpperCase()} AND pl.image_url IS NOT NULL
               UNION ALL
-              SELECT COALESCE(ii.image_url, p.image_url) as image_url
-              FROM uom_variants uv
-              LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-              LEFT JOIN products p ON UPPER(p.sku) = UPPER(uv.sku)
-              WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
-                AND COALESCE(ii.image_url, p.image_url) IS NOT NULL
+              SELECT COALESCE(pv.image_url, p.image_url) as image_url
+              FROM product_variants pv
+              LEFT JOIN products p ON pv.product_id = p.id
+              WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
+                AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
             ) sub
             LIMIT 1
           `);

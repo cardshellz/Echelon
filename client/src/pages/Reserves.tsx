@@ -22,9 +22,9 @@ interface Channel {
   status: string;
 }
 
-interface InventoryItem {
+interface ProductVariant {
   id: number;
-  baseSku: string;
+  sku: string;
   name: string;
   active: number;
 }
@@ -32,13 +32,13 @@ interface InventoryItem {
 interface ChannelReservation {
   id: number;
   channelId: number;
-  inventoryItemId: number;
+  productVariantId: number;
   reserveBaseQty: number;
   minStockBase: number | null;
   maxStockBase: number | null;
   notes: string | null;
   channel?: Channel;
-  inventoryItem?: InventoryItem;
+  productVariant?: ProductVariant;
 }
 
 export default function Reserves() {
@@ -49,7 +49,7 @@ export default function Reserves() {
   const [selectedChannelFilter, setSelectedChannelFilter] = useState<string>("all");
   const [newReservation, setNewReservation] = useState({
     channelId: "",
-    inventoryItemId: "",
+    productVariantId: "",
     reserveBaseQty: 0,
     minStockBase: 0,
     maxStockBase: 0,
@@ -69,11 +69,11 @@ export default function Reserves() {
     enabled: canView,
   });
 
-  const { data: inventoryItems = [] } = useQuery<InventoryItem[]>({
-    queryKey: ["/api/inventory/items"],
+  const { data: productVariants = [] } = useQuery<ProductVariant[]>({
+    queryKey: ["/api/product-variants"],
     queryFn: async () => {
-      const res = await fetch("/api/inventory/items", { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch inventory");
+      const res = await fetch("/api/product-variants", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch product variants");
       return res.json();
     },
     enabled: canView,
@@ -100,7 +100,7 @@ export default function Reserves() {
         credentials: "include",
         body: JSON.stringify({
           channelId: parseInt(data.channelId),
-          inventoryItemId: parseInt(data.inventoryItemId),
+          productVariantId: parseInt(data.productVariantId),
           reserveBaseQty: data.reserveBaseQty,
           minStockBase: data.minStockBase || null,
           maxStockBase: data.maxStockBase || null,
@@ -115,7 +115,7 @@ export default function Reserves() {
       setIsCreateOpen(false);
       setNewReservation({
         channelId: "",
-        inventoryItemId: "",
+        productVariantId: "",
         reserveBaseQty: 0,
         minStockBase: 0,
         maxStockBase: 0,
@@ -215,18 +215,18 @@ export default function Reserves() {
                     </Select>
                   </div>
                   <div className="space-y-2">
-                    <Label className="text-sm">Inventory Item (SKU)</Label>
+                    <Label className="text-sm">Product Variant (SKU)</Label>
                     <Select
-                      value={newReservation.inventoryItemId}
-                      onValueChange={(value) => setNewReservation(prev => ({ ...prev, inventoryItemId: value }))}
+                      value={newReservation.productVariantId}
+                      onValueChange={(value) => setNewReservation(prev => ({ ...prev, productVariantId: value }))}
                     >
                       <SelectTrigger className="h-11" data-testid="select-reserve-item">
-                        <SelectValue placeholder="Select item" />
+                        <SelectValue placeholder="Select variant" />
                       </SelectTrigger>
                       <SelectContent>
-                        {inventoryItems.filter(i => i.active === 1).map(item => (
+                        {productVariants.filter(i => i.active === 1).map(item => (
                           <SelectItem key={item.id} value={item.id.toString()}>
-                            {item.baseSku} - {item.name}
+                            {item.sku} - {item.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -294,7 +294,7 @@ export default function Reserves() {
                   <Button
                     className="min-h-[44px]"
                     onClick={() => createMutation.mutate(newReservation)}
-                    disabled={!newReservation.channelId || !newReservation.inventoryItemId || createMutation.isPending}
+                    disabled={!newReservation.channelId || !newReservation.productVariantId || createMutation.isPending}
                     data-testid="button-submit-reserve"
                   >
                     Create Reserve
@@ -384,8 +384,8 @@ export default function Reserves() {
                       )}
                     </div>
                     <div className="space-y-1">
-                      <p className="font-mono text-xs">{reserve.inventoryItem?.baseSku || '-'}</p>
-                      <p className="text-xs text-muted-foreground">{reserve.inventoryItem?.name || '-'}</p>
+                      <p className="font-mono text-xs">{reserve.productVariant?.sku || '-'}</p>
+                      <p className="text-xs text-muted-foreground">{reserve.productVariant?.name || '-'}</p>
                     </div>
                     <div className="flex items-center justify-between pt-2 border-t">
                       <span className="text-xs text-muted-foreground">Reserved Qty</span>
@@ -422,10 +422,10 @@ export default function Reserves() {
                             </Badge>
                           </TableCell>
                           <TableCell className="font-mono text-sm">
-                            {reserve.inventoryItem?.baseSku || '-'}
+                            {reserve.productVariant?.sku || '-'}
                           </TableCell>
                           <TableCell>
-                            {reserve.inventoryItem?.name || '-'}
+                            {reserve.productVariant?.name || '-'}
                           </TableCell>
                           <TableCell className="text-right font-medium">
                             {reserve.reserveBaseQty.toLocaleString()}

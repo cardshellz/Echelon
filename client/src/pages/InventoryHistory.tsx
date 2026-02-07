@@ -49,7 +49,7 @@ interface WarehouseLocation {
   locationType: string;
 }
 
-interface InventoryItem {
+interface Product {
   id: number;
   baseSku: string;
   name: string;
@@ -57,7 +57,7 @@ interface InventoryItem {
 
 interface InventoryTransaction {
   id: number;
-  inventoryItemId: number;
+  productVariantId: number;
   variantId: number | null;
   fromLocationId: number | null;
   toLocationId: number | null;
@@ -83,7 +83,7 @@ interface InventoryTransaction {
   fromLocation: WarehouseLocation | null;
   toLocation: WarehouseLocation | null;
   warehouseLocation: WarehouseLocation | null;
-  inventoryItem: InventoryItem | null;
+  product: Product | null;
 }
 
 const transactionTypeConfig: Record<string, { label: string; icon: React.ElementType; color: string }> = {
@@ -137,8 +137,8 @@ export default function InventoryHistory() {
     if (!searchTerm) return true;
     const term = searchTerm.toLowerCase();
     return (
-      tx.inventoryItem?.baseSku?.toLowerCase().includes(term) ||
-      tx.inventoryItem?.name?.toLowerCase().includes(term) ||
+      tx.product?.baseSku?.toLowerCase().includes(term) ||
+      tx.product?.name?.toLowerCase().includes(term) ||
       tx.fromLocation?.code?.toLowerCase().includes(term) ||
       tx.toLocation?.code?.toLowerCase().includes(term) ||
       tx.batchId?.toLowerCase().includes(term) ||
@@ -289,8 +289,8 @@ export default function InventoryHistory() {
                           </span>
                         </div>
                         <div className="space-y-1">
-                          <div className="font-mono text-sm text-primary">{tx.inventoryItem?.baseSku || "-"}</div>
-                          <div className="text-xs text-muted-foreground truncate">{tx.inventoryItem?.name}</div>
+                          <div className="font-mono text-sm text-primary">{tx.product?.baseSku || "-"}</div>
+                          <div className="text-xs text-muted-foreground truncate">{tx.product?.name}</div>
                         </div>
                         <div className="flex items-center justify-between mt-2 pt-2 border-t">
                           <div className="text-xs text-muted-foreground">
@@ -361,9 +361,9 @@ export default function InventoryHistory() {
                             </TableCell>
                             <TableCell>
                               <div className="flex flex-col">
-                                <span className="font-mono text-sm">{tx.inventoryItem?.baseSku || "-"}</span>
+                                <span className="font-mono text-sm">{tx.product?.baseSku || "-"}</span>
                                 <span className="text-xs text-muted-foreground truncate max-w-48">
-                                  {tx.inventoryItem?.name}
+                                  {tx.product?.name}
                                 </span>
                               </div>
                             </TableCell>

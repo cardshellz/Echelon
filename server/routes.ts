@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertInventoryItemSchema, insertUomVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, orders, combinedOrderGroups, appSettings } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -553,8 +553,7 @@ export async function registerRoutes(
       if (productLocation.catalogProductId) {
         const userId = req.session?.user?.id || 'system';
         await db.insert(inventoryTransactions).values({
-          variantId: null,
-          uomVariantId: null,
+          productVariantId: null,
           fromLocationId: sourceLocation?.id || null,
           toLocationId: targetLocation.id,
           transactionType: 'transfer',
@@ -1193,38 +1192,30 @@ export async function registerRoutes(
         try {
           const pickedQty = pickedQuantity || item.quantity;
           
-          // First, try to find UOM variant by SKU (sellable SKU like EG-STD-SLV-P100)
-          const uomVariant = await storage.getUomVariantBySku(item.sku);
-          
-          let inventoryItemId: number | null = null;
+          // Find product variant by SKU to get unitsPerVariant for conversion
+          const productVariant = await storage.getProductVariantBySku(item.sku);
+
           let baseUnitsToDecrement: number;
-          
-          if (uomVariant) {
-            // UOM-aware: multiply picked quantity by unitsPerVariant
-            inventoryItemId = uomVariant.inventoryItemId;
-            baseUnitsToDecrement = pickedQty * uomVariant.unitsPerVariant;
-            console.log(`[Inventory] UOM conversion: ${pickedQty} x ${uomVariant.sku} (${uomVariant.unitsPerVariant} units each) = ${baseUnitsToDecrement} base units`);
+
+          if (productVariant) {
+            // Convert picked quantity by unitsPerVariant
+            baseUnitsToDecrement = pickedQty * productVariant.unitsPerVariant;
+            console.log(`[Inventory] Conversion: ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each) = ${baseUnitsToDecrement} base units`);
           } else {
-            // Fallback: try to find by base SKU, assume 1:1 conversion
-            const inventoryItem = await storage.getInventoryItemBySku(item.sku);
-            if (inventoryItem) {
-              inventoryItemId = inventoryItem.id;
-              baseUnitsToDecrement = pickedQty; // 1:1 if no variant found
-              console.log(`[Inventory] No UOM variant found for ${item.sku}, using 1:1 conversion: ${baseUnitsToDecrement} base units`);
-            } else {
-              baseUnitsToDecrement = 0;
-            }
+            // No variant found — assume 1:1 conversion
+            baseUnitsToDecrement = pickedQty;
+            console.log(`[Inventory] No product variant found for ${item.sku}, using 1:1 conversion: ${baseUnitsToDecrement} base units`);
           }
-          
-          if (uomVariant) {
-            // Get pickable locations with stock by variantId, prioritize forward pick bins
-            const levels = await storage.getInventoryLevelsByVariantId(uomVariant.id);
+
+          if (productVariant) {
+            // Get pickable locations with stock, prioritize forward pick bins
+            const levels = await storage.getInventoryLevelsByProductVariantId(productVariant.id);
             const allLocations = await storage.getAllWarehouseLocations();
-            
+
             // Sort by location type priority: forward_pick > bulk_storage > others
             const sortedLevels = levels
-              .filter(l => l.onHandBase > 0)
-              .sort((a, b) => {
+              .filter((l: any) => l.onHandBase > 0)
+              .sort((a: any, b: any) => {
                 const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
                 const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
                 const priorityOrder = { forward_pick: 0, pallet: 1, bulk_storage: 2, receiving: 3 };
@@ -1232,22 +1223,22 @@ export async function registerRoutes(
                 const priorityB = priorityOrder[locB?.locationType as keyof typeof priorityOrder] ?? 99;
                 return priorityA - priorityB;
               });
-            
+
             const pickableLevel = sortedLevels[0];
-            
+
             if (pickableLevel) {
               await inventoryService.pickItem(
-                uomVariant.inventoryItemId,
+                productVariant.id,
                 pickableLevel.warehouseLocationId,
                 baseUnitsToDecrement,
                 item.orderId,
                 req.session.user?.id
               );
-              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of variant ${uomVariant.id} from location ${pickableLevel.warehouseLocationId}`);
+              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of variant ${productVariant.id} from location ${pickableLevel.warehouseLocationId}`);
               
               // Sync to Shopify (async - don't block response)
-              syncInventoryItemToShopify(uomVariant.inventoryItemId, storage).catch(err => 
-                console.warn(`[Inventory] Shopify sync failed for variant ${uomVariant.id}:`, err)
+              syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
+                console.warn(`[Inventory] Shopify sync failed for variant ${productVariant.id}:`, err)
               );
             }
           }
@@ -2202,7 +2193,7 @@ export async function registerRoutes(
         }
       }
 
-      let inventoryItemsCreated = 0;
+      let productsCreated = 0;
       let variantsCreated = 0;
       let locationsCreated = 0;
       let levelsCreated = 0;
@@ -2211,18 +2202,16 @@ export async function registerRoutes(
       // Process base SKUs with variants
       for (const [baseSku, data] of Object.entries(baseSkuMap)) {
         try {
-          // Check if inventory item already exists
-          let invItem = await storage.getInventoryItemByBaseSku(baseSku);
-          
-          if (!invItem) {
-            invItem = await storage.createInventoryItem({
-              baseSku,
+          // Check if product already exists
+          let product = await storage.getProductBySku(baseSku);
+
+          if (!product) {
+            product = await storage.createProduct({
+              sku: baseSku,
               name: data.name,
               baseUnit: 'each',
-              trackingType: 'serialized',
-              status: 'active'
             });
-            inventoryItemsCreated++;
+            productsCreated++;
           }
 
           // Sort variants by pieces (smallest first for hierarchy)
@@ -2231,15 +2220,15 @@ export async function registerRoutes(
 
           for (let idx = 0; idx < sortedVariants.length; idx++) {
             const v = sortedVariants[idx];
-            
+
             // Check if variant already exists
-            let variant = await storage.getUomVariantBySku(v.sku);
-            
+            let variant = await storage.getProductVariantBySku(v.sku);
+
             if (!variant) {
               const parentVariantId = idx > 0 ? createdVariantIds[sortedVariants[idx - 1].sku] : null;
-              
-              variant = await storage.createUomVariant({
-                inventoryItemId: invItem.id,
+
+              variant = await storage.createProductVariant({
+                productId: product.id,
                 sku: v.sku,
                 name: v.name || `${data.name} - ${v.type} of ${v.pieces}`,
                 unitsPerVariant: v.pieces,
@@ -2270,8 +2259,7 @@ export async function registerRoutes(
               const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLoc.id, variant.id);
               if (!existingLevel) {
                 await storage.upsertInventoryLevel({
-                  inventoryItemId: invItem.id,
-                  uomVariantId: variant.id,
+                  productVariantId: variant.id,
                   warehouseLocationId: warehouseLoc.id,
                   onHandBase: 0,
                   reservedBase: 0,
@@ -2290,23 +2278,21 @@ export async function registerRoutes(
       // Process standalone SKUs (no variant suffix) as P1
       for (const item of skusWithoutVariant) {
         try {
-          let invItem = await storage.getInventoryItemByBaseSku(item.sku);
-          
-          if (!invItem) {
-            invItem = await storage.createInventoryItem({
-              baseSku: item.sku,
+          let product = await storage.getProductBySku(item.sku);
+
+          if (!product) {
+            product = await storage.createProduct({
+              sku: item.sku,
               name: item.name,
               baseUnit: 'each',
-              trackingType: 'serialized',
-              status: 'active'
             });
-            inventoryItemsCreated++;
+            productsCreated++;
           }
 
-          let variant = await storage.getUomVariantBySku(item.sku);
+          let variant = await storage.getProductVariantBySku(item.sku);
           if (!variant) {
-            variant = await storage.createUomVariant({
-              inventoryItemId: invItem.id,
+            variant = await storage.createProductVariant({
+              productId: product.id,
               sku: item.sku,
               name: item.name || item.sku,
               unitsPerVariant: 1,
@@ -2333,8 +2319,7 @@ export async function registerRoutes(
             const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLoc.id, variant.id);
             if (!existingLevel) {
               await storage.upsertInventoryLevel({
-                inventoryItemId: invItem.id,
-                uomVariantId: variant.id,
+                productVariantId: variant.id,
                 warehouseLocationId: warehouseLoc.id,
                 onHandBase: 0,
                 reservedBase: 0,
@@ -2352,13 +2337,13 @@ export async function registerRoutes(
       res.json({
         success: true,
         summary: {
-          inventoryItemsCreated,
+          productsCreated,
           variantsCreated,
           locationsCreated,
           levelsCreated
         },
         errors: errors.length > 0 ? errors : undefined,
-        message: "Bootstrap complete. Inventory items, variants, and levels have been created."
+        message: "Bootstrap complete. Products, variants, and levels have been created."
       });
     } catch (error) {
       console.error("Error in bootstrap:", error);
@@ -2564,19 +2549,19 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Sync API - syncs to inventory_items (grouped by product), uom_variants, catalog_products, and catalog_assets
+  // Shopify Sync API - syncs to products (grouped by Shopify product), product_variants, catalog_products, and catalog_assets
   // Uses Shopify's natural hierarchy: Product -> Variants
-  // - inventory_items: ONE per Shopify Product (parent container)
-  // - uom_variants: ONE per Shopify Variant (sellable SKUs)
+  // - products: ONE per Shopify Product (parent container)
+  // - product_variants: ONE per Shopify Variant (sellable SKUs)
   // - catalog_products: ONE per Shopify Variant (storefront display)
   app.post("/api/shopify/sync", async (req, res) => {
     try {
       console.log("Starting Shopify catalog sync...");
-      
+
       // Fetch full catalog data from Shopify
       const shopifyProducts = await fetchShopifyCatalogProducts();
       console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
-      
+
       // Group variants by Shopify Product ID
       const productGroups = new Map<number, typeof shopifyProducts>();
       for (const variant of shopifyProducts) {
@@ -2585,27 +2570,25 @@ export async function registerRoutes(
         productGroups.set(variant.shopifyProductId, group);
       }
       console.log(`Grouped into ${productGroups.size} parent products`);
-      
+
       let variantsUpdated = 0; // SKU matches found
       let catalogCreated = 0;
       let catalogUpdated = 0;
       let assetsCreated = 0;
       let skuNotFound = 0;
       const unmatchedSkus: string[] = [];
-      
+
       for (const [shopifyProductId, variants] of productGroups) {
         // Echelon owns inventory - Shopify sync only creates catalog_products
-        // and links to existing uom_variants by SKU match
-        
+        // and links to existing product_variants by SKU match
+
         for (const variant of variants) {
-          // Try to find existing uom_variant by SKU (Echelon is source of truth)
-          let uomVariant = null;
-          let inventoryItemId = null;
-          
+          // Try to find existing product_variant by SKU (Echelon is source of truth)
+          let productVariant = null;
+
           if (variant.sku) {
-            uomVariant = await storage.getUomVariantBySku(variant.sku);
-            if (uomVariant) {
-              inventoryItemId = uomVariant.inventoryItemId;
+            productVariant = await storage.getProductVariantBySku(variant.sku);
+            if (productVariant) {
               variantsUpdated++; // Found existing match
             } else {
               skuNotFound++;
@@ -2615,11 +2598,11 @@ export async function registerRoutes(
             skuNotFound++;
             unmatchedSkus.push(`(no SKU) ${variant.title}`);
           }
-          
+
           // Create/update catalog_product (channel data) - always happens
-          // Links to uom_variant only if SKU match found
+          // Links to product_variant only if SKU match found
           const existingCatalog = await storage.getCatalogProductByVariantId(variant.variantId);
-          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, inventoryItemId, {
+          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, {
             sku: variant.sku,
             title: variant.title,
             description: variant.description,
@@ -2627,18 +2610,18 @@ export async function registerRoutes(
             category: variant.productType,
             tags: variant.tags,
             status: variant.status,
-            uomVariantId: uomVariant?.id || null, // Only link if match found
+            productVariantId: productVariant?.id || null, // Only link if match found
           });
-          
+
           if (existingCatalog) {
             catalogUpdated++;
           } else {
             catalogCreated++;
           }
-          
+
           // 4. Sync catalog_assets (images)
           await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
-          
+
           for (let i = 0; i < variant.allImages.length; i++) {
             const img = variant.allImages[i];
             await storage.createCatalogAsset({
@@ -2650,19 +2633,19 @@ export async function registerRoutes(
             });
             assetsCreated++;
           }
-          
+
           // 5. Also sync to product_locations for warehouse assignment (only if has SKU)
           if (variant.sku) {
             await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, variant.imageUrl || undefined, variant.barcode || undefined);
           }
         }
       }
-      
+
       console.log(`Sync complete: ${variantsUpdated} SKUs matched, ${skuNotFound} unmatched, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
       if (unmatchedSkus.length > 0) {
         console.log(`Unmatched SKUs (need to be created in Echelon first):`, unmatchedSkus.slice(0, 20));
       }
-      
+
       res.json({
         success: true,
         skuMatched: variantsUpdated,
@@ -2675,9 +2658,9 @@ export async function registerRoutes(
       });
     } catch (error: any) {
       console.error("Shopify sync error:", error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: "Failed to sync with Shopify",
-        message: error.message 
+        message: error.message
       });
     }
   });
@@ -3036,7 +3019,7 @@ export async function registerRoutes(
         for (const item of unfulfilledItems) {
           const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           
-          // Look up image from product_locations first (best source), then products/inventory_items
+          // Look up image from product_locations first (best source), then products/product_variants
           let itemImageUrl = binLocation?.imageUrl || null;
           if (!itemImageUrl && item.sku) {
             const imgResult = await db.execute<{ image_url: string | null }>(sql`
@@ -3044,12 +3027,11 @@ export async function registerRoutes(
                 SELECT pl.image_url FROM product_locations pl
                 WHERE UPPER(pl.sku) = ${item.sku.toUpperCase()} AND pl.image_url IS NOT NULL
                 UNION ALL
-                SELECT COALESCE(ii.image_url, p.image_url) as image_url
-                FROM uom_variants uv
-                LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-                LEFT JOIN products p ON UPPER(p.sku) = UPPER(uv.sku)
-                WHERE UPPER(uv.sku) = ${item.sku.toUpperCase()}
-                  AND COALESCE(ii.image_url, p.image_url) IS NOT NULL
+                SELECT COALESCE(pv.image_url, p.image_url) as image_url
+                FROM product_variants pv
+                LEFT JOIN products p ON pv.product_id = p.id
+                WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
+                  AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
               ) sub
               LIMIT 1
             `);
@@ -4460,7 +4442,7 @@ export async function registerRoutes(
       // Get all inventory levels at this location with variant and product details
       const result = await db.execute<{
         id: number;
-        variant_id: number;
+        product_variant_id: number;
         variant_qty: number;
         on_hand_base: number;
         reserved_base: number;
@@ -4473,32 +4455,32 @@ export async function registerRoutes(
         image_url: string | null;
         barcode: string | null;
       }>(sql`
-        SELECT 
+        SELECT
           il.id,
-          il.variant_id,
+          il.product_variant_id,
           il.variant_qty,
           il.on_hand_base,
           il.reserved_base,
           il.picked_base,
-          uv.sku,
-          uv.name as variant_name,
-          uv.units_per_variant,
+          pv.sku,
+          pv.name as variant_name,
+          pv.units_per_variant,
           cp.title as product_title,
           cp.id as catalog_product_id,
-          COALESCE(uv.image_url, ii.image_url) as image_url,
-          uv.barcode
+          COALESCE(pv.image_url, p.image_url) as image_url,
+          pv.barcode
         FROM inventory_levels il
-        JOIN uom_variants uv ON il.variant_id = uv.id
-        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-        LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN products p ON pv.product_id = p.id
+        LEFT JOIN catalog_products cp ON cp.product_variant_id = pv.id
         WHERE il.warehouse_location_id = ${warehouseLocationId}
           AND il.variant_qty > 0
-        ORDER BY uv.sku
+        ORDER BY pv.sku
       `);
       
       const inventory = result.rows.map(row => ({
         id: row.id,
-        variantId: row.variant_id,
+        variantId: row.product_variant_id,
         qty: row.variant_qty,
         onHandBase: row.on_hand_base,
         reservedBase: row.reserved_base,
@@ -4561,6 +4543,17 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
       
+      // Get image/barcode from product variant if linked
+      let imageUrl: string | null = null;
+      let barcode: string | null = null;
+      if (catalogProduct.productVariantId) {
+        const pv = await storage.getProductVariantById(catalogProduct.productVariantId);
+        if (pv) {
+          imageUrl = pv.imageUrl || null;
+          barcode = pv.barcode || null;
+        }
+      }
+
       const productLocation = await storage.addProductToLocation({
         catalogProductId,
         warehouseLocationId,
@@ -4571,8 +4564,8 @@ export async function registerRoutes(
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
         locationType: locationType || "forward_pick",
         isPrimary: isPrimary ?? 1,
-        imageUrl: catalogProduct.imageUrl || null,
-        barcode: catalogProduct.barcode || null,
+        imageUrl,
+        barcode,
       });
       
       res.status(201).json(productLocation);
@@ -4659,12 +4652,19 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
       
-      // Also get inventory item and variants
-      const inventoryItem = await storage.getInventoryItemById(product.inventoryItemId);
-      const variants = inventoryItem ? await storage.getUomVariantsByInventoryItemId(inventoryItem.id) : [];
+      // Also get linked product and variants
+      const linkedProduct = product.productVariantId
+        ? await storage.getProductVariantById(product.productVariantId)
+        : null;
+      const parentProduct = linkedProduct
+        ? await storage.getProductById(linkedProduct.productId)
+        : null;
+      const variants = parentProduct
+        ? await storage.getProductVariantsByProductId(parentProduct.id)
+        : [];
       const assets = await storage.getCatalogAssetsByProductId(product.id);
-      
-      res.json({ ...product, inventoryItem, variants, assets });
+
+      res.json({ ...product, product: parentProduct, variants, assets });
     } catch (error) {
       console.error("Error fetching catalog product:", error);
       res.status(500).json({ error: "Failed to fetch catalog product" });
@@ -4722,25 +4722,31 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const catalogProduct = await storage.getCatalogProductById(id);
-      
+
       if (!catalogProduct) {
         return res.status(404).json({ error: "Product not found" });
       }
-      
-      // Get linked inventory item and assets
-      const inventoryItem = await storage.getInventoryItemById(catalogProduct.inventoryItemId);
+
+      // Get linked product variant and parent product
+      const linkedVariant = catalogProduct.productVariantId
+        ? await storage.getProductVariantById(catalogProduct.productVariantId)
+        : null;
+      const parentProduct = linkedVariant
+        ? await storage.getProductById(linkedVariant.productId)
+        : null;
       const assets = await storage.getCatalogAssetsByProductId(catalogProduct.id);
-      const variants = await storage.getUomVariantsByInventoryItemId(catalogProduct.inventoryItemId);
-      
+      const variants = parentProduct
+        ? await storage.getProductVariantsByProductId(parentProduct.id)
+        : [];
+
       res.json({
         id: catalogProduct.id,
         baseSku: catalogProduct.sku,
         name: catalogProduct.title,
-        imageUrl: inventoryItem?.imageUrl || null,
+        imageUrl: parentProduct?.imageUrl || null,
         active: catalogProduct.status === "active" ? 1 : 0,
         description: catalogProduct.description,
-        baseUnit: inventoryItem?.baseUnit || "each",
-        costPerUnit: inventoryItem?.costPerUnit || null,
+        baseUnit: parentProduct?.baseUnit || "each",
         catalogProduct,
         variants,
         assets,
@@ -4756,34 +4762,37 @@ export async function registerRoutes(
     try {
       // Get all catalog products (master source from Shopify sync)
       const catalogProductsList = await storage.getAllCatalogProducts();
-      const inventoryItemsList = await storage.getAllInventoryItems();
-      const variantsList = await storage.getAllUomVariants();
-      
+      const productsList = await storage.getAllProducts();
+      const variantsList = await storage.getAllProductVariants();
+
       // Create lookup maps
-      const inventoryById = new Map(inventoryItemsList.map(i => [i.id, i]));
-      const variantsByItemId = new Map<number, typeof variantsList>();
+      const productById = new Map(productsList.map(p => [p.id, p]));
+      const variantById = new Map(variantsList.map(v => [v.id, v]));
+      const variantsByProductId = new Map<number, typeof variantsList>();
       for (const v of variantsList) {
-        if (!variantsByItemId.has(v.inventoryItemId)) {
-          variantsByItemId.set(v.inventoryItemId, []);
+        if (!variantsByProductId.has(v.productId)) {
+          variantsByProductId.set(v.productId, []);
         }
-        variantsByItemId.get(v.inventoryItemId)!.push(v);
+        variantsByProductId.get(v.productId)!.push(v);
       }
-      
+
       // Combine into product view
       const products = catalogProductsList.map(catalog => {
-        const inventoryItem = inventoryById.get(catalog.inventoryItemId);
+        const linkedVariant = catalog.productVariantId ? variantById.get(catalog.productVariantId) : null;
+        const parentProduct = linkedVariant ? productById.get(linkedVariant.productId) : null;
+        const productId = parentProduct?.id;
         return {
           id: catalog.id,
           baseSku: catalog.sku,
           name: catalog.title,
-          imageUrl: inventoryItem?.imageUrl || null,
+          imageUrl: parentProduct?.imageUrl || null,
           active: catalog.status === "active" ? 1 : 0,
           catalogProduct: catalog,
-          variantCount: variantsByItemId.get(catalog.inventoryItemId)?.length || 0,
-          variants: variantsByItemId.get(catalog.inventoryItemId) || [],
+          variantCount: productId ? (variantsByProductId.get(productId)?.length || 0) : 0,
+          variants: productId ? (variantsByProductId.get(productId) || []) : [],
         };
       });
-      
+
       res.json(products);
     } catch (error) {
       console.error("Error fetching products:", error);
@@ -4791,14 +4800,14 @@ export async function registerRoutes(
     }
   });
 
-  // Inventory Items (Master SKUs)
+  // Products (Master SKUs) - replaces legacy inventory_items
   app.get("/api/inventory/items", async (req, res) => {
     try {
-      const items = await storage.getAllInventoryItems();
+      const items = await storage.getAllProducts();
       res.json(items);
     } catch (error) {
-      console.error("Error fetching inventory items:", error);
-      res.status(500).json({ error: "Failed to fetch items" });
+      console.error("Error fetching products:", error);
+      res.status(500).json({ error: "Failed to fetch products" });
     }
   });
 
@@ -4829,25 +4838,25 @@ export async function registerRoutes(
 
   app.post("/api/inventory/items", async (req, res) => {
     try {
-      const parsed = insertInventoryItemSchema.safeParse(req.body);
+      const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
-        return res.status(400).json({ error: "Invalid item data", details: parsed.error });
+        return res.status(400).json({ error: "Invalid product data", details: parsed.error });
       }
-      const item = await storage.createInventoryItem(parsed.data);
+      const item = await storage.createProduct(parsed.data);
       res.status(201).json(item);
     } catch (error) {
-      console.error("Error creating inventory item:", error);
-      res.status(500).json({ error: "Failed to create item" });
+      console.error("Error creating product:", error);
+      res.status(500).json({ error: "Failed to create product" });
     }
   });
 
-  // UOM Variants
+  // Product Variants (replaces legacy UOM Variants)
   app.get("/api/inventory/variants", async (req, res) => {
     try {
-      const variants = await storage.getAllUomVariants();
+      const variants = await storage.getAllProductVariants();
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching UOM variants:", error);
+      console.error("Error fetching product variants:", error);
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
@@ -4856,16 +4865,16 @@ export async function registerRoutes(
     try {
       const variantId = parseInt(req.params.variantId);
       const { unitsPerVariant } = req.body;
-      
+
       if (!unitsPerVariant || unitsPerVariant < 1) {
         return res.status(400).json({ error: "unitsPerVariant must be at least 1" });
       }
-      
-      const updated = await storage.updateUomVariant(variantId, { unitsPerVariant });
+
+      const updated = await storage.updateProductVariant(variantId, { unitsPerVariant });
       if (!updated) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      
+
       res.json(updated);
     } catch (error) {
       console.error("Error updating variant:", error);
@@ -4876,33 +4885,33 @@ export async function registerRoutes(
   app.get("/api/inventory/items/:id/variants", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const variants = await storage.getUomVariantsByInventoryItemId(id);
+      const variants = await storage.getProductVariantsByProductId(id);
       res.json(variants);
     } catch (error) {
-      console.error("Error fetching variants for item:", error);
+      console.error("Error fetching variants for product:", error);
       res.status(500).json({ error: "Failed to fetch variants" });
     }
   });
 
   app.post("/api/inventory/variants", async (req, res) => {
     try {
-      const parsed = insertUomVariantSchema.safeParse(req.body);
+      const parsed = insertProductVariantSchema.safeParse(req.body);
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid variant data", details: parsed.error });
       }
-      const variant = await storage.createUomVariant(parsed.data);
+      const variant = await storage.createProductVariant(parsed.data);
       res.status(201).json(variant);
     } catch (error) {
-      console.error("Error creating UOM variant:", error);
+      console.error("Error creating product variant:", error);
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
 
-  // Inventory Levels & Adjustments - now uses variantId as source of truth
+  // Inventory Levels & Adjustments - uses productVariantId as source of truth
   app.get("/api/inventory/levels/:variantId", async (req, res) => {
     try {
       const variantId = parseInt(req.params.variantId);
-      const levels = await storage.getInventoryLevelsByVariantId(variantId);
+      const levels = await storage.getInventoryLevelsByProductVariantId(variantId);
       res.json(levels);
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
@@ -4912,21 +4921,23 @@ export async function registerRoutes(
 
   app.post("/api/inventory/adjust", async (req, res) => {
     try {
-      const { inventoryItemId, warehouseLocationId, baseUnitsDelta, reason } = req.body;
+      const { inventoryCore } = req.app.locals.services;
+      const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, reason } = req.body;
       const userId = req.session.user?.id;
-      
-      if (!inventoryItemId || !warehouseLocationId || baseUnitsDelta === undefined || !reason) {
+      const adjustVariantId = pvId || inventoryItemId; // Support both old and new param names
+
+      if (!adjustVariantId || !warehouseLocationId || baseUnitsDelta === undefined || !reason) {
         return res.status(400).json({ error: "Missing required fields" });
       }
-      
-      await inventoryService.adjustInventory(
-        inventoryItemId,
+
+      await inventoryCore.adjustInventory({
+        productVariantId: adjustVariantId,
         warehouseLocationId,
         baseUnitsDelta,
         reason,
-        userId
-      );
-      
+        userId,
+      });
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error adjusting inventory:", error);
@@ -4935,60 +4946,60 @@ export async function registerRoutes(
   });
 
   // Search SKUs for typeahead (used in cycle counts, receiving, etc.)
-  // Model A architecture: uom_variants is source of truth for sellable SKUs
+  // product_variants is source of truth for sellable SKUs
   app.get("/api/inventory/skus/search", async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
       const locationId = req.query.locationId ? parseInt(String(req.query.locationId)) : null;
       const limit = parseInt(String(req.query.limit)) || 20;
-      
+
       if (locationId) {
         const result = await db.execute(sql`
-          SELECT 
-            uv.sku as sku,
-            uv.name as name,
-            uv.id as "variantId",
-            il.quantity as available,
+          SELECT
+            pv.sku as sku,
+            pv.name as name,
+            pv.id as "variantId",
+            il.variant_qty as available,
             wl.id as "locationId",
             wl.code as location
           FROM inventory_levels il
-          JOIN uom_variants uv ON uv.id = il.uom_variant_id
+          JOIN product_variants pv ON pv.id = il.product_variant_id
           JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
           WHERE il.warehouse_location_id = ${locationId}
-            AND il.quantity > 0
-          ORDER BY uv.sku
+            AND il.variant_qty > 0
+          ORDER BY pv.sku
           LIMIT ${limit}
         `);
         return res.json(result.rows);
       }
-      
+
       if (!query) {
         return res.json([]);
       }
-      
+
       const searchPattern = `%${query}%`;
-      
+
       const result = await db.execute(sql`
-        SELECT 
-          uv.sku as sku,
-          uv.name as name,
-          'uom_variant' as source,
+        SELECT
+          pv.sku as sku,
+          pv.name as name,
+          'product_variant' as source,
           cp.id as "catalogProductId",
-          uv.inventory_item_id as "inventoryItemId",
-          uv.id as "uomVariantId",
-          uv.units_per_variant as "unitsPerVariant"
-        FROM uom_variants uv
-        LEFT JOIN catalog_products cp ON cp.sku = uv.sku
-        WHERE uv.active = 1
-          AND uv.sku IS NOT NULL
+          pv.product_id as "productId",
+          pv.id as "productVariantId",
+          pv.units_per_variant as "unitsPerVariant"
+        FROM product_variants pv
+        LEFT JOIN catalog_products cp ON cp.sku = pv.sku
+        WHERE pv.is_active = true
+          AND pv.sku IS NOT NULL
           AND (
-            LOWER(uv.sku) LIKE ${searchPattern} OR
-            LOWER(uv.name) LIKE ${searchPattern}
+            LOWER(pv.sku) LIKE ${searchPattern} OR
+            LOWER(pv.name) LIKE ${searchPattern}
           )
-        ORDER BY uv.sku
+        ORDER BY pv.sku
         LIMIT ${limit}
       `);
-      
+
       res.json(result.rows);
     } catch (error) {
       console.error("Error searching SKUs:", error);
@@ -5002,30 +5013,30 @@ export async function registerRoutes(
       if (!query || query.length < 2) {
         return res.json([]);
       }
-      
+
       const searchPattern = `%${query}%`;
-      
+
       const result = await db.execute(sql`
-        SELECT 
-          uv.sku,
-          uv.name,
-          uv.id as "variantId",
+        SELECT
+          pv.sku,
+          pv.name,
+          pv.id as "variantId",
           wl.code as location,
           wl.zone,
           wl.location_type as "locationType",
-          il.quantity as available,
+          il.variant_qty as available,
           il.warehouse_location_id as "locationId"
         FROM inventory_levels il
-        JOIN uom_variants uv ON uv.id = il.uom_variant_id
+        JOIN product_variants pv ON pv.id = il.product_variant_id
         JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-        WHERE il.quantity > 0
+        WHERE il.variant_qty > 0
           AND (
-            LOWER(uv.sku) LIKE ${searchPattern} OR
-            LOWER(uv.name) LIKE ${searchPattern}
+            LOWER(pv.sku) LIKE ${searchPattern} OR
+            LOWER(pv.name) LIKE ${searchPattern}
           )
-        ORDER BY uv.sku, wl.code
+        ORDER BY pv.sku, wl.code
       `);
-      
+
       res.json(result.rows);
     } catch (error) {
       console.error("Error fetching SKU locations:", error);
@@ -5110,31 +5121,32 @@ export async function registerRoutes(
   
   app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const { fromLocationId, toLocationId, variantId, quantity, notes } = req.body;
-      
+
       // Validate required fields exist
       if (!fromLocationId || !toLocationId || !variantId || !quantity) {
         return res.status(400).json({ error: "Missing required fields: fromLocationId, toLocationId, variantId, quantity" });
       }
-      
+
       // Parse and validate as integers
       const fromLocId = parseInt(String(fromLocationId));
       const toLocId = parseInt(String(toLocationId));
       const varId = parseInt(String(variantId));
       const qty = parseInt(String(quantity));
-      
+
       if (isNaN(fromLocId) || isNaN(toLocId) || isNaN(varId) || isNaN(qty)) {
         return res.status(400).json({ error: "All numeric fields must be valid integers" });
       }
-      
+
       if (fromLocId === toLocId) {
         return res.status(400).json({ error: "Source and destination must be different" });
       }
-      
+
       if (qty <= 0) {
         return res.status(400).json({ error: "Quantity must be positive" });
       }
-      
+
       // Validate locations exist
       const fromLoc = await storage.getWarehouseLocationById(fromLocId);
       const toLoc = await storage.getWarehouseLocationById(toLocId);
@@ -5144,19 +5156,27 @@ export async function registerRoutes(
       if (!toLoc) {
         return res.status(400).json({ error: "Destination location not found" });
       }
-      
+
       const userId = req.session.user?.id || "system";
-      
-      const transaction = await storage.executeTransfer({
+
+      const variant = await storage.getProductVariantById(varId);
+      if (!variant) {
+        return res.status(400).json({ error: "Variant not found" });
+      }
+
+      const baseUnits = qty * variant.unitsPerVariant;
+
+      await inventoryCore.transfer({
+        productVariantId: varId,
         fromLocationId: fromLocId,
         toLocationId: toLocId,
-        variantId: varId,
-        quantity: qty,
+        baseUnits,
+        variantQty: qty,
         userId,
-        notes: typeof notes === "string" ? notes : undefined
+        notes: typeof notes === "string" ? notes : undefined,
       });
-      
-      res.json({ success: true, transaction });
+
+      res.json({ success: true });
     } catch (error) {
       console.error("Transfer error:", error);
       res.status(400).json({ error: String(error) });
@@ -5277,20 +5297,19 @@ export async function registerRoutes(
           continue;
         }
 
-        // Try to find as variant SKU first, then as base SKU
-        let variant = await storage.getUomVariantBySku(sku);
-        let inventoryItem: any = null;
-        
+        // Try to find as variant SKU first, then as base product SKU
+        let variant = await storage.getProductVariantBySku(sku);
+        let product: any = null;
+
         if (variant) {
-          // Found as variant SKU - get the inventory item directly from the variant's reference
-          const items = await storage.getAllInventoryItems();
-          inventoryItem = items.find(item => item.id === variant!.inventoryItemId) || null;
+          // Found as variant SKU - get the parent product
+          product = await storage.getProductById(variant.productId);
         } else {
-          // Try as base SKU - find the inventory item and use unitsPerVariant=1
-          inventoryItem = await storage.getInventoryItemByBaseSku(sku);
+          // Try as base SKU - find the product and use unitsPerVariant=1
+          product = await storage.getProductBySku(sku);
         }
-        
-        if (!inventoryItem) {
+
+        if (!product) {
           results.push({ row: rowNum, sku, location: locationCode, status: "error", message: `SKU not found: ${sku}` });
           errorCount++;
           continue;
@@ -5322,10 +5341,10 @@ export async function registerRoutes(
               variantQty: varQtyDelta,
             });
           } else {
-            // Create new level - variantId is required
+            // Create new level - productVariantId is required
             await storage.upsertInventoryLevel({
               warehouseLocationId: warehouseLocation.id,
-              variantId: variant.id,
+              productVariantId: variant.id,
               variantQty: targetQty,
               onHandBase: targetQty,
               reservedBase: 0,
@@ -5336,25 +5355,18 @@ export async function registerRoutes(
           }
 
           // Log the transaction with before/after snapshots
-          const baseQtyBefore = existingLevel ? existingLevel.onHandBase : 0;
           const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
-          const baseQtyDelta = targetQty - baseQtyBefore;
           const variantQtyDelta = targetQty - variantQtyBefore;
 
           // Log with Full WMS fields
           await inventoryService.logTransaction({
-            inventoryItemId: inventoryItem.id,
+            productVariantId: variant?.id,
             toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
-            warehouseLocationId: warehouseLocation.id, // Legacy
-            variantId: variant?.id,
             transactionType: "csv_upload",
             reasonId: csvReason?.id,
             variantQtyDelta,
             variantQtyBefore,
             variantQtyAfter: targetQty,
-            baseQtyDelta,
-            baseQtyBefore,
-            baseQtyAfter: targetQty,
             batchId,
             sourceState: "external",
             targetState: "on_hand",
@@ -5401,52 +5413,51 @@ export async function registerRoutes(
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    
+
     try {
+      const { inventoryCore } = req.app.locals.services;
       const { variantId, warehouseLocationId, quantity, referenceId, notes } = req.body;
       const userId = req.session.user.id;
-      
+
       if (!variantId || !warehouseLocationId || !quantity) {
         return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, quantity" });
       }
-      
+
       // Get the variant by ID directly (more efficient than getting all)
-      const targetVariant = await storage.getUomVariantById(variantId);
-      
+      const targetVariant = await storage.getProductVariantById(variantId);
+
       if (!targetVariant) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      
-      if (!targetVariant.active) {
+
+      if (!targetVariant.isActive) {
         return res.status(400).json({ error: "Cannot receive stock for inactive variant" });
       }
-      
+
       // Verify warehouse location exists
       const location = await storage.getWarehouseLocationById(warehouseLocationId);
       if (!location) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
-      
-      const inventoryItemId = targetVariant.inventoryItemId;
+
       const variantQty = quantity;
-      
-      // Calculate base units: variantQty × unitsPerVariant
+
+      // Calculate base units: variantQty * unitsPerVariant
       const baseUnits = variantQty * targetVariant.unitsPerVariant;
-      
+
       // Generate a reference ID if not provided
       const refId = referenceId || `RCV-${Date.now()}`;
-      
-      await inventoryService.receiveInventory(
-        inventoryItemId,
+
+      await inventoryCore.receiveInventory({
+        productVariantId: variantId,
         warehouseLocationId,
         baseUnits,
-        refId,
-        notes || "Stock received via UI",
+        variantQty,
+        referenceId: refId,
+        notes: notes || "Stock received via UI",
         userId,
-        variantId,
-        variantQty
-      );
-      
+      });
+
       res.json({ success: true, baseUnitsReceived: baseUnits, variantQtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
@@ -5467,12 +5478,12 @@ export async function registerRoutes(
       }
       
       // Verify variant exists
-      const variant = await storage.getUomVariantById(variantId);
+      const variant = await storage.getProductVariantById(variantId);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      
-      const levels = await storage.getInventoryLevelsByVariantId(variantId);
+
+      const levels = await storage.getInventoryLevelsByProductVariantId(variantId);
       
       // Join with warehouse locations to get location codes
       const locations = await storage.getAllWarehouseLocations();
@@ -5493,15 +5504,16 @@ export async function registerRoutes(
   // Replenishment - move stock from bulk to pick location
   app.post("/api/inventory/replenish", async (req, res) => {
     try {
-      const { inventoryItemId, targetLocationId, requestedUnits } = req.body;
+      const { inventoryItemId, productVariantId: pvId, targetLocationId, requestedUnits } = req.body;
       const userId = req.session.user?.id;
-      
-      if (!inventoryItemId || !targetLocationId || !requestedUnits) {
+      const replenVariantId = pvId || inventoryItemId; // Support both old and new param names
+
+      if (!replenVariantId || !targetLocationId || !requestedUnits) {
         return res.status(400).json({ error: "Missing required fields" });
       }
-      
+
       const result = await inventoryService.replenishLocation(
-        inventoryItemId,
+        replenVariantId,
         targetLocationId,
         requestedUnits,
         userId
@@ -5521,8 +5533,8 @@ export async function registerRoutes(
   // Get locations needing replenishment
   app.get("/api/inventory/replenishment-needed", async (req, res) => {
     try {
-      const inventoryItemId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
-      const locations = await inventoryService.getLocationsNeedingReplenishment(inventoryItemId);
+      const productVariantId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
+      const locations = await inventoryService.getLocationsNeedingReplenishment(productVariantId);
       res.json(locations);
     } catch (error) {
       console.error("Error fetching replenishment needs:", error);
@@ -5547,7 +5559,7 @@ export async function registerRoutes(
     try {
       const itemId = parseInt(req.params.itemId);
       const limit = parseInt(req.query.limit as string) || 100;
-      const transactions = await storage.getInventoryTransactionsByItemId(itemId, limit);
+      const transactions = await storage.getInventoryTransactionsByProductVariantId(itemId, limit);
       res.json(transactions);
     } catch (error) {
       console.error("Error fetching inventory transactions:", error);
@@ -5586,23 +5598,23 @@ export async function registerRoutes(
         // Group levels by variantId to calculate totals
         const levelsByVariant = new Map<number, typeof filteredLevels>();
         for (const level of filteredLevels) {
-          if (!level.variantId) continue;
-          const existing = levelsByVariant.get(level.variantId) || [];
+          if (!level.productVariantId) continue;
+          const existing = levelsByVariant.get(level.productVariantId) || [];
           existing.push(level);
-          levelsByVariant.set(level.variantId, existing);
+          levelsByVariant.set(level.productVariantId, existing);
         }
         
-        // Get all variants and items to build summaries
-        const allVariants = await storage.getAllUomVariants();
-        const allItems = await storage.getAllInventoryItems();
-        const variantToItem = new Map<number, number>();
+        // Get all variants and products to build summaries
+        const allVariants = await storage.getAllProductVariants();
+        const allProducts = await storage.getAllProducts();
+        const variantToProduct = new Map<number, number>();
         for (const v of allVariants) {
-          variantToItem.set(v.id, v.inventoryItemId);
+          variantToProduct.set(v.id, v.productId);
         }
-        
-        // Build summary by item
-        const summaryByItem = new Map<number, {
-          inventoryItemId: number;
+
+        // Build summary by product
+        const summaryByProduct = new Map<number, {
+          productId: number;
           baseSku: string;
           name: string;
           totalOnHandBase: number;
@@ -5620,39 +5632,39 @@ export async function registerRoutes(
             variantQty: number;
           }>;
         }>();
-        
+
         for (const [variantId, levels] of levelsByVariant) {
           const variant = allVariants.find(v => v.id === variantId);
           if (!variant) continue;
-          const itemId = variant.inventoryItemId;
-          const item = allItems.find(i => i.id === itemId);
-          if (!item) continue;
-          
+          const productId = variant.productId;
+          const product = allProducts.find(p => p.id === productId);
+          if (!product) continue;
+
           const variantQty = levels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
           const onHand = levels.reduce((sum, l) => sum + (l.onHandBase || 0), 0);
           const reserved = levels.reduce((sum, l) => sum + (l.reservedBase || 0), 0);
           const atp = onHand - reserved;
-          
-          let summary = summaryByItem.get(itemId);
+
+          let summary = summaryByProduct.get(productId);
           if (!summary) {
             summary = {
-              inventoryItemId: itemId,
-              baseSku: item.baseSku,
-              name: item.name,
+              productId,
+              baseSku: product.sku || '',
+              name: product.name,
               totalOnHandBase: 0,
               totalReservedBase: 0,
               totalAtpBase: 0,
               variants: [],
             };
-            summaryByItem.set(itemId, summary);
+            summaryByProduct.set(productId, summary);
           }
-          
+
           summary.totalOnHandBase += onHand;
           summary.totalReservedBase += reserved;
           summary.totalAtpBase += atp;
           summary.variants.push({
             variantId: variant.id,
-            sku: variant.sku,
+            sku: variant.sku || '',
             name: variant.name,
             unitsPerVariant: variant.unitsPerVariant,
             available: Math.floor(atp / variant.unitsPerVariant),
@@ -5662,13 +5674,13 @@ export async function registerRoutes(
             variantQty,
           });
         }
-        
-        res.json(Array.from(summaryByItem.values()));
+
+        res.json(Array.from(summaryByProduct.values()));
       } else {
         // Original behavior: full summary across all warehouses
-        const items = await storage.getAllInventoryItems();
+        const products = await storage.getAllProducts();
         const summaries = await Promise.all(
-          items.map(item => inventoryService.getInventoryItemSummary(item.id))
+          products.map(product => inventoryService.getInventoryItemSummary(product.id))
         );
         res.json(summaries.filter(Boolean));
       }
@@ -5678,34 +5690,34 @@ export async function registerRoutes(
     }
   });
 
-  // Sync inventory levels to Shopify for a specific item or all items
+  // Sync inventory levels to Shopify for a specific product or all products
   app.post("/api/inventory/sync-shopify", async (req, res) => {
     try {
-      const { inventoryItemId } = req.body;
-      
-      // Get all items or a specific one
-      const items = inventoryItemId 
-        ? [await storage.getAllInventoryItems().then(all => all.find(i => i.id === inventoryItemId))].filter(Boolean)
-        : await storage.getAllInventoryItems();
-      
+      const { productId } = req.body;
+
+      // Get all products or a specific one
+      const products = productId
+        ? [await storage.getProductById(productId)].filter(Boolean)
+        : await storage.getAllProducts();
+
       const updates: InventoryLevelUpdate[] = [];
-      
-      for (const item of items) {
-        if (!item) continue;
-        
-        // Get all variants for this item
-        const variants = await storage.getUomVariantsByInventoryItemId(item.id);
-        
+
+      for (const product of products) {
+        if (!product) continue;
+
+        // Get all variants for this product
+        const variants = await storage.getProductVariantsByProductId(product.id);
+
         // Get channel feeds to find Shopify variant IDs
         for (const variant of variants) {
           const feeds = await storage.getChannelFeedsByVariantId(variant.id);
           const shopifyFeed = feeds.find(f => f.channelType === "shopify");
-          
+
           if (shopifyFeed) {
             // Calculate availability for this variant
-            const summary = await inventoryService.getInventoryItemSummary(item.id);
+            const summary = await inventoryService.getInventoryItemSummary(product.id);
             const variantAvail = summary?.variants.find(v => v.variantId === variant.id);
-            
+
             if (variantAvail) {
               updates.push({
                 shopifyVariantId: shopifyFeed.channelVariantId,
@@ -5715,13 +5727,13 @@ export async function registerRoutes(
           }
         }
       }
-      
+
       if (updates.length === 0) {
         return res.json({ message: "No variants with Shopify channel feeds found", synced: 0 });
       }
-      
+
       const result = await syncInventoryToShopify(updates);
-      res.json({ 
+      res.json({
         message: "Shopify inventory sync completed",
         success: result.success,
         failed: result.failed,
@@ -6728,40 +6740,40 @@ export async function registerRoutes(
         location_count: string;
         pickable_variant_qty: string;
       }>(warehouseId ? sql`
-        SELECT 
-          uv.id as variant_id,
-          uv.sku as variant_sku,
-          uv.name as variant_name,
-          uv.units_per_variant,
-          ii.base_sku,
+        SELECT
+          pv.id as variant_id,
+          pv.sku as variant_sku,
+          pv.name as variant_name,
+          pv.units_per_variant,
+          p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
           COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
-        FROM uom_variants uv
-        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-        LEFT JOIN inventory_levels il ON il.variant_id = uv.id
+        FROM product_variants pv
+        LEFT JOIN products p ON pv.product_id = p.id
+        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE uv.active = 1
+        WHERE pv.is_active = true
           AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
-        GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
-        ORDER BY uv.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.sku
+        ORDER BY pv.sku
       ` : sql`
-        SELECT 
-          uv.id as variant_id,
-          uv.sku as variant_sku,
-          uv.name as variant_name,
-          uv.units_per_variant,
-          ii.base_sku,
+        SELECT
+          pv.id as variant_id,
+          pv.sku as variant_sku,
+          pv.name as variant_name,
+          pv.units_per_variant,
+          p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
           COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
-        FROM uom_variants uv
-        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
-        LEFT JOIN inventory_levels il ON il.variant_id = uv.id
+        FROM product_variants pv
+        LEFT JOIN products p ON pv.product_id = p.id
+        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE uv.active = 1
-        GROUP BY uv.id, uv.sku, uv.name, uv.units_per_variant, ii.base_sku
-        ORDER BY uv.sku
+        WHERE pv.is_active = true
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.sku
+        ORDER BY pv.sku
       `);
       
       // Step 2: Get COMMITTED quantities from order_items
@@ -6873,7 +6885,7 @@ export async function registerRoutes(
           il.picked_base
         FROM inventory_levels il
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE il.variant_id = ${variantId}
+        WHERE il.product_variant_id = ${variantId}
         ORDER BY wl.code
       `);
       
@@ -6902,11 +6914,11 @@ export async function registerRoutes(
       const { locationType, binType, zone } = req.query;
       
       let query = sql`
-        SELECT 
-          uv.sku,
-          uv.name as variant_name,
-          ii.base_sku,
-          ii.name as item_name,
+        SELECT
+          pv.sku,
+          pv.name as variant_name,
+          p.sku as base_sku,
+          p.name as item_name,
           wl.code as location_code,
           wl.zone,
           wl.location_type,
@@ -6918,11 +6930,11 @@ export async function registerRoutes(
           il.picked_base,
           (il.on_hand_base - il.reserved_base - il.picked_base) as available_base
         FROM inventory_levels il
-        JOIN uom_variants uv ON il.variant_id = uv.id
-        LEFT JOIN inventory_items ii ON uv.inventory_item_id = ii.id
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN products p ON pv.product_id = p.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.variant_qty > 0
-        ORDER BY wl.code, uv.sku
+        ORDER BY wl.code, pv.sku
       `;
       
       const result = await db.execute<{
@@ -6984,68 +6996,31 @@ export async function registerRoutes(
   // Add inventory to a bin (simplified receipt) - variant-centric
   app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const { variantId, warehouseLocationId, variantQty, notes } = req.body;
       const userId = req.session.user?.id;
-      
+
       if (!variantId || !warehouseLocationId || variantQty === undefined) {
         return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQty" });
       }
-      
-      // Get the variant to find its inventory_item_id and units_per_variant
-      const variant = await storage.getUomVariantById(variantId);
+
+      const variant = await storage.getProductVariantById(variantId);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      
-      // Calculate base units from variant quantity
+
       const baseUnits = variantQty * variant.unitsPerVariant;
-      
-      // Check if inventory level exists for this variant at this location
-      let existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
-      
-      if (existingLevel) {
-        // Update existing level - add to current quantities
-        await storage.adjustInventoryLevel(existingLevel.id, {
-          variantQty: variantQty,
-          onHandBase: baseUnits,
-        });
-      } else {
-        // Create or update inventory level directly by variantId
-        const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
-        
-        if (existingLevel) {
-          // Add to existing level
-          await storage.adjustInventoryLevel(existingLevel.id, {
-            variantQty: variantQty,
-            onHandBase: baseUnits,
-          });
-        } else {
-          // Create new level with variantId
-          await storage.createInventoryLevel({
-            variantId: variantId,
-            warehouseLocationId: warehouseLocationId,
-            variantQty: variantQty,
-            onHandBase: baseUnits,
-            reservedBase: 0,
-          });
-        }
-        
-        // Create transaction for audit trail
-        await storage.createInventoryTransaction({
-          variantId: variantId,
-          inventoryItemId: variant.inventoryItemId,
-          toLocationId: warehouseLocationId,
-          warehouseLocationId: warehouseLocationId,
-          transactionType: "receipt",
-          variantQtyDelta: variantQty,
-          baseQtyDelta: baseUnits,
-          sourceState: "external",
-          targetState: "on_hand",
-          notes: notes || "Stock added via inventory page",
-          userId,
-        });
-      }
-      
+
+      await inventoryCore.receiveInventory({
+        productVariantId: variantId,
+        warehouseLocationId,
+        baseUnits,
+        variantQty,
+        referenceId: `ADD-${Date.now()}`,
+        notes: notes || "Stock added via inventory page",
+        userId,
+      });
+
       res.json({ success: true, variantQtyAdded: variantQty, baseUnitsAdded: baseUnits });
     } catch (error) {
       console.error("Error adding stock:", error);
@@ -7056,44 +7031,29 @@ export async function registerRoutes(
   // Adjust inventory with reason code - variant-centric
   app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const { variantId, warehouseLocationId, variantQtyDelta, reasonCode, notes } = req.body;
       const userId = req.session.user?.id;
-      
+
       if (!variantId || !warehouseLocationId || variantQtyDelta === undefined || !reasonCode) {
         return res.status(400).json({ error: "Missing required fields: variantId, warehouseLocationId, variantQtyDelta, reasonCode" });
       }
-      
-      // Get the variant to find its inventory_item_id and units_per_variant
-      const variant = await storage.getUomVariantById(variantId);
+
+      const variant = await storage.getProductVariantById(variantId);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      
-      // Calculate base units from variant quantity delta
+
       const baseUnitsDelta = variantQtyDelta * variant.unitsPerVariant;
-      
-      // Find the inventory level for this variant at this location
-      const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocationId, variantId);
-      
-      if (!existingLevel) {
-        return res.status(404).json({ error: "No inventory level found for this variant at this location" });
-      }
-      
-      // Use the inventory service to adjust base units
-      await inventoryService.adjustInventory(
-        variant.inventoryItemId,
+
+      await inventoryCore.adjustInventory({
+        productVariantId: variantId,
         warehouseLocationId,
         baseUnitsDelta,
-        reasonCode,
+        reason: reasonCode,
         userId,
-        notes
-      );
-      
-      // Also adjust the variant qty
-      await storage.adjustInventoryLevel(existingLevel.id, {
-        variantQty: variantQtyDelta,
       });
-      
+
       res.json({ success: true, variantQtyDelta, baseUnitsDelta });
     } catch (error) {
       console.error("Error adjusting stock:", error);
@@ -7139,8 +7099,8 @@ export async function registerRoutes(
           }
           
           // Find variant by SKU (storable unit like pack/case)
-          const variant = await storage.getUomVariantBySku(sku);
-          
+          const variant = await storage.getProductVariantBySku(sku);
+
           if (!variant) {
             results.errors.push(`Variant not found: ${sku}`);
             continue;
@@ -7165,7 +7125,7 @@ export async function registerRoutes(
             const delta = targetBaseUnits - existingLevel.onHandBase;
             if (delta !== 0) {
               await inventoryService.adjustInventory(
-                variant.inventoryItemId,
+                variant.id,
                 location.id,
                 delta,
                 "CSV_UPLOAD",
@@ -7178,24 +7138,21 @@ export async function registerRoutes(
               results.updated++;
             }
           } else {
-            // Create new inventory level directly with variantId
+            // Create new inventory level directly with productVariantId
             await storage.createInventoryLevel({
-              variantId: variant.id,
+              productVariantId: variant.id,
               warehouseLocationId: location.id,
               variantQty: variantQty,
               onHandBase: baseUnits,
               reservedBase: 0,
             });
-            
+
             // Create transaction for audit trail
             await storage.createInventoryTransaction({
-              variantId: variant.id,
-              inventoryItemId: variant.inventoryItemId,
+              productVariantId: variant.id,
               toLocationId: location.id,
-              warehouseLocationId: location.id,
               transactionType: "csv_upload",
               variantQtyDelta: variantQty,
-              baseQtyDelta: baseUnits,
               sourceState: "external",
               targetState: "on_hand",
               notes: "Initial inventory from CSV import",
@@ -7331,35 +7288,33 @@ export async function registerRoutes(
       
       for (const location of locations) {
         // Get inventory levels at this location with actual stock
-        // Join to uom_variants for the sellable SKU (source of truth)
+        // Join to product_variants for the sellable SKU (source of truth)
         const result = await db.execute<{
-          variant_id: number;
-          inventory_item_id: number | null;
+          product_variant_id: number;
           variant_qty: number;
           catalog_product_id: number | null;
           sku: string | null;
         }>(sql`
-          SELECT 
-            il.variant_id,
-            il.inventory_item_id,
+          SELECT
+            il.product_variant_id,
             il.variant_qty,
             cp.id as catalog_product_id,
-            COALESCE(uv.sku, cp.sku, ii.base_sku) as sku
+            COALESCE(pv.sku, cp.sku, p.sku) as sku
           FROM inventory_levels il
-          LEFT JOIN uom_variants uv ON il.variant_id = uv.id
-          LEFT JOIN inventory_items ii ON il.inventory_item_id = ii.id
-          LEFT JOIN catalog_products cp ON cp.inventory_item_id = ii.id
+          LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
+          LEFT JOIN products p ON pv.product_id = p.id
+          LEFT JOIN catalog_products cp ON cp.product_variant_id = pv.id
           WHERE il.warehouse_location_id = ${location.id}
             AND il.variant_qty > 0
         `);
-        
+
         if (result.rows.length > 0) {
           // Has inventory - create item for each product
           for (const row of result.rows) {
             items.push({
               cycleCountId: id,
               warehouseLocationId: location.id,
-              inventoryItemId: row.inventory_item_id,
+              productVariantId: row.product_variant_id,
               catalogProductId: row.catalog_product_id,
               expectedSku: row.sku,
               expectedQty: row.variant_qty,
@@ -7371,7 +7326,7 @@ export async function registerRoutes(
           items.push({
             cycleCountId: id,
             warehouseLocationId: location.id,
-            inventoryItemId: null,
+            productVariantId: null,
             catalogProductId: null,
             expectedSku: null,
             expectedQty: 0,
@@ -7441,11 +7396,11 @@ export async function registerRoutes(
           countedAt: new Date(),
         });
         
-        // Look up inventory item for the found SKU
-        const foundInventoryResult = await db.execute<{ id: number }>(sql`
-          SELECT id FROM inventory_items WHERE base_sku = ${countedSku} LIMIT 1
+        // Look up product variant for the found SKU
+        const foundVariantResult = await db.execute<{ id: number }>(sql`
+          SELECT id FROM product_variants WHERE sku = ${countedSku} LIMIT 1
         `);
-        const foundInventoryItemId = foundInventoryResult.rows[0]?.id || null;
+        const foundProductVariantId = foundVariantResult.rows[0]?.id || null;
         
         // Look up catalog product for the found SKU
         const foundCatalogResult = await db.execute<{ id: number }>(sql`
@@ -7456,13 +7411,13 @@ export async function registerRoutes(
         // Create NEW item for the FOUND product (unexpected item in this bin)
         const foundItemResult = await db.execute<{ id: number }>(sql`
           INSERT INTO cycle_count_items (
-            cycle_count_id, warehouse_location_id, inventory_item_id, catalog_product_id,
+            cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
             expected_sku, expected_qty, counted_sku, counted_qty,
             variance_qty, variance_type, variance_notes, status,
             requires_approval, mismatch_type, related_item_id,
             counted_by, counted_at, created_at
           ) VALUES (
-            ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundInventoryItemId}, ${foundCatalogProductId},
+            ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundCatalogProductId},
             NULL, 0, ${countedSku}, ${countedQty},
             ${countedQty}, 'unexpected_item', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
             1, 'unexpected_found', ${itemId},
@@ -7567,12 +7522,12 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Can only add items to in-progress cycle counts" });
       }
       
-      // Look up inventory item and catalog product for the found SKU
-      const inventoryResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM inventory_items WHERE base_sku = ${sku} LIMIT 1
+      // Look up product variant and catalog product for the found SKU
+      const variantResult = await db.execute<{ id: number }>(sql`
+        SELECT id FROM product_variants WHERE sku = ${sku} LIMIT 1
       `);
-      const inventoryItemId = inventoryResult.rows[0]?.id || null;
-      
+      const productVariantId = variantResult.rows[0]?.id || null;
+
       const catalogResult = await db.execute<{ id: number }>(sql`
         SELECT id FROM catalog_products WHERE sku = ${sku} LIMIT 1
       `);
@@ -7581,13 +7536,13 @@ export async function registerRoutes(
       // Create new item for the unexpected found product
       const result = await db.execute<{ id: number }>(sql`
         INSERT INTO cycle_count_items (
-          cycle_count_id, warehouse_location_id, inventory_item_id, catalog_product_id,
+          cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
           expected_sku, expected_qty, counted_sku, counted_qty,
           variance_qty, variance_type, variance_notes, status,
           requires_approval, mismatch_type,
           counted_by, counted_at, created_at
         ) VALUES (
-          ${id}, ${warehouseLocationId}, ${inventoryItemId}, ${catalogProductId},
+          ${id}, ${warehouseLocationId}, ${productVariantId}, ${catalogProductId},
           NULL, 0, ${sku}, ${quantity},
           ${quantity}, 'unexpected_item', ${notes || `Unexpected item found during count: ${sku} x ${quantity}`}, 'variance',
           1, 'unexpected_found',
@@ -7633,10 +7588,10 @@ export async function registerRoutes(
       // Track adjustments made for audit response
       const adjustmentsMade: any[] = [];
       
-      // Apply inventory adjustment if we have an inventory item
-      if (item.inventoryItemId && item.varianceQty !== null && item.varianceQty !== 0) {
+      // Apply inventory adjustment if we have a product variant
+      if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
         await inventoryService.adjustInventory(
-          item.inventoryItemId,
+          item.productVariantId,
           item.warehouseLocationId,
           item.varianceQty,
           reasonCode || "CYCLE_COUNT",
@@ -7665,9 +7620,9 @@ export async function registerRoutes(
         
         if (relatedItem && relatedItem.status !== "approved") {
           // Apply adjustment for the related item too
-          if (relatedItem.inventoryItemId && relatedItem.varianceQty !== null && relatedItem.varianceQty !== 0) {
+          if (relatedItem.productVariantId && relatedItem.varianceQty !== null && relatedItem.varianceQty !== 0) {
             await inventoryService.adjustInventory(
-              relatedItem.inventoryItemId,
+              relatedItem.productVariantId,
               relatedItem.warehouseLocationId,
               relatedItem.varianceQty,
               reasonCode || "CYCLE_COUNT",
@@ -7706,9 +7661,9 @@ export async function registerRoutes(
         
         if (reverseItem && reverseItem.status !== "approved") {
           // Apply adjustment for the reverse-linked item
-          if (reverseItem.inventoryItemId && reverseItem.varianceQty !== null && reverseItem.varianceQty !== 0) {
+          if (reverseItem.productVariantId && reverseItem.varianceQty !== null && reverseItem.varianceQty !== 0) {
             await inventoryService.adjustInventory(
-              reverseItem.inventoryItemId,
+              reverseItem.productVariantId,
               reverseItem.warehouseLocationId,
               reverseItem.varianceQty,
               reasonCode || "CYCLE_COUNT",
@@ -8050,45 +8005,37 @@ export async function registerRoutes(
       let linesReceived = 0;
       
       for (const line of lines) {
-        if (line.receivedQty > 0 && line.uomVariantId && line.putawayLocationId) {
-          // Get or create inventory level at location by variantId (source of truth)
-          let level = await storage.getInventoryLevelByLocationAndVariant(line.putawayLocationId, line.uomVariantId);
-          
-          const baseQtyBefore = level?.onHandBase || 0;
+        if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
+          // Get or create inventory level at location by productVariantId (source of truth)
+          let level = await storage.getInventoryLevelByLocationAndVariant(line.putawayLocationId, line.productVariantId);
+
           const qtyToAdd = line.receivedQty;
-          const baseQtyAfter = baseQtyBefore + qtyToAdd;
-          
+
           if (level) {
             // Update existing level
             await storage.updateInventoryLevel(level.id, {
-              onHandBase: baseQtyAfter,
+              onHandBase: (level.onHandBase || 0) + qtyToAdd,
               variantQty: (level.variantQty || 0) + qtyToAdd,
             });
           } else {
-            // Create new level - variantId is required, inventoryItemId is legacy
+            // Create new level - productVariantId is required
             await storage.createInventoryLevel({
-              inventoryItemId: line.inventoryItemId || 0, // Legacy field, will be removed
+              productVariantId: line.productVariantId,
               warehouseLocationId: line.putawayLocationId,
               onHandBase: qtyToAdd,
               reservedBase: 0,
-              variantId: line.uomVariantId,
               variantQty: qtyToAdd,
             });
           }
-          
-          // Create transaction record with Full WMS fields
+
+          // Create transaction record
           await storage.createInventoryTransaction({
-            inventoryItemId: line.inventoryItemId,
-            variantId: line.uomVariantId || null,
+            productVariantId: line.productVariantId,
             toLocationId: line.putawayLocationId, // Receive = TO location
-            warehouseLocationId: line.putawayLocationId, // Legacy compatibility
             transactionType: "receipt",
             variantQtyDelta: qtyToAdd,
             variantQtyBefore: level?.variantQty || 0,
             variantQtyAfter: (level?.variantQty || 0) + qtyToAdd,
-            baseQtyDelta: qtyToAdd,
-            baseQtyBefore,
-            baseQtyAfter,
             batchId,
             sourceState: "external", // Coming from outside
             targetState: "on_hand", // Now on hand
@@ -8147,8 +8094,8 @@ export async function registerRoutes(
   app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const { sku, productName, expectedQty, receivedQty, status, inventoryItemId, uomVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
-      
+      const { sku, productName, expectedQty, receivedQty, status, productVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
+
       await storage.createReceivingLine({
         receivingOrderId: orderId,
         sku: sku || null,
@@ -8156,8 +8103,7 @@ export async function registerRoutes(
         expectedQty: expectedQty || 0,
         receivedQty: receivedQty || 0,
         damagedQty: 0,
-        inventoryItemId: inventoryItemId || null,
-        uomVariantId: uomVariantId || null,
+        productVariantId: productVariantId || null,
         catalogProductId: catalogProductId || null,
         barcode: barcode || null,
         unitCost: unitCost || null,
@@ -8360,14 +8306,14 @@ export async function registerRoutes(
       );
       console.log(`[CSV Import] Loaded ${catalogProducts.length} catalog products, ${catalogBySku.size} with SKUs`);
       
-      // Pre-fetch uom_variants for efficient lookup (Model A source of truth)
-      const allUomVariants = await storage.getAllUomVariants();
-      const uomVariantBySku = new Map(
-        allUomVariants
+      // Pre-fetch product_variants for efficient lookup (source of truth)
+      const allProductVariants = await storage.getAllProductVariants();
+      const productVariantBySku = new Map(
+        allProductVariants
           .filter(v => v.sku)
           .map(v => [v.sku!.toUpperCase(), v])
       );
-      console.log(`[CSV Import] Loaded ${allUomVariants.length} uom_variants, ${uomVariantBySku.size} with SKUs`);
+      console.log(`[CSV Import] Loaded ${allProductVariants.length} product_variants, ${productVariantBySku.size} with SKUs`);
       
       for (const line of lines) {
         const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
@@ -8377,45 +8323,43 @@ export async function registerRoutes(
           continue;
         }
         
-        // Model A source of truth: uom_variants (sellable SKUs with inventory_item linkage)
+        // Source of truth: product_variants (sellable SKUs with product linkage)
         const lookupKey = sku.toUpperCase();
-        const uomVariant = uomVariantBySku.get(lookupKey);
+        const productVariant = productVariantBySku.get(lookupKey);
         const catalog = catalogBySku.get(lookupKey);
-        
-        let inventoryItemId: number | null = null;
-        let uomVariantId: number | null = null;
+
+        let productVariantId: number | null = null;
         let catalogProductId: number | null = null;
         let productName = sku;
         let productBarcode = barcode || null;
-        
-        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" uomVariant=${!!uomVariant} catalog=${!!catalog}`);
-        
-        if (uomVariant) {
-          // Found in uom_variants - use this as source of truth
-          uomVariantId = uomVariant.id;
-          inventoryItemId = uomVariant.inventoryItemId;
-          productName = uomVariant.name;
-          if (!productBarcode && uomVariant.barcode) {
-            productBarcode = uomVariant.barcode;
+
+        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" productVariant=${!!productVariant} catalog=${!!catalog}`);
+
+        if (productVariant) {
+          // Found in product_variants - use this as source of truth
+          productVariantId = productVariant.id;
+          productName = productVariant.name;
+          if (!productBarcode && productVariant.barcode) {
+            productBarcode = productVariant.barcode;
           }
           // Also get catalogProductId if exists
           if (catalog) {
             catalogProductId = catalog.id;
           }
-          console.log(`[CSV Import] SKU "${sku}" -> uomVariantId=${uomVariantId}, inventoryItemId=${inventoryItemId}, catalogProductId=${catalogProductId}`);
+          console.log(`[CSV Import] SKU "${sku}" -> productVariantId=${productVariantId}, catalogProductId=${catalogProductId}`);
         } else if (catalog) {
-          // Fallback to catalog_products (legacy path)
+          // Fallback to catalog_products
           catalogProductId = catalog.id;
-          inventoryItemId = catalog.inventoryItemId || null;
+          productVariantId = catalog.productVariantId || null;
           productName = catalog.title;
-          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, inventoryItemId=${inventoryItemId} (legacy path, no uom_variant)`);
+          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, productVariantId=${productVariantId} (fallback path, no product_variant)`);
           if (!productBarcode && (catalog as any).barcode) {
             productBarcode = (catalog as any).barcode;
           }
-          warnings.push(`SKU ${sku} found in catalog but not in uom_variants - please set up UOM hierarchy`);
+          warnings.push(`SKU ${sku} found in catalog but not in product_variants - please set up variant hierarchy`);
         } else {
           // SKU not found anywhere - add warning but continue
-          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in uom_variants or catalog_products`);
+          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in product_variants or catalog_products`);
           warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
         }
         
@@ -8467,8 +8411,7 @@ export async function registerRoutes(
               receivedQty: parsedQty,
               damagedQty: parsedDamagedQty,
               unitCost: parsedUnitCost,
-              inventoryItemId,
-              uomVariantId,
+              productVariantId,
               catalogProductId,
               putawayLocationId,
               notes: notes || null,
@@ -8487,8 +8430,7 @@ export async function registerRoutes(
             receivedQty: parsedQty, // For initial load, received = expected
             damagedQty: parsedDamagedQty,
             unitCost: parsedUnitCost,
-            inventoryItemId,
-            uomVariantId,
+            productVariantId,
             catalogProductId,
             putawayLocationId,
             notes: notes || null,
@@ -8547,30 +8489,28 @@ export async function registerRoutes(
       
       // Collect unique IDs for batch lookup
       const locationIds = new Set<number>();
-      const itemIds = new Set<number>();
-      
+      const variantIds = new Set<number>();
+
       for (const tx of transactions) {
         if (tx.fromLocationId) locationIds.add(tx.fromLocationId);
         if (tx.toLocationId) locationIds.add(tx.toLocationId);
-        if (tx.warehouseLocationId) locationIds.add(tx.warehouseLocationId);
-        if (tx.inventoryItemId) itemIds.add(tx.inventoryItemId);
+        if (tx.productVariantId) variantIds.add(tx.productVariantId);
       }
-      
+
       // Batch fetch only needed data
-      const [allLocations, allItems] = await Promise.all([
+      const [allLocations, allVariants] = await Promise.all([
         locationIds.size > 0 ? storage.getAllWarehouseLocations() : [],
-        itemIds.size > 0 ? storage.getAllInventoryItems() : []
+        variantIds.size > 0 ? storage.getAllProductVariants() : []
       ]);
-      
+
       const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
-      const itemMap = new Map(allItems.filter(i => itemIds.has(i.id)).map(i => [i.id, i]));
-      
+      const variantMap = new Map(allVariants.filter(v => variantIds.has(v.id)).map(v => [v.id, v]));
+
       const enriched = transactions.map(tx => ({
         ...tx,
         fromLocation: tx.fromLocationId ? locationMap.get(tx.fromLocationId) : null,
         toLocation: tx.toLocationId ? locationMap.get(tx.toLocationId) : null,
-        warehouseLocation: tx.warehouseLocationId ? locationMap.get(tx.warehouseLocationId) : null,
-        inventoryItem: itemMap.get(tx.inventoryItemId),
+        productVariant: tx.productVariantId ? variantMap.get(tx.productVariantId) : null,
       }));
       
       res.json(enriched);
@@ -8772,26 +8712,26 @@ export async function registerRoutes(
       
       const [allProducts, allVariants] = await Promise.all([
         storage.getAllCatalogProducts(),
-        storage.getAllUomVariants(),
+        storage.getAllProductVariants(),
       ]);
-      
+
       const productMap = new Map(allProducts.filter(p => productIds.has(p.id)).map(p => [p.id, p]));
       const variantMap = new Map(allVariants.filter(v => variantIds.has(v.id)).map(v => [v.id, v]));
-      
+
       const enriched = rules.map(rule => ({
         ...rule,
         catalogProduct: productMap.get(rule.catalogProductId),
         pickVariant: variantMap.get(rule.pickVariantId),
         sourceVariant: variantMap.get(rule.sourceVariantId),
       }));
-      
+
       res.json(enriched);
     } catch (error) {
       console.error("Error fetching replen rules:", error);
       res.status(500).json({ error: "Failed to fetch replen rules" });
     }
   });
-  
+
   app.get("/api/replen/rules/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
@@ -8799,15 +8739,15 @@ export async function registerRoutes(
       if (!rule) {
         return res.status(404).json({ error: "Replen rule not found" });
       }
-      
+
       const [allProducts, allVariants] = await Promise.all([
         storage.getAllCatalogProducts(),
-        storage.getAllUomVariants(),
+        storage.getAllProductVariants(),
       ]);
-      
+
       const productMap = new Map(allProducts.map(p => [p.id, p]));
       const variantMap = new Map(allVariants.map(v => [v.id, v]));
-      
+
       const enriched = {
         ...rule,
         catalogProduct: productMap.get(rule.catalogProductId),
@@ -8831,14 +8771,13 @@ export async function registerRoutes(
       }
       
       // Validate that variants belong to the product
-      const [product, pickVariant, sourceVariant, allProducts, allInventoryItems] = await Promise.all([
+      const [product, pickVariant, sourceVariant, allCatalogProducts] = await Promise.all([
         storage.getCatalogProductById(catalogProductId),
-        storage.getUomVariantById(pickVariantId),
-        storage.getUomVariantById(sourceVariantId),
+        storage.getProductVariantById(pickVariantId),
+        storage.getProductVariantById(sourceVariantId),
         storage.getAllCatalogProducts(),
-        storage.getAllInventoryItems(),
       ]);
-      
+
       if (!product) {
         return res.status(400).json({ error: "Product not found" });
       }
@@ -8848,18 +8787,18 @@ export async function registerRoutes(
       if (!sourceVariant) {
         return res.status(400).json({ error: "Source variant not found" });
       }
-      
-      // Build product lookup by inventoryItemId
-      const productByInventoryItemId = new Map(allProducts.filter(p => p.inventoryItemId).map(p => [p.inventoryItemId!, p]));
-      
+
+      // Build product lookup by productVariantId
+      const productByVariantId = new Map(allCatalogProducts.filter(p => p.productVariantId).map(p => [p.productVariantId!, p]));
+
       // Validate pick variant belongs to product
-      const pickVariantProduct = productByInventoryItemId.get(pickVariant.inventoryItemId);
+      const pickVariantProduct = productByVariantId.get(pickVariant.id);
       if (!pickVariantProduct || pickVariantProduct.id !== catalogProductId) {
         return res.status(400).json({ error: "Pick variant does not belong to the specified product" });
       }
-      
+
       // Validate source variant belongs to product
-      const sourceVariantProduct = productByInventoryItemId.get(sourceVariant.inventoryItemId);
+      const sourceVariantProduct = productByVariantId.get(sourceVariant.id);
       if (!sourceVariantProduct || sourceVariantProduct.id !== catalogProductId) {
         return res.status(400).json({ error: "Source variant does not belong to the specified product" });
       }
@@ -8962,23 +8901,20 @@ export async function registerRoutes(
         }
         
         // Get lookup data
-        const [products, variants, inventoryItems] = await Promise.all([
+        const [products, variants] = await Promise.all([
           storage.getAllCatalogProducts(),
-          storage.getAllUomVariants(),
-          storage.getAllInventoryItems(),
+          storage.getAllProductVariants(),
         ]);
-        
+
         // Build lookup maps
         const productBySku = new Map(products.filter(p => p.sku).map(p => [p.sku!.toLowerCase(), p]));
         const variantBySku = new Map(variants.filter(v => v.sku).map(v => [v.sku!.toLowerCase(), v]));
-        
-        // Build variant-to-product mapping via inventoryItem
-        // variant.inventoryItemId -> inventoryItem.id -> match with product.inventoryItemId
-        const inventoryItemMap = new Map(inventoryItems.map(i => [i.id, i]));
-        const productByInventoryItemId = new Map(products.filter(p => p.inventoryItemId).map(p => [p.inventoryItemId!, p]));
-        
+
+        // Build variant-to-product mapping via productVariantId
+        const productByVariantId = new Map(products.filter(p => p.productVariantId).map(p => [p.productVariantId!, p]));
+
         const getProductForVariant = (variant: typeof variants[0]) => {
-          return productByInventoryItemId.get(variant.inventoryItemId);
+          return productByVariantId.get(variant.id);
         };
         
         const results = { created: 0, skipped: 0, errors: [] as string[] };
@@ -9220,13 +9156,13 @@ export async function registerRoutes(
       const inventoryLevels = await storage.getAllInventoryLevels();
       const locations = await storage.getAllWarehouseLocations();
       const catalogProducts = await storage.getAllCatalogProducts();
-      const uomVariants = await storage.getAllUomVariants();
+      const allProductVariants = await storage.getAllProductVariants();
       const warehouses = await storage.getAllWarehouses();
       const allWarehouseSettings = await storage.getAllWarehouseSettings();
       
       const locationMap = new Map(locations.map(l => [l.id, l]));
       const productMap = new Map(catalogProducts.map(p => [p.id, p]));
-      const variantMap = new Map(uomVariants.map(v => [v.id, v]));
+      const variantMap = new Map(allProductVariants.map(v => [v.id, v]));
       const warehouseMap = new Map(warehouses.map(w => [w.id, w]));
       
       // Map warehouse code to settings
@@ -9247,14 +9183,23 @@ export async function registerRoutes(
         return settingsByWarehouseCode.get(warehouse.code) || defaultSettings;
       };
       
-      // Group variants by product and hierarchy level
-      const variantsByProduct = new Map<number, Map<number, typeof uomVariants[0]>>();
-      for (const v of uomVariants) {
-        if (!v.catalogProductId) continue;
-        if (!variantsByProduct.has(v.catalogProductId)) {
-          variantsByProduct.set(v.catalogProductId, new Map());
+      // Build reverse map: productVariantId -> catalogProductId
+      const catalogProductByVariantId = new Map<number, number>();
+      for (const cp of catalogProducts) {
+        if (cp.productVariantId) {
+          catalogProductByVariantId.set(cp.productVariantId, cp.id);
         }
-        variantsByProduct.get(v.catalogProductId)!.set(v.hierarchyLevel, v);
+      }
+
+      // Group variants by catalog product and hierarchy level
+      const variantsByProduct = new Map<number, Map<number, typeof allProductVariants[0]>>();
+      for (const v of allProductVariants) {
+        const cpId = catalogProductByVariantId.get(v.id);
+        if (!cpId) continue;
+        if (!variantsByProduct.has(cpId)) {
+          variantsByProduct.set(cpId, new Map());
+        }
+        variantsByProduct.get(cpId)!.set(v.hierarchyLevel, v);
       }
       
       // Index SKU overrides by product ID
@@ -9275,7 +9220,7 @@ export async function registerRoutes(
         const location = locationMap.get(level.warehouseLocationId);
         if (!location) continue;
         
-        const key = `${level.variantId}-${location.locationType}`;
+        const key = `${level.productVariantId}-${location.locationType}`;
         const existing = inventoryByVariantAndType.get(key) || [];
         existing.push({
           locationId: level.warehouseLocationId,
@@ -9298,17 +9243,19 @@ export async function registerRoutes(
         const location = locationMap.get(level.warehouseLocationId);
         if (!location || location.locationType !== "forward_pick") continue;
         
-        const variant = variantMap.get(level.variantId);
-        if (!variant || !variant.catalogProductId) continue;
-        
-        const productId = variant.catalogProductId;
+        const variant = variantMap.get(level.productVariantId);
+        if (!variant) continue;
+        const cpId = catalogProductByVariantId.get(variant.id);
+        if (!cpId) continue;
+
+        const productId = cpId;
         if (!pickLocationsNeedingReplen.has(productId)) {
           pickLocationsNeedingReplen.set(productId, []);
         }
         
         pickLocationsNeedingReplen.get(productId)!.push({
           locationId: level.warehouseLocationId,
-          variantId: level.variantId,
+          variantId: level.productVariantId,
           currentQty: level.variantQty || 0,
           hierarchyLevel: variant.hierarchyLevel,
         });
@@ -9335,7 +9282,7 @@ export async function registerRoutes(
         for (const pickLoc of pickLocs) {
           // Find the matching tier default (by priority) where both source and target levels exist
           let matchedDefault: typeof tierDefaults[0] | null = null;
-          let sourceVariant: typeof uomVariants[0] | null = null;
+          let sourceVariant: typeof allProductVariants[0] | null = null;
           let pickVariant = variantMap.get(pickLoc.variantId);
           
           if (!pickVariant) continue;
@@ -9696,6 +9643,230 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error generating replen tasks:", error);
       res.status(500).json({ error: "Failed to generate replen tasks" });
+    }
+  });
+
+  // ============================================
+  // WMS SERVICE ROUTES (Phase 2)
+  // ============================================
+
+  // --- Break / Assembly Routes ---
+
+  app.post("/api/inventory/break", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { breakAssembly } = req.app.locals.services;
+      const { sourceVariantId, targetVariantId, sourceQty, warehouseLocationId } = req.body;
+      const userId = req.session.user?.id;
+
+      if (!sourceVariantId || !targetVariantId || !sourceQty || !warehouseLocationId) {
+        return res.status(400).json({ error: "Missing required fields: sourceVariantId, targetVariantId, sourceQty, warehouseLocationId" });
+      }
+
+      const result = await breakAssembly.breakVariant({
+        sourceVariantId,
+        targetVariantId,
+        sourceQty,
+        warehouseLocationId,
+        userId,
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error breaking variant:", error);
+      res.status(400).json({ error: error.message || "Failed to break variant" });
+    }
+  });
+
+  app.post("/api/inventory/assemble", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { breakAssembly } = req.app.locals.services;
+      const { sourceVariantId, targetVariantId, targetQty, warehouseLocationId } = req.body;
+      const userId = req.session.user?.id;
+
+      if (!sourceVariantId || !targetVariantId || !targetQty || !warehouseLocationId) {
+        return res.status(400).json({ error: "Missing required fields: sourceVariantId, targetVariantId, targetQty, warehouseLocationId" });
+      }
+
+      const result = await breakAssembly.assembleVariant({
+        sourceVariantId,
+        targetVariantId,
+        targetQty,
+        warehouseLocationId,
+        userId,
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error assembling variant:", error);
+      res.status(400).json({ error: error.message || "Failed to assemble variant" });
+    }
+  });
+
+  app.get("/api/inventory/conversion-preview", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { breakAssembly } = req.app.locals.services;
+      const sourceVariantId = parseInt(String(req.query.sourceVariantId));
+      const targetVariantId = parseInt(String(req.query.targetVariantId));
+      const qty = parseInt(String(req.query.qty));
+      const direction = String(req.query.direction || "break");
+
+      if (isNaN(sourceVariantId) || isNaN(targetVariantId) || isNaN(qty)) {
+        return res.status(400).json({ error: "sourceVariantId, targetVariantId, and qty are required" });
+      }
+
+      const preview = await breakAssembly.getConversionPreview({
+        sourceVariantId,
+        targetVariantId,
+        qty,
+        direction: direction as "break" | "assemble",
+      });
+
+      res.json(preview);
+    } catch (error: any) {
+      console.error("Error getting conversion preview:", error);
+      res.status(400).json({ error: error.message || "Failed to get preview" });
+    }
+  });
+
+  // --- Returns Routes ---
+
+  app.post("/api/returns/process", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { returns } = req.app.locals.services;
+      const { orderId, items, warehouseLocationId, notes } = req.body;
+      const userId = req.session.user?.id;
+
+      if (!orderId || !items || !Array.isArray(items) || items.length === 0 || !warehouseLocationId) {
+        return res.status(400).json({ error: "Missing required fields: orderId, items (array), warehouseLocationId" });
+      }
+
+      const result = await returns.processReturn({
+        orderId,
+        items,
+        warehouseLocationId,
+        userId,
+        notes,
+      });
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error processing return:", error);
+      res.status(500).json({ error: error.message || "Failed to process return" });
+    }
+  });
+
+  app.get("/api/returns/:orderId", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { returns } = req.app.locals.services;
+      const orderId = parseInt(req.params.orderId);
+
+      if (isNaN(orderId)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const history = await returns.getReturnHistory(orderId);
+      res.json(history);
+    } catch (error: any) {
+      console.error("Error getting return history:", error);
+      res.status(500).json({ error: error.message || "Failed to get return history" });
+    }
+  });
+
+  // --- Order Reservation Routes ---
+
+  app.post("/api/orders/:id/reserve", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { reservation } = req.app.locals.services;
+      const orderId = parseInt(req.params.id);
+
+      if (isNaN(orderId)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const result = await reservation.reserveOrder(orderId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error reserving order:", error);
+      res.status(500).json({ error: error.message || "Failed to reserve order" });
+    }
+  });
+
+  app.delete("/api/orders/:id/reserve", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { reservation } = req.app.locals.services;
+      const orderId = parseInt(req.params.id);
+
+      if (isNaN(orderId)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const result = await reservation.releaseOrderReservation(orderId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error releasing reservation:", error);
+      res.status(500).json({ error: error.message || "Failed to release reservation" });
+    }
+  });
+
+  app.get("/api/orders/:id/reservation", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { reservation } = req.app.locals.services;
+      const orderId = parseInt(req.params.id);
+
+      if (isNaN(orderId)) {
+        return res.status(400).json({ error: "Invalid order ID" });
+      }
+
+      const status = await reservation.getOrderReservationStatus(orderId);
+      res.json(status);
+    } catch (error: any) {
+      console.error("Error getting reservation status:", error);
+      res.status(500).json({ error: error.message || "Failed to get reservation status" });
+    }
+  });
+
+  // --- Channel Sync Routes ---
+
+  app.post("/api/channel-sync/product/:productId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const productId = parseInt(req.params.productId);
+
+      if (isNaN(productId)) {
+        return res.status(400).json({ error: "Invalid product ID" });
+      }
+
+      const result = await channelSync.syncProduct(productId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error syncing product:", error);
+      res.status(500).json({ error: error.message || "Failed to sync product" });
+    }
+  });
+
+  app.post("/api/channel-sync/all", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const channelId = req.body.channelId ? parseInt(req.body.channelId) : undefined;
+
+      const result = await channelSync.syncAllProducts(channelId);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error syncing all products:", error);
+      res.status(500).json({ error: error.message || "Failed to sync products" });
+    }
+  });
+
+  // --- Replenishment Check Route ---
+
+  app.post("/api/replen/check", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { replenishment } = req.app.locals.services;
+      const tasks = await replenishment.checkThresholds();
+      res.json({ created: tasks.length, tasks });
+    } catch (error: any) {
+      console.error("Error checking replenishment thresholds:", error);
+      res.status(500).json({ error: error.message || "Failed to check thresholds" });
     }
   });
 

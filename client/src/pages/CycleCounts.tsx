@@ -72,7 +72,7 @@ interface CycleCountItem {
   id: number;
   cycleCountId: number;
   warehouseLocationId: number;
-  inventoryItemId: number | null;
+  productVariantId: number | null;
   catalogProductId: number | null;
   expectedSku: string | null;
   expectedQty: number;
@@ -159,7 +159,7 @@ export default function CycleCounts() {
     sku: string;
     name: string;
     source: string;
-    inventoryItemId: number | null;
+    productVariantId: number | null;
   }
   
   const { data: skuResults = [] } = useQuery<SkuSearchResult[]>({
