@@ -147,10 +147,10 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="flex-1 flex flex-col min-h-0 gap-4">
       {/* Summary cards */}
       {data && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
               <ShoppingCart size={12} /> Total SKUs
@@ -179,7 +179,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 shrink-0">
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-[160px] h-9 text-sm">
             <SelectValue placeholder="All Statuses" />
@@ -210,9 +210,9 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
       {isLoading ? (
         <div className="text-sm text-muted-foreground py-12 text-center">Loading reorder analysis...</div>
       ) : (
-        <>
+        <div className="flex-1 flex flex-col min-h-0">
           {/* Mobile cards */}
-          <div className="md:hidden space-y-3">
+          <div className="md:hidden flex-1 overflow-auto space-y-3">
             {filtered.map((item) => {
               const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
               return (
@@ -249,7 +249,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
           </div>
 
           {/* Desktop table */}
-          <div className="hidden md:block rounded-md border bg-card overflow-x-auto">
+          <div className="hidden md:block rounded-md border bg-card flex-1 overflow-auto">
             <Table>
               <TableHeader className="bg-muted/40 sticky top-0 z-10">
                 <TableRow>
@@ -321,13 +321,13 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
           </div>
 
           {filtered.length > 0 && (
-            <div className="text-xs text-muted-foreground">
+            <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} SKUs
               {" · "}Velocity based on trailing {data?.lookbackDays ?? 90} days
               {" · "}Default lead time: 120 days
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

@@ -10598,14 +10598,15 @@ export async function registerRoutes(
         const suggestedOrderQty = Math.max(0, Math.ceil((leadTimeDays * avgDailyUsage) + safetyStockQty - totalOnHand));
 
         let status: string;
-        if (totalOnHand <= 0 && avgDailyUsage > 0) {
+        if (avgDailyUsage === 0) {
+          // No outbound movement in the lookback window
+          status = "no_movement";
+        } else if (totalOnHand <= 0) {
           status = "stockout";
         } else if (totalOnHand <= reorderPoint) {
           status = "order_now";
         } else if (daysOfSupply <= leadTimeDays * 1.5) {
           status = "order_soon";
-        } else if (avgDailyUsage === 0 && totalOnHand > 0) {
-          status = "no_movement";
         } else {
           status = "ok";
         }
