@@ -1658,7 +1658,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                               </TableCell>
                               {selectedReceipt.status !== "closed" && (
                                 <TableCell>
-                                  {(!line.productVariantId || !line.putawayLocationId) ? (
+                                  {(!line.productVariantId || !line.putawayLocationId) && (
                                     <div className="flex gap-1">
                                       {!line.productVariantId && (
                                         <button
@@ -1679,8 +1679,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         </button>
                                       )}
                                     </div>
-                                  ) : (
-                                    <Check className="h-4 w-4 text-green-500" />
                                   )}
                                 </TableCell>
                               )}
