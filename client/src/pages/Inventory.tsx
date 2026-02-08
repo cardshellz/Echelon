@@ -2,15 +2,13 @@ import React, { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
+import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
+import { useAuth } from "@/lib/auth";
 import {
   Package,
   Search,
-  Filter,
   Plus,
-  MoreHorizontal,
   Download,
-  Edit,
-  History,
   RefreshCw,
   AlertTriangle,
   TrendingUp,
@@ -25,19 +23,12 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  ArrowLeftRight,
   Building2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
   Table,
   TableBody,
@@ -164,7 +155,13 @@ interface VariantLocationLevel {
   } | null;
 }
 
-function VariantLocationRows({ variantId, warehouses }: { variantId: number; warehouses: Warehouse[] }) {
+function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }: {
+  variantId: number;
+  sku: string;
+  warehouses: Warehouse[];
+  canEdit: boolean;
+  onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
+}) {
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [`/api/inventory/variants/${variantId}/locations`],
   });
@@ -172,7 +169,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (isLoading) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={7} className="py-2 pl-8">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8">
           <RefreshCw className="h-4 w-4 animate-spin inline mr-2" />
           Loading locations...
         </TableCell>
@@ -183,7 +180,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (isError) {
     return (
       <TableRow className="bg-red-50 dark:bg-red-900/10">
-        <TableCell colSpan={7} className="py-2 pl-8 text-red-600 text-sm">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8 text-red-600 text-sm">
           <AlertTriangle className="h-4 w-4 inline mr-2" />
           Failed to load location data
         </TableCell>
@@ -194,7 +191,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (locationLevels.length === 0) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={7} className="py-2 pl-8 text-muted-foreground text-sm">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8 text-muted-foreground text-sm">
           No stock at any location
         </TableCell>
       </TableRow>
@@ -206,47 +203,51 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
       {locationLevels.map((locLevel) => {
         const isPickable = locLevel.location?.isPickable === 1;
         const available = locLevel.variantQty - locLevel.reservedQty;
+        const locType = locLevel.location?.locationType || "";
         return (
           <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
-            <TableCell className="pl-8">
+            <TableCell colSpan={2} className="pl-8">
               <div className="flex items-center gap-2">
-                <MapPin className="h-3 w-3 text-muted-foreground" />
+                <MapPin className="h-3 w-3 text-muted-foreground shrink-0" />
                 <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                  isPickable
+                    ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : "bg-muted text-muted-foreground"
+                }`}>
+                  {locType.replace("_", " ")}
+                </span>
                 {locLevel.location?.warehouseId && (
-                  <Badge variant="secondary" className="text-[10px] px-1 py-0">
-                    {warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}
-                  </Badge>
+                  <span className="text-[10px] text-muted-foreground">
+                    [{warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}]
+                  </span>
                 )}
               </div>
             </TableCell>
-            <TableCell className="text-muted-foreground text-xs">
-              <Badge variant="outline" className="text-xs">{locLevel.location?.locationType || "-"}</Badge>
-            </TableCell>
-            {/* Units/Pkg - skip for location rows */}
-            <TableCell></TableCell>
-            {/* Qty at this location */}
             <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
-            {/* Pickable indicator */}
-            <TableCell className="text-right font-mono text-xs">
-              {isPickable ? (
-                <span className="text-green-600">{locLevel.variantQty}</span>
-              ) : (
-                <span className="text-muted-foreground">-</span>
-              )}
-            </TableCell>
-            {/* Committed (allocated to orders) */}
             <TableCell className="text-right font-mono text-xs">{locLevel.reservedQty || 0}</TableCell>
-            {/* Available at this location */}
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
-            {/* Pickable status */}
-            <TableCell className="text-center">
-              {isPickable ? (
-                <Badge variant="default" className="text-xs bg-green-600">Pick</Badge>
-              ) : (
-                <Badge variant="secondary" className="text-xs">Bulk</Badge>
-              )}
-            </TableCell>
-            <TableCell></TableCell>
+            {canEdit && (
+              <TableCell className="text-right">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-xs px-2"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTransfer(
+                      locLevel.location?.id || 0,
+                      locLevel.location?.code || "",
+                      variantId,
+                      sku
+                    );
+                  }}
+                >
+                  <ArrowLeftRight className="h-3 w-3 mr-1" />
+                  Move
+                </Button>
+              </TableCell>
+            )}
           </TableRow>
         );
       })}
@@ -356,9 +357,18 @@ export default function Inventory() {
   const [productSortField, setProductSortField] = useState<string>("baseSku");
   const [productSortDirection, setProductSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
-  
+  const [transferDialog, setTransferDialog] = useState<{
+    open: boolean;
+    fromLocationId?: number;
+    fromLocationCode?: string;
+    variantId?: number;
+    sku?: string;
+  }>({ open: false });
+
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { hasPermission } = useAuth();
+  const canEdit = hasPermission("inventory", "edit");
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
     queryKey: ["/api/warehouses"],
@@ -468,7 +478,7 @@ export default function Inventory() {
   };
 
   const sortedVariantLevels = [...variantLevels]
-    .filter(v => 
+    .filter(v =>
       (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
     )
@@ -478,11 +488,8 @@ export default function Inventory() {
         case "sku": aVal = a.sku || ""; bVal = b.sku || ""; break;
         case "name": aVal = a.name || ""; bVal = b.name || ""; break;
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
-        case "units": aVal = a.unitsPerVariant; bVal = b.unitsPerVariant; break;
-        case "pickable": aVal = a.pickableQty; bVal = b.pickableQty; break;
         case "reserved": aVal = a.reservedQty; bVal = b.reservedQty; break;
         case "available": aVal = a.available; bVal = b.available; break;
-        case "locations": aVal = a.locationCount; bVal = b.locationCount; break;
         default: aVal = a.sku || ""; bVal = b.sku || "";
       }
       if (typeof aVal === "string") {
@@ -751,20 +758,22 @@ export default function Inventory() {
                           <div className="font-mono font-medium text-primary text-sm">{level.sku}</div>
                           <div className="text-sm font-medium mt-1">{level.name}</div>
                         </div>
-                        <Badge variant="outline" className="text-xs">{level.unitsPerVariant} /pkg</Badge>
+                        {level.locationCount > 0 && (
+                          <span className="text-xs text-muted-foreground">{level.locationCount} bins</span>
+                        )}
                       </div>
                       <div className="grid grid-cols-3 gap-2 text-xs mt-3">
                         <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Qty</div>
+                          <div className="text-muted-foreground">Physical</div>
                           <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Pickable</div>
-                          <div className="font-mono font-bold text-green-600">{level.pickableQty.toLocaleString()}</div>
+                          <div className="text-muted-foreground">Committed</div>
+                          <div className="font-mono font-bold text-muted-foreground">{level.reservedQty.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Locations</div>
-                          <div className="font-mono font-bold">{level.locationCount}</div>
+                          <div className="text-muted-foreground">Available</div>
+                          <div className="font-mono font-bold text-green-600">{level.available.toLocaleString()}</div>
                         </div>
                       </div>
                     </div>
@@ -788,22 +797,10 @@ export default function Inventory() {
                             {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("units")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Units/Pkg
-                            {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
                         <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
                           <div className="flex items-center justify-end gap-1">
-                            Qty
+                            Physical
                             {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("pickable")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Pickable
-                            {sortField === "pickable" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
                         <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
@@ -812,12 +809,13 @@ export default function Inventory() {
                             {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
-                        <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("locations")}>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("available")}>
                           <div className="flex items-center justify-end gap-1">
-                            Locations
-                            {sortField === "locations" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                            Available
+                            {sortField === "available" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
+                        {canEdit && <TableHead className="w-[80px]"></TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -849,14 +847,27 @@ export default function Inventory() {
                               </div>
                             </TableCell>
                             <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
-                            <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right">{level.locationCount}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{level.available.toLocaleString()}</TableCell>
+                            {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
-                            <VariantLocationRows variantId={level.variantId} warehouses={warehouses} />
+                            <VariantLocationRows
+                              variantId={level.variantId}
+                              sku={level.sku}
+                              warehouses={warehouses}
+                              canEdit={canEdit}
+                              onTransfer={(fromLocationId, fromLocationCode, variantId, sku) => {
+                                setTransferDialog({
+                                  open: true,
+                                  fromLocationId,
+                                  fromLocationCode,
+                                  variantId,
+                                  sku,
+                                });
+                              }}
+                            />
                           )}
                         </React.Fragment>
                       ))}
@@ -1252,6 +1263,15 @@ export default function Inventory() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <InlineTransferDialog
+        open={transferDialog.open}
+        onOpenChange={(open) => setTransferDialog({ ...transferDialog, open })}
+        defaultFromLocationId={transferDialog.fromLocationId}
+        defaultFromLocationCode={transferDialog.fromLocationCode}
+        defaultVariantId={transferDialog.variantId}
+        defaultSku={transferDialog.sku}
+      />
 
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
         <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
