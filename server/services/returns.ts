@@ -87,7 +87,7 @@ class ReturnsService {
    * Process a batch of returned items for an order.
    *
    * For each returned item:
-   *   - **Sellable**: Adds stock back to `onHandBase` at the specified
+   *   - **Sellable**: Adds stock back to `variantQty` at the specified
    *     location via `inventoryCore.receiveInventory()` with
    *     `transactionType = "return"`.
    *   - **Damaged / Defective**: Logs the return transaction but places the
@@ -110,7 +110,7 @@ class ReturnsService {
 
     for (const item of params.items) {
       try {
-        // Look up variant to get unitsPerVariant
+        // Look up variant for base unit calculation in response
         const [variant] = await this.db
           .select()
           .from(productVariants)
@@ -125,8 +125,7 @@ class ReturnsService {
           await this.inventoryCore.receiveInventory({
             productVariantId: item.productVariantId,
             warehouseLocationId: params.warehouseLocationId,
-            baseUnits,
-            variantQty: item.qty,
+            qty: item.qty,
             referenceId: String(params.orderId),
             notes: params.notes
               ? `Return (sellable): ${params.notes}`
@@ -165,8 +164,7 @@ class ReturnsService {
           await this.inventoryCore.receiveInventory({
             productVariantId: item.productVariantId,
             warehouseLocationId: params.warehouseLocationId,
-            baseUnits,
-            variantQty: item.qty,
+            qty: item.qty,
             referenceId: String(params.orderId),
             notes: `Return (${item.condition}) for order ${params.orderId}`,
             userId: params.userId,
@@ -177,7 +175,7 @@ class ReturnsService {
           await this.inventoryCore.adjustInventory({
             productVariantId: item.productVariantId,
             warehouseLocationId: params.warehouseLocationId,
-            baseUnitsDelta: -baseUnits,
+            qtyDelta: -item.qty,
             reason: `${item.condition} return${item.reason ? `: ${item.reason}` : ""}`,
             userId: params.userId,
           });

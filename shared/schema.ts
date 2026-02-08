@@ -518,17 +518,17 @@ export const insertProductVariantSchema = createInsertSchema(productVariants).om
 export type InsertProductVariant = z.infer<typeof insertProductVariantSchema>;
 export type ProductVariant = typeof productVariants.$inferSelect;
 
-// Inventory levels per location - tracks physical variant counts and state buckets
+// Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
+// Base unit equivalents are computed at query time via: qty * product_variants.units_per_variant
 export const inventoryLevels = pgTable("inventory_levels", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
-  variantQty: integer("variant_qty").notNull().default(0), // Physical count of variant units (e.g., 5 boxes)
-  onHandBase: integer("on_hand_base").notNull().default(0), // Derived: variantQty * unitsPerVariant
-  reservedBase: integer("reserved_base").notNull().default(0), // Allocated to orders (in base units)
-  pickedBase: integer("picked_base").notNull().default(0), // In picker carts (in base units)
-  packedBase: integer("packed_base").notNull().default(0), // Boxed, awaiting ship (in base units)
-  backorderBase: integer("backorder_base").notNull().default(0), // Backorder demand (in base units)
+  variantQty: integer("variant_qty").notNull().default(0), // Physical on-hand count in variant units (e.g., 5 cases)
+  reservedQty: integer("reserved_qty").notNull().default(0), // Allocated to orders (variant units)
+  pickedQty: integer("picked_qty").notNull().default(0), // In picker carts (variant units)
+  packedQty: integer("packed_qty").notNull().default(0), // Boxed, awaiting ship (variant units)
+  backorderQty: integer("backorder_qty").notNull().default(0), // Backorder demand (variant units)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

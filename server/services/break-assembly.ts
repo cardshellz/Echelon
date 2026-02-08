@@ -127,7 +127,6 @@ class BreakAssemblyService {
       // Decrement source variant
       await this.adjustWithinTx(tx, sourceLevel.id, {
         variantQty: -sourceQty,
-        onHandBase: -baseUnits,
       });
 
       // Increment target variant (upsert if no level row exists yet)
@@ -135,18 +134,16 @@ class BreakAssemblyService {
       if (targetLevel) {
         await this.adjustWithinTx(tx, targetLevel.id, {
           variantQty: targetQty,
-          onHandBase: baseUnits,
         });
       } else {
         await this.insertLevel(tx, {
           productVariantId: targetVariantId,
           warehouseLocationId,
           variantQty: targetQty,
-          onHandBase: baseUnits,
-          reservedBase: 0,
-          pickedBase: 0,
-          packedBase: 0,
-          backorderBase: 0,
+          reservedQty: 0,
+          pickedQty: 0,
+          packedQty: 0,
+          backorderQty: 0,
         });
       }
 
@@ -248,7 +245,6 @@ class BreakAssemblyService {
       // Decrement source
       await this.adjustWithinTx(tx, sourceLevel.id, {
         variantQty: -sourceQtyNeeded,
-        onHandBase: -baseUnits,
       });
 
       // Increment target
@@ -256,18 +252,16 @@ class BreakAssemblyService {
       if (targetLevel) {
         await this.adjustWithinTx(tx, targetLevel.id, {
           variantQty: targetQty,
-          onHandBase: baseUnits,
         });
       } else {
         await this.insertLevel(tx, {
           productVariantId: targetVariantId,
           warehouseLocationId,
           variantQty: targetQty,
-          onHandBase: baseUnits,
-          reservedBase: 0,
-          pickedBase: 0,
-          packedBase: 0,
-          backorderBase: 0,
+          reservedQty: 0,
+          pickedQty: 0,
+          packedQty: 0,
+          backorderQty: 0,
         });
       }
 
@@ -576,16 +570,13 @@ class BreakAssemblyService {
   private async adjustWithinTx(
     tx: any,
     levelId: number,
-    deltas: { variantQty?: number; onHandBase?: number }
+    deltas: { variantQty?: number }
   ): Promise<void> {
     const { sql } = await import("drizzle-orm");
     const updates: Record<string, any> = { updatedAt: new Date() };
 
     if (deltas.variantQty !== undefined) {
       updates.variantQty = sql`${inventoryLevels.variantQty} + ${deltas.variantQty}`;
-    }
-    if (deltas.onHandBase !== undefined) {
-      updates.onHandBase = sql`${inventoryLevels.onHandBase} + ${deltas.onHandBase}`;
     }
 
     await tx
@@ -603,11 +594,10 @@ class BreakAssemblyService {
       productVariantId: number;
       warehouseLocationId: number;
       variantQty: number;
-      onHandBase: number;
-      reservedBase: number;
-      pickedBase: number;
-      packedBase: number;
-      backorderBase: number;
+      reservedQty: number;
+      pickedQty: number;
+      packedQty: number;
+      backorderQty: number;
     }
   ): Promise<void> {
     await tx.insert(inventoryLevels).values(data);

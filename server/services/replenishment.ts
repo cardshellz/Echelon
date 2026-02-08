@@ -34,16 +34,14 @@ type InventoryCore = {
     productVariantId: number;
     fromLocationId: number;
     toLocationId: number;
-    baseUnits: number;
-    variantQty?: number;
+    qty: number;
     userId?: string;
     notes?: string;
   }) => Promise<void>;
   receiveInventory: (params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
-    variantQty?: number;
+    qty: number;
     referenceId: string;
     notes?: string;
     userId?: string;
@@ -79,7 +77,7 @@ class ReplenishmentService {
   /**
    * Scan all forward-pick locations that have a minQty threshold configured
    * (via replen rules or tier defaults) and create replen tasks for any
-   * location where onHandBase has dropped below the threshold.
+   * location where variantQty has dropped below the threshold.
    *
    * Existing pending/assigned/in_progress tasks for the same product+location
    * are skipped to avoid duplicate work.
@@ -177,7 +175,7 @@ class ReplenishmentService {
       if (minQty <= 0) continue; // No threshold configured
 
       // Is the location below threshold?
-      if (level.onHandBase >= minQty) continue;
+      if (level.variantQty >= minQty) continue;
 
       // Skip if a task already exists for this product+location
       const key = `${level.productVariantId}:${level.warehouseLocationId}`;
@@ -199,7 +197,7 @@ class ReplenishmentService {
       if (!sourceLocation) continue; // No stock to replenish from
 
       // Calculate target quantity (how many base units to move)
-      const qtyNeeded = (maxQty ?? minQty * 2) - level.onHandBase;
+      const qtyNeeded = (maxQty ?? minQty * 2) - level.variantQty;
       const sourceVariant = sourceVariantId != null
         ? variantMap.get(sourceVariantId) ?? variant
         : variant;
@@ -224,7 +222,7 @@ class ReplenishmentService {
           triggeredBy: "min_max",
           executionMode: "queue",
           warehouseId: location.warehouseId ?? undefined,
-          notes: `Auto-generated: onHand=${level.onHandBase}, minQty=${minQty}`,
+          notes: `Auto-generated: onHand=${level.variantQty}, minQty=${minQty}`,
         } satisfies InsertReplenTask)
         .returning();
 
@@ -322,7 +320,7 @@ class ReplenishmentService {
         sourceVariant.id,
         task.fromLocationId,
       );
-      if (!sourceLevel || sourceLevel.onHandBase < task.qtySourceUnits * sourceVariant.unitsPerVariant) {
+      if (!sourceLevel || sourceLevel.variantQty < task.qtySourceUnits) {
         throw new Error(
           `Insufficient source stock at location ${task.fromLocationId} ` +
           `for variant ${sourceVariant.id}`,
@@ -330,10 +328,10 @@ class ReplenishmentService {
       }
 
       const baseUnitsFromSource = task.qtySourceUnits * sourceVariant.unitsPerVariant;
+      const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
 
-      // Decrement source location (source variant)
+      // Decrement source location (source variant) - variant units only
       await this.inventoryCore.adjustLevel(sourceLevel.id, {
-        onHandBase: -baseUnitsFromSource,
         variantQty: -task.qtySourceUnits,
       });
 
@@ -349,7 +347,7 @@ class ReplenishmentService {
         targetState: "on_hand",
         referenceType: "replen_task",
         referenceId: String(taskId),
-        notes: `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${baseUnitsFromSource} base units`,
+        notes: `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}`,
         userId: userId ?? null,
       });
 
@@ -359,9 +357,7 @@ class ReplenishmentService {
         task.toLocationId,
       );
 
-      const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
       await this.inventoryCore.adjustLevel(destLevel.id, {
-        onHandBase: baseUnitsFromSource,
         variantQty: pickVariantUnits,
       });
 
@@ -394,8 +390,7 @@ class ReplenishmentService {
         productVariantId: variantId,
         fromLocationId: task.fromLocationId,
         toLocationId: task.toLocationId,
-        baseUnits,
-        variantQty: task.qtySourceUnits,
+        qty: task.qtySourceUnits,
         userId,
         notes: `Replen task #${taskId} (full_case)`,
       });
@@ -557,7 +552,7 @@ class ReplenishmentService {
     if (minQty <= 0) return null;
 
     // Is the location below threshold?
-    if (level.onHandBase >= minQty) return null;
+    if (level.variantQty >= minQty) return null;
 
     // Check for existing active task
     const [existingTask] = await this.db
@@ -598,7 +593,7 @@ class ReplenishmentService {
           .limit(1))[0] ?? variant
       : variant;
 
-    const qtyNeeded = (maxQty ?? minQty * 2) - level.onHandBase;
+    const qtyNeeded = (maxQty ?? minQty * 2) - level.variantQty;
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
@@ -620,7 +615,7 @@ class ReplenishmentService {
         triggeredBy: "inline_pick",
         executionMode: "queue",
         warehouseId: location.warehouseId ?? undefined,
-        notes: `Auto-triggered after pick: onHand=${level.onHandBase}, minQty=${minQty}`,
+        notes: `Auto-triggered after pick: onHand=${level.variantQty}, minQty=${minQty}`,
       } satisfies InsertReplenTask)
       .returning();
 
@@ -763,7 +758,7 @@ class ReplenishmentService {
           and(
             eq(inventoryLevels.productVariantId, productVariantId),
             eq(warehouseLocations.locationType, sourceLocationType),
-            sql`${inventoryLevels.onHandBase} > 0`,
+            sql`${inventoryLevels.variantQty} > 0`,
             ...(warehouseId != null
               ? [eq(warehouseLocations.warehouseId, warehouseId)]
               : []),

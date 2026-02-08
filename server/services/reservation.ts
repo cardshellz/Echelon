@@ -103,8 +103,8 @@ class ReservationService {
           continue;
         }
 
-        // 2. Calculate base units needed
-        const baseUnitsNeeded = item.quantity * (variant.unitsPerVariant ?? 1);
+        // 2. Calculate variant units needed (order qty IS variant units)
+        const unitsNeeded = item.quantity;
 
         // 3. Find the best location to reserve from
         //    Prefer forward_pick locations with sufficient available stock,
@@ -120,7 +120,7 @@ class ReservationService {
             and(
               eq(inventoryLevels.productVariantId, variant.id),
               // Available = onHand - reserved - picked > 0
-              sql`${inventoryLevels.onHandBase} - ${inventoryLevels.reservedBase} - ${inventoryLevels.pickedBase} > 0`,
+              sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
             ),
           )
           .orderBy(warehouseLocations.pickSequence);
@@ -129,7 +129,7 @@ class ReservationService {
           result.failed.push({
             sku: item.sku,
             orderItemId: item.id,
-            reason: `No available inventory for SKU "${item.sku}" (need ${baseUnitsNeeded} base units)`,
+            reason: `No available inventory for SKU "${item.sku}" (need ${unitsNeeded} units)`,
           });
           continue;
         }
@@ -138,10 +138,10 @@ class ReservationService {
         // first location with any stock if none has sufficient quantity.
         let chosenLevel = levels.find((row: any) => {
           const available =
-            row.inventory_levels.onHandBase -
-            row.inventory_levels.reservedBase -
-            row.inventory_levels.pickedBase;
-          return available >= baseUnitsNeeded;
+            row.inventory_levels.variantQty -
+            row.inventory_levels.reservedQty -
+            row.inventory_levels.pickedQty;
+          return available >= unitsNeeded;
         });
 
         if (!chosenLevel) {
@@ -151,17 +151,18 @@ class ReservationService {
         }
 
         const available =
-          chosenLevel.inventory_levels.onHandBase -
-          chosenLevel.inventory_levels.reservedBase -
-          chosenLevel.inventory_levels.pickedBase;
+          chosenLevel.inventory_levels.variantQty -
+          chosenLevel.inventory_levels.reservedQty -
+          chosenLevel.inventory_levels.pickedQty;
 
-        const unitsToReserve = Math.min(baseUnitsNeeded, available);
+        const unitsToReserve = Math.min(unitsNeeded, available);
+        const baseUnitsReserved = unitsToReserve * (variant.unitsPerVariant ?? 1);
 
-        // 4. Reserve via inventory core
+        // 4. Reserve via inventory core (now in variant units)
         const reserved = await this.inventoryCore.reserveForOrder({
           productVariantId: variant.id,
           warehouseLocationId: chosenLevel.inventory_levels.warehouseLocationId,
-          baseUnits: unitsToReserve,
+          qty: unitsToReserve,
           orderId,
           orderItemId: item.id,
           userId,
@@ -169,14 +170,14 @@ class ReservationService {
 
         if (reserved) {
           result.reserved++;
-          result.totalBaseUnits += unitsToReserve;
+          result.totalBaseUnits += baseUnitsReserved;
 
           // If we could not fully reserve, note the shortfall
-          if (unitsToReserve < baseUnitsNeeded) {
+          if (unitsToReserve < unitsNeeded) {
             result.failed.push({
               sku: item.sku,
               orderItemId: item.id,
-              reason: `Partial reservation: reserved ${unitsToReserve} of ${baseUnitsNeeded} base units`,
+              reason: `Partial reservation: reserved ${unitsToReserve} of ${unitsNeeded} variant units`,
             });
           }
         } else {
@@ -207,7 +208,7 @@ class ReservationService {
    * Release all inventory reservations for an order (e.g. order cancelled).
    *
    * For each line item, finds the matching reserved inventory and calls
-   * `inventoryCore.releaseReservation()` to decrement `reservedBase`.
+   * `inventoryCore.releaseReservation()` to decrement `reservedQty`.
    *
    * @param orderId  Internal order PK.
    * @param reason   Human-readable reason for the release (audit trail).
@@ -239,32 +240,32 @@ class ReservationService {
           continue;
         }
 
-        const baseUnits = item.quantity * (variant.unitsPerVariant ?? 1);
+        const unitsNeeded = item.quantity;
 
         // Find which location(s) hold the reservation for this variant.
-        // We look for locations where reservedBase > 0.
+        // We look for locations where reservedQty > 0.
         const levels = await this.db
           .select()
           .from(inventoryLevels)
           .where(
             and(
               eq(inventoryLevels.productVariantId, variant.id),
-              sql`${inventoryLevels.reservedBase} > 0`,
+              sql`${inventoryLevels.reservedQty} > 0`,
             ),
           );
 
-        let remaining = baseUnits;
+        let remaining = unitsNeeded;
 
         for (const level of levels) {
           if (remaining <= 0) break;
 
-          const releaseQty = Math.min(remaining, level.reservedBase);
+          const releaseQty = Math.min(remaining, level.reservedQty);
 
           try {
             await this.inventoryCore.releaseReservation({
               productVariantId: variant.id,
               warehouseLocationId: level.warehouseLocationId,
-              baseUnits: releaseQty,
+              qty: releaseQty,
               orderId,
               orderItemId: item.id,
               reason,
@@ -311,7 +312,7 @@ class ReservationService {
     Array<{
       sku: string;
       orderItemId: number;
-      reservedBase: number;
+      reservedQty: number;
       isReserved: boolean;
     }>
   > {
@@ -323,7 +324,7 @@ class ReservationService {
     const statuses: Array<{
       sku: string;
       orderItemId: number;
-      reservedBase: number;
+      reservedQty: number;
       isReserved: boolean;
     }> = [];
 
@@ -339,28 +340,27 @@ class ReservationService {
         statuses.push({
           sku: item.sku,
           orderItemId: item.id,
-          reservedBase: 0,
+          reservedQty: 0,
           isReserved: false,
         });
         continue;
       }
 
-      // Sum reserved base units across all locations for this variant
+      // Sum reserved units across all locations for this variant
       const [aggregate] = await this.db
         .select({
-          totalReserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)`,
+          totalReserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty}), 0)`,
         })
         .from(inventoryLevels)
         .where(eq(inventoryLevels.productVariantId, variant.id));
 
       const totalReserved = Number(aggregate?.totalReserved ?? 0);
-      const baseUnitsNeeded = item.quantity * (variant.unitsPerVariant ?? 1);
 
       statuses.push({
         sku: item.sku,
         orderItemId: item.id,
-        reservedBase: totalReserved,
-        isReserved: totalReserved >= baseUnitsNeeded,
+        reservedQty: totalReserved,
+        isReserved: totalReserved >= item.quantity,
       });
     }
 

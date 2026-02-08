@@ -72,19 +72,19 @@ interface VariantAvailability {
   name: string;
   unitsPerVariant: number;
   available: number;
-  onHandBase: number;
-  reservedBase: number;
-  atpBase: number;
   variantQty: number;
+  reservedQty: number;
+  pickedQty: number;
+  atpPieces: number;
 }
 
 interface InventoryItemSummary {
   productVariantId: number;
   baseSku: string;
   name: string;
-  totalOnHandBase: number;
-  totalReservedBase: number;
-  totalAtpBase: number;
+  totalOnHandPieces: number;
+  totalReservedPieces: number;
+  totalAtpPieces: number;
   variants: VariantAvailability[];
 }
 
@@ -141,11 +141,9 @@ interface VariantLevel {
   unitsPerVariant: number;
   baseSku: string | null;
   variantQty: number;
-  onHandBase: number;
-  reservedBase: number;
-  pickedBase: number;
+  reservedQty: number;
+  pickedQty: number;
   available: number;
-  totalPieces: number;
   locationCount: number;
   pickableQty: number;
 }
@@ -153,9 +151,8 @@ interface VariantLevel {
 interface VariantLocationLevel {
   id: number;
   variantQty: number;
-  onHandBase: number;
-  reservedBase: number;
-  pickedBase: number;
+  reservedQty: number;
+  pickedQty: number;
   location: {
     id: number;
     code: string;
@@ -207,7 +204,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
     <>
       {locationLevels.map((locLevel) => {
         const isPickable = locLevel.location?.isPickable === 1;
-        const available = locLevel.variantQty - locLevel.reservedBase;
+        const available = locLevel.variantQty - locLevel.reservedQty;
         return (
           <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
             <TableCell className="pl-8">
@@ -237,7 +234,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
               )}
             </TableCell>
             {/* Committed (allocated to orders) */}
-            <TableCell className="text-right font-mono text-xs">{locLevel.reservedBase || 0}</TableCell>
+            <TableCell className="text-right font-mono text-xs">{locLevel.reservedQty || 0}</TableCell>
             {/* Available at this location */}
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
             {/* Pickable status */}
@@ -312,7 +309,7 @@ export default function Inventory() {
       const data = await response.json();
       
       // Convert to CSV
-      const headers = ["SKU", "Variant Name", "Base SKU", "Item Name", "Location", "Zone", "Location Type", "Bin Type", "Pickable", "Variant Qty", "On Hand", "Reserved", "Picked", "Available"];
+      const headers = ["SKU", "Variant Name", "Base SKU", "Item Name", "Location", "Zone", "Location Type", "Bin Type", "Pickable", "Variant Qty", "Reserved", "Picked", "Available"];
       const csvRows = [headers.join(",")];
       
       for (const row of data) {
@@ -327,10 +324,9 @@ export default function Inventory() {
           `"${row.binType || ''}"`,
           row.isPickable ? "Yes" : "No",
           row.variantQty,
-          row.onHandBase,
-          row.reservedBase,
-          row.pickedBase,
-          row.availableBase,
+          row.reservedQty,
+          row.pickedQty,
+          row.availableQty,
         ].join(","));
       }
       
@@ -417,7 +413,7 @@ export default function Inventory() {
   });
 
   const adjustInventoryMutation = useMutation({
-    mutationFn: async (data: { productVariantId: number; warehouseLocationId: number; baseUnitsDelta: number; reason: string }) => {
+    mutationFn: async (data: { productVariantId: number; warehouseLocationId: number; qtyDelta: number; reason: string }) => {
       const response = await apiRequest("POST", "/api/inventory/adjust", data);
       return response.json();
     },
@@ -456,10 +452,10 @@ export default function Inventory() {
     (item.name?.toLowerCase() || '').includes(searchQuery.toLowerCase())
   );
 
-  const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandBase || 0), 0);
-  const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedBase || 0), 0);
-  const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpBase || 0), 0);
-  const lowStockItems = inventorySummary.filter(item => Number(item.totalAtpBase || 0) <= 0).length;
+  const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandPieces || 0), 0);
+  const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedPieces || 0), 0);
+  const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpPieces || 0), 0);
+  const lowStockItems = inventorySummary.filter(item => Number(item.totalAtpPieces || 0) <= 0).length;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -483,7 +479,7 @@ export default function Inventory() {
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
         case "units": aVal = a.unitsPerVariant; bVal = b.unitsPerVariant; break;
         case "pickable": aVal = a.pickableQty; bVal = b.pickableQty; break;
-        case "reserved": aVal = a.reservedBase; bVal = b.reservedBase; break;
+        case "reserved": aVal = a.reservedQty; bVal = b.reservedQty; break;
         case "available": aVal = a.available; bVal = b.available; break;
         case "locations": aVal = a.locationCount; bVal = b.locationCount; break;
         default: aVal = a.sku || ""; bVal = b.sku || "";
@@ -511,7 +507,7 @@ export default function Inventory() {
     adjustInventoryMutation.mutate({
       productVariantId: selectedItem.productVariantId,
       warehouseLocationId: firstLocation.id,
-      baseUnitsDelta: parseInt(adjustmentQty),
+      qtyDelta: parseInt(adjustmentQty),
       reason: adjustmentReason,
     });
   };
@@ -551,9 +547,9 @@ export default function Inventory() {
     switch (productSortField) {
       case "baseSku": aVal = a.baseSku || ""; bVal = b.baseSku || ""; break;
       case "name": aVal = a.name || ""; bVal = b.name || ""; break;
-      case "onHand": aVal = a.totalOnHandBase; bVal = b.totalOnHandBase; break;
-      case "reserved": aVal = a.totalReservedBase; bVal = b.totalReservedBase; break;
-      case "atp": aVal = a.totalAtpBase; bVal = b.totalAtpBase; break;
+      case "onHand": aVal = a.totalOnHandPieces; bVal = b.totalOnHandPieces; break;
+      case "reserved": aVal = a.totalReservedPieces; bVal = b.totalReservedPieces; break;
+      case "atp": aVal = a.totalAtpPieces; bVal = b.totalAtpPieces; break;
       case "variants": aVal = a.variants.length; bVal = b.variants.length; break;
       default: aVal = a.baseSku || ""; bVal = b.baseSku || "";
     }
@@ -848,7 +844,7 @@ export default function Inventory() {
                             <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right">{level.locationCount}</TableCell>
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
@@ -886,16 +882,16 @@ export default function Inventory() {
                           <div className="font-mono font-medium text-primary text-sm">{product.baseSku}</div>
                           <div className="text-sm font-medium mt-1">{product.name}</div>
                         </div>
-                        {getProductStatusBadge(product.totalAtpBase)}
+                        {getProductStatusBadge(product.totalAtpPieces)}
                       </div>
                       <div className="grid grid-cols-3 gap-2 text-xs mt-3">
                         <div className="bg-muted/30 p-2 rounded">
                           <div className="text-muted-foreground">Total Pieces</div>
-                          <div className="font-mono font-bold">{product.totalOnHandBase.toLocaleString()}</div>
+                          <div className="font-mono font-bold">{product.totalOnHandPieces.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
                           <div className="text-muted-foreground">Available</div>
-                          <div className="font-mono font-bold text-green-600">{product.totalAtpBase.toLocaleString()}</div>
+                          <div className="font-mono font-bold text-green-600">{product.totalAtpPieces.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
                           <div className="text-muted-foreground">Variants</div>
@@ -976,11 +972,11 @@ export default function Inventory() {
                               </div>
                             </TableCell>
                             <TableCell className="truncate max-w-[200px]">{product.name}</TableCell>
-                            <TableCell className="text-right font-mono font-bold">{product.totalOnHandBase.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono text-muted-foreground">{product.totalReservedBase.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{product.totalAtpBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-bold">{product.totalOnHandPieces.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">{product.totalReservedPieces.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{product.totalAtpPieces.toLocaleString()}</TableCell>
                             <TableCell className="text-right">{product.variants.length}</TableCell>
-                            <TableCell>{getProductStatusBadge(product.totalAtpBase)}</TableCell>
+                            <TableCell>{getProductStatusBadge(product.totalAtpPieces)}</TableCell>
                           </TableRow>
                           {expandedProducts.has(product.productVariantId) && product.variants.map((v) => (
                             <TableRow key={v.variantId} className="bg-muted/20">
@@ -1020,7 +1016,7 @@ export default function Inventory() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label className="text-sm">Current On Hand: {selectedItem?.totalOnHandBase.toLocaleString()} base units</Label>
+              <Label className="text-sm">Current On Hand: {selectedItem?.totalOnHandPieces.toLocaleString()} pieces</Label>
             </div>
             <div className="space-y-2">
               <Label htmlFor="qty" className="text-sm">Adjustment Quantity (+ or -)</Label>

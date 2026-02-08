@@ -65,6 +65,9 @@ export interface ProductAtpSummary {
  * Read-only service that calculates fungible Available-to-Promise (ATP)
  * for a multi-UOM inventory model.
  *
+ * All inventory_levels quantities are stored in **variant units**. Base-unit
+ * equivalents are computed at query time via `qty * product_variants.units_per_variant`.
+ *
  * Key concept: all variants of the same product share a single pool of
  * "base units". A case, box, and pack of the same sleeve product all
  * draw from the same on-hand total expressed in the smallest sellable
@@ -81,24 +84,20 @@ class InventoryAtpService {
   // --------------------------------------------------------------------------
 
   /**
-   * Sum all inventory_levels across every variant of a product.
-   *
-   * Because base units are fungible within a product, we aggregate
-   * on_hand_base, reserved_base, picked_base, packed_base, and
-   * backorder_base across ALL variants and ALL warehouse locations.
+   * Sum all inventory_levels across every variant of a product, converting
+   * to base units via `qty * product_variants.units_per_variant`.
    *
    * @param productId - The product whose base-unit totals to compute.
-   * @returns Aggregated base-unit totals. All fields default to 0 when
-   *          no inventory records exist.
+   * @returns Aggregated base-unit totals. All fields default to 0.
    */
   async getTotalBaseUnits(productId: number): Promise<BaseUnitTotals> {
     const [row] = await this.db
       .select({
-        onHand: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)`,
-        reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)`,
-        picked: sql<number>`COALESCE(SUM(${inventoryLevels.pickedBase}), 0)`,
-        packed: sql<number>`COALESCE(SUM(${inventoryLevels.packedBase}), 0)`,
-        backorder: sql<number>`COALESCE(SUM(${inventoryLevels.backorderBase}), 0)`,
+        onHand: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
+        reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        picked: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        packed: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        backorder: sql<number>`COALESCE(SUM(${inventoryLevels.backorderQty} * ${productVariants.unitsPerVariant}), 0)`,
       })
       .from(inventoryLevels)
       .innerJoin(
@@ -124,15 +123,6 @@ class InventoryAtpService {
    * Calculate the fungible ATP pool for a product in base units.
    *
    * Formula: ATP = totalOnHand - totalReserved - totalPicked - totalPacked
-   *
-   * Reserved, picked, and packed units are all committed and therefore
-   * unavailable for new order promises. Backorder is excluded from the
-   * deduction because it represents future demand, not current stock
-   * commitment.
-   *
-   * @param productId - The product to calculate ATP for.
-   * @returns ATP in base units. May be negative when commitments exceed
-   *          on-hand stock (over-promise scenario).
    */
   async getAtpBase(productId: number): Promise<number> {
     const totals = await this.getTotalBaseUnits(productId);
@@ -146,17 +136,6 @@ class InventoryAtpService {
   /**
    * For each active variant of a product, compute how many sellable
    * units can be promised based on the shared ATP pool.
-   *
-   * Every variant sees the SAME atpBase (the shared pool). The sellable
-   * unit count is `floor(atpBase / unitsPerVariant)`.
-   *
-   * Example with atpBase = 1000 packs:
-   *   - Pack  (unitsPerVariant=1)   → atpUnits = 1000
-   *   - Box   (unitsPerVariant=5)   → atpUnits = 200
-   *   - Case  (unitsPerVariant=100) → atpUnits = 10
-   *
-   * @param productId - The product whose variants to evaluate.
-   * @returns Array of per-variant ATP, one entry per active variant.
    */
   async getAtpPerVariant(productId: number): Promise<VariantAtp[]> {
     const [atpBase, variants] = await Promise.all([
@@ -198,32 +177,12 @@ class InventoryAtpService {
   // 4. getAtpForChannel
   // --------------------------------------------------------------------------
 
-  /**
-   * Compute ATP for variants of a product that are listed on a specific
-   * sales channel.
-   *
-   * Joins product_variants → channel_feeds (on productVariantId) and
-   * filters to rows matching the given channelId via the channel_feeds
-   * table. Only active channel_feed entries (isActive = 1) are included.
-   *
-   * @param productId  - The product to evaluate.
-   * @param channelId  - Numeric channel ID. Matched against channel_feeds
-   *                     rows by joining through the channels table.
-   * @returns Array of channel-scoped ATPs with the external channel
-   *          variant identifier.
-   */
   async getAtpForChannel(
     productId: number,
     channelId: number,
   ): Promise<ChannelVariantAtp[]> {
     const atpBase = await this.getAtpBase(productId);
 
-    // channel_feeds stores channelType (e.g. "shopify") rather than a
-    // direct channelId FK.  We resolve the channel's provider first,
-    // then filter channel_feeds by that type.
-    //
-    // Import `channels` lazily to keep the top-level import list lean;
-    // this is the only method that needs it.
     const { channels } = await import("@shared/schema");
 
     const feedRows = await this.db
@@ -267,22 +226,9 @@ class InventoryAtpService {
   // 5. getProductSummary
   // --------------------------------------------------------------------------
 
-  /**
-   * Build a comprehensive ATP summary for a single product.
-   *
-   * Includes:
-   * - Product identity (id, sku, name)
-   * - Aggregate base-unit totals (on-hand, reserved, ATP)
-   * - Per-variant breakdown with sellable ATP and physical location counts
-   *
-   * Returns `null` if the product does not exist.
-   *
-   * @param productId - The product to summarise.
-   */
   async getProductSummary(
     productId: number,
   ): Promise<ProductAtpSummary | null> {
-    // Fetch product row
     const [product] = await this.db
       .select({
         id: products.id,
@@ -294,11 +240,9 @@ class InventoryAtpService {
 
     if (!product) return null;
 
-    // Fetch totals, ATP, and per-variant physical quantities in parallel
     const [totals, atpBase, variantPhysicals] = await Promise.all([
       this.getTotalBaseUnits(productId),
       this.getAtpBase(productId),
-      // Sum variantQty across all locations, grouped by variant
       this.db
         .select({
           productVariantId: productVariants.id,
@@ -357,17 +301,6 @@ class InventoryAtpService {
   // 6. getInventoryItemSummary (backward-compatible shape)
   // --------------------------------------------------------------------------
 
-  /**
-   * Returns an inventory summary in the legacy shape expected by existing
-   * client pages (Inventory.tsx, etc.).
-   *
-   * Unlike `getProductSummary` (which returns fungible ATP and physicalQty),
-   * this method includes per-variant onHandBase, reservedBase, and
-   * per-variant atpBase so the client can render per-variant detail.
-   *
-   * @param productId - The product to summarise.
-   * @returns Legacy-shaped summary, or `null` if product not found.
-   */
   async getInventoryItemSummary(productId: number): Promise<{
     productId: number;
     baseSku: string;
@@ -381,10 +314,10 @@ class InventoryAtpService {
       name: string;
       unitsPerVariant: number;
       available: number;
-      onHandBase: number;
-      reservedBase: number;
-      atpBase: number;
       variantQty: number;
+      reservedQty: number;
+      pickedQty: number;
+      atpBase: number;
     }>;
   } | null> {
     const [product] = await this.db
@@ -394,17 +327,22 @@ class InventoryAtpService {
 
     if (!product) return null;
 
+    // Aggregate per-variant across all locations, computing base units via JOIN
     const variantRows = await this.db
       .select({
         productVariantId: productVariants.id,
         sku: productVariants.sku,
         name: productVariants.name,
         unitsPerVariant: productVariants.unitsPerVariant,
-        onHandBase: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)`,
-        reservedBase: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)`,
-        pickedBase: sql<number>`COALESCE(SUM(${inventoryLevels.pickedBase}), 0)`,
-        packedBase: sql<number>`COALESCE(SUM(${inventoryLevels.packedBase}), 0)`,
         variantQty: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)`,
+        reservedQty: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty}), 0)`,
+        pickedQty: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty}), 0)`,
+        packedQty: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty}), 0)`,
+        // Base-unit equivalents computed on the fly
+        onHandPieces: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
+        reservedPieces: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        pickedPieces: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        packedPieces: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)`,
       })
       .from(productVariants)
       .leftJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
@@ -416,28 +354,24 @@ class InventoryAtpService {
         productVariants.unitsPerVariant,
       );
 
-    // Compute fungible ATP pool across ALL variants of this product
-    const totalOnHand = variantRows.reduce((s: number, v: any) => s + Number(v.onHandBase), 0);
-    const totalReserved = variantRows.reduce((s: number, v: any) => s + Number(v.reservedBase), 0);
-    const totalPicked = variantRows.reduce((s: number, v: any) => s + Number(v.pickedBase), 0);
-    const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedBase), 0);
+    // Compute fungible ATP pool across ALL variants in base units (pieces)
+    const totalOnHand = variantRows.reduce((s: number, v: any) => s + Number(v.onHandPieces), 0);
+    const totalReserved = variantRows.reduce((s: number, v: any) => s + Number(v.reservedPieces), 0);
+    const totalPicked = variantRows.reduce((s: number, v: any) => s + Number(v.pickedPieces), 0);
+    const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedPieces), 0);
     const totalAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
 
-    const variants = variantRows.map((v: any) => {
-      const onHand = Number(v.onHandBase);
-      const reserved = Number(v.reservedBase);
-      return {
-        productVariantId: v.productVariantId,
-        sku: v.sku ?? "",
-        name: v.name,
-        unitsPerVariant: v.unitsPerVariant,
-        available: Math.floor(totalAtpBase / v.unitsPerVariant),
-        onHandBase: onHand,
-        reservedBase: reserved,
-        atpBase: totalAtpBase,
-        variantQty: Number(v.variantQty),
-      };
-    });
+    const variants = variantRows.map((v: any) => ({
+      productVariantId: v.productVariantId,
+      sku: v.sku ?? "",
+      name: v.name,
+      unitsPerVariant: v.unitsPerVariant,
+      available: Math.floor(totalAtpBase / v.unitsPerVariant),
+      variantQty: Number(v.variantQty),
+      reservedQty: Number(v.reservedQty),
+      pickedQty: Number(v.pickedQty),
+      atpBase: totalAtpBase,
+    }));
 
     return {
       productId: product.id,
@@ -454,16 +388,6 @@ class InventoryAtpService {
   // 7. getBulkAtp
   // --------------------------------------------------------------------------
 
-  /**
-   * Efficiently fetch ATP base units for many products in a single query.
-   *
-   * Uses a single SQL statement with `GROUP BY product_variants.product_id`
-   * to avoid N+1 queries. Products with no inventory records are omitted
-   * from the result map (implicitly ATP = 0).
-   *
-   * @param productIds - Array of product IDs to evaluate.
-   * @returns Map from productId to ATP in base units.
-   */
   async getBulkAtp(productIds: number[]): Promise<Map<number, number>> {
     if (productIds.length === 0) return new Map();
 
@@ -471,10 +395,10 @@ class InventoryAtpService {
       .select({
         productId: productVariants.productId,
         atp: sql<number>`
-          COALESCE(SUM(${inventoryLevels.onHandBase}), 0)
-          - COALESCE(SUM(${inventoryLevels.reservedBase}), 0)
-          - COALESCE(SUM(${inventoryLevels.pickedBase}), 0)
-          - COALESCE(SUM(${inventoryLevels.packedBase}), 0)
+          COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)
+          - COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)
+          - COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)
+          - COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)
         `,
       })
       .from(inventoryLevels)
@@ -497,13 +421,6 @@ class InventoryAtpService {
 // Factory
 // ============================================================================
 
-/**
- * Create an InventoryAtpService instance bound to the given Drizzle
- * database client.
- *
- * @param db - A Drizzle ORM database instance (e.g. from `drizzle(pool)`).
- * @returns A new read-only ATP service.
- */
 export function createInventoryAtpService(db: any) {
   return new InventoryAtpService(db);
 }

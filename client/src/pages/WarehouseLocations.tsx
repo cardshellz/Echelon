@@ -165,9 +165,8 @@ export default function WarehouseLocations() {
     id: number;
     variantId: number;
     qty: number;
-    onHandBase: number;
-    reservedBase: number;
-    pickedBase: number;
+    reservedQty: number;
+    pickedQty: number;
     sku: string | null;
     variantName: string | null;
     unitsPerVariant: number;
@@ -1634,7 +1633,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className="font-bold text-sm">{inv.onHandBase}</div>
+                          <div className="font-bold text-sm">{inv.qty}</div>
                           <div className="text-xs text-muted-foreground">on hand</div>
                         </div>
                       </div>

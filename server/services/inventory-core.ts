@@ -22,10 +22,11 @@ type DrizzleDb = {
 /**
  * Core inventory service for the Echelon WMS.
  *
- * Manages `inventory_levels` state buckets (onHandBase, reservedBase,
- * pickedBase, packedBase, backorderBase, variantQty) and writes an
- * `inventory_transactions` record for every mutation so the ledger
- * is always auditable.
+ * All quantities in `inventory_levels` are stored in **variant units**
+ * (e.g., 5 cases, 10 packs). Base-unit equivalents are computed at
+ * query time via `qty * product_variants.units_per_variant`.
+ *
+ * State buckets: variantQty, reservedQty, pickedQty, packedQty, backorderQty
  *
  * Design principles:
  * - Receives `db` via constructor -- no global singletons.
@@ -42,12 +43,6 @@ export class InventoryCoreService {
   // READ helpers
   // ---------------------------------------------------------------------------
 
-  /**
-   * Look up a single inventory level for a specific variant at a specific
-   * warehouse location.
-   *
-   * @returns The level row, or `null` if none exists.
-   */
   async getLevel(
     productVariantId: number,
     warehouseLocationId: number,
@@ -65,10 +60,6 @@ export class InventoryCoreService {
     return row ?? null;
   }
 
-  /**
-   * Return every inventory level row for a given product variant, across
-   * all warehouse locations.
-   */
   async getLevelsByVariant(
     productVariantId: number,
   ): Promise<InventoryLevel[]> {
@@ -78,10 +69,6 @@ export class InventoryCoreService {
       .where(eq(inventoryLevels.productVariantId, productVariantId));
   }
 
-  /**
-   * Return every inventory level row at a given warehouse location, across
-   * all product variants stored there.
-   */
   async getLevelsByLocation(
     warehouseLocationId: number,
   ): Promise<InventoryLevel[]> {
@@ -95,14 +82,6 @@ export class InventoryCoreService {
   // UPSERT
   // ---------------------------------------------------------------------------
 
-  /**
-   * Create an inventory level row if one does not already exist for the given
-   * variant + location pair.  If a row already exists it is returned as-is
-   * (the `initial` values are *not* merged into an existing row).
-   *
-   * @param initial  Optional seed values for the new row (onHandBase, etc.).
-   *                 If omitted every bucket defaults to 0.
-   */
   async upsertLevel(
     productVariantId: number,
     warehouseLocationId: number,
@@ -129,12 +108,11 @@ export class InventoryCoreService {
         .values({
           productVariantId,
           warehouseLocationId,
-          onHandBase: initial.onHandBase ?? 0,
-          reservedBase: initial.reservedBase ?? 0,
-          pickedBase: initial.pickedBase ?? 0,
-          packedBase: initial.packedBase ?? 0,
-          backorderBase: initial.backorderBase ?? 0,
           variantQty: initial.variantQty ?? 0,
+          reservedQty: initial.reservedQty ?? 0,
+          pickedQty: initial.pickedQty ?? 0,
+          packedQty: initial.packedQty ?? 0,
+          backorderQty: initial.backorderQty ?? 0,
         })
         .returning();
 
@@ -146,26 +124,14 @@ export class InventoryCoreService {
   // ATOMIC BUCKET ADJUSTMENT
   // ---------------------------------------------------------------------------
 
-  /**
-   * Atomically adjust one or more state buckets on an existing inventory
-   * level row using `SET col = col + delta`.  This avoids read-then-write
-   * race conditions when multiple workers touch the same row concurrently.
-   *
-   * @param levelId  Primary key of the `inventory_levels` row.
-   * @param deltas   Map of bucket name to signed delta value.  Only
-   *                 non-undefined keys are applied.
-   * @returns The updated row.
-   * @throws If no row exists with the given `levelId`.
-   */
   async adjustLevel(
     levelId: number,
     deltas: {
-      onHandBase?: number;
-      reservedBase?: number;
-      pickedBase?: number;
-      packedBase?: number;
-      backorderBase?: number;
       variantQty?: number;
+      reservedQty?: number;
+      pickedQty?: number;
+      packedQty?: number;
+      backorderQty?: number;
     },
   ): Promise<InventoryLevel> {
     return this.db.transaction(async (tx: any) => {
@@ -173,23 +139,20 @@ export class InventoryCoreService {
         updatedAt: new Date(),
       };
 
-      if (deltas.onHandBase !== undefined) {
-        setClauses.onHandBase = sql`${inventoryLevels.onHandBase} + ${deltas.onHandBase}`;
-      }
-      if (deltas.reservedBase !== undefined) {
-        setClauses.reservedBase = sql`${inventoryLevels.reservedBase} + ${deltas.reservedBase}`;
-      }
-      if (deltas.pickedBase !== undefined) {
-        setClauses.pickedBase = sql`${inventoryLevels.pickedBase} + ${deltas.pickedBase}`;
-      }
-      if (deltas.packedBase !== undefined) {
-        setClauses.packedBase = sql`${inventoryLevels.packedBase} + ${deltas.packedBase}`;
-      }
-      if (deltas.backorderBase !== undefined) {
-        setClauses.backorderBase = sql`${inventoryLevels.backorderBase} + ${deltas.backorderBase}`;
-      }
       if (deltas.variantQty !== undefined) {
         setClauses.variantQty = sql`${inventoryLevels.variantQty} + ${deltas.variantQty}`;
+      }
+      if (deltas.reservedQty !== undefined) {
+        setClauses.reservedQty = sql`${inventoryLevels.reservedQty} + ${deltas.reservedQty}`;
+      }
+      if (deltas.pickedQty !== undefined) {
+        setClauses.pickedQty = sql`${inventoryLevels.pickedQty} + ${deltas.pickedQty}`;
+      }
+      if (deltas.packedQty !== undefined) {
+        setClauses.packedQty = sql`${inventoryLevels.packedQty} + ${deltas.packedQty}`;
+      }
+      if (deltas.backorderQty !== undefined) {
+        setClauses.backorderQty = sql`${inventoryLevels.backorderQty} + ${deltas.backorderQty}`;
       }
 
       const [updated] = await tx
@@ -211,46 +174,40 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Receive stock into a warehouse location -- typically from a purchase
-   * order.  Increments `onHandBase` (and optionally `variantQty`) then
-   * writes a `receipt` transaction.
+   * Receive stock into a warehouse location. Increments `variantQty` and
+   * writes a `receipt` transaction. All quantities are in variant units.
    */
   async receiveInventory(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
-    variantQty?: number;
+    qty: number;
     referenceId: string;
     notes?: string;
     userId?: string;
   }): Promise<void> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
 
     await this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
-      // Ensure a level row exists
       const level = await svc.upsertLevel(
         params.productVariantId,
         params.warehouseLocationId,
       );
 
-      // Atomically increment
       await svc.adjustLevel(level.id, {
-        onHandBase: params.baseUnits,
-        variantQty: params.variantQty,
+        variantQty: params.qty,
       });
 
-      // Audit
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         toLocationId: params.warehouseLocationId,
         transactionType: "receipt",
-        variantQtyDelta: params.variantQty ?? 0,
+        variantQtyDelta: params.qty,
         variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty + (params.variantQty ?? 0),
+        variantQtyAfter: level.variantQty + params.qty,
         sourceState: null,
         targetState: "on_hand",
         referenceType: "receiving",
@@ -266,23 +223,20 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Pick a product for an order.  Decrements `onHandBase`, increments
-   * `pickedBase`, and releases any matching reservation by decrementing
-   * `reservedBase`.
-   *
-   * @returns `true` if the pick succeeded, `false` if there was
-   *          insufficient on-hand inventory.
+   * Pick a product for an order. Decrements `variantQty`, increments
+   * `pickedQty`, and releases any matching reservation by decrementing
+   * `reservedQty`. All quantities in variant units.
    */
   async pickItem(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
+    qty: number;
     orderId: number;
     orderItemId?: number;
     userId?: string;
   }): Promise<boolean> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
 
     return this.db.transaction(async (tx: any) => {
@@ -298,17 +252,17 @@ export class InventoryCoreService {
       }
 
       // Guard: enough on-hand stock?
-      if (level.onHandBase < params.baseUnits) {
+      if (level.variantQty < params.qty) {
         return false;
       }
 
       // Determine if there is a reservation to release
-      const reservationRelease = Math.min(level.reservedBase, params.baseUnits);
+      const reservationRelease = Math.min(level.reservedQty, params.qty);
 
       await svc.adjustLevel(level.id, {
-        onHandBase: -params.baseUnits,
-        pickedBase: params.baseUnits,
-        reservedBase: reservationRelease > 0 ? -reservationRelease : undefined,
+        variantQty: -params.qty,
+        pickedQty: params.qty,
+        reservedQty: reservationRelease > 0 ? -reservationRelease : undefined,
       });
 
       await svc.logTransaction({
@@ -336,20 +290,20 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Record a shipment confirmation.  Decrements `pickedBase` (the stock
-   * has left the building) and writes a `ship` transaction.
+   * Record a shipment confirmation. Decrements `pickedQty` and `variantQty`
+   * (the stock has left the building). All quantities in variant units.
    */
   async recordShipment(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
+    qty: number;
     orderId: number;
     orderItemId?: number;
     shipmentId?: string;
     userId?: string;
   }): Promise<void> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
 
     await this.db.transaction(async (tx: any) => {
@@ -367,36 +321,24 @@ export class InventoryCoreService {
         );
       }
 
-      if (level.pickedBase < params.baseUnits) {
+      if (level.pickedQty < params.qty) {
         throw new Error(
-          `Cannot ship ${params.baseUnits} base units: only ` +
-            `${level.pickedBase} in picked state`,
+          `Cannot ship ${params.qty} units: only ` +
+            `${level.pickedQty} in picked state`,
         );
       }
 
-      // Compute the variantQty delta -- derive from baseUnits and variant's
-      // unitsPerVariant if we can, otherwise leave at 0.
-      const [variant] = await tx
-        .select()
-        .from(productVariants)
-        .where(eq(productVariants.id, params.productVariantId))
-        .limit(1);
-
-      const unitsPerVariant = (variant as ProductVariant | undefined)?.unitsPerVariant ?? 1;
-      const variantQtyDelta = Math.floor(params.baseUnits / unitsPerVariant);
-
       await svc.adjustLevel(level.id, {
-        pickedBase: -params.baseUnits,
-        variantQty: variantQtyDelta > 0 ? -variantQtyDelta : undefined,
+        pickedQty: -params.qty,
       });
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.warehouseLocationId,
         transactionType: "ship",
-        variantQtyDelta: variantQtyDelta > 0 ? -variantQtyDelta : 0,
+        variantQtyDelta: -params.qty,
         variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty - variantQtyDelta,
+        variantQtyAfter: level.variantQty - params.qty,
         sourceState: "picked",
         targetState: "shipped",
         orderId: params.orderId,
@@ -413,21 +355,20 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Apply a manual inventory adjustment.  The delta can be positive or
-   * negative.  Adjusts `onHandBase` and writes an `adjustment` transaction
-   * with the supplied reason.
+   * Apply a manual inventory adjustment to `variantQty`. The delta can be
+   * positive or negative. All quantities in variant units.
    */
   async adjustInventory(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnitsDelta: number;
+    qtyDelta: number;
     reason: string;
     reasonId?: number;
     cycleCountId?: number;
     userId?: string;
   }): Promise<void> {
-    if (params.baseUnitsDelta === 0) {
-      throw new Error("baseUnitsDelta must be non-zero");
+    if (params.qtyDelta === 0) {
+      throw new Error("qtyDelta must be non-zero");
     }
 
     await this.db.transaction(async (tx: any) => {
@@ -439,20 +380,20 @@ export class InventoryCoreService {
       );
 
       await svc.adjustLevel(level.id, {
-        onHandBase: params.baseUnitsDelta,
+        variantQty: params.qtyDelta,
       });
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         fromLocationId:
-          params.baseUnitsDelta < 0 ? params.warehouseLocationId : null,
+          params.qtyDelta < 0 ? params.warehouseLocationId : null,
         toLocationId:
-          params.baseUnitsDelta > 0 ? params.warehouseLocationId : null,
+          params.qtyDelta > 0 ? params.warehouseLocationId : null,
         transactionType: "adjustment",
         reasonId: params.reasonId ?? null,
-        variantQtyDelta: 0,
+        variantQtyDelta: params.qtyDelta,
         variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty,
+        variantQtyAfter: level.variantQty + params.qtyDelta,
         sourceState: "on_hand",
         targetState: "on_hand",
         cycleCountId: params.cycleCountId ?? null,
@@ -471,23 +412,20 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Reserve inventory for an order by incrementing `reservedBase`.
-   * The reservation is a soft hold -- `onHandBase` is *not* decremented
-   * until the pick step.
-   *
-   * @returns `true` if the reservation succeeded (enough available),
-   *          `false` otherwise.
+   * Reserve inventory for an order by incrementing `reservedQty`.
+   * The reservation is a soft hold -- `variantQty` is *not* decremented
+   * until the pick step. All quantities in variant units.
    */
   async reserveForOrder(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
+    qty: number;
     orderId: number;
     orderItemId: number;
     userId?: string;
   }): Promise<boolean> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
 
     return this.db.transaction(async (tx: any) => {
@@ -503,13 +441,13 @@ export class InventoryCoreService {
       }
 
       // Available = onHand - already reserved
-      const available = level.onHandBase - level.reservedBase;
-      if (available < params.baseUnits) {
+      const available = level.variantQty - level.reservedQty;
+      if (available < params.qty) {
         return false;
       }
 
       await svc.adjustLevel(level.id, {
-        reservedBase: params.baseUnits,
+        reservedQty: params.qty,
       });
 
       await svc.logTransaction({
@@ -533,20 +471,19 @@ export class InventoryCoreService {
   }
 
   /**
-   * Release a previously placed reservation (e.g. order cancelled,
-   * item shorted).  Decrements `reservedBase`.
+   * Release a previously placed reservation. Decrements `reservedQty`.
    */
   async releaseReservation(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
+    qty: number;
     orderId: number;
     orderItemId: number;
     reason: string;
     userId?: string;
   }): Promise<void> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
 
     await this.db.transaction(async (tx: any) => {
@@ -564,15 +501,15 @@ export class InventoryCoreService {
         );
       }
 
-      if (level.reservedBase < params.baseUnits) {
+      if (level.reservedQty < params.qty) {
         throw new Error(
-          `Cannot release ${params.baseUnits} reserved units: only ` +
-            `${level.reservedBase} currently reserved`,
+          `Cannot release ${params.qty} reserved units: only ` +
+            `${level.reservedQty} currently reserved`,
         );
       }
 
       await svc.adjustLevel(level.id, {
-        reservedBase: -params.baseUnits,
+        reservedQty: -params.qty,
       });
 
       await svc.logTransaction({
@@ -599,21 +536,19 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Move inventory from one warehouse location to another.  Both the
-   * source decrement and destination increment happen in a single
-   * transaction.  Two transaction records are written (one per location).
+   * Move inventory from one warehouse location to another. All quantities
+   * in variant units.
    */
   async transfer(params: {
     productVariantId: number;
     fromLocationId: number;
     toLocationId: number;
-    baseUnits: number;
-    variantQty?: number;
+    qty: number;
     userId?: string;
     notes?: string;
   }): Promise<void> {
-    if (params.baseUnits <= 0) {
-      throw new Error("baseUnits must be a positive integer");
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
     }
     if (params.fromLocationId === params.toLocationId) {
       throw new Error("Source and destination locations must be different");
@@ -635,16 +570,15 @@ export class InventoryCoreService {
         );
       }
 
-      if (sourceLevel.onHandBase < params.baseUnits) {
+      if (sourceLevel.variantQty < params.qty) {
         throw new Error(
-          `Insufficient on-hand at source: need ${params.baseUnits}, ` +
-            `have ${sourceLevel.onHandBase}`,
+          `Insufficient on-hand at source: need ${params.qty}, ` +
+            `have ${sourceLevel.variantQty}`,
         );
       }
 
       await svc.adjustLevel(sourceLevel.id, {
-        onHandBase: -params.baseUnits,
-        variantQty: params.variantQty != null ? -params.variantQty : undefined,
+        variantQty: -params.qty,
       });
 
       // --- DESTINATION ---
@@ -654,19 +588,18 @@ export class InventoryCoreService {
       );
 
       await svc.adjustLevel(destLevel.id, {
-        onHandBase: params.baseUnits,
-        variantQty: params.variantQty,
+        variantQty: params.qty,
       });
 
-      // --- AUDIT: single transfer record with both locations ---
+      // --- AUDIT ---
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.fromLocationId,
         toLocationId: params.toLocationId,
         transactionType: "transfer",
-        variantQtyDelta: params.variantQty ?? 0,
+        variantQtyDelta: params.qty,
         variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: sourceLevel.variantQty - (params.variantQty ?? 0),
+        variantQtyAfter: sourceLevel.variantQty - params.qty,
         sourceState: "on_hand",
         targetState: "on_hand",
         referenceType: "manual",
@@ -680,11 +613,6 @@ export class InventoryCoreService {
   // AUDIT TRAIL
   // ---------------------------------------------------------------------------
 
-  /**
-   * Write a single row to the `inventory_transactions` audit ledger.
-   * This is the low-level writer; all mutation methods above call this
-   * internally so every state change is recorded.
-   */
   async logTransaction(txn: InsertInventoryTransaction): Promise<void> {
     await this.db.insert(inventoryTransactions).values(txn);
   }
@@ -693,12 +621,6 @@ export class InventoryCoreService {
   // INTERNAL: transaction-scoped clone
   // ---------------------------------------------------------------------------
 
-  /**
-   * Return a lightweight copy of this service bound to the given
-   * Drizzle transaction handle.  Used internally so that compound
-   * operations (e.g. `receiveInventory`) can call helpers like
-   * `upsertLevel` and `adjustLevel` within the same transaction.
-   */
   private withTx(tx: any): InventoryCoreService {
     return new InventoryCoreService(tx);
   }
@@ -708,18 +630,6 @@ export class InventoryCoreService {
 // Factory
 // ---------------------------------------------------------------------------
 
-/**
- * Create a new `InventoryCoreService` bound to the supplied Drizzle
- * database instance.
- *
- * ```ts
- * import { db } from "../db";
- * import { createInventoryCoreService } from "./services/inventory-core";
- *
- * const inventory = createInventoryCoreService(db);
- * await inventory.receiveInventory({ ... });
- * ```
- */
 export function createInventoryCoreService(db: any) {
   return new InventoryCoreService(db);
 }

@@ -36,7 +36,7 @@ interface InventoryCore {
   recordShipment(params: {
     productVariantId: number;
     warehouseLocationId: number;
-    baseUnits: number;
+    qty: number;
     orderId: number;
     orderItemId?: number;
     shipmentId?: string;
@@ -60,7 +60,7 @@ interface InventoryCore {
  * Design:
  * - Receives `db` and `inventoryCore` via constructor (no global singletons).
  * - All write operations run inside `db.transaction()`.
- * - Inventory state changes (releasing pickedBase) are delegated to
+ * - Inventory state changes (releasing pickedQty) are delegated to
  *   `inventoryCore.recordShipment()`.
  */
 class FulfillmentService {
@@ -159,7 +159,7 @@ class FulfillmentService {
    * Confirm that a shipment has left the warehouse.
    *
    * For every item on the shipment this method calls
-   * `inventoryCore.recordShipment()` to release `pickedBase` and write
+   * `inventoryCore.recordShipment()` to release `pickedQty` and write
    * an inventory transaction.  The shipment status is then set to
    * "shipped" and `shippedAt` is recorded.
    *
@@ -200,30 +200,20 @@ class FulfillmentService {
         .from(shipmentItems)
         .where(eq(shipmentItems.shipmentId, shipmentId));
 
-      // 3. For each item, release inventory via inventoryCore
+      // 3. For each item, release inventory via inventoryCore (qty = variant units)
       for (const item of items) {
         if (!item.productVariantId) continue;
-
-        // Look up the variant to determine unitsPerVariant
-        const [variant] = await tx
-          .select()
-          .from(productVariants)
-          .where(eq(productVariants.id, item.productVariantId))
-          .limit(1);
-
-        const unitsPerVariant = (variant as ProductVariant | undefined)?.unitsPerVariant ?? 1;
-        const baseUnits = item.qty * unitsPerVariant;
 
         // Determine the warehouse location.  If fromLocationId is set on
         // the item, use it.  Otherwise attempt to find the primary pick
         // location for this variant (best-effort -- may still be null).
         const warehouseLocationId = item.fromLocationId;
 
-        if (warehouseLocationId && baseUnits > 0) {
+        if (warehouseLocationId && item.qty > 0) {
           await this.inventoryCore.recordShipment({
             productVariantId: item.productVariantId,
             warehouseLocationId,
-            baseUnits,
+            qty: item.qty,
             orderId: (shipment as Shipment).orderId!,
             orderItemId: item.orderItemId ?? undefined,
             shipmentId: String(shipmentId),
@@ -515,25 +505,17 @@ class FulfillmentService {
       .from(shipmentItems)
       .where(eq(shipmentItems.shipmentId, shipmentId));
 
-    // 3. Release inventory for each item
+    // 3. Release inventory for each item (qty is in variant units)
     for (const item of items) {
       if (!item.productVariantId) continue;
 
-      const [variant] = await tx
-        .select()
-        .from(productVariants)
-        .where(eq(productVariants.id, item.productVariantId))
-        .limit(1);
-
-      const unitsPerVariant = (variant as ProductVariant | undefined)?.unitsPerVariant ?? 1;
-      const baseUnits = item.qty * unitsPerVariant;
       const warehouseLocationId = item.fromLocationId;
 
-      if (warehouseLocationId && baseUnits > 0) {
+      if (warehouseLocationId && item.qty > 0) {
         await this.inventoryCore.recordShipment({
           productVariantId: item.productVariantId,
           warehouseLocationId,
-          baseUnits,
+          qty: item.qty,
           orderId: (shipment as Shipment).orderId!,
           orderItemId: item.orderItemId ?? undefined,
           shipmentId: String(shipmentId),

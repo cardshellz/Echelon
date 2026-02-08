@@ -1190,26 +1190,16 @@ export async function registerRoutes(
           // Find product variant by SKU to get unitsPerVariant for conversion
           const productVariant = await storage.getProductVariantBySku(item.sku);
 
-          let baseUnitsToDecrement: number;
-
           if (productVariant) {
-            // Convert picked quantity by unitsPerVariant
-            baseUnitsToDecrement = pickedQty * productVariant.unitsPerVariant;
-            console.log(`[Inventory] Conversion: ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each) = ${baseUnitsToDecrement} base units`);
-          } else {
-            // No variant found — assume 1:1 conversion
-            baseUnitsToDecrement = pickedQty;
-            console.log(`[Inventory] No product variant found for ${item.sku}, using 1:1 conversion: ${baseUnitsToDecrement} base units`);
-          }
+            console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
 
-          if (productVariant) {
             // Get pickable locations with stock, prioritize forward pick bins
             const levels = await storage.getInventoryLevelsByProductVariantId(productVariant.id);
             const allLocations = await storage.getAllWarehouseLocations();
 
             // Sort by location type priority: forward_pick > bulk_storage > others
             const sortedLevels = levels
-              .filter((l: any) => l.onHandBase > 0)
+              .filter((l: any) => l.variantQty > 0)
               .sort((a: any, b: any) => {
                 const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
                 const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
@@ -1226,11 +1216,11 @@ export async function registerRoutes(
               await pickCore.pickItem({
                 productVariantId: productVariant.id,
                 warehouseLocationId: pickableLevel.warehouseLocationId,
-                baseUnits: baseUnitsToDecrement,
+                qty: pickedQty,
                 orderId: item.orderId,
                 userId: req.session.user?.id,
               });
-              console.log(`[Inventory] Decremented: ${baseUnitsToDecrement} base units of variant ${productVariant.id} from location ${pickableLevel.warehouseLocationId}`);
+              console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickableLevel.warehouseLocationId}`);
               
               // Sync to Shopify (async - don't block response)
               syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
@@ -2257,10 +2247,10 @@ export async function registerRoutes(
                 await storage.upsertInventoryLevel({
                   productVariantId: variant.id,
                   warehouseLocationId: warehouseLoc.id,
-                  onHandBase: 0,
-                  reservedBase: 0,
-                  pickedBase: 0,
-                  backorderBase: 0
+                  reservedQty: 0,
+                  pickedQty: 0,
+                  packedQty: 0,
+                  backorderQty: 0
                 });
                 levelsCreated++;
               }
@@ -2317,10 +2307,10 @@ export async function registerRoutes(
               await storage.upsertInventoryLevel({
                 productVariantId: variant.id,
                 warehouseLocationId: warehouseLoc.id,
-                onHandBase: 0,
-                reservedBase: 0,
-                pickedBase: 0,
-                backorderBase: 0
+                reservedQty: 0,
+                pickedQty: 0,
+                packedQty: 0,
+                backorderQty: 0
               });
               levelsCreated++;
             }
@@ -4440,9 +4430,8 @@ export async function registerRoutes(
         id: number;
         product_variant_id: number;
         variant_qty: number;
-        on_hand_base: number;
-        reserved_base: number;
-        picked_base: number;
+        reserved_qty: number;
+        picked_qty: number;
         sku: string | null;
         variant_name: string | null;
         units_per_variant: number;
@@ -4455,9 +4444,8 @@ export async function registerRoutes(
           il.id,
           il.product_variant_id,
           il.variant_qty,
-          il.on_hand_base,
-          il.reserved_base,
-          il.picked_base,
+          il.reserved_qty,
+          il.picked_qty,
           pv.sku,
           pv.name as variant_name,
           pv.units_per_variant,
@@ -4478,9 +4466,8 @@ export async function registerRoutes(
         id: row.id,
         variantId: row.product_variant_id,
         qty: row.variant_qty,
-        onHandBase: row.on_hand_base,
-        reservedBase: row.reserved_base,
-        pickedBase: row.picked_base,
+        reservedQty: row.reserved_qty,
+        pickedQty: row.picked_qty,
         sku: row.sku,
         variantName: row.variant_name,
         unitsPerVariant: row.units_per_variant,
@@ -4919,18 +4906,19 @@ export async function registerRoutes(
   app.post("/api/inventory/adjust", async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
-      const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, reason } = req.body;
+      const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, qtyDelta: bodyQtyDelta, reason } = req.body;
       const userId = req.session.user?.id;
       const adjustVariantId = pvId || inventoryItemId; // Support both old and new param names
+      const qtyDelta = bodyQtyDelta ?? baseUnitsDelta; // Accept both param names
 
-      if (!adjustVariantId || !warehouseLocationId || baseUnitsDelta === undefined || !reason) {
+      if (!adjustVariantId || !warehouseLocationId || qtyDelta === undefined || !reason) {
         return res.status(400).json({ error: "Missing required fields" });
       }
 
       await inventoryCore.adjustInventory({
         productVariantId: adjustVariantId,
         warehouseLocationId,
-        baseUnitsDelta,
+        qtyDelta,
         reason,
         userId,
       });
@@ -5163,14 +5151,11 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Variant not found" });
       }
 
-      const baseUnits = qty * variant.unitsPerVariant;
-
       await inventoryCore.transfer({
         productVariantId: varId,
         fromLocationId: fromLocId,
         toLocationId: toLocId,
-        baseUnits,
-        variantQty: qty,
+        qty,
         userId,
         notes: typeof notes === "string" ? notes : undefined,
       });
@@ -5315,8 +5300,6 @@ export async function registerRoutes(
         }
 
         try {
-          // Both variantQty and onHandBase track the same value (variant count)
-          // This ensures consistency across the system
           const targetQty = quantity;
 
           if (!variant) {
@@ -5330,14 +5313,11 @@ export async function registerRoutes(
 
           if (existingLevel) {
             // Calculate delta from current value
-            const currentQty = existingLevel.onHandBase;
-            const currentVarQty = existingLevel.variantQty || 0;
+            const currentQty = existingLevel.variantQty || 0;
             const qtyDelta = targetQty - currentQty;
-            const varQtyDelta = targetQty - currentVarQty;
 
             await storage.adjustInventoryLevel(existingLevel.id, {
-              onHandBase: qtyDelta,
-              variantQty: varQtyDelta,
+              variantQty: qtyDelta,
             });
           } else {
             // Create new level - productVariantId is required
@@ -5345,11 +5325,10 @@ export async function registerRoutes(
               warehouseLocationId: warehouseLocation.id,
               productVariantId: variant.id,
               variantQty: targetQty,
-              onHandBase: targetQty,
-              reservedBase: 0,
-              pickedBase: 0,
-              packedBase: 0,
-              backorderBase: 0,
+              reservedQty: 0,
+              pickedQty: 0,
+              packedQty: 0,
+              backorderQty: 0,
             });
           }
 
@@ -5442,23 +5421,19 @@ export async function registerRoutes(
 
       const variantQty = quantity;
 
-      // Calculate base units: variantQty * unitsPerVariant
-      const baseUnits = variantQty * targetVariant.unitsPerVariant;
-
       // Generate a reference ID if not provided
       const refId = referenceId || `RCV-${Date.now()}`;
 
       await inventoryCore.receiveInventory({
         productVariantId: variantId,
         warehouseLocationId,
-        baseUnits,
-        variantQty,
+        qty: variantQty,
         referenceId: refId,
         notes: notes || "Stock received via UI",
         userId,
       });
 
-      res.json({ success: true, baseUnitsReceived: baseUnits, variantQtyReceived: variantQty });
+      res.json({ success: true, variantQtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
       res.status(500).json({ error: "Failed to receive inventory" });
@@ -5521,16 +5496,16 @@ export async function registerRoutes(
       }
 
       const parentLevel = await replenCore.getLevel(replenVariantId, targetLocation.parentLocationId);
-      if (!parentLevel || parentLevel.onHandBase <= 0) {
+      if (!parentLevel || parentLevel.variantQty <= 0) {
         return res.json({ success: false, replenished: 0, sourceLocationId: targetLocation.parentLocationId });
       }
 
-      const replenishAmount = Math.min(requestedUnits, parentLevel.onHandBase);
+      const replenishAmount = Math.min(requestedUnits, parentLevel.variantQty);
       await replenCore.transfer({
         productVariantId: replenVariantId,
         fromLocationId: targetLocation.parentLocationId,
         toLocationId: targetLocationId,
-        baseUnits: replenishAmount,
+        qty: replenishAmount,
         userId,
         notes: `Replenished from location ${targetLocation.parentLocationId}`,
       });
@@ -5563,12 +5538,12 @@ export async function registerRoutes(
 
         for (const level of levelsAtLocation) {
           if (productVariantId && level.productVariantId !== productVariantId) continue;
-          if (level.onHandBase < (location.minQty || 0)) {
+          if (level.variantQty < (location.minQty || 0)) {
             locations.push({
               locationId: location.id,
               locationCode: location.code,
               productVariantId: level.productVariantId,
-              currentQty: level.onHandBase,
+              currentQty: level.variantQty,
               minQty: location.minQty || 0,
               parentLocationId: location.parentLocationId,
             });
@@ -5669,19 +5644,19 @@ export async function registerRoutes(
           productId: number;
           baseSku: string;
           name: string;
-          totalOnHandBase: number;
-          totalReservedBase: number;
-          totalAtpBase: number;
+          totalOnHandPieces: number;
+          totalReservedPieces: number;
+          totalAtpPieces: number;
           variants: Array<{
             variantId: number;
             sku: string;
             name: string;
             unitsPerVariant: number;
             available: number;
-            onHandBase: number;
-            reservedBase: number;
-            atpBase: number;
             variantQty: number;
+            reservedQty: number;
+            pickedQty: number;
+            atpPieces: number;
           }>;
         }>();
 
@@ -5692,10 +5667,14 @@ export async function registerRoutes(
           const product = allProducts.find(p => p.id === productId);
           if (!product) continue;
 
+          const upv = variant.unitsPerVariant || 1;
           const variantQty = levels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
-          const onHand = levels.reduce((sum, l) => sum + (l.onHandBase || 0), 0);
-          const reserved = levels.reduce((sum, l) => sum + (l.reservedBase || 0), 0);
-          const atp = onHand - reserved;
+          const reservedQty = levels.reduce((sum, l) => sum + (l.reservedQty || 0), 0);
+          const pickedQty = levels.reduce((sum, l) => sum + (l.pickedQty || 0), 0);
+          const onHandPieces = variantQty * upv;
+          const reservedPieces = reservedQty * upv;
+          const pickedPieces = pickedQty * upv;
+          const atpPieces = onHandPieces - reservedPieces - pickedPieces;
 
           let summary = summaryByProduct.get(productId);
           if (!summary) {
@@ -5703,27 +5682,27 @@ export async function registerRoutes(
               productId,
               baseSku: product.sku || '',
               name: product.name,
-              totalOnHandBase: 0,
-              totalReservedBase: 0,
-              totalAtpBase: 0,
+              totalOnHandPieces: 0,
+              totalReservedPieces: 0,
+              totalAtpPieces: 0,
               variants: [],
             };
             summaryByProduct.set(productId, summary);
           }
 
-          summary.totalOnHandBase += onHand;
-          summary.totalReservedBase += reserved;
-          summary.totalAtpBase += atp;
+          summary.totalOnHandPieces += onHandPieces;
+          summary.totalReservedPieces += reservedPieces;
+          summary.totalAtpPieces += atpPieces;
           summary.variants.push({
             variantId: variant.id,
             sku: variant.sku || '',
             name: variant.name,
             unitsPerVariant: variant.unitsPerVariant,
-            available: Math.floor(atp / variant.unitsPerVariant),
-            onHandBase: onHand,
-            reservedBase: reserved,
-            atpBase: atp,
+            available: Math.floor(atpPieces / upv),
             variantQty,
+            reservedQty,
+            pickedQty,
+            atpPieces,
           });
         }
 
@@ -6894,9 +6873,8 @@ export async function registerRoutes(
           unitsPerVariant,
           baseSku: row.base_sku,
           variantQty,
-          onHandBase: 0, // Not used - no base units in display
-          reservedBase: committed, // "Committed" for display (field name kept for compatibility)
-          pickedBase: picked, // "Picked" for display
+          reservedQty: committed,
+          pickedQty: picked,
           available,
           totalPieces: 0, // Not used
           locationCount: parseInt(row.location_count) || 0,
@@ -6922,35 +6900,32 @@ export async function registerRoutes(
         location_code: string | null;
         zone: string | null;
         variant_qty: number;
-        on_hand_base: number;
-        reserved_base: number;
-        picked_base: number;
+        reserved_qty: number;
+        picked_qty: number;
       }>(sql`
-        SELECT 
+        SELECT
           il.id,
           il.warehouse_location_id,
           wl.code as location_code,
           wl.zone,
           il.variant_qty,
-          il.on_hand_base,
-          il.reserved_base,
-          il.picked_base
+          il.reserved_qty,
+          il.picked_qty
         FROM inventory_levels il
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.product_variant_id = ${variantId}
         ORDER BY wl.code
       `);
-      
+
       const locations = result.rows.map(row => ({
         id: row.id,
         warehouseLocationId: row.warehouse_location_id,
         locationCode: row.location_code,
         zone: row.zone,
         variantQty: row.variant_qty,
-        onHandBase: row.on_hand_base,
-        reservedBase: row.reserved_base,
-        pickedBase: row.picked_base,
-        available: row.on_hand_base - row.reserved_base - row.picked_base,
+        reservedQty: row.reserved_qty,
+        pickedQty: row.picked_qty,
+        available: row.variant_qty - row.reserved_qty - row.picked_qty,
       }));
       
       res.json(locations);
@@ -6977,10 +6952,9 @@ export async function registerRoutes(
           wl.bin_type,
           wl.is_pickable,
           il.variant_qty,
-          il.on_hand_base,
-          il.reserved_base,
-          il.picked_base,
-          (il.on_hand_base - il.reserved_base - il.picked_base) as available_base
+          il.reserved_qty,
+          il.picked_qty,
+          (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
         FROM inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
@@ -7000,10 +6974,9 @@ export async function registerRoutes(
         bin_type: string | null;
         is_pickable: number | null;
         variant_qty: number;
-        on_hand_base: number;
-        reserved_base: number;
-        picked_base: number;
-        available_base: number;
+        reserved_qty: number;
+        picked_qty: number;
+        available_qty: number;
       }>(query);
       
       let rows = result.rows;
@@ -7032,10 +7005,9 @@ export async function registerRoutes(
         binType: row.bin_type,
         isPickable: row.is_pickable === 1,
         variantQty: row.variant_qty,
-        onHandBase: row.on_hand_base,
-        reservedBase: row.reserved_base,
-        pickedBase: row.picked_base,
-        availableBase: row.available_base,
+        reservedQty: row.reserved_qty,
+        pickedQty: row.picked_qty,
+        availableQty: row.available_qty,
       }));
       
       res.json(exportData);
@@ -7061,19 +7033,16 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Variant not found" });
       }
 
-      const baseUnits = variantQty * variant.unitsPerVariant;
-
       await inventoryCore.receiveInventory({
         productVariantId: variantId,
         warehouseLocationId,
-        baseUnits,
-        variantQty,
+        qty: variantQty,
         referenceId: `ADD-${Date.now()}`,
         notes: notes || "Stock added via inventory page",
         userId,
       });
 
-      res.json({ success: true, variantQtyAdded: variantQty, baseUnitsAdded: baseUnits });
+      res.json({ success: true, variantQtyAdded: variantQty });
     } catch (error) {
       console.error("Error adding stock:", error);
       res.status(500).json({ error: "Failed to add stock" });
@@ -7096,17 +7065,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Variant not found" });
       }
 
-      const baseUnitsDelta = variantQtyDelta * variant.unitsPerVariant;
-
       await inventoryCore.adjustInventory({
         productVariantId: variantId,
         warehouseLocationId,
-        baseUnitsDelta,
+        qtyDelta: variantQtyDelta,
         reason: reasonCode,
         userId,
       });
 
-      res.json({ success: true, variantQtyDelta, baseUnitsDelta });
+      res.json({ success: true, variantQtyDelta });
     } catch (error) {
       console.error("Error adjusting stock:", error);
       res.status(500).json({ error: "Failed to adjust stock" });
@@ -7165,28 +7132,21 @@ export async function registerRoutes(
             continue;
           }
           
-          // Calculate base units from variant quantity
-          const baseUnits = variantQty * variant.unitsPerVariant;
-          
           // Check if inventory level exists for this variant at this location
           const existingLevel = await storage.getInventoryLevelByLocationAndVariant(location.id, variant.id);
-          
+
           if (existingLevel) {
-            // Calculate delta to reach target quantity (in base units)
-            const targetBaseUnits = variantQty * variant.unitsPerVariant;
-            const delta = targetBaseUnits - existingLevel.onHandBase;
+            // Calculate delta to reach target quantity (in variant units)
+            const currentQty = existingLevel.variantQty || 0;
+            const delta = variantQty - currentQty;
             if (delta !== 0) {
               const { inventoryCore: csvAdjCore } = req.app.locals.services as any;
               await csvAdjCore.adjustInventory({
                 productVariantId: variant.id,
                 warehouseLocationId: location.id,
-                baseUnitsDelta: delta,
+                qtyDelta: delta,
                 reason: "CSV_UPLOAD",
                 userId,
-              });
-              // Update variant qty
-              await storage.updateInventoryLevel(existingLevel.id, {
-                variantQty: variantQty,
               });
               results.updated++;
             }
@@ -7196,8 +7156,7 @@ export async function registerRoutes(
               productVariantId: variant.id,
               warehouseLocationId: location.id,
               variantQty: variantQty,
-              onHandBase: baseUnits,
-              reservedBase: 0,
+              reservedQty: 0,
             });
 
             // Create transaction for audit trail
@@ -7647,7 +7606,7 @@ export async function registerRoutes(
         await ccCore.adjustInventory({
           productVariantId: item.productVariantId,
           warehouseLocationId: item.warehouseLocationId,
-          baseUnitsDelta: item.varianceQty,
+          qtyDelta: item.varianceQty,
           reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`,
           userId,
         });
@@ -7677,7 +7636,7 @@ export async function registerRoutes(
             await ccCore.adjustInventory({
               productVariantId: relatedItem.productVariantId,
               warehouseLocationId: relatedItem.warehouseLocationId,
-              baseUnitsDelta: relatedItem.varianceQty,
+              qtyDelta: relatedItem.varianceQty,
               reason: `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`,
               userId,
             });
@@ -7717,7 +7676,7 @@ export async function registerRoutes(
             await ccCore.adjustInventory({
               productVariantId: reverseItem.productVariantId,
               warehouseLocationId: reverseItem.warehouseLocationId,
-              baseUnitsDelta: reverseItem.varianceQty,
+              qtyDelta: reverseItem.varianceQty,
               reason: `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`,
               userId,
             });
@@ -8065,7 +8024,6 @@ export async function registerRoutes(
           if (level) {
             // Update existing level
             await storage.updateInventoryLevel(level.id, {
-              onHandBase: (level.onHandBase || 0) + qtyToAdd,
               variantQty: (level.variantQty || 0) + qtyToAdd,
             });
           } else {
@@ -8073,9 +8031,8 @@ export async function registerRoutes(
             await storage.createInventoryLevel({
               productVariantId: line.productVariantId,
               warehouseLocationId: line.putawayLocationId,
-              onHandBase: qtyToAdd,
-              reservedBase: 0,
               variantQty: qtyToAdd,
+              reservedQty: 0,
             });
           }
 
