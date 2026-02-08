@@ -8299,6 +8299,45 @@ export async function registerRoutes(
     }
   });
   
+  // Helper: generate candidate location codes for fuzzy matching
+  function normalizeLocationCode(input: string): string[] {
+    const clean = input.trim().toUpperCase();
+    const candidates = new Set<string>();
+    candidates.add(clean);
+
+    // Strip all hyphens
+    candidates.add(clean.replace(/-/g, ''));
+
+    // Zero-pad single-digit numeric segments
+    const segments = clean.split('-');
+    const padded = segments.map(seg => {
+      const num = parseInt(seg, 10);
+      if (!isNaN(num) && seg === num.toString()) return num.toString().padStart(2, '0');
+      return seg;
+    });
+    candidates.add(padded.join('-'));
+    candidates.add(padded.join(''));
+
+    // If no hyphens, insert at letter↔digit transitions: H6 → H-6, J1A → J-1-A
+    if (!clean.includes('-')) {
+      const withHyphens = clean
+        .replace(/([A-Z])(\d)/g, '$1-$2')
+        .replace(/(\d)([A-Z])/g, '$1-$2');
+      candidates.add(withHyphens);
+      // Also pad the hyphenated version
+      const hSegments = withHyphens.split('-');
+      const hPadded = hSegments.map(seg => {
+        const num = parseInt(seg, 10);
+        if (!isNaN(num) && seg === num.toString()) return num.toString().padStart(2, '0');
+        return seg;
+      });
+      candidates.add(hPadded.join('-'));
+      candidates.add(hPadded.join(''));
+    }
+
+    return Array.from(candidates);
+  }
+
   // Bulk add lines from CSV for initial inventory load
   app.post("/api/receiving/:orderId/lines/bulk", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
@@ -8345,7 +8384,15 @@ export async function registerRoutes(
           .filter(l => l.name)
           .map(l => [l.name!.toUpperCase().trim(), l])
       );
-      console.log(`[CSV Import] Loaded ${allWarehouseLocations.length} warehouse locations. Sample codes:`, 
+      // Normalized index: stripped hyphens → location (for fuzzy matching)
+      const locationByNormalized = new Map<string, typeof allWarehouseLocations[0]>();
+      for (const loc of allWarehouseLocations) {
+        const stripped = loc.code.toUpperCase().replace(/-/g, '');
+        if (!locationByNormalized.has(stripped)) {
+          locationByNormalized.set(stripped, loc);
+        }
+      }
+      console.log(`[CSV Import] Loaded ${allWarehouseLocations.length} warehouse locations. Sample codes:`,
         allWarehouseLocations.slice(0, 5).map(l => l.code).join(', '));
       
       // Pre-fetch catalog products for efficient lookup
@@ -8414,32 +8461,52 @@ export async function registerRoutes(
           warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
         }
         
-        // Look up location by code first, then by name as fallback
+        // Look up location: exact code → exact name → normalized/fuzzy
         let putawayLocationId = null;
+        let csvLocationRaw: string | null = null;
         if (location) {
           const cleanLocation = location.trim().toUpperCase();
+          csvLocationRaw = location.trim();
           let loc = locationByCode.get(cleanLocation);
+          let matchMethod = 'exact';
+
           if (!loc) {
             loc = locationByName.get(cleanLocation);
+            if (loc) matchMethod = 'name';
           }
+
+          // Fuzzy matching: try normalized candidate codes
+          if (!loc) {
+            const candidates = normalizeLocationCode(cleanLocation);
+            for (const candidate of candidates) {
+              loc = locationByCode.get(candidate);
+              if (loc) { matchMethod = 'normalized'; break; }
+              const stripped = candidate.replace(/-/g, '');
+              loc = locationByNormalized.get(stripped);
+              if (loc) { matchMethod = 'fuzzy'; break; }
+            }
+          }
+
           if (loc) {
             putawayLocationId = loc.id;
-            
+            if (matchMethod !== 'exact') {
+              warnings.push(`Location "${location}" auto-matched to "${loc.code}" (${matchMethod})`);
+            }
+
             // Check if bin is already occupied by a different SKU
             if (!allowMultipleSkus) {
               const existingInBin = existingProductLocations.find(
-                pl => pl.location?.trim().toUpperCase() === cleanLocation && 
+                pl => pl.location?.trim().toUpperCase() === loc!.code.toUpperCase() &&
                       pl.sku?.toUpperCase() !== sku.toUpperCase()
               );
               if (existingInBin) {
-                errors.push(`Bin ${location} already contains SKU ${existingInBin.sku} - cannot add ${sku} (multiple SKUs per bin is disabled)`);
+                errors.push(`Bin ${loc.code} already contains SKU ${existingInBin.sku} - cannot add ${sku} (multiple SKUs per bin is disabled)`);
                 continue;
               }
             }
           } else {
-            // Log available locations for debugging
-            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found in code or name lookup.`);
-            warnings.push(`Location "${location}" not found for SKU ${sku}`);
+            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found after normalization.`);
+            warnings.push(`Location "${location}" not found for SKU ${sku} - needs manual resolution`);
           }
         }
         
@@ -8448,6 +8515,12 @@ export async function registerRoutes(
         const parsedDamagedQty = parseInt(damaged_qty) || 0;
         const parsedUnitCost = unit_cost ? Math.round(parseFloat(unit_cost) * 100) : null; // Convert dollars to cents
         
+        // Build notes: append CSV location if unmatched for resolution UI
+        let lineNotes = notes || null;
+        if (csvLocationRaw && !putawayLocationId) {
+          lineNotes = lineNotes ? `${lineNotes} | CSV location: ${csvLocationRaw}` : `CSV location: ${csvLocationRaw}`;
+        }
+
         // Check if line with same SKU + Location already exists in this order (idempotent import)
         const uniqueKey = `${sku.toUpperCase()}|${putawayLocationId || 'none'}`;
         const existingLine = existingBySkuLocation.get(uniqueKey);
@@ -8465,7 +8538,7 @@ export async function registerRoutes(
               productVariantId,
               catalogProductId,
               putawayLocationId,
-              notes: notes || null,
+              notes: lineNotes,
               status: putawayLocationId ? "complete" : "pending",
               receivedBy: req.session?.user?.id || null,
               receivedAt: new Date(),
@@ -8484,7 +8557,7 @@ export async function registerRoutes(
             productVariantId,
             catalogProductId,
             putawayLocationId,
-            notes: notes || null,
+            notes: lineNotes,
             status: putawayLocationId ? "complete" : "pending",
             receivedBy: req.session?.user?.id || null,
             receivedAt: new Date(),

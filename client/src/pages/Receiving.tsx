@@ -31,6 +31,16 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { 
@@ -225,6 +235,16 @@ export default function Receiving() {
   const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
   const [showImportResults, setShowImportResults] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
+  // Resolution UI state
+  const [resolvingLine, setResolvingLine] = useState<ReceivingLine | null>(null);
+  const [showResolveDialog, setShowResolveDialog] = useState(false);
+  const [resolveMode, setResolveMode] = useState<'sku' | 'location'>('sku');
+  const [resolveSkuSearch, setResolveSkuSearch] = useState("");
+  const [resolveSkuResults, setResolveSkuResults] = useState<{sku: string; name: string; productVariantId: number}[]>([]);
+  const [resolveLocSearch, setResolveLocSearch] = useState("");
+  const resolveSkuTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Pre-close validation state
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [newLine, setNewLine] = useState({
     sku: "",
     productName: "",
@@ -665,6 +685,46 @@ DEF-456,25,,,5.00,,Location TBD`;
     }
     console.log("Importing lines:", result.lines);
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
+  };
+
+  // Pre-close validation: check for lines that will be skipped
+  const handlePreCloseValidation = () => {
+    if (!selectedReceipt?.lines) return;
+    const received = selectedReceipt.lines.filter(l => l.receivedQty > 0);
+    const skipped = received.filter(l => !l.productVariantId || !l.putawayLocationId);
+    if (skipped.length === 0) {
+      closeReceiptMutation.mutate(selectedReceipt.id);
+      return;
+    }
+    setShowCloseConfirm(true);
+  };
+
+  // Compute issue counts for the current receipt
+  const issueLines = selectedReceipt?.lines?.filter(l => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId)) || [];
+  const skuIssueCount = issueLines.filter(l => !l.productVariantId).length;
+  const locIssueCount = issueLines.filter(l => !l.putawayLocationId).length;
+
+  // Resolution: open dialog for a specific line + issue type
+  const openResolve = (line: ReceivingLine, mode: 'sku' | 'location') => {
+    setResolvingLine(line);
+    setResolveMode(mode);
+    setResolveSkuSearch(line.sku || "");
+    setResolveSkuResults([]);
+    setResolveLocSearch("");
+    setShowResolveDialog(true);
+  };
+
+  // Debounced SKU search for resolution dialog
+  const handleResolveSkuSearch = (query: string) => {
+    setResolveSkuSearch(query);
+    if (resolveSkuTimeout.current) clearTimeout(resolveSkuTimeout.current);
+    if (query.length < 2) { setResolveSkuResults([]); return; }
+    resolveSkuTimeout.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(query)}&limit=10`);
+        if (res.ok) setResolveSkuResults(await res.json());
+      } catch { /* ignore */ }
+    }, 300);
   };
 
   const loadReceiptDetail = async (receipt: ReceivingOrder) => {
@@ -1258,9 +1318,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
                         Complete All
                       </Button>
-                      <Button 
+                      <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                        onClick={() => closeReceiptMutation.mutate(selectedReceipt.id)}
+                        onClick={handlePreCloseValidation}
                         disabled={closeReceiptMutation.isPending}
                         data-testid="btn-close-receipt"
                       >
@@ -1288,6 +1348,23 @@ DEF-456,25,,,5.00,,Location TBD`;
                       </Button>
                     )}
                   </CardHeader>
+                  {/* Issue summary banner */}
+                  {selectedReceipt.status !== "closed" && issueLines.length > 0 && (
+                    <div className="mx-3 mb-2 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-sm">
+                      <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                      <div>
+                        <div className="font-medium text-amber-800">
+                          {issueLines.length} line{issueLines.length !== 1 ? 's' : ''} need attention
+                        </div>
+                        <div className="text-amber-700 text-xs mt-0.5">
+                          {skuIssueCount > 0 && <span>{skuIssueCount} unmatched SKU{skuIssueCount !== 1 ? 's' : ''}</span>}
+                          {skuIssueCount > 0 && locIssueCount > 0 && <span> + </span>}
+                          {locIssueCount > 0 && <span>{locIssueCount} missing location{locIssueCount !== 1 ? 's' : ''}</span>}
+                          <span> — these lines will be skipped when closing.</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <CardContent className="p-0">
                     {/* Mobile card view for lines */}
                     <div className="md:hidden p-2 space-y-2">
@@ -1313,6 +1390,27 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   {line.status}
                                 </Badge>
                               </div>
+                              {/* Issue badges */}
+                              {selectedReceipt.status !== "closed" && (!line.productVariantId || !line.putawayLocationId) && (
+                                <div className="flex gap-1 flex-wrap">
+                                  {!line.productVariantId && (
+                                    <button
+                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                                      onClick={() => openResolve(line, 'sku')}
+                                    >
+                                      <AlertTriangle className="h-3 w-3" /> SKU not linked
+                                    </button>
+                                  )}
+                                  {!line.putawayLocationId && (
+                                    <button
+                                      className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                                      onClick={() => openResolve(line, 'location')}
+                                    >
+                                      <AlertTriangle className="h-3 w-3" /> Location missing
+                                    </button>
+                                  )}
+                                </div>
+                              )}
                               <div className="grid grid-cols-2 gap-2 text-xs">
                                 <div>
                                   <Label className="text-xs text-muted-foreground">Expected</Label>
@@ -1321,12 +1419,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 <div>
                                   <Label className="text-xs text-muted-foreground">Received</Label>
                                   {selectedReceipt.status !== "closed" ? (
-                                    <Input 
+                                    <Input
                                       type="number"
                                       value={line.receivedQty}
-                                      onChange={(e) => updateLineMutation.mutate({ 
-                                        lineId: line.id, 
-                                        updates: { receivedQty: parseInt(e.target.value) || 0 } 
+                                      onChange={(e) => updateLineMutation.mutate({
+                                        lineId: line.id,
+                                        updates: { receivedQty: parseInt(e.target.value) || 0 }
                                       })}
                                       className="h-10 w-full mt-1"
                                       min={0}
@@ -1400,13 +1498,14 @@ DEF-456,25,,,5.00,,Location TBD`;
                           <TableHead>Received</TableHead>
                           <TableHead>Location</TableHead>
                           <TableHead>Status</TableHead>
+                          {selectedReceipt.status !== "closed" && <TableHead>Issues</TableHead>}
                           {selectedReceipt.status !== "closed" && <TableHead></TableHead>}
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {(!selectedReceipt.lines || selectedReceipt.lines.length === 0) ? (
                           <TableRow>
-                            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                               No lines yet. Import CSV or add lines manually.
                             </TableCell>
                           </TableRow>
@@ -1465,6 +1564,34 @@ DEF-456,25,,,5.00,,Location TBD`;
                               </TableCell>
                               {selectedReceipt.status !== "closed" && (
                                 <TableCell>
+                                  {(!line.productVariantId || !line.putawayLocationId) ? (
+                                    <div className="flex gap-1">
+                                      {!line.productVariantId && (
+                                        <button
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                                          onClick={() => openResolve(line, 'sku')}
+                                          title="SKU not linked to a product variant"
+                                        >
+                                          <AlertTriangle className="h-3 w-3" /> SKU
+                                        </button>
+                                      )}
+                                      {!line.putawayLocationId && (
+                                        <button
+                                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
+                                          onClick={() => openResolve(line, 'location')}
+                                          title="Location not set"
+                                        >
+                                          <AlertTriangle className="h-3 w-3" /> Loc
+                                        </button>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <Check className="h-4 w-4 text-green-500" />
+                                  )}
+                                </TableCell>
+                              )}
+                              {selectedReceipt.status !== "closed" && (
+                                <TableCell>
                                   {line.status !== "complete" ? (
                                     <Button
                                       variant="ghost"
@@ -1472,9 +1599,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       className="min-h-[44px]"
                                       onClick={() => updateLineMutation.mutate({
                                         lineId: line.id,
-                                        updates: { 
+                                        updates: {
                                           receivedQty: line.expectedQty || 0,
-                                          status: "complete" 
+                                          status: "complete"
                                         }
                                       })}
                                       disabled={updateLineMutation.isPending}
@@ -1833,6 +1960,167 @@ DEF-456,25,,,5.00,,Location TBD`;
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Line Resolution Dialog */}
+      <Dialog open={showResolveDialog} onOpenChange={setShowResolveDialog}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              {resolveMode === 'sku' ? 'Resolve SKU' : 'Resolve Location'}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              {resolvingLine && (
+                <>Line: <span className="font-mono">{resolvingLine.sku}</span> (Qty: {resolvingLine.receivedQty})</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          {resolveMode === 'sku' && resolvingLine && (
+            <div className="space-y-3">
+              <div className="text-sm text-muted-foreground">
+                CSV SKU: <span className="font-mono font-medium">{resolvingLine.sku}</span>
+              </div>
+              <Input
+                placeholder="Search product variants..."
+                value={resolveSkuSearch}
+                onChange={(e) => handleResolveSkuSearch(e.target.value)}
+                className="h-10"
+                autoFocus
+              />
+              <ScrollArea className="h-48">
+                {resolveSkuResults.map((r: any) => (
+                  <button
+                    key={r.productVariantId}
+                    className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
+                    onClick={() => {
+                      updateLineMutation.mutate({
+                        lineId: resolvingLine.id,
+                        updates: { productVariantId: r.productVariantId }
+                      });
+                      setShowResolveDialog(false);
+                      toast({ title: "SKU linked", description: `${resolvingLine.sku} → ${r.sku}` });
+                    }}
+                  >
+                    <div className="font-mono font-medium">{r.sku}</div>
+                    <div className="text-xs text-muted-foreground truncate">{r.name}</div>
+                  </button>
+                ))}
+                {resolveSkuResults.length === 0 && resolveSkuSearch.length >= 2 && (
+                  <div className="text-center text-sm text-muted-foreground py-4">No variants found</div>
+                )}
+              </ScrollArea>
+              <div className="flex justify-end pt-2">
+                <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => setShowResolveDialog(false)}>
+                  Skip
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {resolveMode === 'location' && resolvingLine && (
+            <div className="space-y-3">
+              <div className="text-sm text-muted-foreground">
+                {resolvingLine.notes?.includes('CSV location:') ? (
+                  <>CSV location: <span className="font-mono font-medium">{resolvingLine.notes.match(/CSV location: (.+?)(?:\s*\||$)/)?.[1] || '—'}</span></>
+                ) : (
+                  <>No CSV location recorded</>
+                )}
+              </div>
+              <Input
+                placeholder="Search locations..."
+                value={resolveLocSearch}
+                onChange={(e) => setResolveLocSearch(e.target.value)}
+                className="h-10"
+                autoFocus
+              />
+              <ScrollArea className="h-48">
+                {locations
+                  .filter(loc => !resolveLocSearch || loc.code.toLowerCase().includes(resolveLocSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(resolveLocSearch.toLowerCase())))
+                  .slice(0, 15)
+                  .map(loc => (
+                    <button
+                      key={loc.id}
+                      className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
+                      onClick={() => {
+                        updateLineMutation.mutate({
+                          lineId: resolvingLine.id,
+                          updates: { putawayLocationId: loc.id }
+                        });
+                        setShowResolveDialog(false);
+                        toast({ title: "Location set", description: `${resolvingLine.sku} → ${loc.code}` });
+                      }}
+                    >
+                      <div className="font-mono font-medium">{loc.code}</div>
+                      {loc.name && <div className="text-xs text-muted-foreground">{loc.name}</div>}
+                    </button>
+                  ))}
+              </ScrollArea>
+              <div className="flex justify-end pt-2">
+                <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => setShowResolveDialog(false)}>
+                  Skip
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Pre-Close Validation Dialog */}
+      <AlertDialog open={showCloseConfirm} onOpenChange={setShowCloseConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              Close Receipt with Unresolved Lines?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3">
+                {selectedReceipt?.lines && (() => {
+                  const received = selectedReceipt.lines.filter(l => l.receivedQty > 0);
+                  const processable = received.filter(l => l.productVariantId && l.putawayLocationId);
+                  const missingSku = received.filter(l => !l.productVariantId);
+                  const missingLoc = received.filter(l => l.productVariantId && !l.putawayLocationId);
+                  const missingBoth = received.filter(l => !l.productVariantId && !l.putawayLocationId);
+                  const totalSkipped = received.length - processable.length;
+                  const affectedSkus = Array.from(new Set(received.filter(l => !l.productVariantId || !l.putawayLocationId).map(l => l.sku).filter((s): s is string => !!s)));
+                  return (
+                    <>
+                      <div className="text-sm">
+                        <span className="font-medium text-green-700">{processable.length}</span> of{' '}
+                        <span className="font-medium">{received.length}</span> received lines will update inventory.
+                      </div>
+                      <div className="bg-amber-50 border border-amber-200 rounded-md p-3 space-y-1">
+                        <div className="font-medium text-amber-800 text-sm">{totalSkipped} line{totalSkipped !== 1 ? 's' : ''} will be SKIPPED:</div>
+                        {missingSku.length > 0 && <div className="text-xs text-amber-700">{missingSku.length} missing product variant link</div>}
+                        {missingLoc.length > 0 && <div className="text-xs text-amber-700">{missingLoc.length} missing putaway location</div>}
+                      </div>
+                      {affectedSkus.length > 0 && (
+                        <div className="text-xs max-h-20 overflow-y-auto">
+                          <span className="font-medium">Affected SKUs: </span>
+                          <span className="font-mono">{affectedSkus.join(', ')}</span>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="min-h-[44px]">Go Back to Resolve</AlertDialogCancel>
+            <AlertDialogAction
+              className="min-h-[44px] bg-amber-600 hover:bg-amber-700"
+              onClick={() => {
+                if (selectedReceipt) closeReceiptMutation.mutate(selectedReceipt.id);
+                setShowCloseConfirm(false);
+              }}
+            >
+              Close Anyway (skip {issueLines.length} line{issueLines.length !== 1 ? 's' : ''})
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
