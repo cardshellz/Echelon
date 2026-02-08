@@ -305,11 +305,11 @@ class InventoryAtpService {
     productId: number;
     baseSku: string;
     name: string;
-    totalOnHandBase: number;
-    totalReservedBase: number;
-    totalAtpBase: number;
+    totalOnHandPieces: number;
+    totalReservedPieces: number;
+    totalAtpPieces: number;
     variants: Array<{
-      productVariantId: number;
+      variantId: number;
       sku: string;
       name: string;
       unitsPerVariant: number;
@@ -317,7 +317,7 @@ class InventoryAtpService {
       variantQty: number;
       reservedQty: number;
       pickedQty: number;
-      atpBase: number;
+      atpPieces: number;
     }>;
   } | null> {
     const [product] = await this.db
@@ -362,7 +362,7 @@ class InventoryAtpService {
     const totalAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
 
     const variants = variantRows.map((v: any) => ({
-      productVariantId: v.productVariantId,
+      variantId: v.productVariantId,
       sku: v.sku ?? "",
       name: v.name,
       unitsPerVariant: v.unitsPerVariant,
@@ -370,16 +370,16 @@ class InventoryAtpService {
       variantQty: Number(v.variantQty),
       reservedQty: Number(v.reservedQty),
       pickedQty: Number(v.pickedQty),
-      atpBase: totalAtpBase,
+      atpPieces: totalAtpBase,
     }));
 
     return {
       productId: product.id,
       baseSku: product.sku ?? "",
       name: product.name,
-      totalOnHandBase: totalOnHand,
-      totalReservedBase: totalReserved,
-      totalAtpBase,
+      totalOnHandPieces: totalOnHand,
+      totalReservedPieces: totalReserved,
+      totalAtpPieces: totalAtpBase,
       variants,
     };
   }
