@@ -10253,13 +10253,13 @@ export async function registerRoutes(
       let itemsByLocation = new Map<number, any[]>();
       if (locationIds.length > 0) {
         const itemsResult = await db.execute(sql`
-          SELECT il.warehouse_location_id as location_id, pv.id as variant_id, pv.sku, pv.name,
-                 il.variant_qty, il.reserved_qty
-          FROM inventory_levels il
-          JOIN product_variants pv ON il.product_variant_id = pv.id
+          SELECT inventory_levels.warehouse_location_id as location_id, pv.id as variant_id, pv.sku, pv.name,
+                 inventory_levels.variant_qty, inventory_levels.reserved_qty
+          FROM inventory_levels
+          JOIN product_variants pv ON inventory_levels.product_variant_id = pv.id
           WHERE ${inArray(inventoryLevels.warehouseLocationId, locationIds)}
-            AND il.variant_qty > 0
-          ORDER BY il.warehouse_location_id, pv.sku
+            AND inventory_levels.variant_qty > 0
+          ORDER BY inventory_levels.warehouse_location_id, pv.sku
         `);
 
         for (const row of itemsResult.rows as any[]) {
