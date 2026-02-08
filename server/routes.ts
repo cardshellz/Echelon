@@ -10577,11 +10577,14 @@ export async function registerRoutes(
         ) inv ON inv.product_id = p.id
         LEFT JOIN (
           SELECT pv.product_id,
-                 SUM(ABS(it.variant_qty_delta) * pv.units_per_variant) AS total_outbound_pieces
-          FROM inventory_transactions it
-          JOIN product_variants pv ON pv.id = it.product_variant_id
-          WHERE it.transaction_type IN ('ship', 'pick')
-            AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+                 SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
+          FROM order_items oi
+          JOIN orders o ON o.id = oi.order_id
+          JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+          WHERE o.cancelled_at IS NULL
+            AND o.warehouse_status != 'cancelled'
+            AND oi.status != 'cancelled'
+            AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
           GROUP BY pv.product_id
         ) vel ON vel.product_id = p.id
         WHERE p.is_active = true
