@@ -5022,10 +5022,12 @@ export async function registerRoutes(
           wl.zone,
           wl.location_type as "locationType",
           il.variant_qty as available,
-          il.warehouse_location_id as "locationId"
+          il.warehouse_location_id as "locationId",
+          w.code as "warehouseCode"
         FROM inventory_levels il
         JOIN product_variants pv ON pv.id = il.product_variant_id
         JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+        LEFT JOIN warehouses w ON w.id = wl.warehouse_id
         WHERE il.variant_qty > 0
           AND (
             LOWER(pv.sku) LIKE ${searchPattern} OR

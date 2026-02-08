@@ -98,6 +98,12 @@ interface CycleCountDetail extends CycleCount {
   items: CycleCountItem[];
 }
 
+interface Warehouse {
+  id: number;
+  code: string;
+  name: string;
+}
+
 interface AdjustmentReason {
   id: number;
   code: string;
@@ -111,7 +117,7 @@ export default function CycleCounts() {
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
-  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", locationTypes: [] as string[], binTypes: [] as string[] });
+  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
     { value: "forward_pick", label: "Forward Pick" },
     { value: "bulk_storage", label: "Bulk Storage" },
@@ -154,6 +160,10 @@ export default function CycleCounts() {
     queryKey: ["/api/inventory/adjustment-reasons"],
   });
 
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({
+    queryKey: ["/api/warehouses"],
+  });
+
   // SKU search for typeahead
   interface SkuSearchResult {
     sku: string;
@@ -176,7 +186,7 @@ export default function CycleCounts() {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (data: { name: string; description?: string; zoneFilter?: string }) => {
+    mutationFn: async (data: { name: string; description?: string; zoneFilter?: string; warehouseId?: number; locationTypeFilter?: string; binTypeFilter?: string }) => {
       const res = await fetch("/api/cycle-counts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -190,7 +200,7 @@ export default function CycleCounts() {
       toast({ title: "Cycle count created" });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       setCreateDialogOpen(false);
-      setNewCountForm({ name: "", description: "", zoneFilter: "", locationTypes: [], binTypes: [] });
+      setNewCountForm({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [], binTypes: [] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
@@ -1597,8 +1607,11 @@ export default function CycleCounts() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="font-semibold truncate">{count.name}</div>
-                      <div className="text-sm text-muted-foreground">
+                      <div className="text-sm text-muted-foreground flex items-center gap-2">
                         {format(new Date(count.createdAt), "MMM d, yyyy")}
+                        {count.warehouseId && (
+                          <Badge variant="outline" className="text-xs">{warehouses.find(w => w.id === count.warehouseId)?.code || "—"}</Badge>
+                        )}
                       </div>
                       {count.status !== "draft" && (
                         <div className="flex items-center gap-4 mt-2 text-sm">
@@ -1659,6 +1672,7 @@ export default function CycleCounts() {
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead>Name</TableHead>
+                  <TableHead>Warehouse</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Progress</TableHead>
                   <TableHead className="text-right">Variances</TableHead>
@@ -1670,6 +1684,11 @@ export default function CycleCounts() {
                 {cycleCounts.map((count) => (
                   <TableRow key={count.id} className="cursor-pointer" onClick={() => setSelectedCount(count.id)}>
                     <TableCell className="font-medium">{count.name}</TableCell>
+                    <TableCell>
+                      {count.warehouseId ? (
+                        <Badge variant="outline" className="text-xs">{warehouses.find(w => w.id === count.warehouseId)?.code || "—"}</Badge>
+                      ) : <span className="text-muted-foreground text-sm">All</span>}
+                    </TableCell>
                     <TableCell>{getStatusBadge(count.status)}</TableCell>
                     <TableCell className="text-right">
                       {count.status !== "draft" ? `${count.countedBins} / ${count.totalBins}` : "-"}
@@ -1760,6 +1779,24 @@ export default function CycleCounts() {
                 data-testid="textarea-description"
               />
             </details>
+            <div>
+              <Label className="text-sm">Warehouse</Label>
+              <Select
+                value={newCountForm.warehouseId}
+                onValueChange={(v) => setNewCountForm({ ...newCountForm, warehouseId: v })}
+              >
+                <SelectTrigger className="h-10" data-testid="select-warehouse">
+                  <SelectValue placeholder="All warehouses" />
+                </SelectTrigger>
+                <SelectContent>
+                  {warehouses.map((w) => (
+                    <SelectItem key={w.id} value={String(w.id)}>
+                      {w.code} — {w.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <details className="text-sm">
               <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                 Zone Filter (optional)
@@ -1833,6 +1870,7 @@ export default function CycleCounts() {
                 name: newCountForm.name,
                 description: newCountForm.description || undefined,
                 zoneFilter: newCountForm.zoneFilter || undefined,
+                warehouseId: newCountForm.warehouseId ? parseInt(newCountForm.warehouseId) : undefined,
                 locationTypeFilter: newCountForm.locationTypes.length > 0 ? newCountForm.locationTypes.join(",") : undefined,
                 binTypeFilter: newCountForm.binTypes.length > 0 ? newCountForm.binTypes.join(",") : undefined,
               })}

@@ -161,10 +161,11 @@ interface VariantLocationLevel {
     name: string | null;
     locationType: string;
     isPickable: number;
+    warehouseId: number | null;
   } | null;
 }
 
-function VariantLocationRows({ variantId }: { variantId: number }) {
+function VariantLocationRows({ variantId, warehouses }: { variantId: number; warehouses: Warehouse[] }) {
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [`/api/inventory/variants/${variantId}/locations`],
   });
@@ -212,6 +213,11 @@ function VariantLocationRows({ variantId }: { variantId: number }) {
               <div className="flex items-center gap-2">
                 <MapPin className="h-3 w-3 text-muted-foreground" />
                 <span className="font-mono text-xs">{locLevel.location?.code || "Unknown"}</span>
+                {locLevel.location?.warehouseId && (
+                  <Badge variant="secondary" className="text-[10px] px-1 py-0">
+                    {warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}
+                  </Badge>
+                )}
               </div>
             </TableCell>
             <TableCell className="text-muted-foreground text-xs">
@@ -795,7 +801,7 @@ export default function Inventory() {
                         <TableCell>{getStatusBadge(level.available)}</TableCell>
                       </TableRow>
                       {expandedVariants.has(level.variantId) && (
-                        <VariantLocationRows variantId={level.variantId} />
+                        <VariantLocationRows variantId={level.variantId} warehouses={warehouses} />
                       )}
                     </React.Fragment>
                   ))}

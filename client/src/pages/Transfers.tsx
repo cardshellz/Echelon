@@ -30,6 +30,13 @@ interface WarehouseLocation {
   code: string;
   zone?: string;
   locationType?: string;
+  warehouseId?: number;
+}
+
+interface Warehouse {
+  id: number;
+  code: string;
+  name: string;
 }
 
 interface SkuResult {
@@ -85,6 +92,12 @@ export default function Transfers() {
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"]
   });
+
+  const { data: warehouses = [] } = useQuery<Warehouse[]>({
+    queryKey: ["/api/warehouses"]
+  });
+
+  const warehouseMap = new Map(warehouses.map(w => [w.id, w.code]));
   
   const { data: skusAtLocation = [] } = useQuery<SkuResult[]>({
     queryKey: ["/api/inventory/skus/search", "location", fromLocationId],
@@ -105,6 +118,7 @@ export default function Transfers() {
     locationType: string | null;
     available: number;
     locationId: number;
+    warehouseCode: string | null;
   }>>({
     queryKey: ["/api/inventory/sku-locations", lookupSearch],
     queryFn: async () => {
@@ -528,7 +542,10 @@ export default function Transfers() {
               {fromLocationId ? (
                 <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
                   <MapPin className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium flex-1">{locations.find(l => l.id === fromLocationId)?.code}</span>
+                  <span className="font-medium flex-1">
+                    {locations.find(l => l.id === fromLocationId)?.code}
+                    {(() => { const loc = locations.find(l => l.id === fromLocationId); return loc?.warehouseId ? ` (${warehouseMap.get(loc.warehouseId) || ''})` : ''; })()}
+                  </span>
                   <button
                     type="button"
                     onClick={() => {
@@ -571,7 +588,7 @@ export default function Transfers() {
                         setLocationSearch(loc.code);
                       }}
                     >
-                      {loc.code} {loc.zone && <span className="text-muted-foreground">({loc.zone})</span>}
+                      {loc.code} <span className="text-muted-foreground">({loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''})</span>
                     </button>
                   ))}
                 </div>
@@ -651,7 +668,10 @@ export default function Transfers() {
               {toLocationId ? (
                 <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
                   <MapPin className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium flex-1">{locations.find(l => l.id === toLocationId)?.code}</span>
+                  <span className="font-medium flex-1">
+                    {locations.find(l => l.id === toLocationId)?.code}
+                    {(() => { const loc = locations.find(l => l.id === toLocationId); return loc?.warehouseId ? ` (${warehouseMap.get(loc.warehouseId) || ''})` : ''; })()}
+                  </span>
                   <button
                     type="button"
                     onClick={() => {
@@ -692,7 +712,7 @@ export default function Transfers() {
                         setDestLocationSearch(loc.code);
                       }}
                     >
-                      {loc.code} {loc.zone && <span className="text-muted-foreground">({loc.zone})</span>}
+                      {loc.code} <span className="text-muted-foreground">({loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''})</span>
                     </button>
                   ))}
                 </div>
@@ -806,7 +826,8 @@ export default function Transfers() {
             
             {lookupResults.length > 0 && (
               <div className="border rounded-md max-h-80 overflow-y-auto">
-                <div className="grid grid-cols-[1fr_auto_auto] gap-2 px-3 py-2 bg-slate-50 border-b text-xs font-medium text-muted-foreground sticky top-0">
+                <div className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2 bg-slate-50 border-b text-xs font-medium text-muted-foreground sticky top-0">
+                  <span>WH</span>
                   <span>Location</span>
                   <span>Type</span>
                   <span className="text-right">Qty</span>
@@ -828,7 +849,8 @@ export default function Transfers() {
                         </div>
                       </div>
                       {data.locations.map((loc) => (
-                        <div key={`${sku}-${loc.locationId}`} className="grid grid-cols-[1fr_auto_auto] gap-2 px-3 py-2 border-b last:border-b-0 text-sm items-center">
+                        <div key={`${sku}-${loc.locationId}`} className="grid grid-cols-[auto_1fr_auto_auto] gap-2 px-3 py-2 border-b last:border-b-0 text-sm items-center">
+                          <Badge variant="secondary" className="text-xs">{loc.warehouseCode || '—'}</Badge>
                           <div className="flex items-center gap-1.5">
                             <MapPin className="h-3 w-3 text-muted-foreground flex-shrink-0" />
                             <span className="font-medium">{loc.location}</span>
