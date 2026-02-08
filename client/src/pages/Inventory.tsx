@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
+import PurchasingView from "./PurchasingView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import { useAuth } from "@/lib/auth";
 import {
@@ -11,7 +12,6 @@ import {
   Download,
   RefreshCw,
   AlertTriangle,
-  TrendingUp,
   Boxes,
   MapPin,
   Upload,
@@ -24,6 +24,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowLeftRight,
+  ShoppingCart,
   Building2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -351,11 +352,8 @@ export default function Inventory() {
   };
   const [activeTab, setActiveTab] = useState("physical");
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
-  const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
-  const [productSortField, setProductSortField] = useState<string>("baseSku");
-  const [productSortDirection, setProductSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
@@ -458,11 +456,6 @@ export default function Inventory() {
     },
   });
 
-  const filteredItems = inventorySummary.filter(item => 
-    (item.baseSku?.toLowerCase() || '').includes(searchQuery.toLowerCase()) ||
-    (item.name?.toLowerCase() || '').includes(searchQuery.toLowerCase())
-  );
-
   const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandPieces || 0), 0);
   const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedPieces || 0), 0);
   const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpPieces || 0), 0);
@@ -519,53 +512,6 @@ export default function Inventory() {
       reason: adjustmentReason,
     });
   };
-
-  const getStatusBadge = (atpBase: number) => {
-    if (atpBase <= 0) {
-      return <Badge className="bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400">Out of Stock</Badge>;
-    }
-    if (atpBase < 100) {
-      return <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Low Stock</Badge>;
-    }
-    return <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">In Stock</Badge>;
-  };
-
-  // Product-level status (fungible ATP in pieces)
-  const getProductStatusBadge = (atpBase: number) => {
-    if (atpBase <= 0) {
-      return <Badge className="bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400">Out of Stock</Badge>;
-    }
-    if (atpBase < 500) {
-      return <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Low Stock</Badge>;
-    }
-    return <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">In Stock</Badge>;
-  };
-
-  const handleProductSort = (field: string) => {
-    if (productSortField === field) {
-      setProductSortDirection(productSortDirection === "asc" ? "desc" : "asc");
-    } else {
-      setProductSortField(field);
-      setProductSortDirection("asc");
-    }
-  };
-
-  const sortedProducts = [...filteredItems].sort((a, b) => {
-    let aVal: any, bVal: any;
-    switch (productSortField) {
-      case "baseSku": aVal = a.baseSku || ""; bVal = b.baseSku || ""; break;
-      case "name": aVal = a.name || ""; bVal = b.name || ""; break;
-      case "onHand": aVal = a.totalOnHandPieces; bVal = b.totalOnHandPieces; break;
-      case "reserved": aVal = a.totalReservedPieces; bVal = b.totalReservedPieces; break;
-      case "atp": aVal = a.totalAtpPieces; bVal = b.totalAtpPieces; break;
-      case "variants": aVal = a.variants.length; bVal = b.variants.length; break;
-      default: aVal = a.baseSku || ""; bVal = b.baseSku || "";
-    }
-    if (typeof aVal === "string") {
-      return productSortDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-    }
-    return productSortDirection === "asc" ? aVal - bVal : bVal - aVal;
-  });
 
   const handleCsvUpload = async () => {
     if (!csvFile) return;
@@ -660,7 +606,7 @@ export default function Inventory() {
           </div>
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <TrendingUp size={12} /> Total On Hand
+              <Package size={12} /> Total On Hand
             </div>
             <div className="text-2xl font-bold font-mono text-foreground mt-1">{totalOnHand.toLocaleString()}</div>
           </div>
@@ -726,11 +672,11 @@ export default function Inventory() {
               Physical Inventory
             </TabsTrigger>
             <TabsTrigger
-              value="availability"
+              value="purchasing"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
             >
-              <TrendingUp className="h-4 w-4 mr-2" />
-              Product Availability
+              <ShoppingCart className="h-4 w-4 mr-2" />
+              Purchasing
             </TabsTrigger>
             <TabsTrigger
               value="operations"
@@ -884,143 +830,9 @@ export default function Inventory() {
             )}
           </TabsContent>
 
-          {/* ====== TAB 2: Product Availability ====== */}
-          <TabsContent value="availability" className="flex-1 flex flex-col mt-0">
-            {loadingInventory ? (
-              <div className="flex-1 flex items-center justify-center">
-                <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-              </div>
-            ) : (
-              <>
-                {/* Mobile card layout */}
-                <div className="md:hidden space-y-3 flex-1 overflow-auto">
-                  {sortedProducts.map((product) => (
-                    <div key={product.baseSku} className="rounded-md border bg-card p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <div className="font-mono font-medium text-primary text-sm">{product.baseSku}</div>
-                          <div className="text-sm font-medium mt-1">{product.name}</div>
-                        </div>
-                        {getProductStatusBadge(product.totalAtpPieces)}
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 text-xs mt-3">
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Total Pieces</div>
-                          <div className="font-mono font-bold">{product.totalOnHandPieces.toLocaleString()}</div>
-                        </div>
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Available</div>
-                          <div className="font-mono font-bold text-green-600">{product.totalAtpPieces.toLocaleString()}</div>
-                        </div>
-                        <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Variants</div>
-                          <div className="font-mono font-bold">{product.variants.length}</div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Desktop table */}
-                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
-                  <Table>
-                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                      <TableRow>
-                        <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("baseSku")}>
-                          <div className="flex items-center gap-1">
-                            Product
-                            {productSortField === "baseSku" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("name")}>
-                          <div className="flex items-center gap-1">
-                            Name
-                            {productSortField === "name" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[120px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("onHand")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Total Pieces
-                            {productSortField === "onHand" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("reserved")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Reserved
-                            {productSortField === "reserved" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[120px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("atp")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Available (ATP)
-                            {productSortField === "atp" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("variants")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Variants
-                            {productSortField === "variants" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="w-[100px]">Status</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {sortedProducts.map((product) => (
-                        <React.Fragment key={product.baseSku}>
-                          <TableRow
-                            className="cursor-pointer hover:bg-muted/50"
-                            onClick={() => {
-                              const newExpanded = new Set(expandedProducts);
-                              const key = product.productVariantId;
-                              if (newExpanded.has(key)) {
-                                newExpanded.delete(key);
-                              } else {
-                                newExpanded.add(key);
-                              }
-                              setExpandedProducts(newExpanded);
-                            }}
-                          >
-                            <TableCell className="font-mono font-medium text-primary">
-                              <div className="flex items-center gap-1">
-                                {expandedProducts.has(product.productVariantId) ?
-                                  <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
-                                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                                }
-                                {product.baseSku}
-                              </div>
-                            </TableCell>
-                            <TableCell className="truncate max-w-[200px]">{product.name}</TableCell>
-                            <TableCell className="text-right font-mono font-bold">{product.totalOnHandPieces.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono text-muted-foreground">{product.totalReservedPieces.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{product.totalAtpPieces.toLocaleString()}</TableCell>
-                            <TableCell className="text-right">{product.variants.length}</TableCell>
-                            <TableCell>{getProductStatusBadge(product.totalAtpPieces)}</TableCell>
-                          </TableRow>
-                          {expandedProducts.has(product.productVariantId) && product.variants.map((v) => (
-                            <TableRow key={v.variantId} className="bg-muted/20">
-                              <TableCell className="font-mono text-sm pl-10 text-muted-foreground">{v.sku}</TableCell>
-                              <TableCell className="text-sm text-muted-foreground">{v.name}</TableCell>
-                              <TableCell className="text-right font-mono text-sm text-muted-foreground">{v.unitsPerVariant} /pkg</TableCell>
-                              <TableCell className="text-right font-mono text-sm" colSpan={1}></TableCell>
-                              <TableCell className="text-right font-mono text-sm font-medium">{v.available.toLocaleString()} sellable</TableCell>
-                              <TableCell className="text-right font-mono text-sm text-muted-foreground">{v.variantQty.toLocaleString()} physical</TableCell>
-                              <TableCell></TableCell>
-                            </TableRow>
-                          ))}
-                        </React.Fragment>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-
-                {sortedProducts.length > 0 && (
-                  <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-                    <div>Showing {sortedProducts.length} of {inventorySummary.length} products</div>
-                  </div>
-                )}
-              </>
-            )}
+          {/* ====== TAB 2: Purchasing / Reorder ====== */}
+          <TabsContent value="purchasing" className="flex-1 flex flex-col mt-0 overflow-auto">
+            <PurchasingView searchQuery={searchQuery} />
           </TabsContent>
 
           {/* ====== TAB 3: Operations ====== */}

@@ -460,6 +460,8 @@ export const products = pgTable("products", {
   baseUnit: varchar("base_unit", { length: 20 }).notNull().default("piece"), // piece, pack, box, case, pallet
   imageUrl: text("image_url"),
   shopifyProductId: varchar("shopify_product_id", { length: 100 }), // Shopify product ID for sync
+  leadTimeDays: integer("lead_time_days").notNull().default(120), // Supplier lead time in days
+  safetyStockQty: integer("safety_stock_qty").notNull().default(0), // Safety stock buffer in variant units
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -10542,5 +10542,109 @@ export async function registerRoutes(
     }
   });
 
+  // ── Purchasing / Reorder Analysis ──────────────────────────────────
+  app.get("/api/purchasing/reorder-analysis", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const lookbackDays = parseInt(req.query.lookbackDays as string) || 90;
+
+      // Single query: aggregate on-hand per variant + product lead time + velocity from transactions
+      const rows = await db.execute(sql`
+        SELECT
+          pv.id AS variant_id,
+          pv.sku,
+          pv.name AS variant_name,
+          pv.units_per_variant,
+          p.id AS product_id,
+          p.name AS product_name,
+          p.lead_time_days,
+          p.safety_stock_qty,
+          COALESCE(inv.total_on_hand, 0)::int AS total_on_hand,
+          COALESCE(inv.total_reserved, 0)::int AS total_reserved,
+          COALESCE(vel.total_outbound, 0)::int AS total_outbound,
+          (SELECT MAX(it2.created_at)
+           FROM inventory_transactions it2
+           WHERE it2.product_variant_id = pv.id
+             AND it2.transaction_type = 'receipt') AS last_received_at
+        FROM product_variants pv
+        JOIN products p ON pv.product_id = p.id
+        LEFT JOIN (
+          SELECT product_variant_id,
+                 SUM(variant_qty) AS total_on_hand,
+                 SUM(reserved_qty) AS total_reserved
+          FROM inventory_levels
+          GROUP BY product_variant_id
+        ) inv ON inv.product_variant_id = pv.id
+        LEFT JOIN (
+          SELECT product_variant_id,
+                 SUM(ABS(variant_qty_delta)) AS total_outbound
+          FROM inventory_transactions
+          WHERE transaction_type IN ('ship', 'pick')
+            AND created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+          GROUP BY product_variant_id
+        ) vel ON vel.product_variant_id = pv.id
+        WHERE pv.is_active = true
+        ORDER BY pv.sku
+      `);
+
+      const items = (rows.rows as any[]).map((r) => {
+        const totalOnHand = Number(r.total_on_hand);
+        const totalReserved = Number(r.total_reserved);
+        const totalOutbound = Number(r.total_outbound);
+        const leadTimeDays = Number(r.lead_time_days);
+        const safetyStockQty = Number(r.safety_stock_qty);
+        const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
+        const daysOfSupply = avgDailyUsage > 0 ? Math.round(totalOnHand / avgDailyUsage) : totalOnHand > 0 ? 9999 : 0;
+        const reorderPoint = Math.ceil(leadTimeDays * avgDailyUsage) + safetyStockQty;
+        const suggestedOrderQty = Math.max(0, Math.ceil((leadTimeDays * avgDailyUsage) + safetyStockQty - totalOnHand));
+
+        let status: string;
+        if (totalOnHand <= 0 && avgDailyUsage > 0) {
+          status = "stockout";
+        } else if (totalOnHand <= reorderPoint) {
+          status = "order_now";
+        } else if (daysOfSupply <= leadTimeDays * 1.5) {
+          status = "order_soon";
+        } else if (avgDailyUsage === 0 && totalOnHand > 0) {
+          status = "no_movement";
+        } else {
+          status = "ok";
+        }
+
+        return {
+          variantId: r.variant_id,
+          sku: r.sku,
+          variantName: r.variant_name,
+          productName: r.product_name,
+          unitsPerVariant: Number(r.units_per_variant),
+          totalOnHand,
+          totalReserved,
+          available: totalOnHand - totalReserved,
+          avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
+          daysOfSupply,
+          leadTimeDays,
+          safetyStockQty,
+          reorderPoint,
+          suggestedOrderQty,
+          status,
+          lastReceivedAt: r.last_received_at,
+        };
+      });
+
+      // Summary stats
+      const summary = {
+        totalSkus: items.length,
+        belowReorderPoint: items.filter((i) => i.status === "order_now" || i.status === "stockout").length,
+        orderSoon: items.filter((i) => i.status === "order_soon").length,
+        noMovement: items.filter((i) => i.status === "no_movement").length,
+        totalOnHand: items.reduce((s, i) => s + i.totalOnHand, 0),
+      };
+
+      res.json({ items, summary, lookbackDays });
+    } catch (error) {
+      console.error("Error fetching reorder analysis:", error);
+      res.status(500).json({ error: "Failed to fetch reorder analysis" });
+    }
+  });
+
   return httpServer;
 }
