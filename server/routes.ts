@@ -1712,7 +1712,7 @@ export async function registerRoutes(
       
       // Validate all orders are ready and not already combined
       for (const order of ordersToGroup) {
-        if (order.status !== "ready") {
+        if (order.warehouseStatus !== "ready") {
           return res.status(400).json({ error: `Order ${order.orderNumber} is not in ready status` });
         }
         if (order.combinedGroupId) {
@@ -3719,8 +3719,8 @@ export async function registerRoutes(
       return false;
     }
     
-    if (order.status === "shipped" || order.status === "cancelled") {
-      console.log(`Fulfillment ${source}: Order ${order.orderNumber} already ${order.status}, skipping`);
+    if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+      console.log(`Fulfillment ${source}: Order ${order.orderNumber} already ${order.warehouseStatus}, skipping`);
       return false;
     }
     
@@ -3756,7 +3756,7 @@ export async function registerRoutes(
   // Helper to check order fulfillment status from Shopify (used by sync, not webhooks)
   async function checkOrderFulfillmentFromShopify(shopifyOrderId: string, source: string): Promise<void> {
     const order = await storage.getOrderByShopifyId(shopifyOrderId);
-    if (!order || order.status === "shipped" || order.status === "cancelled") {
+    if (!order || order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
       return;
     }
     
@@ -5967,7 +5967,7 @@ export async function registerRoutes(
       const csvData = orders.map(order => ({
         orderNumber: order.orderNumber,
         customerName: order.customerName,
-        status: order.status,
+        status: order.warehouseStatus,
         priority: order.priority,
         itemCount: order.itemCount,
         pickedCount: order.pickedCount,

@@ -1276,7 +1276,9 @@ export class DatabaseStorage implements IStorage {
         updates.exceptionAt = new Date();
         updates.completedAt = new Date();
       } else {
-        updates.warehouseStatus = "completed" as OrderStatus;
+        // Auto-pack: skip manual "completed" step, go straight to ready_to_ship.
+        // No pack station — ShipStation handles packing/shipping externally.
+        updates.warehouseStatus = "ready_to_ship" as OrderStatus;
         updates.completedAt = new Date();
       }
       
