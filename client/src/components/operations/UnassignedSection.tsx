@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { PackageX, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +29,13 @@ interface UnassignedItem {
   locationType: string;
 }
 
+interface UnassignedResponse {
+  items: UnassignedItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 interface UnassignedSectionProps {
   canEdit: boolean;
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
@@ -36,18 +43,34 @@ interface UnassignedSectionProps {
 
 export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSectionProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [autoOpened, setAutoOpened] = useState(false);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
 
-  const { data: items, isLoading } = useQuery<UnassignedItem[]>({
-    queryKey: ["/api/operations/unassigned-inventory"],
+  const { data, isLoading } = useQuery<UnassignedResponse>({
+    queryKey: ["/api/operations/unassigned-inventory", page],
     queryFn: async () => {
-      const res = await fetch("/api/operations/unassigned-inventory");
+      const params = new URLSearchParams();
+      params.set("page", page.toString());
+      params.set("pageSize", pageSize.toString());
+      const res = await fetch(`/api/operations/unassigned-inventory?${params}`);
       if (!res.ok) throw new Error("Failed to fetch unassigned inventory");
       return res.json();
     },
     staleTime: 30_000,
   });
 
-  const count = items?.length ?? 0;
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.ceil(total / pageSize);
+
+  // Auto-open if there are unassigned items (alert condition)
+  useEffect(() => {
+    if (!autoOpened && total > 0) {
+      setIsOpen(true);
+      setAutoOpened(true);
+    }
+  }, [total, autoOpened]);
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -56,8 +79,8 @@ export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSec
           <div className="flex items-center gap-2">
             <PackageX className="h-4 w-4 text-muted-foreground" />
             <h3 className="font-semibold text-base">Unassigned Inventory</h3>
-            {count > 0 && (
-              <Badge variant="secondary" className="text-xs">{count}</Badge>
+            {total > 0 && (
+              <Badge variant="secondary" className="text-xs">{total}</Badge>
             )}
           </div>
           {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -66,7 +89,7 @@ export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSec
           <div className="border-t">
             {isLoading ? (
               <div className="text-sm text-muted-foreground py-6 text-center">Loading...</div>
-            ) : count === 0 ? (
+            ) : items.length === 0 ? (
               <div className="text-sm text-muted-foreground py-6 text-center">
                 No unassigned inventory (receiving/staging areas are empty)
               </div>
@@ -86,7 +109,7 @@ export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSec
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {items!.map((item) => (
+                      {items.map((item) => (
                         <TableRow key={item.levelId}>
                           <TableCell className="font-mono text-sm">{item.sku}</TableCell>
                           <TableCell className="text-sm text-muted-foreground truncate max-w-[200px]">{item.name}</TableCell>
@@ -117,7 +140,7 @@ export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSec
                 </div>
                 {/* Mobile */}
                 <div className="md:hidden p-3 space-y-2">
-                  {items!.map((item) => (
+                  {items.map((item) => (
                     <div key={item.levelId} className="rounded-md border p-3">
                       <div className="flex justify-between">
                         <div>
@@ -142,6 +165,22 @@ export default function UnassignedSection({ canEdit, onTransfer }: UnassignedSec
                     </div>
                   ))}
                 </div>
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div className="p-3 border-t flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">
+                      Page {page} of {totalPages} ({total} items)
+                    </span>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                        Previous
+                      </Button>
+                      <Button size="sm" variant="outline" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>

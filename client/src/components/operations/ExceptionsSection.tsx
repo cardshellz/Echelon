@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Edit, Clock, PackageX } from "lucide-react";
+import { AlertTriangle, Edit, Clock, PackageX, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -56,10 +56,13 @@ interface ExceptionsSectionProps {
   warehouseId: number | null;
   canEdit: boolean;
   onAdjust: (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) => void;
+  onTransferTo: (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string) => void;
+  onTransferFrom: (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) => void;
 }
 
-export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: ExceptionsSectionProps) {
+export default function ExceptionsSection({ warehouseId, canEdit, onAdjust, onTransferTo, onTransferFrom }: ExceptionsSectionProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [autoOpened, setAutoOpened] = useState(false);
 
   const { data, isLoading } = useQuery<Exceptions>({
     queryKey: ["/api/operations/exceptions", warehouseId],
@@ -76,6 +79,13 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
   const totalExceptions = data
     ? data.negativeInventory.length + data.emptyPickFaces.length + data.staleBins.length
     : 0;
+
+  useEffect(() => {
+    if (!autoOpened && totalExceptions > 0) {
+      setIsOpen(true);
+      setAutoOpened(true);
+    }
+  }, [totalExceptions, autoOpened]);
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -102,13 +112,13 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
               <Tabs defaultValue="negative" className="p-3">
                 <TabsList className="bg-muted/50">
                   <TabsTrigger value="negative" className="text-xs">
-                    Negative ({data!.negativeInventory.length})
+                    Negative ({data!.negativeInventory.length}{data!.negativeInventory.length >= 50 ? "+" : ""})
                   </TabsTrigger>
                   <TabsTrigger value="empty-pick" className="text-xs">
-                    Empty Pick ({data!.emptyPickFaces.length})
+                    Empty Pick ({data!.emptyPickFaces.length}{data!.emptyPickFaces.length >= 50 ? "+" : ""})
                   </TabsTrigger>
                   <TabsTrigger value="stale" className="text-xs">
-                    Stale ({data!.staleBins.length})
+                    Stale ({data!.staleBins.length}{data!.staleBins.length >= 50 ? "+" : ""})
                   </TabsTrigger>
                 </TabsList>
 
@@ -180,6 +190,7 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                             <TableHead>Location</TableHead>
                             <TableHead>Last SKU</TableHead>
                             <TableHead>Last Movement</TableHead>
+                            {canEdit && <TableHead className="w-[100px]"></TableHead>}
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -190,6 +201,19 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                               <TableCell className="text-sm text-muted-foreground">
                                 {item.lastMovementAt ? new Date(item.lastMovementAt).toLocaleDateString() : "Never"}
                               </TableCell>
+                              {canEdit && (
+                                <TableCell>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 text-xs"
+                                    onClick={() => onTransferTo(item.locationId, item.locationCode)}
+                                  >
+                                    <ArrowRight className="h-3.5 w-3.5 mr-1" />
+                                    Replenish
+                                  </Button>
+                                </TableCell>
+                              )}
                             </TableRow>
                           ))}
                         </TableBody>
@@ -203,6 +227,16 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                         <div className="text-xs text-muted-foreground">
                           Last: {item.lastSku || "unknown"} — {item.lastMovementAt ? new Date(item.lastMovementAt).toLocaleDateString() : "never"}
                         </div>
+                        {canEdit && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full mt-2 h-7 text-xs"
+                            onClick={() => onTransferTo(item.locationId, item.locationCode)}
+                          >
+                            Replenish
+                          </Button>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -221,6 +255,7 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                             <TableHead className="text-right">SKUs</TableHead>
                             <TableHead className="text-right">Qty</TableHead>
                             <TableHead className="text-right">Days Stale</TableHead>
+                            {canEdit && <TableHead className="w-[100px]"></TableHead>}
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -239,6 +274,19 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                                   {item.daysSinceMovement ?? "∞"}d
                                 </span>
                               </TableCell>
+                              {canEdit && (
+                                <TableCell>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 text-xs"
+                                    onClick={() => onTransferFrom(item.locationId, item.locationCode)}
+                                  >
+                                    <ArrowRight className="h-3.5 w-3.5 mr-1" />
+                                    Move
+                                  </Button>
+                                </TableCell>
+                              )}
                             </TableRow>
                           ))}
                         </TableBody>
@@ -253,6 +301,16 @@ export default function ExceptionsSection({ warehouseId, canEdit, onAdjust }: Ex
                           <span className="text-amber-600 text-sm">{item.daysSinceMovement ?? "∞"}d stale</span>
                         </div>
                         <div className="text-xs text-muted-foreground">{item.skuCount} SKUs, {item.totalQty} units</div>
+                        {canEdit && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full mt-2 h-7 text-xs"
+                            onClick={() => onTransferFrom(item.locationId, item.locationCode)}
+                          >
+                            Move Inventory
+                          </Button>
+                        )}
                       </div>
                     ))}
                   </div>

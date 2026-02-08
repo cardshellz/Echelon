@@ -381,6 +381,7 @@ export class InventoryCoreService {
     reasonId?: number;
     cycleCountId?: number;
     userId?: string;
+    allowNegative?: boolean;
   }): Promise<void> {
     if (params.qtyDelta === 0) {
       throw new Error("qtyDelta must be non-zero");
@@ -393,6 +394,16 @@ export class InventoryCoreService {
         params.productVariantId,
         params.warehouseLocationId,
       );
+
+      // Guard against negative inventory unless explicitly allowed
+      if (!params.allowNegative && params.qtyDelta < 0) {
+        if (level.variantQty + params.qtyDelta < 0) {
+          throw new Error(
+            `Adjustment would result in negative inventory: ` +
+            `current ${level.variantQty} + delta ${params.qtyDelta} = ${level.variantQty + params.qtyDelta}`,
+          );
+        }
+      }
 
       await svc.adjustLevel(level.id, {
         variantQty: params.qtyDelta,
@@ -572,7 +583,7 @@ export class InventoryCoreService {
     await this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
-      // --- SOURCE ---
+      // --- SOURCE (atomic guarded decrement) ---
       const sourceLevel = await svc.getLevel(
         params.productVariantId,
         params.fromLocationId,
@@ -592,9 +603,28 @@ export class InventoryCoreService {
         );
       }
 
-      await svc.adjustLevel(sourceLevel.id, {
-        variantQty: -params.qty,
-      });
+      // Atomic WHERE guard prevents concurrent transfers from over-decrementing
+      // (same pattern as pickItem optimistic lock).
+      const [decremented] = await tx
+        .update(inventoryLevels)
+        .set({
+          variantQty: sql`${inventoryLevels.variantQty} - ${params.qty}`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(inventoryLevels.id, sourceLevel.id),
+            sql`${inventoryLevels.variantQty} >= ${params.qty}`,
+          ),
+        )
+        .returning();
+
+      if (!decremented) {
+        throw new Error(
+          `Transfer failed: insufficient stock at source (concurrent claim). ` +
+          `Needed ${params.qty}, had ${sourceLevel.variantQty} at read time.`,
+        );
+      }
 
       // --- DESTINATION ---
       const destLevel = await svc.upsertLevel(
@@ -614,7 +644,7 @@ export class InventoryCoreService {
         transactionType: "transfer",
         variantQtyDelta: params.qty,
         variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: sourceLevel.variantQty - params.qty,
+        variantQtyAfter: decremented.variantQty,
         sourceState: "on_hand",
         targetState: "on_hand",
         referenceType: "manual",

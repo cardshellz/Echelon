@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import OpsKpiCards from "@/components/operations/OpsKpiCards";
@@ -20,6 +20,8 @@ export interface TransferDialogState {
   open: boolean;
   fromLocationId?: number;
   fromLocationCode?: string;
+  toLocationId?: number;
+  toLocationCode?: string;
   variantId?: number;
   sku?: string;
 }
@@ -56,6 +58,17 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
     staleTime: 30_000,
   });
 
+  // Helper: open transfer dialog with source pre-filled (standard flow)
+  const openTransferFrom = (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) =>
+    setTransferDialog({ open: true, fromLocationId, fromLocationCode, variantId, sku });
+
+  // Helper: open transfer dialog with destination pre-filled (replen flow)
+  const openTransferTo = (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string) =>
+    setTransferDialog({ open: true, toLocationId, toLocationCode, variantId, sku });
+
+  const openAdjust = (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) =>
+    setAdjustDialog({ open: true, locationId, locationCode, variantId, sku, currentQty });
+
   return (
     <div className="space-y-6">
       <OpsKpiCards data={healthQuery.data} isLoading={healthQuery.isLoading} />
@@ -64,42 +77,43 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         warehouseId={warehouseId}
         searchQuery={searchQuery}
         canEdit={canEdit}
-        onTransfer={(fromLocationId, fromLocationCode, variantId, sku) =>
-          setTransferDialog({ open: true, fromLocationId, fromLocationCode, variantId, sku })
-        }
-        onAdjust={(locationId, locationCode, variantId, sku, currentQty) =>
-          setAdjustDialog({ open: true, locationId, locationCode, variantId, sku, currentQty })
-        }
+        onTransfer={openTransferFrom}
+        onAdjust={openAdjust}
         onViewActivity={(locationId) => setActivityLocationId(locationId)}
       />
 
       <SkuLocatorSection
         canEdit={canEdit}
-        onTransfer={(fromLocationId, fromLocationCode, variantId, sku) =>
-          setTransferDialog({ open: true, fromLocationId, fromLocationCode, variantId, sku })
-        }
+        onTransfer={openTransferFrom}
       />
 
       <UnassignedSection
         canEdit={canEdit}
-        onTransfer={(fromLocationId, fromLocationCode, variantId, sku) =>
-          setTransferDialog({ open: true, fromLocationId, fromLocationCode, variantId, sku })
-        }
+        onTransfer={openTransferFrom}
       />
 
-      <PickReadinessSection warehouseId={warehouseId} />
+      <PickReadinessSection
+        warehouseId={warehouseId}
+        canEdit={canEdit}
+        onTransfer={(toLocationId, toLocationCode, variantId, sku) =>
+          openTransferTo(toLocationId, toLocationCode, variantId, sku)
+        }
+        onAdjust={openAdjust}
+      />
 
       <ExceptionsSection
         warehouseId={warehouseId}
         canEdit={canEdit}
-        onAdjust={(locationId, locationCode, variantId, sku, currentQty) =>
-          setAdjustDialog({ open: true, locationId, locationCode, variantId, sku, currentQty })
-        }
+        onAdjust={openAdjust}
+        onTransferTo={openTransferTo}
+        onTransferFrom={openTransferFrom}
       />
 
       <RecentActivitySection
         locationId={activityLocationId}
         variantId={activityVariantId}
+        onClearLocation={() => setActivityLocationId(null)}
+        onClearVariant={() => setActivityVariantId(null)}
       />
 
       <InlineTransferDialog
@@ -107,6 +121,8 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         onOpenChange={(open) => setTransferDialog((prev) => ({ ...prev, open }))}
         defaultFromLocationId={transferDialog.fromLocationId}
         defaultFromLocationCode={transferDialog.fromLocationCode}
+        defaultToLocationId={transferDialog.toLocationId}
+        defaultToLocationCode={transferDialog.toLocationCode}
         defaultVariantId={transferDialog.variantId}
         defaultSku={transferDialog.sku}
       />

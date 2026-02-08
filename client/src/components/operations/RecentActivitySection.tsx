@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { History, ArrowRight } from "lucide-react";
+import { History, ArrowRight, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -39,6 +40,8 @@ interface ActivityItem {
 interface RecentActivitySectionProps {
   locationId: number | null;
   variantId: number | null;
+  onClearLocation?: () => void;
+  onClearVariant?: () => void;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -56,9 +59,18 @@ const TYPE_COLORS: Record<string, string> = {
   assemble: "bg-rose-100 text-rose-800",
 };
 
-export default function RecentActivitySection({ locationId, variantId }: RecentActivitySectionProps) {
+export default function RecentActivitySection({ locationId, variantId, onClearLocation, onClearVariant }: RecentActivitySectionProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
+  const prevLocationId = useRef(locationId);
+
+  // Auto-open when locationId is set (user clicked "View History")
+  useEffect(() => {
+    if (locationId && locationId !== prevLocationId.current) {
+      setIsOpen(true);
+    }
+    prevLocationId.current = locationId;
+  }, [locationId]);
 
   const { data: items, isLoading } = useQuery<ActivityItem[]>({
     queryKey: ["/api/operations/activity", locationId, variantId],
@@ -97,6 +109,17 @@ export default function RecentActivitySection({ locationId, variantId }: RecentA
           <div className="flex items-center gap-2">
             <History className="h-4 w-4 text-muted-foreground" />
             <h3 className="font-semibold text-base">Recent Activity</h3>
+            {locationId && (
+              <Badge variant="secondary" className="text-xs font-mono gap-1">
+                Bin filter active
+                {onClearLocation && (
+                  <X
+                    className="h-3 w-3 cursor-pointer hover:text-foreground"
+                    onClick={(e) => { e.stopPropagation(); onClearLocation(); }}
+                  />
+                )}
+              </Badge>
+            )}
           </div>
           {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         </CollapsibleTrigger>

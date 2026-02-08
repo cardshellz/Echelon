@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -98,6 +99,7 @@ export default function InlineAdjustDialog({
       queryClient.invalidateQueries({ queryKey: ["/api/operations/unassigned-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/activity"] });
       onOpenChange(false);
     },
     onError: (error: any) => {
@@ -147,6 +149,14 @@ export default function InlineAdjustDialog({
                 New qty: {newQty.toLocaleString()}
               </div>
             )}
+            {newQty < 0 && delta !== 0 && (
+              <div className="flex items-start gap-2 p-2.5 rounded-md bg-red-50 border border-red-200 dark:bg-red-900/10 dark:border-red-800/30">
+                <AlertTriangle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                <p className="text-xs text-red-700 dark:text-red-400">
+                  This adjustment would result in negative inventory ({newQty}). Adjustments that go below zero are blocked.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2">
@@ -178,7 +188,7 @@ export default function InlineAdjustDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => adjustMutation.mutate()}
-            disabled={!isValid || adjustMutation.isPending || (selectedReason?.requiresNote === 1 && !notes)}
+            disabled={!isValid || adjustMutation.isPending || (selectedReason?.requiresNote === 1 && !notes) || newQty < 0}
           >
             {adjustMutation.isPending ? "Applying..." : "Apply Adjustment"}
           </Button>

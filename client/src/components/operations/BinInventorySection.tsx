@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   ChevronDown,
   ChevronRight,
   MoreHorizontal,
   ArrowLeftRight,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
   Edit,
   History,
   Filter,
@@ -103,13 +106,40 @@ export default function BinInventorySection({
   const [locationType, setLocationType] = useState("all");
   const [hasInventory, setHasInventory] = useState("all");
   const [binSearch, setBinSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [expandedBins, setExpandedBins] = useState<Set<number>>(new Set());
+  const [sortField, setSortField] = useState("code");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const pageSize = 50;
 
-  const effectiveSearch = binSearch || searchQuery;
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDir("asc");
+    }
+    setPage(1);
+  };
+
+  const SortIcon = ({ field }: { field: string }) => {
+    if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground" />;
+    return sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />;
+  };
+
+  // Debounce bin search input (300ms)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(binSearch);
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [binSearch]);
+
+  const effectiveSearch = debouncedSearch || searchQuery;
 
   const { data, isLoading } = useQuery<BinInventoryResponse>({
-    queryKey: ["/api/operations/bin-inventory", warehouseId, locationType, hasInventory, effectiveSearch, page],
+    queryKey: ["/api/operations/bin-inventory", warehouseId, locationType, hasInventory, effectiveSearch, page, sortField, sortDir],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (warehouseId) params.set("warehouseId", warehouseId.toString());
@@ -118,6 +148,8 @@ export default function BinInventorySection({
       if (effectiveSearch) params.set("search", effectiveSearch);
       params.set("page", page.toString());
       params.set("pageSize", pageSize.toString());
+      params.set("sortField", sortField);
+      params.set("sortDir", sortDir);
       const res = await fetch(`/api/operations/bin-inventory?${params}`);
       if (!res.ok) throw new Error("Failed to fetch bin inventory");
       return res.json();
@@ -164,7 +196,7 @@ export default function BinInventorySection({
             <Input
               placeholder="Search bins..."
               value={binSearch}
-              onChange={(e) => { setBinSearch(e.target.value); setPage(1); }}
+              onChange={(e) => setBinSearch(e.target.value)}
               className="pl-9 h-9"
             />
           </div>
@@ -198,13 +230,25 @@ export default function BinInventorySection({
           <TableHeader>
             <TableRow>
               <TableHead className="w-[30px]"></TableHead>
-              <TableHead>Location</TableHead>
-              <TableHead>Zone</TableHead>
-              <TableHead>Type</TableHead>
+              <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("code")}>
+                <div className="flex items-center gap-1">Location <SortIcon field="code" /></div>
+              </TableHead>
+              <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("zone")}>
+                <div className="flex items-center gap-1">Zone <SortIcon field="zone" /></div>
+              </TableHead>
+              <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("type")}>
+                <div className="flex items-center gap-1">Type <SortIcon field="type" /></div>
+              </TableHead>
               <TableHead className="text-center">Pick</TableHead>
-              <TableHead className="text-right">SKUs</TableHead>
-              <TableHead className="text-right">Qty</TableHead>
-              <TableHead className="text-right">Reserved</TableHead>
+              <TableHead className="text-right cursor-pointer hover:bg-muted/60" onClick={() => handleSort("skus")}>
+                <div className="flex items-center justify-end gap-1">SKUs <SortIcon field="skus" /></div>
+              </TableHead>
+              <TableHead className="text-right cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
+                <div className="flex items-center justify-end gap-1">Qty <SortIcon field="qty" /></div>
+              </TableHead>
+              <TableHead className="text-right cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
+                <div className="flex items-center justify-end gap-1">Reserved <SortIcon field="reserved" /></div>
+              </TableHead>
               {canEdit && <TableHead className="w-[50px]"></TableHead>}
             </TableRow>
           </TableHeader>
@@ -274,6 +318,28 @@ export default function BinInventorySection({
                   ))}
                 </div>
               )}
+              <div className="mt-2 pt-2 border-t flex gap-2">
+                {canEdit && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs flex-1"
+                    onClick={() => onTransfer(bin.locationId, bin.locationCode)}
+                  >
+                    <ArrowLeftRight className="h-3 w-3 mr-1" />
+                    Transfer
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => onViewActivity(bin.locationId)}
+                >
+                  <History className="h-3 w-3 mr-1" />
+                  History
+                </Button>
+              </div>
             </div>
           ))
         )}

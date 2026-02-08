@@ -4986,7 +4986,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/inventory/adjust", async (req, res) => {
+  app.post("/api/inventory/adjust", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, qtyDelta: bodyQtyDelta, reason } = req.body;
@@ -10193,6 +10193,8 @@ export async function registerRoutes(
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
       const offset = (page - 1) * pageSize;
+      const sortField = (req.query.sortField as string) || "code";
+      const sortDir = (req.query.sortDir as string) === "desc" ? "desc" : "asc";
 
       // Compose filter fragments using Drizzle sql template literals
       const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
@@ -10235,7 +10237,14 @@ export async function registerRoutes(
         WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
         GROUP BY wl.id, wl.code, wl.zone, wl.location_type, wl.bin_type, wl.is_pickable,
                  wl.pick_sequence, wl.warehouse_id, wl.capacity_cubic_mm, w.code
-        ORDER BY wl.code
+        ORDER BY ${
+          sortField === "qty" ? sql`total_variant_qty` :
+          sortField === "skus" ? sql`sku_count` :
+          sortField === "reserved" ? sql`total_reserved_qty` :
+          sortField === "zone" ? sql`wl.zone` :
+          sortField === "type" ? sql`wl.location_type` :
+          sql`wl.code`
+        } ${sortDir === "desc" ? sql`DESC` : sql`ASC`}, wl.code ASC
         LIMIT ${pageSize} OFFSET ${offset}
       `);
 
@@ -10301,115 +10310,107 @@ export async function registerRoutes(
   // 2. Unassigned Inventory — items in receiving/staging locations
   app.get("/api/operations/unassigned-inventory", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const result = await db.execute(sql`
-        SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
-               wl.id as location_id, wl.code as location_code, wl.location_type
-        FROM inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE il.variant_qty > 0
-          AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
-        ORDER BY pv.sku
-      `);
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
+      const offset = (page - 1) * pageSize;
 
-      res.json((result.rows as any[]).map((r: any) => ({
-        levelId: r.level_id,
-        variantId: r.variant_id,
-        sku: r.sku,
-        name: r.name,
-        variantQty: parseInt(r.variant_qty) || 0,
-        locationId: r.location_id,
-        locationCode: r.location_code,
-        locationType: r.location_type,
-      })));
+      const [countResult, result] = await Promise.all([
+        db.execute(sql`
+          SELECT COUNT(*) as total
+          FROM inventory_levels il
+          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+          WHERE il.variant_qty > 0
+            AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
+        `),
+        db.execute(sql`
+          SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
+                 wl.id as location_id, wl.code as location_code, wl.location_type
+          FROM inventory_levels il
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+          WHERE il.variant_qty > 0
+            AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
+          ORDER BY pv.sku
+          LIMIT ${pageSize} OFFSET ${offset}
+        `),
+      ]);
+
+      res.json({
+        items: (result.rows as any[]).map((r: any) => ({
+          levelId: r.level_id,
+          variantId: r.variant_id,
+          sku: r.sku,
+          name: r.name,
+          variantQty: parseInt(r.variant_qty) || 0,
+          locationId: r.location_id,
+          locationCode: r.location_code,
+          locationType: r.location_type,
+        })),
+        total: parseInt((countResult.rows[0] as any).total) || 0,
+        page,
+        pageSize,
+      });
     } catch (error) {
       console.error("Error fetching unassigned inventory:", error);
       res.status(500).json({ error: "Failed to fetch unassigned inventory" });
     }
   });
 
-  // 3. Location Health — aggregated KPI metrics
+  // 3. Location Health — aggregated KPI metrics (single consolidated query)
   app.get("/api/operations/location-health", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const staleDays = Math.max(1, Math.min(365, parseInt(req.query.staleDays as string) || 30));
       const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
 
-      // Location counts
-      const locResult = await db.execute(sql`
-        SELECT
-          COUNT(*) as total_locations,
-          COUNT(*) FILTER (WHERE wl.is_pickable = 1) as pick_locations,
-          COUNT(*) FILTER (WHERE wl.location_type = 'bulk_storage') as bulk_locations
-        FROM warehouse_locations wl
-        WHERE 1=1 ${warehouseFilter}
-      `);
-
-      // Empty locations (no inventory with qty > 0)
-      const emptyResult = await db.execute(sql`
-        SELECT
-          COUNT(*) as empty_locations,
-          COUNT(*) FILTER (WHERE wl.is_pickable = 1) as empty_pick_locations
-        FROM warehouse_locations wl
-        WHERE NOT EXISTS (
-          SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
-        ) ${warehouseFilter}
-      `);
-
-      // Negative inventory
-      const negResult = await db.execute(sql`
-        SELECT COUNT(*) as cnt
-        FROM inventory_levels il
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE il.variant_qty < 0 ${warehouseFilter}
-      `);
-
-      // Pending replen tasks
-      const replenResult = await db.execute(sql`
-        SELECT COUNT(*) as cnt
-        FROM replen_tasks
-        WHERE status IN ('pending', 'assigned')
-      `);
-
-      // Recent transactions (last 24h)
-      const recentResult = await db.execute(sql`
-        SELECT
-          COUNT(*) FILTER (WHERE transaction_type = 'transfer') as transfer_count,
-          COUNT(*) FILTER (WHERE transaction_type = 'adjustment') as adjustment_count
-        FROM inventory_transactions
-        WHERE created_at > NOW() - INTERVAL '24 hours'
-      `);
-
-      // Stale bins (inventory with no transactions in 90+ days)
-      const staleResult = await db.execute(sql`
-        SELECT COUNT(DISTINCT wl.id) as cnt
-        FROM warehouse_locations wl
-        JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
-        WHERE 1=1 ${warehouseFilter}
-          AND NOT EXISTS (
-            SELECT 1 FROM inventory_transactions it
-            WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
-              AND it.created_at > NOW() - INTERVAL '90 days'
-          )
-      `);
+      // Consolidated into 2 queries instead of 6 — location-centric + auxiliary
+      const [locResult, auxResult] = await Promise.all([
+        db.execute(sql`
+          SELECT
+            COUNT(*) as total_locations,
+            COUNT(*) FILTER (WHERE wl.is_pickable = 1) as pick_locations,
+            COUNT(*) FILTER (WHERE wl.location_type = 'bulk_storage') as bulk_locations,
+            COUNT(*) FILTER (WHERE NOT EXISTS (
+              SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            )) as empty_locations,
+            COUNT(*) FILTER (WHERE wl.is_pickable = 1 AND NOT EXISTS (
+              SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            )) as empty_pick_locations,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty < 0
+            )) as negative_inventory_count,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+            ) AND NOT EXISTS (
+              SELECT 1 FROM inventory_transactions it
+              WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
+                AND it.created_at > NOW() - INTERVAL '1 day' * ${staleDays}
+            )) as stale_inventory_count
+          FROM warehouse_locations wl
+          WHERE 1=1 ${warehouseFilter}
+        `),
+        db.execute(sql`
+          SELECT
+            (SELECT COUNT(*) FROM replen_tasks WHERE status IN ('pending', 'assigned')) as pending_replen_tasks,
+            (SELECT COUNT(*) FILTER (WHERE transaction_type = 'transfer') FROM inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_transfer_count,
+            (SELECT COUNT(*) FILTER (WHERE transaction_type = 'adjustment') FROM inventory_transactions WHERE created_at > NOW() - INTERVAL '24 hours') as recent_adjustment_count
+        `),
+      ]);
 
       const loc = locResult.rows[0] as any;
-      const empty = emptyResult.rows[0] as any;
-      const neg = negResult.rows[0] as any;
-      const replen = replenResult.rows[0] as any;
-      const recent = recentResult.rows[0] as any;
-      const stale = staleResult.rows[0] as any;
+      const aux = auxResult.rows[0] as any;
 
       res.json({
         totalLocations: parseInt(loc.total_locations) || 0,
-        emptyLocations: parseInt(empty.empty_locations) || 0,
+        emptyLocations: parseInt(loc.empty_locations) || 0,
         pickLocations: parseInt(loc.pick_locations) || 0,
-        emptyPickLocations: parseInt(empty.empty_pick_locations) || 0,
+        emptyPickLocations: parseInt(loc.empty_pick_locations) || 0,
         bulkLocations: parseInt(loc.bulk_locations) || 0,
-        negativeInventoryCount: parseInt(neg.cnt) || 0,
-        pendingReplenTasks: parseInt(replen.cnt) || 0,
-        recentTransferCount: parseInt(recent.transfer_count) || 0,
-        recentAdjustmentCount: parseInt(recent.adjustment_count) || 0,
-        staleInventoryCount: parseInt(stale.cnt) || 0,
+        negativeInventoryCount: parseInt(loc.negative_inventory_count) || 0,
+        pendingReplenTasks: parseInt(aux.pending_replen_tasks) || 0,
+        recentTransferCount: parseInt(aux.recent_transfer_count) || 0,
+        recentAdjustmentCount: parseInt(aux.recent_adjustment_count) || 0,
+        staleInventoryCount: parseInt(loc.stale_inventory_count) || 0,
       });
     } catch (error) {
       console.error("Error fetching location health:", error);
@@ -10421,6 +10422,7 @@ export async function registerRoutes(
   app.get("/api/operations/exceptions", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const staleDays = Math.max(1, Math.min(365, parseInt(req.query.staleDays as string) || 30));
       const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
 
       // Negative inventory
@@ -10455,7 +10457,7 @@ export async function registerRoutes(
         LIMIT 50
       `);
 
-      // Stale bins (no movement in 90+ days but still have inventory)
+      // Stale bins (no movement in N+ days but still have inventory)
       const staleResult = await db.execute(sql`
         SELECT wl.id as location_id, wl.code as location_code, wl.location_type,
                COUNT(DISTINCT il.product_variant_id) as sku_count,
@@ -10468,7 +10470,7 @@ export async function registerRoutes(
           AND NOT EXISTS (
             SELECT 1 FROM inventory_transactions it
             WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
-              AND it.created_at > NOW() - INTERVAL '90 days'
+              AND it.created_at > NOW() - INTERVAL '1 day' * ${staleDays}
           )
         GROUP BY wl.id, wl.code, wl.location_type
         ORDER BY wl.code
@@ -10513,6 +10515,7 @@ export async function registerRoutes(
   app.get("/api/operations/pick-readiness", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const threshold = Math.max(1, Math.min(999, parseInt(req.query.threshold as string) || 5));
       const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
 
       const result = await db.execute(sql`
@@ -10543,7 +10546,7 @@ export async function registerRoutes(
         ) rt ON true
         WHERE wl.is_pickable = 1
           AND wl.location_type = 'forward_pick'
-          AND il.variant_qty <= 5
+          AND il.variant_qty <= ${threshold}
           ${warehouseFilter}
         ORDER BY il.variant_qty ASC, pv.sku
         LIMIT 100

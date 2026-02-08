@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, ArrowLeftRight, Edit } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -10,6 +11,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Collapsible,
   CollapsibleContent,
@@ -31,16 +39,21 @@ interface PickReadinessItem {
 
 interface PickReadinessSectionProps {
   warehouseId: number | null;
+  canEdit: boolean;
+  onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
+  onAdjust: (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) => void;
 }
 
-export default function PickReadinessSection({ warehouseId }: PickReadinessSectionProps) {
+export default function PickReadinessSection({ warehouseId, canEdit, onTransfer, onAdjust }: PickReadinessSectionProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [threshold, setThreshold] = useState("5");
 
   const { data: items, isLoading } = useQuery<PickReadinessItem[]>({
-    queryKey: ["/api/operations/pick-readiness", warehouseId],
+    queryKey: ["/api/operations/pick-readiness", warehouseId, threshold],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (warehouseId) params.set("warehouseId", warehouseId.toString());
+      params.set("threshold", threshold);
       const res = await fetch(`/api/operations/pick-readiness?${params}`);
       if (!res.ok) throw new Error("Failed to fetch pick readiness");
       return res.json();
@@ -82,11 +95,26 @@ export default function PickReadinessSection({ warehouseId }: PickReadinessSecti
         </CollapsibleTrigger>
         <CollapsibleContent>
           <div className="border-t">
+            <div className="p-3 pb-0 flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Threshold:</span>
+              <Select value={threshold} onValueChange={setThreshold}>
+                <SelectTrigger className="w-[100px] h-7 text-xs" onClick={(e) => e.stopPropagation()}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="3">&le; 3 units</SelectItem>
+                  <SelectItem value="5">&le; 5 units</SelectItem>
+                  <SelectItem value="10">&le; 10 units</SelectItem>
+                  <SelectItem value="20">&le; 20 units</SelectItem>
+                  <SelectItem value="50">&le; 50 units</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             {isLoading ? (
               <div className="text-sm text-muted-foreground py-6 text-center">Loading...</div>
             ) : count === 0 ? (
               <div className="text-sm text-green-600 py-6 text-center">
-                All pick locations are stocked
+                All pick locations are stocked above threshold
               </div>
             ) : (
               <>
@@ -100,6 +128,7 @@ export default function PickReadinessSection({ warehouseId }: PickReadinessSecti
                         <TableHead className="text-right">Current Qty</TableHead>
                         <TableHead className="text-right">Bulk Available</TableHead>
                         <TableHead>Replen Status</TableHead>
+                        {canEdit && <TableHead className="w-[100px]"></TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -129,6 +158,31 @@ export default function PickReadinessSection({ warehouseId }: PickReadinessSecti
                               <span className="text-xs text-red-600">No bulk supply</span>
                             )}
                           </TableCell>
+                          {canEdit && (
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {item.bulkAvailable > 0 && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-6 text-xs px-2"
+                                    onClick={() => onTransfer(item.locationId, item.locationCode, item.variantId, item.sku)}
+                                  >
+                                    <ArrowLeftRight className="h-3 w-3 mr-1" />
+                                    Replen
+                                  </Button>
+                                )}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 text-xs px-2"
+                                  onClick={() => onAdjust(item.locationId, item.locationCode, item.variantId, item.sku, item.currentQty)}
+                                >
+                                  <Edit className="h-3 w-3" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          )}
                         </TableRow>
                       ))}
                     </TableBody>
@@ -150,9 +204,31 @@ export default function PickReadinessSection({ warehouseId }: PickReadinessSecti
                           <div className="text-xs text-blue-600">Bulk: {item.bulkAvailable}</div>
                         </div>
                       </div>
-                      {item.pendingReplenStatus && (
-                        <div className="mt-1">{replenStatusBadge(item.pendingReplenStatus)}</div>
-                      )}
+                      <div className="flex items-center justify-between mt-2">
+                        <div>{item.pendingReplenStatus && replenStatusBadge(item.pendingReplenStatus)}</div>
+                        {canEdit && (
+                          <div className="flex gap-1">
+                            {item.bulkAvailable > 0 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={() => onTransfer(item.locationId, item.locationCode, item.variantId, item.sku)}
+                              >
+                                Replen
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => onAdjust(item.locationId, item.locationCode, item.variantId, item.sku, item.currentQty)}
+                            >
+                              Adjust
+                            </Button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

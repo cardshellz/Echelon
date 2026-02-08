@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +28,8 @@ interface InlineTransferDialogProps {
   onOpenChange: (open: boolean) => void;
   defaultFromLocationId?: number;
   defaultFromLocationCode?: string;
+  defaultToLocationId?: number;
+  defaultToLocationCode?: string;
   defaultVariantId?: number;
   defaultSku?: string;
 }
@@ -52,6 +54,8 @@ export default function InlineTransferDialog({
   onOpenChange,
   defaultFromLocationId,
   defaultFromLocationCode,
+  defaultToLocationId,
+  defaultToLocationCode,
   defaultVariantId,
   defaultSku,
 }: InlineTransferDialogProps) {
@@ -63,17 +67,19 @@ export default function InlineTransferDialog({
   const [variantId, setVariantId] = useState<number | null>(null);
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
+  const [locationSearch, setLocationSearch] = useState("");
 
   // Reset form when dialog opens with defaults
   useEffect(() => {
     if (open) {
       setFromLocationId(defaultFromLocationId ?? null);
+      setToLocationId(defaultToLocationId ?? null);
       setVariantId(defaultVariantId ?? null);
-      setToLocationId(null);
       setQuantity("");
       setNotes("");
+      setLocationSearch("");
     }
-  }, [open, defaultFromLocationId, defaultVariantId]);
+  }, [open, defaultFromLocationId, defaultToLocationId, defaultVariantId]);
 
   // Fetch all locations
   const { data: locations } = useQuery<Location[]>({
@@ -97,6 +103,19 @@ export default function InlineTransferDialog({
     enabled: open && !!fromLocationId,
   });
 
+  // Filter locations for search
+  const filteredLocations = useMemo(() => {
+    if (!locations) return [];
+    if (!locationSearch) return locations;
+    const q = locationSearch.toLowerCase();
+    return locations.filter(
+      (loc) =>
+        loc.code.toLowerCase().includes(q) ||
+        loc.locationType.toLowerCase().includes(q) ||
+        (loc.zone?.toLowerCase().includes(q) ?? false),
+    );
+  }, [locations, locationSearch]);
+
   const transferMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", "/api/inventory/transfer", {
@@ -109,7 +128,8 @@ export default function InlineTransferDialog({
       return res.json();
     },
     onSuccess: () => {
-      toast({ title: "Transfer complete", description: `Moved ${quantity} units successfully` });
+      const sku = defaultSku || skusAtLocation?.find((s) => s.variantId === variantId)?.sku || "";
+      toast({ title: "Transfer complete", description: `Moved ${quantity} ${sku} units` });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/bin-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/exceptions"] });
@@ -117,6 +137,7 @@ export default function InlineTransferDialog({
       queryClient.invalidateQueries({ queryKey: ["/api/operations/unassigned-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/activity"] });
       onOpenChange(false);
     },
     onError: (error: any) => {
@@ -126,7 +147,9 @@ export default function InlineTransferDialog({
 
   const selectedSku = skusAtLocation?.find((s) => s.variantId === variantId);
   const maxQty = selectedSku?.variantQty ?? 0;
-  const isValid = fromLocationId && toLocationId && variantId && parseInt(quantity) > 0 && fromLocationId !== toLocationId;
+  const qtyNum = parseInt(quantity) || 0;
+  const isValid = fromLocationId && toLocationId && variantId && qtyNum > 0 && fromLocationId !== toLocationId;
+  const overMax = maxQty > 0 && qtyNum > maxQty;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -143,25 +166,34 @@ export default function InlineTransferDialog({
           <div className="space-y-2">
             <Label>From Location</Label>
             {defaultFromLocationCode ? (
-              <div className="flex items-center gap-2">
-                <Input value={defaultFromLocationCode} disabled className="font-mono" />
-              </div>
+              <Input value={defaultFromLocationCode} disabled className="font-mono" />
             ) : (
-              <Select
-                value={fromLocationId?.toString() || ""}
-                onValueChange={(v) => { setFromLocationId(parseInt(v)); setVariantId(null); }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select source location" />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations?.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} ({loc.locationType.replace("_", " ")})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <>
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search locations..."
+                    value={locationSearch}
+                    onChange={(e) => setLocationSearch(e.target.value)}
+                    className="pl-9 h-9 mb-1"
+                  />
+                </div>
+                <Select
+                  value={fromLocationId?.toString() || ""}
+                  onValueChange={(v) => { setFromLocationId(parseInt(v)); setVariantId(null); setLocationSearch(""); }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select source location" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[200px]">
+                    {filteredLocations.map((loc) => (
+                      <SelectItem key={loc.id} value={loc.id.toString()}>
+                        {loc.code} ({loc.locationType.replace("_", " ")})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </>
             )}
           </div>
 
@@ -179,7 +211,7 @@ export default function InlineTransferDialog({
                 <SelectTrigger>
                   <SelectValue placeholder={fromLocationId ? "Select SKU" : "Select location first"} />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-[200px]">
                   {skusAtLocation?.map((s) => (
                     <SelectItem key={s.variantId} value={s.variantId.toString()}>
                       {s.sku} — {s.name} (qty: {s.variantQty})
@@ -197,11 +229,11 @@ export default function InlineTransferDialog({
               <Input
                 type="number"
                 min="1"
-                max={maxQty}
+                max={maxQty || undefined}
                 value={quantity}
                 onChange={(e) => setQuantity(e.target.value)}
                 placeholder="Enter quantity"
-                className="font-mono"
+                className={`font-mono ${overMax ? "border-red-500 focus-visible:ring-red-500" : ""}`}
               />
               {maxQty > 0 && (
                 <Button variant="outline" size="sm" onClick={() => setQuantity(maxQty.toString())}>
@@ -209,28 +241,48 @@ export default function InlineTransferDialog({
                 </Button>
               )}
             </div>
+            {overMax && (
+              <p className="text-xs text-red-600">Exceeds available quantity ({maxQty})</p>
+            )}
           </div>
 
           {/* Destination */}
           <div className="space-y-2">
             <Label>To Location</Label>
-            <Select
-              value={toLocationId?.toString() || ""}
-              onValueChange={(v) => setToLocationId(parseInt(v))}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select destination" />
-              </SelectTrigger>
-              <SelectContent>
-                {locations
-                  ?.filter((loc) => loc.id !== fromLocationId)
-                  .map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} ({loc.locationType.replace("_", " ")})
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
+            {defaultToLocationCode ? (
+              <Input value={defaultToLocationCode} disabled className="font-mono" />
+            ) : (
+              <>
+                {!defaultFromLocationCode && (
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      placeholder="Search locations..."
+                      value={locationSearch}
+                      onChange={(e) => setLocationSearch(e.target.value)}
+                      className="pl-9 h-9 mb-1"
+                    />
+                  </div>
+                )}
+                <Select
+                  value={toLocationId?.toString() || ""}
+                  onValueChange={(v) => { setToLocationId(parseInt(v)); setLocationSearch(""); }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select destination" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-[200px]">
+                    {(defaultFromLocationCode ? locations : filteredLocations)
+                      ?.filter((loc) => loc.id !== fromLocationId)
+                      .map((loc) => (
+                        <SelectItem key={loc.id} value={loc.id.toString()}>
+                          {loc.code} ({loc.locationType.replace("_", " ")})
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </>
+            )}
           </div>
 
           {/* Notes */}
@@ -249,7 +301,7 @@ export default function InlineTransferDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => transferMutation.mutate()}
-            disabled={!isValid || transferMutation.isPending}
+            disabled={!isValid || overMax || transferMutation.isPending}
           >
             {transferMutation.isPending ? "Transferring..." : (
               <>
