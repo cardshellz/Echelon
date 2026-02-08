@@ -1250,6 +1250,14 @@ export async function registerRoutes(
             syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
               console.warn(`[Inventory] Shopify sync failed for variant ${productVariant.id}:`, err)
             );
+
+            // Auto-trigger replenishment check (fire-and-forget)
+            const { replenishment } = req.app.locals.services as any;
+            if (replenishment) {
+              replenishment.checkAndTriggerAfterPick(productVariant.id, pickLocationId).catch((err: any) =>
+                console.warn(`[Replen] Auto-trigger failed for variant ${productVariant.id}:`, err)
+              );
+            }
           } else {
             // No location with sufficient stock — revert
             await storage.updateOrderItemStatus(id, beforeItem!.status, beforeItem!.pickedQuantity, undefined);
@@ -9542,8 +9550,8 @@ export async function registerRoutes(
           
           // Check for existing pending task for this location/product
           const pendingTasks = await storage.getPendingReplenTasksForLocation(pickLoc.locationId);
-          const existingTask = pendingTasks.find(t => 
-            t.catalogProductId === productId && t.pickVariantId === pickLoc.variantId
+          const existingTask = pendingTasks.find(t =>
+            t.pickProductVariantId === pickLoc.variantId
           );
           
           if (existingTask) {

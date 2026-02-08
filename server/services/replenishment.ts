@@ -188,11 +188,12 @@ class ReplenishmentService {
       const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "bulk_storage";
       const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
-      // Find a source location with stock
+      // Find a source location with stock (try dedicated parent first)
       const sourceLocation = await this.findSourceLocation(
         sourceVariantId ?? level.productVariantId,
         location.warehouseId ?? undefined,
         sourceLocationType,
+        location.parentLocationId,
       );
       if (!sourceLocation) continue; // No stock to replenish from
 
@@ -315,25 +316,50 @@ class ReplenishmentService {
     ) {
       // --- CASE BREAK: consume source variant, produce pick-variant base units ---
 
-      // 1. Decrement source variant at fromLocation
+      const baseUnitsFromSource = task.qtySourceUnits * sourceVariant.unitsPerVariant;
+      const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
+      const remainder = baseUnitsFromSource - (pickVariantUnits * pickVariant.unitsPerVariant);
+
+      if (pickVariantUnits <= 0) {
+        throw new Error(
+          `Case break would produce 0 pick units: ${task.qtySourceUnits} x ${sourceVariant.unitsPerVariant} ` +
+          `base units / ${pickVariant.unitsPerVariant} per pick unit`,
+        );
+      }
+
+      // 1. Snapshot source level for audit log, then atomic guarded decrement
       const sourceLevel = await this.inventoryCore.getLevel(
         sourceVariant.id,
         task.fromLocationId,
       );
-      if (!sourceLevel || sourceLevel.variantQty < task.qtySourceUnits) {
+      if (!sourceLevel) {
         throw new Error(
-          `Insufficient source stock at location ${task.fromLocationId} ` +
-          `for variant ${sourceVariant.id}`,
+          `No inventory level at location ${task.fromLocationId} for variant ${sourceVariant.id}`,
         );
       }
 
-      const baseUnitsFromSource = task.qtySourceUnits * sourceVariant.unitsPerVariant;
-      const pickVariantUnits = Math.floor(baseUnitsFromSource / pickVariant.unitsPerVariant);
+      // Atomic UPDATE with WHERE guard — prevents concurrent tasks from
+      // over-decrementing (same pattern as pickItem optimistic lock).
+      const [updated] = await this.db
+        .update(inventoryLevels)
+        .set({
+          variantQty: sql`${inventoryLevels.variantQty} - ${task.qtySourceUnits}`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(inventoryLevels.id, sourceLevel.id),
+            sql`${inventoryLevels.variantQty} >= ${task.qtySourceUnits}`,
+          ),
+        )
+        .returning();
 
-      // Decrement source location (source variant) - variant units only
-      await this.inventoryCore.adjustLevel(sourceLevel.id, {
-        variantQty: -task.qtySourceUnits,
-      });
+      if (!updated) {
+        throw new Error(
+          `Insufficient source stock at location ${task.fromLocationId} ` +
+          `for variant ${sourceVariant.id} (concurrent claim or qty < ${task.qtySourceUnits})`,
+        );
+      }
 
       // Log the break transaction
       await this.inventoryCore.logTransaction({
@@ -342,12 +368,13 @@ class ReplenishmentService {
         transactionType: "break",
         variantQtyDelta: -task.qtySourceUnits,
         variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: sourceLevel.variantQty - task.qtySourceUnits,
+        variantQtyAfter: updated.variantQty,
         sourceState: "on_hand",
         targetState: "on_hand",
         referenceType: "replen_task",
         referenceId: String(taskId),
-        notes: `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}`,
+        notes: `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
+          (remainder > 0 ? ` (${remainder} base units remainder)` : ""),
         userId: userId ?? null,
       });
 
@@ -374,7 +401,8 @@ class ReplenishmentService {
         targetState: "on_hand",
         referenceType: "replen_task",
         referenceId: String(taskId),
-        notes: `Replen case-break to pick location`,
+        notes: `Replen case-break to pick location` +
+          (remainder > 0 ? ` (${remainder} base units lost in conversion)` : ""),
         userId: userId ?? null,
       });
 
@@ -576,11 +604,12 @@ class ReplenishmentService {
     const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "bulk_storage";
     const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
-    // Find source location with stock
+    // Find source location with stock (try dedicated parent first)
     const sourceLocation = await this.findSourceLocation(
       sourceVariantId ?? productVariantId,
       location.warehouseId ?? undefined,
       sourceLocationType,
+      location.parentLocationId,
     );
     if (!sourceLocation) return null;
 
@@ -734,15 +763,36 @@ class ReplenishmentService {
 
   /**
    * Find a source (bulk) location that has on-hand stock for the given variant.
-   * Prefers locations in the same warehouse and uses FIFO ordering (earliest
-   * updatedAt first).
+   *
+   * Resolution order (hybrid approach):
+   * 1. Dedicated parent -- if the pick location has `parentLocationId` set and
+   *    the parent has stock for the source variant, use it immediately.
+   * 2. General search -- scan all locations of `sourceLocationType` in the
+   *    same warehouse, ordered FIFO (earliest updatedAt first).
    */
   private async findSourceLocation(
     productVariantId: number,
     warehouseId: number | undefined,
     sourceLocationType: string,
+    parentLocationId?: number | null,
   ): Promise<WarehouseLocation | null> {
-    // Get all locations of the source type with stock for this variant
+    // --- 1. Try dedicated parent location first ---
+    if (parentLocationId) {
+      const parentLevel = await this.inventoryCore.getLevel(
+        productVariantId,
+        parentLocationId,
+      );
+      if (parentLevel && parentLevel.variantQty > 0) {
+        const [parentLoc] = await this.db
+          .select()
+          .from(warehouseLocations)
+          .where(eq(warehouseLocations.id, parentLocationId))
+          .limit(1);
+        if (parentLoc) return parentLoc;
+      }
+    }
+
+    // --- 2. Fallback: general search (FIFO) ---
     const levelsWithStock: Array<InventoryLevel & { location?: WarehouseLocation }> =
       await this.db
         .select({
