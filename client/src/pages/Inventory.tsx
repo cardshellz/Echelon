@@ -558,8 +558,8 @@ export default function Inventory() {
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="border-b bg-card p-4 md:p-6 pb-4">
+    <div className="flex flex-col h-full overflow-hidden">
+      <div className="border-b bg-card p-4 md:p-6 pb-4 shrink-0">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
           <div>
             <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
@@ -661,8 +661,8 @@ export default function Inventory() {
         </div>
       </div>
 
-      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
+      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-4">
             <TabsTrigger
               value="physical"
@@ -688,7 +688,7 @@ export default function Inventory() {
           </TabsList>
 
           {/* ====== TAB 1: Physical Inventory ====== */}
-          <TabsContent value="physical" className="flex-1 flex flex-col mt-0">
+          <TabsContent value="physical" className="flex-1 flex flex-col mt-0 min-h-0">
             {loadingVariantLevels ? (
               <div className="flex-1 flex items-center justify-center">
                 <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -727,7 +727,7 @@ export default function Inventory() {
                 </div>
 
                 {/* Desktop table */}
-                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-auto min-h-0">
                   <Table>
                     <TableHeader className="bg-muted/40 sticky top-0 z-10">
                       <TableRow>
@@ -831,12 +831,12 @@ export default function Inventory() {
           </TabsContent>
 
           {/* ====== TAB 2: Purchasing / Reorder ====== */}
-          <TabsContent value="purchasing" className="flex-1 flex flex-col mt-0 overflow-auto">
+          <TabsContent value="purchasing" className="flex-1 flex flex-col mt-0 min-h-0">
             <PurchasingView searchQuery={searchQuery} />
           </TabsContent>
 
           {/* ====== TAB 3: Operations ====== */}
-          <TabsContent value="operations" className="flex-1 flex flex-col mt-0 overflow-auto">
+          <TabsContent value="operations" className="flex-1 flex flex-col mt-0 min-h-0">
             <OperationsView warehouseId={selectedWarehouseId} searchQuery={searchQuery} />
           </TabsContent>
         </Tabs>

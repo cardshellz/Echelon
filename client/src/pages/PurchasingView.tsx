@@ -35,6 +35,7 @@ interface ReorderItem {
   totalOnHand: number;
   totalReserved: number;
   available: number;
+  periodUsage: number;
   avgDailyUsage: number;
   daysOfSupply: number;
   leadTimeDays: number;
@@ -111,7 +112,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
         case "sku": aVal = a.sku; bVal = b.sku; break;
         case "name": aVal = a.productName; bVal = b.productName; break;
         case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
-        case "usage": aVal = a.avgDailyUsage; bVal = b.avgDailyUsage; break;
+        case "usage": aVal = a.periodUsage; bVal = b.periodUsage; break;
         case "dos": aVal = a.daysOfSupply; bVal = b.daysOfSupply; break;
         case "reorderPt": aVal = a.reorderPoint; bVal = b.reorderPoint; break;
         case "orderQty": aVal = a.suggestedOrderQty; bVal = b.suggestedOrderQty; break;
@@ -232,8 +233,8 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                       <div className={`font-mono font-bold ${dosColor(item)}`}>{formatDos(item.daysOfSupply)}</div>
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Daily Use</div>
-                      <div className="font-mono font-bold">{item.avgDailyUsage}</div>
+                      <div className="text-muted-foreground">{lookbackDays}d Usage</div>
+                      <div className="font-mono font-bold">{item.periodUsage > 0 ? item.periodUsage.toLocaleString() : "—"}</div>
                     </div>
                   </div>
                   {item.suggestedOrderQty > 0 && (
@@ -261,7 +262,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                     <div className="flex items-center justify-end gap-1">On Hand (pcs) <SortIcon field="onHand" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
-                    <div className="flex items-center justify-end gap-1">Daily Use <SortIcon field="usage" /></div>
+                    <div className="flex items-center justify-end gap-1">{lookbackDays}d Usage <SortIcon field="usage" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("dos")}>
                     <div className="flex items-center justify-end gap-1">Days Supply <SortIcon field="dos" /></div>
@@ -286,7 +287,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                       <TableCell className="truncate max-w-[200px]">{item.productName}</TableCell>
                       <TableCell className="text-right font-mono font-bold">{item.totalOnHand.toLocaleString()}</TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {item.avgDailyUsage > 0 ? item.avgDailyUsage : "—"}
+                        {item.periodUsage > 0 ? item.periodUsage.toLocaleString() : "—"}
                       </TableCell>
                       <TableCell className={`text-right font-mono ${dosColor(item)}`}>
                         {formatDos(item.daysOfSupply)}
@@ -322,7 +323,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} products
               {" · "}All quantities in pieces
-              {" · "}Velocity based on trailing {data?.lookbackDays ?? 90} days
+              {" · "}Default lead time: 120 days
             </div>
           )}
         </div>

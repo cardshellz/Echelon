@@ -10620,6 +10620,7 @@ export async function registerRoutes(
           totalOnHand,
           totalReserved,
           available: totalOnHand - totalReserved,
+          periodUsage: totalOutbound,
           avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
           daysOfSupply,
           leadTimeDays,
