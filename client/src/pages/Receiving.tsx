@@ -556,6 +556,72 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
+  // Create a new product variant from a receiving line's SKU
+  const createVariantMutation = useMutation({
+    mutationFn: async (lineId: number) => {
+      const res = await fetch(`/api/receiving/lines/${lineId}/create-variant`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to create variant" }));
+        throw new Error(err.error || "Failed to create variant");
+      }
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      if (!selectedReceipt?.lines) return;
+
+      let updatedLines = selectedReceipt.lines.map(line =>
+        line.id === data.line.id ? data.line : line
+      );
+
+      // Auto-link other lines with the same SKU that are also missing productVariantId
+      const sameSku = updatedLines.filter(l =>
+        l.id !== data.line.id && l.sku?.toUpperCase() === data.variant.sku.toUpperCase() && !l.productVariantId
+      );
+      for (const sibling of sameSku) {
+        try {
+          const res = await fetch(`/api/receiving/lines/${sibling.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ productVariantId: data.variant.id, productName: `${data.product.name} — ${data.variant.name}` }),
+          });
+          if (res.ok) {
+            const updated = await res.json();
+            updatedLines = updatedLines.map(l => l.id === updated.id ? updated : l);
+          }
+        } catch { /* continue */ }
+      }
+
+      setSelectedReceipt({ ...selectedReceipt, lines: updatedLines });
+
+      const linkedCount = 1 + sameSku.length;
+      toast({
+        title: "Variant created & linked",
+        description: `${data.variant.sku} (${data.variant.name}) — linked to ${linkedCount} line${linkedCount > 1 ? 's' : ''}`,
+      });
+
+      // Auto-advance to next unresolved line
+      const nextIssue = updatedLines.find(l =>
+        l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId) && l.id !== data.line.id
+      );
+      if (nextIssue) {
+        const mode = !nextIssue.productVariantId ? 'sku' : 'location';
+        setResolvingLine(nextIssue);
+        setResolveMode(mode);
+        setResolveSkuSearch(nextIssue.sku || "");
+        setResolveSkuResults([]);
+        setResolveLocSearch("");
+      } else {
+        setShowResolveDialog(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to create variant", description: error.message, variant: "destructive" });
+    },
+  });
+
   // Location search for add line dialog (local filter, no API call needed)
   const handleLocationSearch = (query: string) => {
     setLocationSearch(query);
@@ -704,6 +770,16 @@ DEF-456,25,,,5.00,,Location TBD`;
   const skuIssueCount = issueLines.filter(l => !l.productVariantId).length;
   const locIssueCount = issueLines.filter(l => !l.putawayLocationId).length;
 
+  // Sort lines: issues first, then by id
+  const sortedLines = selectedReceipt?.lines
+    ? [...selectedReceipt.lines].sort((a, b) => {
+        const aHasIssue = (!a.productVariantId || !a.putawayLocationId) ? 1 : 0;
+        const bHasIssue = (!b.productVariantId || !b.putawayLocationId) ? 1 : 0;
+        if (bHasIssue !== aHasIssue) return bHasIssue - aHasIssue;
+        return a.id - b.id;
+      })
+    : [];
+
   // Resolution: open dialog for a specific line + issue type
   const openResolve = (line: ReceivingLine, mode: 'sku' | 'location') => {
     setResolvingLine(line);
@@ -725,6 +801,18 @@ DEF-456,25,,,5.00,,Location TBD`;
         if (res.ok) setResolveSkuResults(await res.json());
       } catch { /* ignore */ }
     }, 300);
+  };
+
+  // Parse a SKU to preview what product/variant will be created
+  const parseSku = (sku: string | null) => {
+    if (!sku) return null;
+    const match = sku.match(/^(.+)-(P|B|C)(\d+)$/i);
+    if (match) {
+      const type = match[2].toUpperCase();
+      const typeName = type === "P" ? "Pack" : type === "B" ? "Box" : "Case";
+      return { baseSku: match[1].toUpperCase(), typeName, units: parseInt(match[3], 10) };
+    }
+    return { baseSku: sku.toUpperCase(), typeName: "Each", units: 1 };
   };
 
   const loadReceiptDetail = async (receipt: ReceivingOrder) => {
@@ -1350,9 +1438,15 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </CardHeader>
                   {/* Issue summary banner */}
                   {selectedReceipt.status !== "closed" && issueLines.length > 0 && (
-                    <div className="mx-3 mb-2 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-sm">
+                    <div
+                      className="mx-3 mb-2 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-sm cursor-pointer hover:bg-amber-100 transition-colors"
+                      onClick={() => {
+                        const first = issueLines[0];
+                        if (first) openResolve(first, !first.productVariantId ? 'sku' : 'location');
+                      }}
+                    >
                       <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
-                      <div>
+                      <div className="flex-1">
                         <div className="font-medium text-amber-800">
                           {issueLines.length} line{issueLines.length !== 1 ? 's' : ''} need attention
                         </div>
@@ -1360,7 +1454,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                           {skuIssueCount > 0 && <span>{skuIssueCount} unmatched SKU{skuIssueCount !== 1 ? 's' : ''}</span>}
                           {skuIssueCount > 0 && locIssueCount > 0 && <span> + </span>}
                           {locIssueCount > 0 && <span>{locIssueCount} missing location{locIssueCount !== 1 ? 's' : ''}</span>}
-                          <span> — these lines will be skipped when closing.</span>
+                          <span> — tap to resolve</span>
                         </div>
                       </div>
                     </div>
@@ -1368,12 +1462,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <CardContent className="p-0">
                     {/* Mobile card view for lines */}
                     <div className="md:hidden p-2 space-y-2">
-                      {(!selectedReceipt.lines || selectedReceipt.lines.length === 0) ? (
+                      {sortedLines.length === 0 ? (
                         <div className="text-center text-muted-foreground py-8 text-sm">
                           No lines yet. Import CSV or add lines manually.
                         </div>
                       ) : (
-                        selectedReceipt.lines.map((line) => (
+                        sortedLines.map((line) => (
                           <Card key={line.id} className="border">
                             <CardContent className="p-3 space-y-2">
                               <div className="flex items-start justify-between">
@@ -1503,14 +1597,14 @@ DEF-456,25,,,5.00,,Location TBD`;
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {(!selectedReceipt.lines || selectedReceipt.lines.length === 0) ? (
+                        {sortedLines.length === 0 ? (
                           <TableRow>
                             <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
                               No lines yet. Import CSV or add lines manually.
                             </TableCell>
                           </TableRow>
                         ) : (
-                          selectedReceipt.lines.map((line) => (
+                          sortedLines.map((line) => (
                             <TableRow key={line.id}>
                               <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
                               <TableCell>{line.productName || "-"}</TableCell>
@@ -1981,36 +2075,77 @@ DEF-456,25,,,5.00,,Location TBD`;
               <div className="text-sm text-muted-foreground">
                 CSV SKU: <span className="font-mono font-medium">{resolvingLine.sku}</span>
               </div>
-              <Input
-                placeholder="Search product variants..."
-                value={resolveSkuSearch}
-                onChange={(e) => handleResolveSkuSearch(e.target.value)}
-                className="h-10"
-                autoFocus
-              />
-              <ScrollArea className="h-48">
-                {resolveSkuResults.map((r: any) => (
-                  <button
-                    key={r.productVariantId}
-                    className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
-                    onClick={() => {
-                      updateLineMutation.mutate({
-                        lineId: resolvingLine.id,
-                        updates: { productVariantId: r.productVariantId }
-                      });
-                      setShowResolveDialog(false);
-                      toast({ title: "SKU linked", description: `${resolvingLine.sku} → ${r.sku}` });
-                    }}
-                  >
-                    <div className="font-mono font-medium">{r.sku}</div>
-                    <div className="text-xs text-muted-foreground truncate">{r.name}</div>
-                  </button>
-                ))}
-                {resolveSkuResults.length === 0 && resolveSkuSearch.length >= 2 && (
-                  <div className="text-center text-sm text-muted-foreground py-4">No variants found</div>
-                )}
-              </ScrollArea>
-              <div className="flex justify-end pt-2">
+
+              {/* Option 1: Search existing variants */}
+              <div>
+                <Label className="text-xs font-medium text-muted-foreground mb-1 block">Link to existing variant</Label>
+                <Input
+                  placeholder="Search product variants..."
+                  value={resolveSkuSearch}
+                  onChange={(e) => handleResolveSkuSearch(e.target.value)}
+                  className="h-10"
+                  autoFocus
+                />
+                <ScrollArea className="h-32 mt-1">
+                  {resolveSkuResults.map((r: any) => (
+                    <button
+                      key={r.productVariantId}
+                      className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
+                      onClick={() => {
+                        updateLineMutation.mutate({
+                          lineId: resolvingLine.id,
+                          updates: { productVariantId: r.productVariantId }
+                        });
+                        setShowResolveDialog(false);
+                        toast({ title: "SKU linked", description: `${resolvingLine.sku} → ${r.sku}` });
+                      }}
+                    >
+                      <div className="font-mono font-medium">{r.sku}</div>
+                      <div className="text-xs text-muted-foreground truncate">{r.name}</div>
+                    </button>
+                  ))}
+                  {resolveSkuResults.length === 0 && resolveSkuSearch.length >= 2 && (
+                    <div className="text-center text-sm text-muted-foreground py-3">No existing variants found</div>
+                  )}
+                </ScrollArea>
+              </div>
+
+              {/* Option 2: Create new variant from SKU pattern */}
+              {(() => {
+                const parsed = parseSku(resolvingLine.sku);
+                if (!parsed) return null;
+                return (
+                  <div className="border-t pt-3">
+                    <Label className="text-xs font-medium text-muted-foreground mb-2 block">Or create new variant</Label>
+                    <div className="bg-muted/50 border rounded-lg p-3 space-y-2">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                        <span className="text-muted-foreground">Product:</span>
+                        <span className="font-mono font-medium">{parsed.baseSku}</span>
+                        <span className="text-muted-foreground">Variant:</span>
+                        <span className="font-medium">{parsed.typeName} of {parsed.units}</span>
+                        <span className="text-muted-foreground">SKU:</span>
+                        <span className="font-mono font-medium">{resolvingLine.sku?.toUpperCase()}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Creates the product (if it doesn't exist) and variant, then links it to this line.
+                      </p>
+                      <Button
+                        className="w-full min-h-[44px]"
+                        onClick={() => createVariantMutation.mutate(resolvingLine.id)}
+                        disabled={createVariantMutation.isPending}
+                      >
+                        {createVariantMutation.isPending ? (
+                          <><span className="animate-spin mr-2">⏳</span> Creating...</>
+                        ) : (
+                          <><Plus className="h-4 w-4 mr-2" /> Create & Link Variant</>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex justify-end pt-1">
                 <Button variant="outline" size="sm" className="min-h-[44px]" onClick={() => setShowResolveDialog(false)}>
                   Skip
                 </Button>

@@ -8214,6 +8214,89 @@ export async function registerRoutes(
     }
   });
   
+  // Create a product variant from a receiving line's SKU and link it
+  // Uses the same SKU pattern as Shopify sync: BASE-SKU-[P|B|C]###
+  app.post("/api/receiving/lines/:lineId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const lineId = parseInt(req.params.lineId);
+      const line = await storage.getReceivingLineById(lineId);
+      if (!line) {
+        return res.status(404).json({ error: "Receiving line not found" });
+      }
+      if (!line.sku) {
+        return res.status(400).json({ error: "Line has no SKU" });
+      }
+      if (line.productVariantId) {
+        return res.status(400).json({ error: "Line already has a linked product variant" });
+      }
+
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      const match = line.sku.match(variantPattern);
+
+      let baseSku: string;
+      let variantType: string;
+      let unitsPerVariant: number;
+      let hierarchyLevel: number;
+      let variantName: string;
+
+      if (match) {
+        baseSku = match[1].toUpperCase();
+        variantType = match[2].toUpperCase();
+        unitsPerVariant = parseInt(match[3], 10);
+        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
+        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
+        variantName = `${typeName} of ${unitsPerVariant}`;
+      } else {
+        // Standalone SKU — single unit
+        baseSku = line.sku.toUpperCase();
+        variantType = "EA";
+        unitsPerVariant = 1;
+        hierarchyLevel = 1;
+        variantName = "Each";
+      }
+
+      // Find or create the parent product
+      let product = await storage.getProductBySku(baseSku);
+      if (!product) {
+        product = await storage.createProduct({
+          sku: baseSku,
+          name: baseSku,
+          baseUnit: "EA",
+        });
+        console.log(`[Receiving] Created product ${product.id} for base SKU ${baseSku}`);
+      }
+
+      // Create the variant
+      const variant = await storage.createProductVariant({
+        productId: product.id,
+        sku: line.sku.toUpperCase(),
+        name: variantName,
+        unitsPerVariant,
+        hierarchyLevel,
+      });
+      console.log(`[Receiving] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
+
+      // Link the variant to the receiving line
+      const updatedLine = await storage.updateReceivingLine(lineId, {
+        productVariantId: variant.id,
+        productName: `${product.name} — ${variantName}`,
+      });
+
+      res.json({
+        line: updatedLine,
+        product: { id: product.id, sku: product.sku, name: product.name },
+        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
+      });
+    } catch (error: any) {
+      console.error("Error creating variant from receiving line:", error);
+      // Handle unique constraint violation (SKU already exists)
+      if (error.code === "23505" || error.message?.includes("unique")) {
+        return res.status(409).json({ error: "A variant with this SKU already exists. Use the search to link it instead." });
+      }
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
   // Delete a receiving order (only if not closed)
   app.delete("/api/receiving/:orderId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
