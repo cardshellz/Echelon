@@ -1131,7 +1131,7 @@ export async function registerRoutes(
   app.patch("/api/picking/items/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { status, pickedQuantity, shortReason, pickMethod } = req.body;
+      const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId } = req.body;
       
       // Get item before update to check if this is a status change to completed
       const beforeItem = await storage.getOrderItemById(id);
@@ -1184,22 +1184,35 @@ export async function registerRoutes(
       
       // If item was just marked as completed, decrement inventory
       if (status === "completed" && beforeItem?.status !== "completed") {
-        try {
-          const pickedQty = pickedQuantity || item.quantity;
-          
-          // Find product variant by SKU to get unitsPerVariant for conversion
-          const productVariant = await storage.getProductVariantBySku(item.sku);
+        const pickedQty = pickedQuantity || item.quantity;
+        const productVariant = await storage.getProductVariantBySku(item.sku);
 
-          if (productVariant) {
-            console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
+        if (productVariant) {
+          console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
 
-            // Get pickable locations with stock, prioritize forward pick bins
-            const levels = await storage.getInventoryLevelsByProductVariantId(productVariant.id);
-            const allLocations = await storage.getAllWarehouseLocations();
+          const levels = await storage.getInventoryLevelsByProductVariantId(productVariant.id);
+          const allLocations = await storage.getAllWarehouseLocations();
 
-            // Sort by location type priority: forward_pick > bulk_storage > others
+          // Resolve pick location: explicit ID > assigned bin > auto-select
+          let pickLocationId: number | null = warehouseLocationId ? Number(warehouseLocationId) : null;
+
+          // Try the location already assigned to this order item
+          if (!pickLocationId && item.location && item.location !== "UNASSIGNED") {
+            const assignedLoc = allLocations.find(loc => loc.code === item.location);
+            if (assignedLoc) {
+              const hasStock = levels.some((l: any) =>
+                l.warehouseLocationId === assignedLoc.id && l.variantQty >= pickedQty
+              );
+              if (hasStock) {
+                pickLocationId = assignedLoc.id;
+              }
+            }
+          }
+
+          // Fallback: auto-select by location type priority
+          if (!pickLocationId) {
             const sortedLevels = levels
-              .filter((l: any) => l.variantQty > 0)
+              .filter((l: any) => l.variantQty >= pickedQty)
               .sort((a: any, b: any) => {
                 const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
                 const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
@@ -1208,29 +1221,43 @@ export async function registerRoutes(
                 const priorityB = priorityOrder[locB?.locationType as keyof typeof priorityOrder] ?? 99;
                 return priorityA - priorityB;
               });
-
-            const pickableLevel = sortedLevels[0];
-
-            if (pickableLevel) {
-              const { inventoryCore: pickCore } = req.app.locals.services as any;
-              await pickCore.pickItem({
-                productVariantId: productVariant.id,
-                warehouseLocationId: pickableLevel.warehouseLocationId,
-                qty: pickedQty,
-                orderId: item.orderId,
-                userId: req.session.user?.id,
-              });
-              console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickableLevel.warehouseLocationId}`);
-              
-              // Sync to Shopify (async - don't block response)
-              syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
-                console.warn(`[Inventory] Shopify sync failed for variant ${productVariant.id}:`, err)
-              );
-            }
+            pickLocationId = sortedLevels[0]?.warehouseLocationId || null;
           }
-        } catch (inventoryError) {
-          // Log but don't fail the pick operation - inventory sync can be reconciled later
-          console.warn(`Inventory decrement failed for ${item.sku}:`, inventoryError);
+
+          if (pickLocationId) {
+            const { inventoryCore: pickCore } = req.app.locals.services as any;
+            const picked = await pickCore.pickItem({
+              productVariantId: productVariant.id,
+              warehouseLocationId: pickLocationId,
+              qty: pickedQty,
+              orderId: item.orderId,
+              orderItemId: item.id,
+              userId: req.session.user?.id,
+            });
+
+            if (!picked) {
+              // Revert item status — inventory couldn't be deducted
+              await storage.updateOrderItemStatus(id, beforeItem!.status, beforeItem!.pickedQuantity, undefined);
+              return res.status(409).json({
+                error: "Insufficient inventory",
+                message: `Not enough stock to pick ${pickedQty} of ${item.sku}`,
+              });
+            }
+
+            console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
+
+            // Sync to Shopify (async - don't block response)
+            syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
+              console.warn(`[Inventory] Shopify sync failed for variant ${productVariant.id}:`, err)
+            );
+          } else {
+            // No location with sufficient stock — revert
+            await storage.updateOrderItemStatus(id, beforeItem!.status, beforeItem!.pickedQuantity, undefined);
+            return res.status(409).json({
+              error: "No inventory available",
+              message: `No location has sufficient stock for ${pickedQty} of ${item.sku}`,
+            });
+          }
         }
       }
       

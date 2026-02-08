@@ -242,6 +242,7 @@ export class InventoryCoreService {
     return this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
+      // Snapshot current level for the audit log
       const level = await svc.getLevel(
         params.productVariantId,
         params.warehouseLocationId,
@@ -251,19 +252,33 @@ export class InventoryCoreService {
         return false;
       }
 
-      // Guard: enough on-hand stock?
-      if (level.variantQty < params.qty) {
-        return false;
-      }
-
-      // Determine if there is a reservation to release
+      // Determine reservation release (capped at current reservedQty)
       const reservationRelease = Math.min(level.reservedQty, params.qty);
 
-      await svc.adjustLevel(level.id, {
-        variantQty: -params.qty,
-        pickedQty: params.qty,
-        reservedQty: reservationRelease > 0 ? -reservationRelease : undefined,
-      });
+      // Atomic guarded UPDATE — WHERE variant_qty >= qty prevents concurrent
+      // picks from driving stock negative (optimistic lock).
+      const [updated] = await tx
+        .update(inventoryLevels)
+        .set({
+          variantQty: sql`${inventoryLevels.variantQty} - ${params.qty}`,
+          pickedQty: sql`${inventoryLevels.pickedQty} + ${params.qty}`,
+          ...(reservationRelease > 0
+            ? { reservedQty: sql`${inventoryLevels.reservedQty} - ${reservationRelease}` }
+            : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(inventoryLevels.id, level.id),
+            sql`${inventoryLevels.variantQty} >= ${params.qty}`,
+          ),
+        )
+        .returning();
+
+      if (!updated) {
+        // Another concurrent pick claimed the stock — insufficient qty
+        return false;
+      }
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
@@ -271,7 +286,7 @@ export class InventoryCoreService {
         transactionType: "pick",
         variantQtyDelta: 0,
         variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty,
+        variantQtyAfter: updated.variantQty,
         sourceState: "on_hand",
         targetState: "picked",
         orderId: params.orderId,
