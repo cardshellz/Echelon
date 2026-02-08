@@ -10096,5 +10096,451 @@ export async function registerRoutes(
     }
   });
 
+  // ===== OPERATIONS VIEW ENDPOINTS =====
+
+  // 1. Bin Inventory — location-centric inventory view
+  app.get("/api/operations/bin-inventory", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const zone = (req.query.zone as string) || null;
+      const locationType = (req.query.locationType as string) || null;
+      const binType = (req.query.binType as string) || null;
+      const search = (req.query.search as string) || null;
+      const hasInventory = req.query.hasInventory === "true" ? true : req.query.hasInventory === "false" ? false : null;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
+      const offset = (page - 1) * pageSize;
+
+      // Compose filter fragments using Drizzle sql template literals
+      const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+      const zoneFilter = zone ? sql`AND wl.zone = ${zone}` : sql``;
+      const ltFilter = locationType ? sql`AND wl.location_type = ${locationType}` : sql``;
+      const btFilter = binType ? sql`AND wl.bin_type = ${binType}` : sql``;
+      const searchFilter = search ? sql`AND LOWER(wl.code) LIKE ${'%' + search.toLowerCase() + '%'}` : sql``;
+      const hasInvFilter = hasInventory === true
+        ? sql`AND EXISTS (SELECT 1 FROM inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
+        : hasInventory === false
+        ? sql`AND NOT EXISTS (SELECT 1 FROM inventory_levels il2 WHERE il2.warehouse_location_id = wl.id AND il2.variant_qty > 0)`
+        : sql``;
+
+      // Count total for pagination
+      const countResult = await db.execute(sql`
+        SELECT COUNT(*) as total FROM warehouse_locations wl
+        WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
+      `);
+      const total = parseInt((countResult.rows[0] as any)?.total) || 0;
+
+      // Get bins with aggregated inventory
+      const binsResult = await db.execute(sql`
+        SELECT
+          wl.id as location_id,
+          wl.code as location_code,
+          wl.zone,
+          wl.location_type,
+          wl.bin_type,
+          wl.is_pickable,
+          wl.pick_sequence,
+          wl.warehouse_id,
+          wl.capacity_cubic_mm,
+          w.code as warehouse_code,
+          COUNT(DISTINCT CASE WHEN il.variant_qty > 0 THEN il.product_variant_id END) as sku_count,
+          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.variant_qty ELSE 0 END), 0) as total_variant_qty,
+          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.reserved_qty ELSE 0 END), 0) as total_reserved_qty
+        FROM warehouse_locations wl
+        LEFT JOIN warehouses w ON wl.warehouse_id = w.id
+        LEFT JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+        WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
+        GROUP BY wl.id, wl.code, wl.zone, wl.location_type, wl.bin_type, wl.is_pickable,
+                 wl.pick_sequence, wl.warehouse_id, wl.capacity_cubic_mm, w.code
+        ORDER BY wl.code
+        LIMIT ${pageSize} OFFSET ${offset}
+      `);
+
+      const bins = binsResult.rows as any[];
+      const locationIds = bins.map((b: any) => b.location_id);
+
+      // Batch-fetch top 5 items per bin
+      let itemsByLocation = new Map<number, any[]>();
+      if (locationIds.length > 0) {
+        const itemsResult = await db.execute(sql`
+          SELECT il.warehouse_location_id as location_id, pv.id as variant_id, pv.sku, pv.name,
+                 il.variant_qty, il.reserved_qty
+          FROM inventory_levels il
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          WHERE ${inArray(inventoryLevels.warehouseLocationId, locationIds)}
+            AND il.variant_qty > 0
+          ORDER BY il.warehouse_location_id, pv.sku
+        `);
+
+        for (const row of itemsResult.rows as any[]) {
+          const locId = row.location_id;
+          if (!itemsByLocation.has(locId)) itemsByLocation.set(locId, []);
+          const items = itemsByLocation.get(locId)!;
+          if (items.length < 5) {
+            items.push({
+              variantId: row.variant_id,
+              sku: row.sku,
+              name: row.name,
+              variantQty: parseInt(row.variant_qty) || 0,
+              reservedQty: parseInt(row.reserved_qty) || 0,
+            });
+          }
+        }
+      }
+
+      res.json({
+        bins: bins.map((b: any) => ({
+          locationId: b.location_id,
+          locationCode: b.location_code,
+          zone: b.zone,
+          locationType: b.location_type,
+          binType: b.bin_type,
+          isPickable: b.is_pickable,
+          pickSequence: b.pick_sequence,
+          warehouseId: b.warehouse_id,
+          warehouseCode: b.warehouse_code,
+          capacityCubicMm: b.capacity_cubic_mm ? parseInt(b.capacity_cubic_mm) : null,
+          skuCount: parseInt(b.sku_count) || 0,
+          totalVariantQty: parseInt(b.total_variant_qty) || 0,
+          totalReservedQty: parseInt(b.total_reserved_qty) || 0,
+          items: itemsByLocation.get(b.location_id) || [],
+        })),
+        total,
+        page,
+        pageSize,
+      });
+    } catch (error) {
+      console.error("Error fetching bin inventory:", error);
+      res.status(500).json({ error: "Failed to fetch bin inventory" });
+    }
+  });
+
+  // 2. Unassigned Inventory — items in receiving/staging locations
+  app.get("/api/operations/unassigned-inventory", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const result = await db.execute(sql`
+        SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
+               wl.id as location_id, wl.code as location_code, wl.location_type
+        FROM inventory_levels il
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.variant_qty > 0
+          AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
+        ORDER BY pv.sku
+      `);
+
+      res.json((result.rows as any[]).map((r: any) => ({
+        levelId: r.level_id,
+        variantId: r.variant_id,
+        sku: r.sku,
+        name: r.name,
+        variantQty: parseInt(r.variant_qty) || 0,
+        locationId: r.location_id,
+        locationCode: r.location_code,
+        locationType: r.location_type,
+      })));
+    } catch (error) {
+      console.error("Error fetching unassigned inventory:", error);
+      res.status(500).json({ error: "Failed to fetch unassigned inventory" });
+    }
+  });
+
+  // 3. Location Health — aggregated KPI metrics
+  app.get("/api/operations/location-health", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+
+      // Location counts
+      const locResult = await db.execute(sql`
+        SELECT
+          COUNT(*) as total_locations,
+          COUNT(*) FILTER (WHERE wl.is_pickable = 1) as pick_locations,
+          COUNT(*) FILTER (WHERE wl.location_type = 'bulk_storage') as bulk_locations
+        FROM warehouse_locations wl
+        WHERE 1=1 ${warehouseFilter}
+      `);
+
+      // Empty locations (no inventory with qty > 0)
+      const emptyResult = await db.execute(sql`
+        SELECT
+          COUNT(*) as empty_locations,
+          COUNT(*) FILTER (WHERE wl.is_pickable = 1) as empty_pick_locations
+        FROM warehouse_locations wl
+        WHERE NOT EXISTS (
+          SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        ) ${warehouseFilter}
+      `);
+
+      // Negative inventory
+      const negResult = await db.execute(sql`
+        SELECT COUNT(*) as cnt
+        FROM inventory_levels il
+        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.variant_qty < 0 ${warehouseFilter}
+      `);
+
+      // Pending replen tasks
+      const replenResult = await db.execute(sql`
+        SELECT COUNT(*) as cnt
+        FROM replen_tasks
+        WHERE status IN ('pending', 'assigned')
+      `);
+
+      // Recent transactions (last 24h)
+      const recentResult = await db.execute(sql`
+        SELECT
+          COUNT(*) FILTER (WHERE transaction_type = 'transfer') as transfer_count,
+          COUNT(*) FILTER (WHERE transaction_type = 'adjustment') as adjustment_count
+        FROM inventory_transactions
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+      `);
+
+      // Stale bins (inventory with no transactions in 90+ days)
+      const staleResult = await db.execute(sql`
+        SELECT COUNT(DISTINCT wl.id) as cnt
+        FROM warehouse_locations wl
+        JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        WHERE 1=1 ${warehouseFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory_transactions it
+            WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
+              AND it.created_at > NOW() - INTERVAL '90 days'
+          )
+      `);
+
+      const loc = locResult.rows[0] as any;
+      const empty = emptyResult.rows[0] as any;
+      const neg = negResult.rows[0] as any;
+      const replen = replenResult.rows[0] as any;
+      const recent = recentResult.rows[0] as any;
+      const stale = staleResult.rows[0] as any;
+
+      res.json({
+        totalLocations: parseInt(loc.total_locations) || 0,
+        emptyLocations: parseInt(empty.empty_locations) || 0,
+        pickLocations: parseInt(loc.pick_locations) || 0,
+        emptyPickLocations: parseInt(empty.empty_pick_locations) || 0,
+        bulkLocations: parseInt(loc.bulk_locations) || 0,
+        negativeInventoryCount: parseInt(neg.cnt) || 0,
+        pendingReplenTasks: parseInt(replen.cnt) || 0,
+        recentTransferCount: parseInt(recent.transfer_count) || 0,
+        recentAdjustmentCount: parseInt(recent.adjustment_count) || 0,
+        staleInventoryCount: parseInt(stale.cnt) || 0,
+      });
+    } catch (error) {
+      console.error("Error fetching location health:", error);
+      res.status(500).json({ error: "Failed to fetch location health" });
+    }
+  });
+
+  // 4. Exceptions — inventory anomalies
+  app.get("/api/operations/exceptions", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+
+      // Negative inventory
+      const negResult = await db.execute(sql`
+        SELECT il.id as level_id, pv.id as variant_id, pv.sku, pv.name, il.variant_qty,
+               wl.id as location_id, wl.code as location_code
+        FROM inventory_levels il
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        WHERE il.variant_qty < 0 ${warehouseFilter}
+        ORDER BY il.variant_qty ASC
+        LIMIT 50
+      `);
+
+      // Empty pick faces (pickable locations with no inventory)
+      const emptyPickResult = await db.execute(sql`
+        SELECT wl.id as location_id, wl.code as location_code,
+               (SELECT pv.sku FROM inventory_transactions it
+                JOIN product_variants pv ON it.product_variant_id = pv.id
+                WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id
+                ORDER BY it.created_at DESC LIMIT 1) as last_sku,
+               (SELECT MAX(it.created_at) FROM inventory_transactions it
+                WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id) as last_movement_at
+        FROM warehouse_locations wl
+        WHERE wl.is_pickable = 1
+          AND wl.location_type = 'forward_pick'
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
+          )
+          ${warehouseFilter}
+        ORDER BY wl.code
+        LIMIT 50
+      `);
+
+      // Stale bins (no movement in 90+ days but still have inventory)
+      const staleResult = await db.execute(sql`
+        SELECT wl.id as location_id, wl.code as location_code, wl.location_type,
+               COUNT(DISTINCT il.product_variant_id) as sku_count,
+               COALESCE(SUM(il.variant_qty), 0) as total_qty,
+               (SELECT MAX(it.created_at) FROM inventory_transactions it
+                WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id) as last_movement_at
+        FROM warehouse_locations wl
+        JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+        WHERE 1=1 ${warehouseFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM inventory_transactions it
+            WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
+              AND it.created_at > NOW() - INTERVAL '90 days'
+          )
+        GROUP BY wl.id, wl.code, wl.location_type
+        ORDER BY wl.code
+        LIMIT 50
+      `);
+
+      res.json({
+        negativeInventory: (negResult.rows as any[]).map((r: any) => ({
+          levelId: r.level_id,
+          variantId: r.variant_id,
+          sku: r.sku,
+          name: r.name,
+          variantQty: parseInt(r.variant_qty) || 0,
+          locationId: r.location_id,
+          locationCode: r.location_code,
+        })),
+        emptyPickFaces: (emptyPickResult.rows as any[]).map((r: any) => ({
+          locationId: r.location_id,
+          locationCode: r.location_code,
+          lastSku: r.last_sku || null,
+          lastMovementAt: r.last_movement_at || null,
+        })),
+        staleBins: (staleResult.rows as any[]).map((r: any) => ({
+          locationId: r.location_id,
+          locationCode: r.location_code,
+          locationType: r.location_type,
+          skuCount: parseInt(r.sku_count) || 0,
+          totalQty: parseInt(r.total_qty) || 0,
+          lastMovementAt: r.last_movement_at || null,
+          daysSinceMovement: r.last_movement_at
+            ? Math.floor((Date.now() - new Date(r.last_movement_at).getTime()) / (1000 * 60 * 60 * 24))
+            : null,
+        })),
+      });
+    } catch (error) {
+      console.error("Error fetching exceptions:", error);
+      res.status(500).json({ error: "Failed to fetch exceptions" });
+    }
+  });
+
+  // 5. Pick Readiness — pick locations at/below threshold
+  app.get("/api/operations/pick-readiness", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const warehouseFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+
+      const result = await db.execute(sql`
+        SELECT
+          wl.id as location_id, wl.code as location_code,
+          pv.id as variant_id, pv.sku, pv.name,
+          il.variant_qty as current_qty,
+          COALESCE(bulk.bulk_qty, 0) as bulk_available,
+          rt.id as pending_replen_task_id,
+          rt.status as pending_replen_status
+        FROM warehouse_locations wl
+        JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN LATERAL (
+          SELECT SUM(il2.variant_qty) as bulk_qty
+          FROM inventory_levels il2
+          JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
+          WHERE wl2.location_type = 'bulk_storage' AND il2.variant_qty > 0
+            AND il2.product_variant_id = pv.id
+        ) bulk ON true
+        LEFT JOIN LATERAL (
+          SELECT rt2.id, rt2.status
+          FROM replen_tasks rt2
+          WHERE rt2.to_location_id = wl.id
+            AND rt2.pick_product_variant_id = pv.id
+            AND rt2.status IN ('pending', 'assigned', 'in_progress')
+          ORDER BY rt2.created_at DESC LIMIT 1
+        ) rt ON true
+        WHERE wl.is_pickable = 1
+          AND wl.location_type = 'forward_pick'
+          AND il.variant_qty <= 5
+          ${warehouseFilter}
+        ORDER BY il.variant_qty ASC, pv.sku
+        LIMIT 100
+      `);
+
+      res.json((result.rows as any[]).map((r: any) => ({
+        locationId: r.location_id,
+        locationCode: r.location_code,
+        variantId: r.variant_id,
+        sku: r.sku,
+        name: r.name,
+        currentQty: parseInt(r.current_qty) || 0,
+        bulkAvailable: parseInt(r.bulk_available) || 0,
+        pendingReplenTaskId: r.pending_replen_task_id || null,
+        pendingReplenStatus: r.pending_replen_status || null,
+      })));
+    } catch (error) {
+      console.error("Error fetching pick readiness:", error);
+      res.status(500).json({ error: "Failed to fetch pick readiness" });
+    }
+  });
+
+  // 6. Activity — recent transactions filtered by location or variant
+  app.get("/api/operations/activity", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const locationId = req.query.locationId ? parseInt(req.query.locationId as string) : null;
+      const variantId = req.query.variantId ? parseInt(req.query.variantId as string) : null;
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
+
+      let locationFilter = sql``;
+      let variantFilter = sql``;
+      if (locationId) {
+        locationFilter = sql`AND (it.from_location_id = ${locationId} OR it.to_location_id = ${locationId})`;
+      }
+      if (variantId) {
+        variantFilter = sql`AND it.product_variant_id = ${variantId}`;
+      }
+
+      const result = await db.execute(sql`
+        SELECT it.id, it.transaction_type, it.variant_qty_delta,
+               it.variant_qty_before, it.variant_qty_after,
+               it.source_state, it.target_state,
+               it.notes, it.user_id, it.created_at,
+               pv.sku, pv.name as variant_name,
+               fl.code as from_location_code,
+               tl.code as to_location_code,
+               it.order_id, it.reference_type, it.reference_id
+        FROM inventory_transactions it
+        LEFT JOIN product_variants pv ON it.product_variant_id = pv.id
+        LEFT JOIN warehouse_locations fl ON it.from_location_id = fl.id
+        LEFT JOIN warehouse_locations tl ON it.to_location_id = tl.id
+        WHERE 1=1 ${locationFilter} ${variantFilter}
+        ORDER BY it.created_at DESC
+        LIMIT ${limit}
+      `);
+
+      res.json((result.rows as any[]).map((r: any) => ({
+        id: r.id,
+        transactionType: r.transaction_type,
+        variantQtyDelta: parseInt(r.variant_qty_delta) || 0,
+        variantQtyBefore: r.variant_qty_before != null ? parseInt(r.variant_qty_before) : null,
+        variantQtyAfter: r.variant_qty_after != null ? parseInt(r.variant_qty_after) : null,
+        sourceState: r.source_state,
+        targetState: r.target_state,
+        notes: r.notes,
+        userId: r.user_id,
+        createdAt: r.created_at,
+        sku: r.sku,
+        variantName: r.variant_name,
+        fromLocationCode: r.from_location_code,
+        toLocationCode: r.to_location_code,
+        orderId: r.order_id,
+        referenceType: r.reference_type,
+        referenceId: r.reference_id,
+      })));
+    } catch (error) {
+      console.error("Error fetching activity:", error);
+      res.status(500).json({ error: "Failed to fetch activity" });
+    }
+  });
+
   return httpServer;
 }

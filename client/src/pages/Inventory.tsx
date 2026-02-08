@@ -1,12 +1,13 @@
 import React, { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { 
-  Package, 
-  Search, 
-  Filter, 
-  Plus, 
-  MoreHorizontal, 
+import OperationsView from "./OperationsView";
+import {
+  Package,
+  Search,
+  Filter,
+  Plus,
+  MoreHorizontal,
   Download,
   Edit,
   History,
@@ -724,6 +725,13 @@ export default function Inventory() {
               <TrendingUp className="h-4 w-4 mr-2" />
               Product Availability
             </TabsTrigger>
+            <TabsTrigger
+              value="operations"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
+            >
+              <Boxes className="h-4 w-4 mr-2" />
+              Operations
+            </TabsTrigger>
           </TabsList>
 
           {/* ====== TAB 1: Physical Inventory ====== */}
@@ -1002,6 +1010,11 @@ export default function Inventory() {
                 )}
               </>
             )}
+          </TabsContent>
+
+          {/* ====== TAB 3: Operations ====== */}
+          <TabsContent value="operations" className="flex-1 flex flex-col mt-0 overflow-auto">
+            <OperationsView warehouseId={selectedWarehouseId} searchQuery={searchQuery} />
           </TabsContent>
         </Tabs>
       </div>
