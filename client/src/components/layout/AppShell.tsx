@@ -72,8 +72,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
-      { label: "Warehouses", icon: Building2, href: "/warehouses" },
-      { label: "Locations", icon: MapPin, href: "/warehouse/locations" },
+      { label: "Warehouses", icon: Building2, href: "/warehouse" },
       { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },
@@ -95,9 +94,7 @@ const navStructure: NavEntry[] = [
     icon: ShoppingCart,
     children: [
       { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-      { label: "Picking Queue", icon: ClipboardList, href: "/picking" },
-      { label: "Pick Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
-      { label: "Pick Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
+      { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
       { label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
       { label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
@@ -108,10 +105,8 @@ const navStructure: NavEntry[] = [
     icon: Store,
     roles: ["admin", "lead"],
     children: [
-      { label: "Products", icon: Package, href: "/products" },
-      { label: "Variants", icon: Layers, href: "/variants" },
+      { label: "Catalog", icon: Package, href: "/catalog" },
       { label: "Channels", icon: Store, href: "/channels" },
-      { label: "Channel Reserves", icon: Package, href: "/channels/reserves" },
       { label: "Dropship Network", icon: Globe, href: "/dropship" },
     ],
   },

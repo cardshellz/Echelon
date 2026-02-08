@@ -78,7 +78,7 @@ export default function ProductDetail() {
     return (
       <div className="p-4 md:p-6 text-center">
         <p className="text-muted-foreground">Invalid product ID</p>
-        <Button variant="link" onClick={() => setLocation("/products")} className="min-h-[44px]">
+        <Button variant="link" onClick={() => setLocation("/catalog")} className="min-h-[44px]">
           Back to Products
         </Button>
       </div>
@@ -97,7 +97,7 @@ export default function ProductDetail() {
     return (
       <div className="p-4 md:p-6 text-center">
         <p className="text-muted-foreground">Product not found</p>
-        <Button variant="link" onClick={() => setLocation("/products")} className="min-h-[44px]">
+        <Button variant="link" onClick={() => setLocation("/catalog")} className="min-h-[44px]">
           Back to Products
         </Button>
       </div>
@@ -110,7 +110,7 @@ export default function ProductDetail() {
         <Button 
           variant="ghost" 
           size="icon"
-          onClick={() => setLocation("/products")}
+          onClick={() => setLocation("/catalog")}
           className="min-h-[44px] min-w-[44px]"
           data-testid="btn-back"
         >
