@@ -402,6 +402,8 @@ class InventoryAtpService {
         unitsPerVariant: productVariants.unitsPerVariant,
         onHandBase: sql<number>`COALESCE(SUM(${inventoryLevels.onHandBase}), 0)`,
         reservedBase: sql<number>`COALESCE(SUM(${inventoryLevels.reservedBase}), 0)`,
+        pickedBase: sql<number>`COALESCE(SUM(${inventoryLevels.pickedBase}), 0)`,
+        packedBase: sql<number>`COALESCE(SUM(${inventoryLevels.packedBase}), 0)`,
         variantQty: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty}), 0)`,
       })
       .from(productVariants)
@@ -414,25 +416,28 @@ class InventoryAtpService {
         productVariants.unitsPerVariant,
       );
 
+    // Compute fungible ATP pool across ALL variants of this product
+    const totalOnHand = variantRows.reduce((s: number, v: any) => s + Number(v.onHandBase), 0);
+    const totalReserved = variantRows.reduce((s: number, v: any) => s + Number(v.reservedBase), 0);
+    const totalPicked = variantRows.reduce((s: number, v: any) => s + Number(v.pickedBase), 0);
+    const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedBase), 0);
+    const totalAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
+
     const variants = variantRows.map((v: any) => {
       const onHand = Number(v.onHandBase);
       const reserved = Number(v.reservedBase);
-      const atp = onHand - reserved;
       return {
         productVariantId: v.productVariantId,
         sku: v.sku ?? "",
         name: v.name,
         unitsPerVariant: v.unitsPerVariant,
-        available: Math.floor(atp / v.unitsPerVariant),
+        available: Math.floor(totalAtpBase / v.unitsPerVariant),
         onHandBase: onHand,
         reservedBase: reserved,
-        atpBase: atp,
+        atpBase: totalAtpBase,
         variantQty: Number(v.variantQty),
       };
     });
-
-    const totalOnHand = variants.reduce((s: number, v: any) => s + v.onHandBase, 0);
-    const totalReserved = variants.reduce((s: number, v: any) => s + v.reservedBase, 0);
 
     return {
       productId: product.id,
@@ -440,7 +445,7 @@ class InventoryAtpService {
       name: product.name,
       totalOnHandBase: totalOnHand,
       totalReservedBase: totalReserved,
-      totalAtpBase: totalOnHand - totalReserved,
+      totalAtpBase,
       variants,
     };
   }

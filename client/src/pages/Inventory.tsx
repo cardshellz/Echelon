@@ -62,6 +62,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 
@@ -173,7 +174,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (isLoading) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={10} className="py-2 pl-8">
+        <TableCell colSpan={7} className="py-2 pl-8">
           <RefreshCw className="h-4 w-4 animate-spin inline mr-2" />
           Loading locations...
         </TableCell>
@@ -184,7 +185,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (isError) {
     return (
       <TableRow className="bg-red-50 dark:bg-red-900/10">
-        <TableCell colSpan={10} className="py-2 pl-8 text-red-600 text-sm">
+        <TableCell colSpan={7} className="py-2 pl-8 text-red-600 text-sm">
           <AlertTriangle className="h-4 w-4 inline mr-2" />
           Failed to load location data
         </TableCell>
@@ -195,7 +196,7 @@ function VariantLocationRows({ variantId, warehouses }: { variantId: number; war
   if (locationLevels.length === 0) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={10} className="py-2 pl-8 text-muted-foreground text-sm">
+        <TableCell colSpan={7} className="py-2 pl-8 text-muted-foreground text-sm">
           No stock at any location
         </TableCell>
       </TableRow>
@@ -350,9 +351,13 @@ export default function Inventory() {
       setExporting(false);
     }
   };
+  const [activeTab, setActiveTab] = useState("physical");
   const [expandedVariants, setExpandedVariants] = useState<Set<number>>(new Set());
+  const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [productSortField, setProductSortField] = useState<string>("baseSku");
+  const [productSortDirection, setProductSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   
   const { toast } = useToast();
@@ -385,13 +390,14 @@ export default function Inventory() {
   const { data: variantLevels = [], isLoading: loadingVariantLevels } = useQuery<VariantLevel[]>({
     queryKey: ["/api/inventory/levels", selectedWarehouseId],
     queryFn: async () => {
-      const url = selectedWarehouseId 
+      const url = selectedWarehouseId
         ? `/api/inventory/levels?warehouseId=${selectedWarehouseId}`
         : "/api/inventory/levels";
       const response = await fetch(url, { credentials: "include" });
       if (!response.ok) throw new Error("Failed to fetch inventory levels");
       return response.json();
     },
+    enabled: activeTab === "physical",
   });
 
   const createItemMutation = useMutation({
@@ -519,6 +525,43 @@ export default function Inventory() {
     }
     return <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">In Stock</Badge>;
   };
+
+  // Product-level status (fungible ATP in pieces)
+  const getProductStatusBadge = (atpBase: number) => {
+    if (atpBase <= 0) {
+      return <Badge className="bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400">Out of Stock</Badge>;
+    }
+    if (atpBase < 500) {
+      return <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">Low Stock</Badge>;
+    }
+    return <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">In Stock</Badge>;
+  };
+
+  const handleProductSort = (field: string) => {
+    if (productSortField === field) {
+      setProductSortDirection(productSortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setProductSortField(field);
+      setProductSortDirection("asc");
+    }
+  };
+
+  const sortedProducts = [...filteredItems].sort((a, b) => {
+    let aVal: any, bVal: any;
+    switch (productSortField) {
+      case "baseSku": aVal = a.baseSku || ""; bVal = b.baseSku || ""; break;
+      case "name": aVal = a.name || ""; bVal = b.name || ""; break;
+      case "onHand": aVal = a.totalOnHandBase; bVal = b.totalOnHandBase; break;
+      case "reserved": aVal = a.totalReservedBase; bVal = b.totalReservedBase; break;
+      case "atp": aVal = a.totalAtpBase; bVal = b.totalAtpBase; break;
+      case "variants": aVal = a.variants.length; bVal = b.variants.length; break;
+      default: aVal = a.baseSku || ""; bVal = b.baseSku || "";
+    }
+    if (typeof aVal === "string") {
+      return productSortDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    }
+    return productSortDirection === "asc" ? aVal - bVal : bVal - aVal;
+  });
 
   const handleCsvUpload = async () => {
     if (!csvFile) return;
@@ -669,156 +712,302 @@ export default function Inventory() {
       </div>
 
       <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col">
-        {loadingInventory || loadingVariantLevels ? (
-          <div className="flex-1 flex items-center justify-center">
-            <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <>
-            {/* Mobile card layout for variant levels */}
-            <div className="md:hidden space-y-3 flex-1 overflow-auto">
-              {variantLevels.filter(v => 
-                (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-                (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
-              ).map((level) => (
-                <div key={level.variantId} className="rounded-md border bg-card p-4">
-                  <div className="flex items-start justify-between mb-2">
-                    <div>
-                      <div className="font-mono font-medium text-primary text-sm">{level.sku}</div>
-                      <div className="text-sm font-medium mt-1">{level.name}</div>
-                    </div>
-                    {getStatusBadge(level.available)}
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 text-xs mt-3">
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Qty</div>
-                      <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Available</div>
-                      <div className="font-mono font-bold">{level.available.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Locations</div>
-                      <div className="font-mono font-bold">{level.locationCount}</div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
+          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-4">
+            <TabsTrigger
+              value="physical"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
+            >
+              <Package className="h-4 w-4 mr-2" />
+              Physical Inventory
+            </TabsTrigger>
+            <TabsTrigger
+              value="availability"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
+            >
+              <TrendingUp className="h-4 w-4 mr-2" />
+              Product Availability
+            </TabsTrigger>
+          </TabsList>
 
-            {/* Desktop table layout for variant levels */}
-            <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
-              <Table>
-                <TableHeader className="bg-muted/40 sticky top-0 z-10">
-                  <TableRow>
-                    <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
-                      <div className="flex items-center gap-1">
-                        SKU
-                        {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("name")}>
-                      <div className="flex items-center gap-1">
-                        Name
-                        {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("units")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Units/Pkg
-                        {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Qty
-                        {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("pickable")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Pickable
-                        {sortField === "pickable" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Committed
-                        {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("available")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Available
-                        {sortField === "available" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("locations")}>
-                      <div className="flex items-center justify-end gap-1">
-                        Locations
-                        {sortField === "locations" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                      </div>
-                    </TableHead>
-                    <TableHead className="w-[100px]">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
+          {/* ====== TAB 1: Physical Inventory ====== */}
+          <TabsContent value="physical" className="flex-1 flex flex-col mt-0">
+            {loadingVariantLevels ? (
+              <div className="flex-1 flex items-center justify-center">
+                <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <>
+                {/* Mobile card layout */}
+                <div className="md:hidden space-y-3 flex-1 overflow-auto">
                   {sortedVariantLevels.map((level) => (
-                    <React.Fragment key={level.variantId}>
-                      <TableRow 
-                        data-testid={`row-variant-${level.variantId}`}
-                        className={level.locationCount > 0 ? "cursor-pointer hover:bg-muted/50" : ""}
-                        onClick={() => {
-                          if (level.locationCount > 0) {
-                            const newExpanded = new Set(expandedVariants);
-                            if (newExpanded.has(level.variantId)) {
-                              newExpanded.delete(level.variantId);
-                            } else {
-                              newExpanded.add(level.variantId);
-                            }
-                            setExpandedVariants(newExpanded);
-                          }
-                        }}
-                      >
-                        <TableCell className="font-mono font-medium text-primary">
-                          <div className="flex items-center gap-1">
-                            {level.locationCount > 0 && (
-                              expandedVariants.has(level.variantId) ? 
-                                <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
-                                <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                            )}
-                            {level.sku}
-                          </div>
-                        </TableCell>
-                        <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
-                        <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
-                        <TableCell className="text-right font-mono">{level.available.toLocaleString()}</TableCell>
-                        <TableCell className="text-right">{level.locationCount}</TableCell>
-                        <TableCell>{getStatusBadge(level.available)}</TableCell>
-                      </TableRow>
-                      {expandedVariants.has(level.variantId) && (
-                        <VariantLocationRows variantId={level.variantId} warehouses={warehouses} />
-                      )}
-                    </React.Fragment>
+                    <div key={level.variantId} className="rounded-md border bg-card p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="font-mono font-medium text-primary text-sm">{level.sku}</div>
+                          <div className="text-sm font-medium mt-1">{level.name}</div>
+                        </div>
+                        <Badge variant="outline" className="text-xs">{level.unitsPerVariant} /pkg</Badge>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs mt-3">
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Qty</div>
+                          <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Pickable</div>
+                          <div className="font-mono font-bold text-green-600">{level.pickableQty.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Locations</div>
+                          <div className="font-mono font-bold">{level.locationCount}</div>
+                        </div>
+                      </div>
+                    </div>
                   ))}
-                </TableBody>
-              </Table>
-            </div>
-          </>
-        )}
-        
-        {variantLevels.length > 0 && (
-          <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-            <div>Showing {variantLevels.filter(v => 
-              (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-              (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
-            ).length} of {variantLevels.length} variants</div>
-          </div>
-        )}
+                </div>
+
+                {/* Desktop table */}
+                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+                  <Table>
+                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
+                      <TableRow>
+                        <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
+                          <div className="flex items-center gap-1">
+                            SKU
+                            {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("name")}>
+                          <div className="flex items-center gap-1">
+                            Name
+                            {sortField === "name" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("units")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Units/Pkg
+                            {sortField === "units" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Qty
+                            {sortField === "qty" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("pickable")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Pickable
+                            {sortField === "pickable" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Committed
+                            {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("locations")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Locations
+                            {sortField === "locations" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {sortedVariantLevels.map((level) => (
+                        <React.Fragment key={level.variantId}>
+                          <TableRow
+                            data-testid={`row-variant-${level.variantId}`}
+                            className={level.locationCount > 0 ? "cursor-pointer hover:bg-muted/50" : ""}
+                            onClick={() => {
+                              if (level.locationCount > 0) {
+                                const newExpanded = new Set(expandedVariants);
+                                if (newExpanded.has(level.variantId)) {
+                                  newExpanded.delete(level.variantId);
+                                } else {
+                                  newExpanded.add(level.variantId);
+                                }
+                                setExpandedVariants(newExpanded);
+                              }
+                            }}
+                          >
+                            <TableCell className="font-mono font-medium text-primary">
+                              <div className="flex items-center gap-1">
+                                {level.locationCount > 0 && (
+                                  expandedVariants.has(level.variantId) ?
+                                    <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
+                                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                )}
+                                {level.sku}
+                              </div>
+                            </TableCell>
+                            <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">{level.unitsPerVariant}</TableCell>
+                            <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{level.pickableQty.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">{level.reservedBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right">{level.locationCount}</TableCell>
+                          </TableRow>
+                          {expandedVariants.has(level.variantId) && (
+                            <VariantLocationRows variantId={level.variantId} warehouses={warehouses} />
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {sortedVariantLevels.length > 0 && (
+                  <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                    <div>Showing {sortedVariantLevels.length} of {variantLevels.length} variants</div>
+                  </div>
+                )}
+              </>
+            )}
+          </TabsContent>
+
+          {/* ====== TAB 2: Product Availability ====== */}
+          <TabsContent value="availability" className="flex-1 flex flex-col mt-0">
+            {loadingInventory ? (
+              <div className="flex-1 flex items-center justify-center">
+                <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <>
+                {/* Mobile card layout */}
+                <div className="md:hidden space-y-3 flex-1 overflow-auto">
+                  {sortedProducts.map((product) => (
+                    <div key={product.baseSku} className="rounded-md border bg-card p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="font-mono font-medium text-primary text-sm">{product.baseSku}</div>
+                          <div className="text-sm font-medium mt-1">{product.name}</div>
+                        </div>
+                        {getProductStatusBadge(product.totalAtpBase)}
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs mt-3">
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Total Pieces</div>
+                          <div className="font-mono font-bold">{product.totalOnHandBase.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Available</div>
+                          <div className="font-mono font-bold text-green-600">{product.totalAtpBase.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-muted/30 p-2 rounded">
+                          <div className="text-muted-foreground">Variants</div>
+                          <div className="font-mono font-bold">{product.variants.length}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Desktop table */}
+                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-x-auto">
+                  <Table>
+                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
+                      <TableRow>
+                        <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("baseSku")}>
+                          <div className="flex items-center gap-1">
+                            Product
+                            {productSortField === "baseSku" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("name")}>
+                          <div className="flex items-center gap-1">
+                            Name
+                            {productSortField === "name" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[120px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("onHand")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Total Pieces
+                            {productSortField === "onHand" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("reserved")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Reserved
+                            {productSortField === "reserved" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[120px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("atp")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Available (ATP)
+                            {productSortField === "atp" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[80px] cursor-pointer hover:bg-muted/60" onClick={() => handleProductSort("variants")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Variants
+                            {productSortField === "variants" ? (productSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="w-[100px]">Status</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {sortedProducts.map((product) => (
+                        <React.Fragment key={product.baseSku}>
+                          <TableRow
+                            className="cursor-pointer hover:bg-muted/50"
+                            onClick={() => {
+                              const newExpanded = new Set(expandedProducts);
+                              const key = product.productVariantId;
+                              if (newExpanded.has(key)) {
+                                newExpanded.delete(key);
+                              } else {
+                                newExpanded.add(key);
+                              }
+                              setExpandedProducts(newExpanded);
+                            }}
+                          >
+                            <TableCell className="font-mono font-medium text-primary">
+                              <div className="flex items-center gap-1">
+                                {expandedProducts.has(product.productVariantId) ?
+                                  <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
+                                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                }
+                                {product.baseSku}
+                              </div>
+                            </TableCell>
+                            <TableCell className="truncate max-w-[200px]">{product.name}</TableCell>
+                            <TableCell className="text-right font-mono font-bold">{product.totalOnHandBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono text-muted-foreground">{product.totalReservedBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{product.totalAtpBase.toLocaleString()}</TableCell>
+                            <TableCell className="text-right">{product.variants.length}</TableCell>
+                            <TableCell>{getProductStatusBadge(product.totalAtpBase)}</TableCell>
+                          </TableRow>
+                          {expandedProducts.has(product.productVariantId) && product.variants.map((v) => (
+                            <TableRow key={v.variantId} className="bg-muted/20">
+                              <TableCell className="font-mono text-sm pl-10 text-muted-foreground">{v.sku}</TableCell>
+                              <TableCell className="text-sm text-muted-foreground">{v.name}</TableCell>
+                              <TableCell className="text-right font-mono text-sm text-muted-foreground">{v.unitsPerVariant} /pkg</TableCell>
+                              <TableCell className="text-right font-mono text-sm" colSpan={1}></TableCell>
+                              <TableCell className="text-right font-mono text-sm font-medium">{v.available.toLocaleString()} sellable</TableCell>
+                              <TableCell className="text-right font-mono text-sm text-muted-foreground">{v.variantQty.toLocaleString()} physical</TableCell>
+                              <TableCell></TableCell>
+                            </TableRow>
+                          ))}
+                        </React.Fragment>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {sortedProducts.length > 0 && (
+                  <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                    <div>Showing {sortedProducts.length} of {inventorySummary.length} products</div>
+                  </div>
+                )}
+              </>
+            )}
+          </TabsContent>
+        </Tabs>
       </div>
 
       <Dialog open={adjustDialogOpen} onOpenChange={setAdjustDialogOpen}>
