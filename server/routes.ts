@@ -10193,8 +10193,13 @@ export async function registerRoutes(
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
       const offset = (page - 1) * pageSize;
-      const sortField = (req.query.sortField as string) || "code";
-      const sortDir = (req.query.sortDir as string) === "desc" ? "desc" : "asc";
+      const SORT_COLUMNS: Record<string, string> = {
+        code: "wl.code", qty: "total_variant_qty", skus: "sku_count",
+        reserved: "total_reserved_qty", zone: "wl.zone", type: "wl.location_type",
+      };
+      const sortColumn = SORT_COLUMNS[(req.query.sortField as string)] || "wl.code";
+      const sortDirection = (req.query.sortDir as string) === "desc" ? "DESC" : "ASC";
+      const orderClause = sql.raw(`${sortColumn} ${sortDirection}, wl.code ASC`);
 
       // Compose filter fragments using Drizzle sql template literals
       const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
@@ -10237,14 +10242,7 @@ export async function registerRoutes(
         WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
         GROUP BY wl.id, wl.code, wl.zone, wl.location_type, wl.bin_type, wl.is_pickable,
                  wl.pick_sequence, wl.warehouse_id, wl.capacity_cubic_mm, w.code
-        ORDER BY ${
-          sortField === "qty" ? sql`total_variant_qty` :
-          sortField === "skus" ? sql`sku_count` :
-          sortField === "reserved" ? sql`total_reserved_qty` :
-          sortField === "zone" ? sql`wl.zone` :
-          sortField === "type" ? sql`wl.location_type` :
-          sql`wl.code`
-        } ${sortDir === "desc" ? sql`DESC` : sql`ASC`}, wl.code ASC
+        ORDER BY ${orderClause}
         LIMIT ${pageSize} OFFSET ${offset}
       `);
 
