@@ -1701,6 +1701,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     >
                                       <Check className="h-4 w-4" />
                                     </Button>
+                                  ) : (!line.productVariantId || !line.putawayLocationId) ? (
+                                    <AlertTriangle className="h-4 w-4 text-amber-500" />
                                   ) : (
                                     <Check className="h-4 w-4 text-green-600" />
                                   )}
