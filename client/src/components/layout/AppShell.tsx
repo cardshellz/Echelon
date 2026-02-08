@@ -1,13 +1,13 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
-import { 
-  LayoutDashboard, 
-  Package, 
-  ShoppingCart, 
-  Truck, 
-  Users, 
-  Settings, 
-  Menu, 
+import {
+  LayoutDashboard,
+  Package,
+  ShoppingCart,
+  Truck,
+  Users,
+  Settings,
+  Menu,
   Search,
   Bell,
   Box,
@@ -15,6 +15,7 @@ import {
   BarChart3,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   LucideIcon,
   Globe,
   Cable,
@@ -36,19 +37,87 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { 
-  DropdownMenu, 
-  DropdownMenuContent, 
-  DropdownMenuItem, 
-  DropdownMenuLabel, 
-  DropdownMenuSeparator, 
-  DropdownMenuTrigger 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+
+// --- Navigation types ---
+
+type NavLink = { label: string; icon: LucideIcon; href: string; roles?: string[] };
+type NavGroup = { label: string; icon: LucideIcon; children: NavLink[]; roles?: string[] };
+type NavEntry = NavLink | NavGroup;
+
+function isNavGroup(entry: NavEntry): entry is NavGroup {
+  return 'children' in entry;
+}
+
+// --- Navigation structure ---
+
+const navStructure: NavEntry[] = [
+  { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
+  {
+    label: "Inventory",
+    icon: Box,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Stock Levels", icon: Box, href: "/inventory" },
+      { label: "Warehouses", icon: Building2, href: "/warehouses" },
+      { label: "Locations", icon: MapPin, href: "/warehouse/locations" },
+      { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
+      { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
+      { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },
+      { label: "History", icon: History, href: "/inventory/history", roles: ["admin"] },
+    ],
+  },
+  {
+    label: "Inbound",
+    icon: Truck,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing" },
+      { label: "Receiving", icon: Truck, href: "/receiving" },
+      { label: "Supplier Catalog", icon: Layers, href: "/purchasing/catalog" },
+    ],
+  },
+  {
+    label: "Orders & Fulfillment",
+    icon: ShoppingCart,
+    children: [
+      { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
+      { label: "Picking Queue", icon: ClipboardList, href: "/picking" },
+      { label: "Pick Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
+      { label: "Pick Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
+      { label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
+      { label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
+      { label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
+    ],
+  },
+  {
+    label: "Catalog & Channels",
+    icon: Store,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Products", icon: Package, href: "/products" },
+      { label: "Variants", icon: Layers, href: "/variants" },
+      { label: "Channels", icon: Store, href: "/channels" },
+      { label: "Channel Reserves", icon: Package, href: "/channels/reserves" },
+      { label: "Dropship Network", icon: Globe, href: "/dropship" },
+    ],
+  },
+];
+
+// --- Sidebar content ---
 
 interface SidebarProps {
   collapsed: boolean;
@@ -57,51 +126,54 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
-type NavItem = 
-  | { type: 'link'; label: string; icon: LucideIcon; href: string; roles?: string[] }
-  | { type: 'separator'; label: string; roles?: string[] };
-
-const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mobile?: boolean, onClose?: () => void }) => {
+const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
+  collapsed: boolean;
+  mobile?: boolean;
+  onClose?: () => void;
+  onExpand?: () => void;
+}) => {
   const [location] = useLocation();
   const { user, logout } = useAuth();
 
-  const allNavItems: NavItem[] = [
-    { type: 'link', label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
-    { type: "separator", label: "Catalog", roles: ["admin", "lead"] },
-    { type: 'link', label: "Products", icon: Package, href: "/products", roles: ["admin", "lead"] },
-    { type: 'link', label: "Variants", icon: Layers, href: "/variants", roles: ["admin", "lead"] },
-    { type: "separator", label: "Warehouse", roles: ["admin", "lead"] },
-    { type: 'link', label: "Inventory (WMS)", icon: Box, href: "/inventory", roles: ["admin", "lead"] },
-    { type: 'link', label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", roles: ["admin", "lead"] },
-    { type: 'link', label: "Transfers", icon: ArrowLeftRight, href: "/transfers", roles: ["admin", "lead"] },
-    { type: 'link', label: "Bin Locations", icon: MapPin, href: "/warehouse/locations", roles: ["admin", "lead"] },
-    { type: 'link', label: "Replenishment", icon: RefreshCw, href: "/replenishment", roles: ["admin", "lead"] },
-    { type: 'link', label: "Warehouses", icon: Building2, href: "/warehouses", roles: ["admin", "lead"] },
-    { type: "separator", label: "Purchasing", roles: ["admin", "lead"] },
-    { type: 'link', label: "Receiving", icon: Truck, href: "/receiving", roles: ["admin", "lead"] },
-    { type: 'link', label: "Product Catalog", icon: Layers, href: "/purchasing/catalog", roles: ["admin", "lead"] },
-    { type: 'link', label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing", roles: ["admin", "lead"] },
-    { type: "separator", label: "Orders", roles: ["admin", "lead"] },
-    { type: 'link', label: "Orders (OMS)", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-    { type: 'link', label: "Order History", icon: History, href: "/order-history", roles: ["admin", "lead"] },
-    { type: 'link', label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },
-    { type: "separator", label: "Fulfillment" },
-    { type: 'link', label: "Picking Queue", icon: ClipboardList, href: "/picking" },
-    { type: 'link', label: "Picking Logs", icon: FileText, href: "/picking/logs", roles: ["admin", "lead"] },
-    { type: 'link', label: "Picking Metrics", icon: BarChart3, href: "/picking/metrics", roles: ["admin", "lead"] },
-    { type: 'link', label: "Inventory History", icon: History, href: "/inventory/history", roles: ["admin"] },
-    { type: 'link', label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
-    { type: "separator", label: "Sales Channels", roles: ["admin", "lead"] },
-    { type: 'link', label: "Channels", icon: Store, href: "/channels", roles: ["admin", "lead"] },
-    { type: 'link', label: "Channel Reserves", icon: Package, href: "/channels/reserves", roles: ["admin", "lead"] },
-    { type: 'link', label: "Dropship Network", icon: Globe, href: "/dropship", roles: ["admin", "lead"] },
-  ];
-  
-  const navItems = allNavItems.filter(item => {
-    if (!item.roles) return true;
-    return user && item.roles.includes(user.role);
-  });
-  
+  // Find which group contains the active route
+  const getActiveGroupLabel = (pathname: string): string | null => {
+    for (const entry of navStructure) {
+      if (!isNavGroup(entry)) continue;
+      for (const child of entry.children) {
+        if (pathname === child.href) return entry.label;
+        if (child.href !== '/' && pathname.startsWith(child.href + '/')) return entry.label;
+      }
+    }
+    return null;
+  };
+
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(
+    () => getActiveGroupLabel(location)
+  );
+
+  // Auto-expand group when navigating to a page in a different group
+  useEffect(() => {
+    const activeLabel = getActiveGroupLabel(location);
+    if (activeLabel) {
+      setExpandedGroup(activeLabel);
+    }
+  }, [location]);
+
+  // Role-based filtering
+  const isVisible = (roles?: string[]) => {
+    if (!roles) return true;
+    return user && roles.includes(user.role);
+  };
+
+  const handleGroupClick = (label: string) => {
+    if (collapsed && !mobile) {
+      onExpand?.();
+      setExpandedGroup(label);
+    } else {
+      setExpandedGroup(prev => prev === label ? null : label);
+    }
+  };
+
   const handleLogout = async () => {
     await logout();
     window.location.href = "/login";
@@ -123,37 +195,116 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
         )}
       </div>
 
-      <ScrollArea className="flex-1 py-4">
-        <nav className="space-y-1 px-2">
-          {navItems.map((item, index) => {
-            if (item.type === "separator") {
-              if (collapsed && !mobile) return <Separator key={index} className="my-4 bg-sidebar-border/50" />;
+      <ScrollArea className="flex-1 py-2">
+        <nav className="space-y-0.5 px-2">
+          {navStructure.map((entry) => {
+            // Top-level role check
+            if (!isVisible(entry.roles)) return null;
+
+            // Standalone link (Dashboard)
+            if (!isNavGroup(entry)) {
+              const isActive = location === entry.href;
+              const Icon = entry.icon;
               return (
-                <div key={index} className="px-3 py-2 mt-4 mb-1 text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wider">
-                  {item.label}
-                </div>
+                <Link
+                  key={entry.href}
+                  href={entry.href}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors text-sm font-medium min-h-[44px]",
+                    isActive
+                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                      : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                    collapsed && !mobile && "justify-center px-2"
+                  )}
+                  onClick={mobile ? onClose : undefined}
+                >
+                  <Icon size={20} className={cn(collapsed && !mobile && "mx-auto")} />
+                  {(!collapsed || mobile) && <span>{entry.label}</span>}
+                </Link>
               );
             }
-            
-            const isActive = location === item.href;
-            const Icon = item.icon;
-            
+
+            // Group: filter children by role
+            const visibleChildren = entry.children.filter(child => isVisible(child.roles));
+            if (visibleChildren.length === 0) return null;
+
+            const GroupIcon = entry.icon;
+            const isOpen = expandedGroup === entry.label;
+            const hasActiveChild = visibleChildren.some(child =>
+              location === child.href || (child.href !== '/' && location.startsWith(child.href + '/'))
+            );
+
+            // Collapsed mode: show group icon only
+            if (collapsed && !mobile) {
+              return (
+                <button
+                  key={entry.label}
+                  onClick={() => handleGroupClick(entry.label)}
+                  className={cn(
+                    "flex items-center justify-center w-full py-2.5 rounded-md transition-colors min-h-[44px]",
+                    hasActiveChild
+                      ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                      : "text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  )}
+                  title={entry.label}
+                >
+                  <GroupIcon size={20} />
+                </button>
+              );
+            }
+
+            // Expanded mode: collapsible group
             return (
-              <Link 
-                key={index} 
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-3 px-3 py-2.5 rounded-md transition-colors text-sm font-medium min-h-[44px]",
-                  isActive 
-                    ? "bg-sidebar-primary text-sidebar-primary-foreground" 
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                  collapsed && !mobile && "justify-center px-2"
-                )}
-                onClick={mobile ? onClose : undefined}
+              <Collapsible
+                key={entry.label}
+                open={isOpen}
+                onOpenChange={() => handleGroupClick(entry.label)}
               >
-                <Icon size={20} className={cn(collapsed && !mobile && "mx-auto")} />
-                {(!collapsed || mobile) && <span>{item.label}</span>}
-              </Link>
+                <CollapsibleTrigger asChild>
+                  <button
+                    className={cn(
+                      "flex items-center w-full gap-2.5 px-3 py-2 rounded-md transition-colors text-[11px] font-semibold uppercase tracking-wider mt-3 first:mt-0 min-h-[32px]",
+                      hasActiveChild
+                        ? "text-sidebar-foreground"
+                        : "text-sidebar-foreground/40 hover:text-sidebar-foreground/70"
+                    )}
+                  >
+                    <GroupIcon size={15} className="shrink-0" />
+                    <span className="flex-1 text-left">{entry.label}</span>
+                    <ChevronDown
+                      size={13}
+                      className={cn(
+                        "shrink-0 transition-transform duration-200",
+                        isOpen && "rotate-180"
+                      )}
+                    />
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="relative ml-[22px] pl-2 border-l border-sidebar-border/30 space-y-0.5 pb-0.5">
+                    {visibleChildren.map((child) => {
+                      const isActive = location === child.href;
+                      const ChildIcon = child.icon;
+                      return (
+                        <Link
+                          key={child.href}
+                          href={child.href}
+                          className={cn(
+                            "flex items-center gap-2.5 px-2.5 py-2 rounded-md transition-colors text-sm font-medium min-h-[38px]",
+                            isActive
+                              ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                              : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                          )}
+                          onClick={mobile ? onClose : undefined}
+                        >
+                          <ChildIcon size={16} className="shrink-0" />
+                          <span>{child.label}</span>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
             );
           })}
         </nav>
@@ -171,8 +322,8 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
             </div>
           </div>
         )}
-        <Button 
-          variant="ghost" 
+        <Button
+          variant="ghost"
           onClick={handleLogout}
           className={cn(
             "w-full text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent min-h-[44px]",
@@ -189,17 +340,17 @@ const SidebarContent = ({ collapsed, mobile, onClose }: { collapsed: boolean, mo
 
 const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
   return (
-    <div 
+    <div
       className={cn(
         "hidden md:flex flex-col bg-sidebar text-sidebar-foreground transition-all duration-300 ease-in-out border-r border-sidebar-border z-20",
         collapsed ? "w-16" : "w-64"
       )}
     >
-      <SidebarContent collapsed={collapsed} />
-      
+      <SidebarContent collapsed={collapsed} onExpand={() => { if (collapsed) onToggle(); }} />
+
       <div className="px-4 pb-4">
-        <Button 
-          variant="ghost" 
+        <Button
+          variant="ghost"
           className={cn(
             "w-full flex items-center text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent min-h-[44px]",
             collapsed ? "justify-center px-0" : "justify-start gap-3"
@@ -224,7 +375,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen bg-background overflow-hidden font-sans">
       {/* Desktop Sidebar */}
       <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
-      
+
       {/* Mobile Sidebar (Sheet) */}
       {isMobile && (
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
@@ -243,17 +394,17 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <Menu className="h-5 w-5" />
               </Button>
             )}
-            
+
             <div className="relative w-full max-w-md hidden md:block">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
-              <Input 
-                placeholder="Search..." 
-                className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-10" 
+              <Input
+                placeholder="Search..."
+                className="pl-9 bg-secondary/50 border-transparent focus-visible:bg-background focus-visible:border-input transition-all h-10"
               />
             </div>
             {isMobile && <span className="font-semibold text-lg">Echelon</span>}
           </div>
-          
+
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="icon" className="text-muted-foreground relative min-h-[44px] min-w-[44px]">
               <Bell size={18} />
@@ -314,7 +465,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuItem>Settings</DropdownMenuItem>
                 <DropdownMenuItem>Billing</DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => { 
+                <DropdownMenuItem onClick={() => {
                   fetch("/api/auth/logout", { method: "POST" }).then(() => {
                     window.location.href = "/login";
                   });
@@ -323,7 +474,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </DropdownMenu>
           </div>
         </header>
-        
+
         <main className="flex-1 overflow-auto bg-muted/20">
           {children}
         </main>
