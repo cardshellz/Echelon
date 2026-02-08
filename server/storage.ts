@@ -139,7 +139,7 @@ export interface IStorage {
   // Order Items
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
-  updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string): Promise<OrderItem | null>;
+  updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string, expectedCurrentStatus?: ItemStatus): Promise<OrderItem | null>;
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number): Promise<Order | null>;
   
@@ -1210,10 +1210,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateOrderItemStatus(
-    itemId: number, 
-    status: ItemStatus, 
-    pickedQty?: number, 
-    shortReason?: string
+    itemId: number,
+    status: ItemStatus,
+    pickedQty?: number,
+    shortReason?: string,
+    expectedCurrentStatus?: ItemStatus,
   ): Promise<OrderItem | null> {
     const updates: any = { status };
     if (pickedQty !== undefined) updates.pickedQuantity = pickedQty;
@@ -1225,13 +1226,19 @@ export class DatabaseStorage implements IStorage {
       // Clear pickedAt if item is reset
       updates.pickedAt = null;
     }
-    
+
+    // Idempotency guard: if caller specifies expectedCurrentStatus, only
+    // update if the row still has that status (prevents concurrent overwrites).
+    const condition = expectedCurrentStatus
+      ? and(eq(orderItems.id, itemId), eq(orderItems.status, expectedCurrentStatus))
+      : eq(orderItems.id, itemId);
+
     const result = await db
       .update(orderItems)
       .set(updates)
-      .where(eq(orderItems.id, itemId))
+      .where(condition)
       .returning();
-    
+
     return result[0] || null;
   }
 

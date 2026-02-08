@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -1128,37 +1128,77 @@ export async function registerRoutes(
   });
 
   // Update item picked status
-  app.patch("/api/picking/items/:id", async (req, res) => {
+  app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId } = req.body;
-      
-      // Get item before update to check if this is a status change to completed
+
+      // Validate status is a known enum value
+      if (!itemStatusEnum.includes(status)) {
+        return res.status(400).json({
+          error: "Invalid status",
+          message: `Status must be one of: ${itemStatusEnum.join(", ")}`,
+        });
+      }
+
+      // Get item before update — needed for status transition check and revert
       const beforeItem = await storage.getOrderItemById(id);
-      
-      const item = await storage.updateOrderItemStatus(id, status, pickedQuantity, shortReason);
-      
-      if (!item) {
+      if (!beforeItem) {
         return res.status(404).json({ error: "Item not found" });
       }
-      
+
+      // Prevent double-pick: if item is already completed, reject a second completion
+      if (status === "completed" && beforeItem.status === "completed") {
+        return res.status(409).json({
+          error: "Already picked",
+          message: `Item ${id} is already completed`,
+        });
+      }
+
+      // Validate pickedQuantity bounds
+      if (pickedQuantity !== undefined) {
+        const qty = Number(pickedQuantity);
+        if (!Number.isInteger(qty) || qty < 0 || qty > beforeItem.quantity) {
+          return res.status(400).json({
+            error: "Invalid pickedQuantity",
+            message: `pickedQuantity must be an integer between 0 and ${beforeItem.quantity}`,
+          });
+        }
+      }
+
+      // Pass expectedCurrentStatus so the UPDATE uses a WHERE guard on the
+      // current status — prevents a concurrent request from overwriting a
+      // status that already changed (database-level double-pick prevention).
+      const item = await storage.updateOrderItemStatus(
+        id, status, pickedQuantity, shortReason, beforeItem.status,
+      );
+
+      if (!item) {
+        // Row exists (we checked above) but WHERE guard didn't match —
+        // another request already changed the status concurrently.
+        return res.status(409).json({
+          error: "Status conflict",
+          message: `Item ${id} status was changed by another request`,
+        });
+      }
+
       // Log the item pick/short action
       const order = await storage.getOrderById(item.orderId);
       const pickerId = order?.assignedPickerId;
       const picker = pickerId ? await storage.getUser(pickerId) : null;
-      
+
       // Determine action type based on status change
       let actionType: string;
       if (status === "completed") {
         actionType = "item_picked";
       } else if (status === "short") {
         actionType = "item_shorted";
-      } else if (pickedQuantity !== undefined && beforeItem?.pickedQuantity !== pickedQuantity) {
+      } else if (pickedQuantity !== undefined && beforeItem.pickedQuantity !== pickedQuantity) {
         actionType = "item_quantity_adjusted";
       } else {
         actionType = "item_picked"; // default
       }
-      
+
       storage.createPickingLog({
         actionType,
         pickerId: pickerId || undefined,
@@ -1171,19 +1211,19 @@ export async function registerRoutes(
         itemName: item.name,
         locationCode: item.location,
         qtyRequested: item.quantity,
-        qtyBefore: beforeItem?.pickedQuantity || 0,
+        qtyBefore: beforeItem.pickedQuantity || 0,
         qtyAfter: item.pickedQuantity,
-        qtyDelta: item.pickedQuantity - (beforeItem?.pickedQuantity || 0),
+        qtyDelta: item.pickedQuantity - (beforeItem.pickedQuantity || 0),
         reason: shortReason,
-        itemStatusBefore: beforeItem?.status,
+        itemStatusBefore: beforeItem.status,
         itemStatusAfter: item.status,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
         pickMethod: pickMethod || "manual", // "scan", "manual", "pick_all", "button"
       }).catch(err => console.warn("[PickingLog] Failed to log item action:", err.message));
-      
+
       // If item was just marked as completed, decrement inventory
-      if (status === "completed" && beforeItem?.status !== "completed") {
+      if (status === "completed" && beforeItem.status !== "completed") {
         const pickedQty = pickedQuantity || item.quantity;
         const productVariant = await storage.getProductVariantBySku(item.sku);
 
@@ -1237,7 +1277,11 @@ export async function registerRoutes(
 
             if (!picked) {
               // Revert item status — inventory couldn't be deducted
-              await storage.updateOrderItemStatus(id, beforeItem!.status, beforeItem!.pickedQuantity, undefined);
+              try {
+                await storage.updateOrderItemStatus(id, beforeItem.status, beforeItem.pickedQuantity, undefined);
+              } catch (revertErr) {
+                console.error(`[Pick] Failed to revert item ${id} status after inventory failure:`, revertErr);
+              }
               return res.status(409).json({
                 error: "Insufficient inventory",
                 message: `Not enough stock to pick ${pickedQty} of ${item.sku}`,
@@ -1260,7 +1304,11 @@ export async function registerRoutes(
             }
           } else {
             // No location with sufficient stock — revert
-            await storage.updateOrderItemStatus(id, beforeItem!.status, beforeItem!.pickedQuantity, undefined);
+            try {
+              await storage.updateOrderItemStatus(id, beforeItem.status, beforeItem.pickedQuantity, undefined);
+            } catch (revertErr) {
+              console.error(`[Pick] Failed to revert item ${id} status after no-stock:`, revertErr);
+            }
             return res.status(409).json({
               error: "No inventory available",
               message: `No location has sufficient stock for ${pickedQty} of ${item.sku}`,
@@ -1268,10 +1316,10 @@ export async function registerRoutes(
           }
         }
       }
-      
+
       // Update order progress
       await storage.updateOrderProgress(item.orderId);
-      
+
       res.json(item);
     } catch (error) {
       console.error("Error updating item:", error);
