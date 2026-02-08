@@ -10547,49 +10547,51 @@ export async function registerRoutes(
     try {
       const lookbackDays = parseInt(req.query.lookbackDays as string) || 90;
 
-      // Single query: aggregate on-hand per variant + product lead time + velocity from transactions
+      // Product-level query: aggregate inventory and velocity in base units (pieces)
       const rows = await db.execute(sql`
         SELECT
-          pv.id AS variant_id,
-          pv.sku,
-          pv.name AS variant_name,
-          pv.units_per_variant,
           p.id AS product_id,
+          p.sku AS base_sku,
           p.name AS product_name,
           p.lead_time_days,
           p.safety_stock_qty,
-          COALESCE(inv.total_on_hand, 0)::int AS total_on_hand,
-          COALESCE(inv.total_reserved, 0)::int AS total_reserved,
-          COALESCE(vel.total_outbound, 0)::int AS total_outbound,
+          COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
+          COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
+          COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
+          inv.variant_count,
           (SELECT MAX(it2.created_at)
            FROM inventory_transactions it2
-           WHERE it2.product_variant_id = pv.id
+           JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
+           WHERE pv2.product_id = p.id
              AND it2.transaction_type = 'receipt') AS last_received_at
-        FROM product_variants pv
-        JOIN products p ON pv.product_id = p.id
+        FROM products p
         LEFT JOIN (
-          SELECT product_variant_id,
-                 SUM(variant_qty) AS total_on_hand,
-                 SUM(reserved_qty) AS total_reserved
-          FROM inventory_levels
-          GROUP BY product_variant_id
-        ) inv ON inv.product_variant_id = pv.id
+          SELECT pv.product_id,
+                 SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
+                 SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
+                 COUNT(DISTINCT pv.id) AS variant_count
+          FROM inventory_levels il
+          JOIN product_variants pv ON pv.id = il.product_variant_id
+          WHERE pv.is_active = true
+          GROUP BY pv.product_id
+        ) inv ON inv.product_id = p.id
         LEFT JOIN (
-          SELECT product_variant_id,
-                 SUM(ABS(variant_qty_delta)) AS total_outbound
-          FROM inventory_transactions
-          WHERE transaction_type IN ('ship', 'pick')
-            AND created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-          GROUP BY product_variant_id
-        ) vel ON vel.product_variant_id = pv.id
-        WHERE pv.is_active = true
-        ORDER BY pv.sku
+          SELECT pv.product_id,
+                 SUM(ABS(it.variant_qty_delta) * pv.units_per_variant) AS total_outbound_pieces
+          FROM inventory_transactions it
+          JOIN product_variants pv ON pv.id = it.product_variant_id
+          WHERE it.transaction_type IN ('ship', 'pick')
+            AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+          GROUP BY pv.product_id
+        ) vel ON vel.product_id = p.id
+        WHERE p.is_active = true
+        ORDER BY p.sku, p.name
       `);
 
       const items = (rows.rows as any[]).map((r) => {
-        const totalOnHand = Number(r.total_on_hand);
-        const totalReserved = Number(r.total_reserved);
-        const totalOutbound = Number(r.total_outbound);
+        const totalOnHand = Number(r.total_pieces);
+        const totalReserved = Number(r.total_reserved_pieces);
+        const totalOutbound = Number(r.total_outbound_pieces);
         const leadTimeDays = Number(r.lead_time_days);
         const safetyStockQty = Number(r.safety_stock_qty);
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
@@ -10599,7 +10601,6 @@ export async function registerRoutes(
 
         let status: string;
         if (avgDailyUsage === 0) {
-          // No outbound movement in the lookback window
           status = "no_movement";
         } else if (totalOnHand <= 0) {
           status = "stockout";
@@ -10612,11 +10613,10 @@ export async function registerRoutes(
         }
 
         return {
-          variantId: r.variant_id,
-          sku: r.sku,
-          variantName: r.variant_name,
+          productId: r.product_id,
+          sku: r.base_sku || r.product_name,
           productName: r.product_name,
-          unitsPerVariant: Number(r.units_per_variant),
+          variantCount: Number(r.variant_count || 0),
           totalOnHand,
           totalReserved,
           available: totalOnHand - totalReserved,
@@ -10631,9 +10631,8 @@ export async function registerRoutes(
         };
       });
 
-      // Summary stats
       const summary = {
-        totalSkus: items.length,
+        totalProducts: items.length,
         belowReorderPoint: items.filter((i) => i.status === "order_now" || i.status === "stockout").length,
         orderSoon: items.filter((i) => i.status === "order_soon").length,
         noMovement: items.filter((i) => i.status === "no_movement").length,

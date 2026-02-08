@@ -28,11 +28,10 @@ import {
 } from "@/components/ui/table";
 
 interface ReorderItem {
-  variantId: number;
+  productId: number;
   sku: string;
-  variantName: string;
   productName: string;
-  unitsPerVariant: number;
+  variantCount: number;
   totalOnHand: number;
   totalReserved: number;
   available: number;
@@ -49,7 +48,7 @@ interface ReorderItem {
 interface ReorderAnalysis {
   items: ReorderItem[];
   summary: {
-    totalSkus: number;
+    totalProducts: number;
     belowReorderPoint: number;
     orderSoon: number;
     noMovement: number;
@@ -101,7 +100,6 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
         const q = searchQuery.toLowerCase();
         return (
           item.sku.toLowerCase().includes(q) ||
-          item.variantName.toLowerCase().includes(q) ||
           item.productName.toLowerCase().includes(q)
         );
       }
@@ -111,7 +109,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
       let aVal: any, bVal: any;
       switch (sortField) {
         case "sku": aVal = a.sku; bVal = b.sku; break;
-        case "name": aVal = a.variantName; bVal = b.variantName; break;
+        case "name": aVal = a.productName; bVal = b.productName; break;
         case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
         case "usage": aVal = a.avgDailyUsage; bVal = b.avgDailyUsage; break;
         case "dos": aVal = a.daysOfSupply; bVal = b.daysOfSupply; break;
@@ -153,9 +151,9 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
           <div className="bg-muted/30 p-3 rounded-lg border">
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <ShoppingCart size={12} /> Total SKUs
+              <ShoppingCart size={12} /> Products
             </div>
-            <div className="text-2xl font-bold font-mono mt-1">{data.summary.totalSkus}</div>
+            <div className="text-2xl font-bold font-mono mt-1">{data.summary.totalProducts}</div>
           </div>
           <div className="bg-muted/30 p-3 rounded-lg border border-red-200 dark:border-red-800/40">
             <div className="text-xs text-red-600 font-medium uppercase tracking-wider flex items-center gap-1">
@@ -216,17 +214,17 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             {filtered.map((item) => {
               const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
               return (
-                <div key={item.variantId} className="rounded-md border bg-card p-4">
+                <div key={item.productId} className="rounded-md border bg-card p-4">
                   <div className="flex items-start justify-between mb-2">
                     <div>
                       <div className="font-mono font-medium text-primary text-sm">{item.sku}</div>
-                      <div className="text-sm text-muted-foreground mt-0.5">{item.variantName}</div>
+                      <div className="text-sm text-muted-foreground mt-0.5">{item.productName}</div>
                     </div>
                     <Badge variant="outline" className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs mt-3">
                     <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">On Hand</div>
+                      <div className="text-muted-foreground">Pieces</div>
                       <div className="font-mono font-bold">{item.totalOnHand.toLocaleString()}</div>
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
@@ -240,7 +238,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                   </div>
                   {item.suggestedOrderQty > 0 && (
                     <div className="mt-2 text-xs bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800/30 rounded p-2">
-                      Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span>
+                      Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span> pcs
                     </div>
                   )}
                 </div>
@@ -253,25 +251,25 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             <Table>
               <TableHeader className="bg-muted/40 sticky top-0 z-10">
                 <TableRow>
-                  <TableHead className="w-[140px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
+                  <TableHead className="w-[160px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
                     <div className="flex items-center gap-1">SKU <SortIcon field="sku" /></div>
                   </TableHead>
                   <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("name")}>
-                    <div className="flex items-center gap-1">Name <SortIcon field="name" /></div>
+                    <div className="flex items-center gap-1">Product <SortIcon field="name" /></div>
                   </TableHead>
-                  <TableHead className="text-right w-[90px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onHand")}>
-                    <div className="flex items-center justify-end gap-1">On Hand <SortIcon field="onHand" /></div>
+                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onHand")}>
+                    <div className="flex items-center justify-end gap-1">On Hand (pcs) <SortIcon field="onHand" /></div>
                   </TableHead>
-                  <TableHead className="text-right w-[90px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
+                  <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
                     <div className="flex items-center justify-end gap-1">Daily Use <SortIcon field="usage" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("dos")}>
                     <div className="flex items-center justify-end gap-1">Days Supply <SortIcon field="dos" /></div>
                   </TableHead>
-                  <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reorderPt")}>
+                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reorderPt")}>
                     <div className="flex items-center justify-end gap-1">Reorder Pt <SortIcon field="reorderPt" /></div>
                   </TableHead>
-                  <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("orderQty")}>
+                  <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("orderQty")}>
                     <div className="flex items-center justify-end gap-1">Order Qty <SortIcon field="orderQty" /></div>
                   </TableHead>
                   <TableHead className="w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("status")}>
@@ -283,9 +281,9 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                 {filtered.map((item) => {
                   const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
                   return (
-                    <TableRow key={item.variantId}>
+                    <TableRow key={item.productId}>
                       <TableCell className="font-mono font-medium text-primary">{item.sku}</TableCell>
-                      <TableCell className="truncate max-w-[200px]">{item.variantName}</TableCell>
+                      <TableCell className="truncate max-w-[200px]">{item.productName}</TableCell>
                       <TableCell className="text-right font-mono font-bold">{item.totalOnHand.toLocaleString()}</TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
                         {item.avgDailyUsage > 0 ? item.avgDailyUsage : "—"}
@@ -322,9 +320,9 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
 
           {filtered.length > 0 && (
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
-              Showing {filtered.length} of {data?.items.length ?? 0} SKUs
+              Showing {filtered.length} of {data?.items.length ?? 0} products
+              {" · "}All quantities in pieces
               {" · "}Velocity based on trailing {data?.lookbackDays ?? 90} days
-              {" · "}Default lead time: 120 days
             </div>
           )}
         </div>
