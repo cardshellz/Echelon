@@ -1768,6 +1768,91 @@ export async function registerRoutes(
     }
   });
   
+  // Combine all combinable order groups at once
+  app.post("/api/orders/combine-all", async (req, res) => {
+    try {
+      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+        return res.status(403).json({ error: "Admin or lead access required" });
+      }
+
+      let result;
+      try {
+        result = await db.execute(sql`
+          SELECT id, order_number, customer_name, customer_email,
+                 shipping_address, shipping_city, shipping_state,
+                 shipping_postal_code, shipping_country, item_count,
+                 unit_count, total_amount, source, created_at
+          FROM orders
+          WHERE warehouse_status = 'ready'
+            AND on_hold = 0
+            AND combined_group_id IS NULL
+        `);
+      } catch {
+        return res.status(500).json({ error: "Failed to query orders" });
+      }
+
+      const readyOrders = result.rows as any[];
+      const groupedByAddress = new Map<string, any[]>();
+
+      for (const order of readyOrders) {
+        const hash = createAddressHash(order);
+        if (!hash || hash === "||||" || !hash.replace(/\|/g, '').trim()) continue;
+        if (!groupedByAddress.has(hash)) {
+          groupedByAddress.set(hash, []);
+        }
+        groupedByAddress.get(hash)!.push(order);
+      }
+
+      const combinableGroups = Array.from(groupedByAddress.entries())
+        .filter(([_, groupOrders]) => groupOrders.length >= 2);
+
+      if (combinableGroups.length === 0) {
+        return res.json({ groupsCreated: 0, message: "No combinable orders found" });
+      }
+
+      let groupsCreated = 0;
+      let totalOrdersCombined = 0;
+
+      for (const [_, groupOrders] of combinableGroups) {
+        const parentOrder = groupOrders[0];
+        const groupCode = `G-${(parentOrder.order_number || '').replace("#", "")}`;
+
+        const [group] = await db.insert(combinedOrderGroups).values({
+          groupCode,
+          customerName: parentOrder.customer_name,
+          customerEmail: parentOrder.customer_email,
+          shippingAddress: parentOrder.shipping_address,
+          shippingCity: parentOrder.shipping_city,
+          shippingState: parentOrder.shipping_state,
+          shippingPostalCode: parentOrder.shipping_postal_code,
+          shippingCountry: parentOrder.shipping_country,
+          addressHash: createAddressHash(parentOrder),
+          orderCount: groupOrders.length,
+          totalItems: groupOrders.reduce((sum: number, o: any) => sum + (o.item_count || 0), 0),
+          totalUnits: groupOrders.reduce((sum: number, o: any) => sum + (o.unit_count || 0), 0),
+          createdBy: req.session.user!.id,
+        }).returning();
+
+        for (let i = 0; i < groupOrders.length; i++) {
+          await db.update(orders)
+            .set({
+              combinedGroupId: group.id,
+              combinedRole: i === 0 ? "parent" : "child"
+            })
+            .where(eq(orders.id, groupOrders[i].id));
+        }
+
+        groupsCreated++;
+        totalOrdersCombined += groupOrders.length;
+      }
+
+      res.json({ groupsCreated, totalOrdersCombined });
+    } catch (error) {
+      console.error("Error combining all orders:", error);
+      res.status(500).json({ error: "Failed to combine all orders" });
+    }
+  });
+
   // Uncombine an order from its group
   app.post("/api/orders/:id/uncombine", async (req, res) => {
     try {

@@ -243,6 +243,30 @@ export default function Orders() {
     },
   });
 
+  const combineAllMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/orders/combine-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to combine all orders");
+      }
+      return res.json();
+    },
+    onSuccess: (data: { groupsCreated: number; totalOrdersCombined: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/orders/combinable"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+      setIsCombineOpen(false);
+      toast({ title: "All orders combined", description: `Created ${data.groupsCreated} groups from ${data.totalOrdersCombined} orders.` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const createOrderMutation = useMutation({
     mutationFn: async (orderData: any) => {
       const res = await fetch("/api/oms/orders", {
@@ -1120,14 +1144,26 @@ export default function Orders() {
                 </Button>
               </>
             ) : (
-              <Button 
-                variant="outline" 
-                onClick={() => setIsCombineOpen(false)} 
-                className="min-h-[44px]"
-                data-testid="button-close-combine"
-              >
-                Close
-              </Button>
+              <>
+                <Button 
+                  variant="outline" 
+                  onClick={() => setIsCombineOpen(false)} 
+                  className="min-h-[44px]"
+                  data-testid="button-close-combine"
+                >
+                  Close
+                </Button>
+                {combinableGroups.length > 0 && (
+                  <Button 
+                    onClick={() => combineAllMutation.mutate()}
+                    disabled={combineAllMutation.isPending}
+                    className="min-h-[44px] bg-amber-600 hover:bg-amber-700"
+                    data-testid="button-combine-all"
+                  >
+                    {combineAllMutation.isPending ? "Combining..." : `Combine All (${combinableGroups.length} groups)`}
+                  </Button>
+                )}
+              </>
             )}
           </DialogFooter>
         </DialogContent>
