@@ -6917,6 +6917,7 @@ export async function registerRoutes(
         variant_sku: string;
         variant_name: string;
         units_per_variant: number;
+        product_id: number | null;
         base_sku: string | null;
         total_variant_qty: string;
         location_count: string;
@@ -6927,6 +6928,7 @@ export async function registerRoutes(
           pv.sku as variant_sku,
           pv.name as variant_name,
           pv.units_per_variant,
+          p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
@@ -6937,7 +6939,7 @@ export async function registerRoutes(
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE pv.is_active = true
           AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.id, p.sku
         ORDER BY pv.sku
       ` : sql`
         SELECT
@@ -6945,6 +6947,7 @@ export async function registerRoutes(
           pv.sku as variant_sku,
           pv.name as variant_name,
           pv.units_per_variant,
+          p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
@@ -6954,7 +6957,7 @@ export async function registerRoutes(
         LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.id, p.sku
         ORDER BY pv.sku
       `);
       
@@ -7004,35 +7007,63 @@ export async function registerRoutes(
         pickedBySku.set(row.sku, parseInt(row.picked_qty) || 0);
       }
       
-      const levels = inventoryResult.rows.map(row => {
-        const variantQty = parseInt(row.total_variant_qty) || 0;
-        const unitsPerVariant = row.units_per_variant || 1;
-        const pickableQty = parseInt(row.pickable_variant_qty) || 0;
-        const sku = row.variant_sku;
-        
-        // Get committed and picked from orders
-        const committed = committedBySku.get(sku) || 0;
-        const picked = pickedBySku.get(sku) || 0;
-        
-        // Available = Qty - Committed - Picked
-        const available = variantQty - committed - picked;
-        
+      // Build per-variant data and group by product for fungible ATP
+      const variantData = inventoryResult.rows.map(row => ({
+        variantId: row.variant_id,
+        sku: row.variant_sku,
+        name: row.variant_name,
+        unitsPerVariant: row.units_per_variant || 1,
+        productId: row.product_id,
+        baseSku: row.base_sku,
+        variantQty: parseInt(row.total_variant_qty) || 0,
+        committed: committedBySku.get(row.variant_sku) || 0,
+        picked: pickedBySku.get(row.variant_sku) || 0,
+        locationCount: parseInt(row.location_count) || 0,
+        pickableQty: parseInt(row.pickable_variant_qty) || 0,
+      }));
+
+      // Compute fungible ATP pool per product in base units
+      const atpByProduct = new Map<number, number>();
+      const productGroups = new Map<number, typeof variantData>();
+      for (const v of variantData) {
+        if (v.productId) {
+          if (!productGroups.has(v.productId)) productGroups.set(v.productId, []);
+          productGroups.get(v.productId)!.push(v);
+        }
+      }
+      for (const [productId, variants] of productGroups) {
+        let onHandBase = 0, committedBase = 0, pickedBase = 0;
+        for (const v of variants) {
+          onHandBase += v.variantQty * v.unitsPerVariant;
+          committedBase += v.committed * v.unitsPerVariant;
+          pickedBase += v.picked * v.unitsPerVariant;
+        }
+        atpByProduct.set(productId, onHandBase - committedBase - pickedBase);
+      }
+
+      const levels = variantData.map(v => {
+        // Fungible available: shared ATP pool / this variant's units
+        const atpBase = v.productId ? (atpByProduct.get(v.productId) ?? 0) : 0;
+        const available = v.productId
+          ? Math.floor(atpBase / v.unitsPerVariant)
+          : v.variantQty - v.committed - v.picked; // fallback for orphan variants
+
         return {
-          variantId: row.variant_id,
-          sku,
-          name: row.variant_name,
-          unitsPerVariant,
-          baseSku: row.base_sku,
-          variantQty,
-          reservedQty: committed,
-          pickedQty: picked,
+          variantId: v.variantId,
+          sku: v.sku,
+          name: v.name,
+          unitsPerVariant: v.unitsPerVariant,
+          baseSku: v.baseSku,
+          variantQty: v.variantQty,
+          reservedQty: v.committed,
+          pickedQty: v.picked,
           available,
-          totalPieces: 0, // Not used
-          locationCount: parseInt(row.location_count) || 0,
-          pickableQty,
+          totalPieces: atpBase,
+          locationCount: v.locationCount,
+          pickableQty: v.pickableQty,
         };
       });
-      
+
       res.json(levels);
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
