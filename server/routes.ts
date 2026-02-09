@@ -9395,6 +9395,14 @@ export async function registerRoutes(
     }
   });
 
+  // CSV template download (must be before :id route)
+  app.get("/api/replen/location-configs/csv-template", requirePermission("inventory", "view"), async (_req, res) => {
+    const template = "location_code,variant_sku,trigger_value,replen_method,max_qty,notes\nF-01,,2,pallet_drop,,All SKUs at F-01\nF-03,ESS-TOP-STD-SLV-CLR-C1000,3,pallet_drop,,High-velocity SKU\nA-11,,0,case_break,50,Standard bin\n";
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=location_replen_config_template.csv");
+    res.send(template);
+  });
+
   app.get("/api/replen/location-configs/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const config = await storage.getLocationReplenConfigById(parseInt(req.params.id));
@@ -9553,14 +9561,6 @@ export async function registerRoutes(
       console.error("Error uploading location replen config CSV:", error);
       res.status(500).json({ error: "Failed to upload CSV" });
     }
-  });
-
-  // CSV template download
-  app.get("/api/replen/location-configs/csv-template", requirePermission("inventory", "view"), async (_req, res) => {
-    const template = "location_code,variant_sku,trigger_value,replen_method,max_qty,notes\nF-01,,2,pallet_drop,,All SKUs at F-01\nF-03,ESS-TOP-STD-SLV-CLR-C1000,3,pallet_drop,,High-velocity SKU\nA-11,,0,case_break,50,Standard bin\n";
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader("Content-Disposition", "attachment; filename=location_replen_config_template.csv");
-    res.send(template);
   });
 
   // Replen Tasks
