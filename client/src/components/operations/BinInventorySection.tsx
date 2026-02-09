@@ -1,8 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ChevronDown,
-  ChevronRight,
   MoreHorizontal,
   ArrowLeftRight,
   ArrowUpDown,
@@ -79,6 +77,14 @@ interface BinInventorySectionProps {
   onViewActivity: (locationId: number) => void;
 }
 
+interface FlatRow {
+  bin: Bin;
+  item: BinItem | null;
+  isFirst: boolean;
+  rowCount: number;
+  groupIndex: number;
+}
+
 const LOCATION_TYPES = [
   { value: "all", label: "All Types" },
   { value: "pick", label: "Pick" },
@@ -106,7 +112,6 @@ export default function BinInventorySection({
   const [hasInventory, setHasInventory] = useState("all");
   const [binSearch, setBinSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [expandedBins, setExpandedBins] = useState<Set<number>>(new Set());
   const [sortField, setSortField] = useState("code");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const pageSize = 50;
@@ -156,14 +161,17 @@ export default function BinInventorySection({
     staleTime: 30_000,
   });
 
-  const toggleExpand = (locationId: number) => {
-    setExpandedBins((prev) => {
-      const next = new Set(prev);
-      if (next.has(locationId)) next.delete(locationId);
-      else next.add(locationId);
-      return next;
+  const flatRows = useMemo<FlatRow[]>(() => {
+    if (!data?.bins) return [];
+    return data.bins.flatMap((bin, groupIndex) => {
+      if (bin.items.length === 0) {
+        return [{ bin, item: null, isFirst: true, rowCount: 1, groupIndex }];
+      }
+      return bin.items.map((item, i) => ({
+        bin, item, isFirst: i === 0, rowCount: bin.items.length, groupIndex,
+      }));
     });
-  };
+  }, [data]);
 
   const totalPages = data ? Math.ceil(data.total / pageSize) : 0;
 
@@ -227,7 +235,6 @@ export default function BinInventorySection({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[30px]"></TableHead>
               <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("code")}>
                 <div className="flex items-center gap-1">Location <SortIcon field="code" /></div>
               </TableHead>
@@ -237,10 +244,8 @@ export default function BinInventorySection({
               <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleSort("type")}>
                 <div className="flex items-center gap-1">Type <SortIcon field="type" /></div>
               </TableHead>
-              <TableHead className="text-center">Pick</TableHead>
-              <TableHead className="text-right cursor-pointer hover:bg-muted/60" onClick={() => handleSort("skus")}>
-                <div className="flex items-center justify-end gap-1">SKUs <SortIcon field="skus" /></div>
-              </TableHead>
+              <TableHead>SKU</TableHead>
+              <TableHead>Item</TableHead>
               <TableHead className="text-right cursor-pointer hover:bg-muted/60" onClick={() => handleSort("qty")}>
                 <div className="flex items-center justify-end gap-1">Qty <SortIcon field="qty" /></div>
               </TableHead>
@@ -253,30 +258,114 @@ export default function BinInventorySection({
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={canEdit ? 9 : 8} className="text-center py-8 text-muted-foreground">
+                <TableCell colSpan={canEdit ? 8 : 7} className="text-center py-8 text-muted-foreground">
                   Loading...
                 </TableCell>
               </TableRow>
-            ) : !data?.bins.length ? (
+            ) : !flatRows.length ? (
               <TableRow>
-                <TableCell colSpan={canEdit ? 9 : 8} className="text-center py-8 text-muted-foreground">
+                <TableCell colSpan={canEdit ? 8 : 7} className="text-center py-8 text-muted-foreground">
                   No locations found
                 </TableCell>
               </TableRow>
             ) : (
-              data.bins.map((bin) => (
-                <BinRow
-                  key={bin.locationId}
-                  bin={bin}
-                  expanded={expandedBins.has(bin.locationId)}
-                  onToggle={() => toggleExpand(bin.locationId)}
-                  canEdit={canEdit}
-                  onTransfer={onTransfer}
-                  onAdjust={onAdjust}
-                  onViewActivity={onViewActivity}
-                  locationTypeBadge={locationTypeBadge}
-                />
-              ))
+              flatRows.map((row) => {
+                const key = row.item
+                  ? `${row.bin.locationId}-${row.item.variantId}`
+                  : `${row.bin.locationId}-empty`;
+                const isEvenGroup = row.groupIndex % 2 === 0;
+                return (
+                  <TableRow
+                    key={key}
+                    className={`${isEvenGroup ? "" : "bg-muted/10"} ${row.isFirst && row.groupIndex > 0 ? "border-t" : ""}`}
+                  >
+                    {/* Location */}
+                    <TableCell className="font-mono text-sm font-medium">
+                      {row.isFirst ? (
+                        <>
+                          {row.bin.locationCode}
+                          {row.bin.warehouseCode && (
+                            <span className="ml-1.5 text-xs text-muted-foreground">[{row.bin.warehouseCode}]</span>
+                          )}
+                          {row.rowCount > 1 && (
+                            <Badge variant="outline" className="ml-1.5 text-[9px] px-1 py-0">
+                              {row.rowCount}
+                            </Badge>
+                          )}
+                        </>
+                      ) : null}
+                    </TableCell>
+                    {/* Zone */}
+                    <TableCell className="text-sm">
+                      {row.isFirst ? (row.bin.zone || "—") : null}
+                    </TableCell>
+                    {/* Type */}
+                    <TableCell>
+                      {row.isFirst ? (
+                        <Badge variant="outline" className={`text-[10px] ${locationTypeBadge(row.bin.locationType)}`}>
+                          {row.bin.locationType.replace("_", " ")}
+                        </Badge>
+                      ) : null}
+                    </TableCell>
+                    {/* SKU */}
+                    <TableCell className={`font-mono text-xs ${!row.isFirst ? "border-l-2 border-primary/20" : ""}`}>
+                      {row.item ? row.item.sku : "—"}
+                    </TableCell>
+                    {/* Item Name */}
+                    <TableCell className="text-xs text-muted-foreground truncate max-w-[200px]">
+                      {row.item ? row.item.name : "—"}
+                    </TableCell>
+                    {/* Qty */}
+                    <TableCell className="text-right font-mono font-medium">
+                      {row.item ? row.item.variantQty.toLocaleString() : row.bin.totalVariantQty.toLocaleString()}
+                    </TableCell>
+                    {/* Reserved */}
+                    <TableCell className="text-right font-mono text-muted-foreground">
+                      {row.item
+                        ? (row.item.reservedQty > 0 ? row.item.reservedQty.toLocaleString() : "—")
+                        : (row.bin.totalReservedQty > 0 ? row.bin.totalReservedQty.toLocaleString() : "—")}
+                    </TableCell>
+                    {/* Actions */}
+                    {canEdit && (
+                      <TableCell className="px-2">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-7 w-7">
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            {row.item && (
+                              <>
+                                <DropdownMenuItem onClick={() => onTransfer(row.bin.locationId, row.bin.locationCode, row.item!.variantId, row.item!.sku)}>
+                                  <ArrowLeftRight className="h-4 w-4 mr-2" />
+                                  Transfer SKU
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => onAdjust(row.bin.locationId, row.bin.locationCode, row.item!.variantId, row.item!.sku, row.item!.variantQty)}>
+                                  <Edit className="h-4 w-4 mr-2" />
+                                  Adjust Qty
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                            {row.isFirst && (
+                              <>
+                                <DropdownMenuItem onClick={() => onTransfer(row.bin.locationId, row.bin.locationCode)}>
+                                  <ArrowLeftRight className="h-4 w-4 mr-2" />
+                                  Transfer From Bin
+                                </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => onViewActivity(row.bin.locationId)}>
+                                  <History className="h-4 w-4 mr-2" />
+                                  View History
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                );
+              })
             )}
           </TableBody>
         </Table>
@@ -360,121 +449,5 @@ export default function BinInventorySection({
         </div>
       )}
     </div>
-  );
-}
-
-function BinRow({
-  bin,
-  expanded,
-  onToggle,
-  canEdit,
-  onTransfer,
-  onAdjust,
-  onViewActivity,
-  locationTypeBadge,
-}: {
-  bin: Bin;
-  expanded: boolean;
-  onToggle: () => void;
-  canEdit: boolean;
-  onTransfer: (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) => void;
-  onAdjust: (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) => void;
-  onViewActivity: (locationId: number) => void;
-  locationTypeBadge: (type: string) => string;
-}) {
-  return (
-    <>
-      <TableRow
-        className="cursor-pointer hover:bg-muted/50"
-        onClick={bin.skuCount > 0 ? onToggle : undefined}
-      >
-        <TableCell className="px-2">
-          {bin.skuCount > 0 ? (
-            expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />
-          ) : null}
-        </TableCell>
-        <TableCell className="font-mono text-sm font-medium">
-          {bin.locationCode}
-          {bin.warehouseCode && (
-            <span className="ml-1.5 text-xs text-muted-foreground">[{bin.warehouseCode}]</span>
-          )}
-        </TableCell>
-        <TableCell className="text-sm">{bin.zone || "—"}</TableCell>
-        <TableCell>
-          <Badge variant="outline" className={`text-[10px] ${locationTypeBadge(bin.locationType)}`}>
-            {bin.locationType.replace("_", " ")}
-          </Badge>
-        </TableCell>
-        <TableCell className="text-center">
-          {bin.isPickable ? (
-            <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Yes</Badge>
-          ) : (
-            <span className="text-xs text-muted-foreground">No</span>
-          )}
-        </TableCell>
-        <TableCell className="text-right font-mono">{bin.skuCount}</TableCell>
-        <TableCell className="text-right font-mono font-medium">{bin.totalVariantQty.toLocaleString()}</TableCell>
-        <TableCell className="text-right font-mono text-muted-foreground">
-          {bin.totalReservedQty > 0 ? bin.totalReservedQty.toLocaleString() : "—"}
-        </TableCell>
-        {canEdit && (
-          <TableCell className="px-2" onClick={(e) => e.stopPropagation()}>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-7 w-7">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => onTransfer(bin.locationId, bin.locationCode)}>
-                  <ArrowLeftRight className="h-4 w-4 mr-2" />
-                  Transfer From
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onViewActivity(bin.locationId)}>
-                  <History className="h-4 w-4 mr-2" />
-                  View History
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </TableCell>
-        )}
-      </TableRow>
-      {expanded && bin.items.map((item) => (
-        <TableRow key={`${bin.locationId}-${item.variantId}`} className="bg-muted/20">
-          <TableCell></TableCell>
-          <TableCell className="font-mono text-xs pl-6">{item.sku}</TableCell>
-          <TableCell colSpan={2} className="text-xs text-muted-foreground truncate max-w-[200px]">
-            {item.name}
-          </TableCell>
-          <TableCell></TableCell>
-          <TableCell></TableCell>
-          <TableCell className="text-right font-mono text-sm">{item.variantQty.toLocaleString()}</TableCell>
-          <TableCell className="text-right font-mono text-xs text-muted-foreground">
-            {item.reservedQty > 0 ? item.reservedQty.toLocaleString() : "—"}
-          </TableCell>
-          {canEdit && (
-            <TableCell className="px-2">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-6 w-6">
-                    <MoreHorizontal className="h-3.5 w-3.5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => onTransfer(bin.locationId, bin.locationCode, item.variantId, item.sku)}>
-                    <ArrowLeftRight className="h-4 w-4 mr-2" />
-                    Transfer
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => onAdjust(bin.locationId, bin.locationCode, item.variantId, item.sku, item.variantQty)}>
-                    <Edit className="h-4 w-4 mr-2" />
-                    Adjust Qty
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </TableCell>
-          )}
-        </TableRow>
-      ))}
-    </>
   );
 }

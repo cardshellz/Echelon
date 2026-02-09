@@ -10567,16 +10567,13 @@ export async function registerRoutes(
         for (const row of itemsResult.rows as any[]) {
           const locId = row.location_id;
           if (!itemsByLocation.has(locId)) itemsByLocation.set(locId, []);
-          const items = itemsByLocation.get(locId)!;
-          if (items.length < 5) {
-            items.push({
-              variantId: row.variant_id,
-              sku: row.sku,
-              name: row.name,
-              variantQty: parseInt(row.variant_qty) || 0,
-              reservedQty: parseInt(row.reserved_qty) || 0,
-            });
-          }
+          itemsByLocation.get(locId)!.push({
+            variantId: row.variant_id,
+            sku: row.sku,
+            name: row.name,
+            variantQty: parseInt(row.variant_qty) || 0,
+            reservedQty: parseInt(row.reserved_qty) || 0,
+          });
         }
       }
 

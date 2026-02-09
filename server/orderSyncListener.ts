@@ -103,25 +103,19 @@ export async function syncNewOrders() {
         skipped++;
         continue;
       }
-      
-      const unfulfilledItems = rawItems.rows.filter(item => 
-        !item.fulfillment_status || item.fulfillment_status !== 'fulfilled'
-      );
-      
-      if (unfulfilledItems.length === 0) {
-        console.log(`[ORDER SYNC] Skipping order ${rawOrder.order_number}: all ${rawItems.rows.length} items already fulfilled`);
-        skipped++;
-        continue;
-      }
-      
-      const totalUnits = unfulfilledItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
-      const hasShippableItems = unfulfilledItems.some(item => item.requires_shipping !== false);
-      
+
+      const allItems = rawItems.rows;
+      const allFullyFulfilled = allItems.every(item => item.fulfillment_status === 'fulfilled');
+      const totalUnits = allItems.reduce((sum, item) => sum + (item.fulfillable_quantity || item.quantity), 0);
+      const hasShippableItems = allItems.some(item => item.requires_shipping !== false);
+
       const enrichedItems: InsertOrderItem[] = [];
-      for (const item of unfulfilledItems) {
+      for (const item of allItems) {
+        const isFulfilled = item.fulfillment_status === 'fulfilled';
+
         // Look up bin location from inventory_levels (where stock actually is)
         const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
-        
+
         // If no image from inventory, try product_locations first (best source), then product_variants/products
         let imageUrl = binLocation?.imageUrl || null;
         if (!imageUrl && item.sku) {
@@ -142,17 +136,18 @@ export async function syncNewOrders() {
             imageUrl = imageResult.rows[0].image_url;
           }
         }
-        
+
+        const qty = item.fulfillable_quantity || item.quantity;
         enrichedItems.push({
           orderId: 0,
           shopifyLineItemId: item.shopify_line_item_id,
           sourceItemId: item.id,
           sku: item.sku || 'UNKNOWN',
           name: item.name || item.title || 'Unknown Item',
-          quantity: item.fulfillable_quantity || item.quantity,
-          pickedQuantity: 0,
-          fulfilledQuantity: 0,
-          status: "pending",
+          quantity: qty,
+          pickedQuantity: isFulfilled ? qty : 0,
+          fulfilledQuantity: isFulfilled ? qty : 0,
+          status: isFulfilled ? "fulfilled" : "pending",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
           imageUrl: imageUrl,
@@ -160,7 +155,7 @@ export async function syncNewOrders() {
           requiresShipping: item.requires_shipping ? 1 : 0,
         });
       }
-      
+
       await storage.createOrderWithItems({
         shopifyOrderId: rawOrder.id,
         externalOrderId: rawOrder.id,
@@ -180,12 +175,12 @@ export async function syncNewOrders() {
         shopifyFulfillmentStatus: rawOrder.fulfillment_status,
         cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
         priority: "normal",
-        warehouseStatus: rawOrder.cancelled_at 
-          ? "cancelled" 
-          : rawOrder.fulfillment_status === "fulfilled"
+        warehouseStatus: rawOrder.cancelled_at
+          ? "cancelled"
+          : allFullyFulfilled
             ? "shipped"
-            : hasShippableItems 
-              ? "ready" 
+            : hasShippableItems
+              ? "ready"
               : "completed",
         itemCount: enrichedItems.length,
         unitCount: totalUnits,
