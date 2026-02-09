@@ -3,6 +3,12 @@ import { db } from "./db";
 import { sql } from "drizzle-orm";
 import { storage } from "./storage";
 import type { InsertOrderItem } from "@shared/schema";
+import { createInventoryCoreService } from "./services/inventory-core";
+import { createReservationService } from "./services/reservation";
+
+// Reservation service for auto-reserving inventory on order creation
+const inventoryCore = createInventoryCoreService(db);
+const reservation = createReservationService(db, inventoryCore);
 
 // Sync health tracking
 let lastSuccessfulSync: Date | null = null;
@@ -156,7 +162,15 @@ export async function syncNewOrders() {
         });
       }
 
-      await storage.createOrderWithItems({
+      const warehouseStatus = rawOrder.cancelled_at
+        ? "cancelled"
+        : allFullyFulfilled
+          ? "shipped"
+          : hasShippableItems
+            ? "ready"
+            : "completed";
+
+      const newOrder = await storage.createOrderWithItems({
         shopifyOrderId: rawOrder.id,
         externalOrderId: rawOrder.id,
         sourceTableId: rawOrder.id,
@@ -175,13 +189,7 @@ export async function syncNewOrders() {
         shopifyFulfillmentStatus: rawOrder.fulfillment_status,
         cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
         priority: "normal",
-        warehouseStatus: rawOrder.cancelled_at
-          ? "cancelled"
-          : allFullyFulfilled
-            ? "shipped"
-            : hasShippableItems
-              ? "ready"
-              : "completed",
+        warehouseStatus,
         itemCount: enrichedItems.length,
         unitCount: totalUnits,
         totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
@@ -189,7 +197,20 @@ export async function syncNewOrders() {
         shopifyCreatedAt: rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : undefined,
         orderPlacedAt: rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : undefined,
       }, enrichedItems);
-      
+
+      // Auto-reserve inventory at bin level for orders that need fulfillment
+      if (warehouseStatus === "ready") {
+        try {
+          const reserveResult = await reservation.reserveOrder(newOrder.id);
+          if (reserveResult.failed.length > 0) {
+            console.log(`[ORDER SYNC] Reservation partial for ${rawOrder.order_number}: ${reserveResult.failed.length} items could not be reserved`);
+          }
+        } catch (e) {
+          console.error(`[ORDER SYNC] Reservation failed for ${rawOrder.order_number}:`, e);
+          // Non-blocking — order still created, just not reserved
+        }
+      }
+
       created++;
     }
     
@@ -242,6 +263,11 @@ async function syncOrderUpdate(shopifyOrderId: string) {
     
     const shopifyOrder = rawOrder.rows[0];
     
+    // Look up the internal order ID before updating
+    const existingOrder = await db.execute<{ id: number; warehouse_status: string }>(sql`
+      SELECT id, warehouse_status FROM orders WHERE source_table_id = ${shopifyOrderId}
+    `);
+
     await db.execute(sql`
       UPDATE orders SET
         financial_status = ${shopifyOrder.financial_status},
@@ -251,7 +277,18 @@ async function syncOrderUpdate(shopifyOrderId: string) {
         shipping_name = COALESCE(${shopifyOrder.shipping_name}, shipping_name)
       WHERE source_table_id = ${shopifyOrderId}
     `);
-    
+
+    // Auto-release bin reservations when order is cancelled
+    if (shopifyOrder.cancelled_at && existingOrder.rows.length > 0) {
+      const orderId = existingOrder.rows[0].id;
+      try {
+        await reservation.releaseOrderReservation(orderId, "Order cancelled in Shopify");
+        console.log(`[ORDER SYNC] Released reservations for cancelled order ${shopifyOrderId}`);
+      } catch (e) {
+        console.error(`[ORDER SYNC] Failed to release reservations for ${shopifyOrderId}:`, e);
+      }
+    }
+
     console.log(`[ORDER SYNC] Updated order from shopify order ${shopifyOrderId}`);
   } catch (error) {
     console.error(`[ORDER SYNC] Error syncing update for ${shopifyOrderId}:`, error);

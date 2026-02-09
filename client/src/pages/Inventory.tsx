@@ -713,7 +713,7 @@ export default function Inventory() {
                           <div className="font-mono font-bold">{level.variantQty.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Committed</div>
+                          <div className="text-muted-foreground">Reserved</div>
                           <div className="font-mono font-bold text-muted-foreground">{level.reservedQty.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
@@ -750,7 +750,7 @@ export default function Inventory() {
                         </TableHead>
                         <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("reserved")}>
                           <div className="flex items-center justify-end gap-1">
-                            Committed
+                            Reserved
                             {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>

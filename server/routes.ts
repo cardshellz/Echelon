@@ -3597,9 +3597,15 @@ export async function registerRoutes(
         shipped++;
         console.log(`Order ${order.orderNumber} marked as shipped (fully fulfilled in Shopify)`);
       }
-      // If cancelled in Shopify, mark as cancelled
+      // If cancelled in Shopify, mark as cancelled and release bin reservations
       else if (status.cancelledAt) {
         await storage.updateOrderStatus(order.id, "cancelled");
+        try {
+          const { reservation } = app.locals.services;
+          await reservation.releaseOrderReservation(order.id, "Order cancelled in Shopify");
+        } catch (e) {
+          console.error(`Failed to release reservations for cancelled order ${order.orderNumber}:`, e);
+        }
         cancelled++;
         console.log(`Order ${order.orderNumber} marked as cancelled`);
       }
@@ -6898,12 +6904,9 @@ export async function registerRoutes(
   // =====================
   // 1. Qty (On Hand) = Total physical inventory across ALL locations (variant_qty)
   // 2. Pickable = Inventory in forward pick locations only (is_pickable = 1)
-  // 3. Committed = Allocated to orders BEFORE picking (order placed, waiting to be picked)
-  //    - Comes from order_items.quantity where order status = pending/ready/assigned
-  //    - Does NOT include items already being picked or picked
-  // 4. Picked = Items currently being picked or picked but not shipped
-  //    - Comes from order_items.picked_quantity where order not yet completed
-  // 5. Available = Qty - Committed - Picked (what can still be sold)
+  // 3. Reserved = Bin-level reservations for pending orders (inventory_levels.reserved_qty)
+  // 4. Picked = Items picked but not yet shipped (inventory_levels.picked_qty)
+  // 5. Available = Qty - Reserved - Picked (what can still be promised)
   //
   app.get("/api/inventory/levels", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -6920,6 +6923,8 @@ export async function registerRoutes(
         product_id: number | null;
         base_sku: string | null;
         total_variant_qty: string;
+        total_reserved_qty: string;
+        total_picked_qty: string;
         location_count: string;
         pickable_variant_qty: string;
       }>(warehouseId ? sql`
@@ -6931,6 +6936,8 @@ export async function registerRoutes(
           p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+          COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
+          COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
           COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
         FROM product_variants pv
@@ -6950,6 +6957,8 @@ export async function registerRoutes(
           p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+          COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
+          COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
           COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
         FROM product_variants pv
@@ -6961,106 +6970,25 @@ export async function registerRoutes(
         ORDER BY pv.sku
       `);
       
-      // Step 2: Get COMMITTED quantities from order_items
-      // Committed = items on orders that are waiting to be picked (not yet in picking process)
-      // Order statuses: pending, ready, assigned = order placed but not being picked yet
-      const committedResult = await db.execute<{
-        sku: string;
-        committed_qty: string;
-      }>(sql`
-        SELECT 
-          oi.sku,
-          COALESCE(SUM(oi.quantity), 0) as committed_qty
-        FROM order_items oi
-        JOIN orders o ON oi.order_id = o.id
-        WHERE o.warehouse_status IN ('pending', 'ready', 'assigned')
-          AND oi.requires_shipping = 1
-          AND COALESCE(oi.picked_quantity, 0) = 0
-        GROUP BY oi.sku
-      `);
-      
-      // Step 3: Get PICKED quantities from order_items
-      // Picked = items that have been picked but order not yet shipped/completed
-      const pickedResult = await db.execute<{
-        sku: string;
-        picked_qty: string;
-      }>(sql`
-        SELECT 
-          oi.sku,
-          COALESCE(SUM(oi.picked_quantity), 0) as picked_qty
-        FROM order_items oi
-        JOIN orders o ON oi.order_id = o.id
-        WHERE o.warehouse_status IN ('pending', 'ready', 'assigned', 'picking', 'picked', 'packing')
-          AND oi.requires_shipping = 1
-          AND COALESCE(oi.picked_quantity, 0) > 0
-        GROUP BY oi.sku
-      `);
-      
-      // Build maps of SKU -> qty
-      const committedBySku = new Map<string, number>();
-      for (const row of committedResult.rows) {
-        committedBySku.set(row.sku, parseInt(row.committed_qty) || 0);
-      }
-      
-      const pickedBySku = new Map<string, number>();
-      for (const row of pickedResult.rows) {
-        pickedBySku.set(row.sku, parseInt(row.picked_qty) || 0);
-      }
-      
-      // Build per-variant data and group by product for fungible ATP
-      const variantData = inventoryResult.rows.map(row => ({
-        variantId: row.variant_id,
-        sku: row.variant_sku,
-        name: row.variant_name,
-        unitsPerVariant: row.units_per_variant || 1,
-        productId: row.product_id,
-        baseSku: row.base_sku,
-        variantQty: parseInt(row.total_variant_qty) || 0,
-        committed: committedBySku.get(row.variant_sku) || 0,
-        picked: pickedBySku.get(row.variant_sku) || 0,
-        locationCount: parseInt(row.location_count) || 0,
-        pickableQty: parseInt(row.pickable_variant_qty) || 0,
-      }));
-
-      // Compute fungible ATP pool per product in base units
-      const atpByProduct = new Map<number, number>();
-      const productGroups = new Map<number, typeof variantData>();
-      for (const v of variantData) {
-        if (v.productId) {
-          if (!productGroups.has(v.productId)) productGroups.set(v.productId, []);
-          productGroups.get(v.productId)!.push(v);
-        }
-      }
-      for (const [productId, variants] of productGroups) {
-        let onHandBase = 0, committedBase = 0, pickedBase = 0;
-        for (const v of variants) {
-          onHandBase += v.variantQty * v.unitsPerVariant;
-          committedBase += v.committed * v.unitsPerVariant;
-          pickedBase += v.picked * v.unitsPerVariant;
-        }
-        atpByProduct.set(productId, onHandBase - committedBase - pickedBase);
-      }
-
-      const levels = variantData.map(v => {
-        // Fungible available: shared ATP pool / this variant's units
-        const atpBase = v.productId ? (atpByProduct.get(v.productId) ?? 0) : 0;
-        const available = v.productId
-          ? Math.floor(atpBase / v.unitsPerVariant)
-          : v.variantQty - v.committed - v.picked; // fallback for orphan variants
+      // Reserved and Picked now come directly from inventory_levels (bin-level truth)
+      const levels = inventoryResult.rows.map(row => {
+        const variantQty = parseInt(row.total_variant_qty) || 0;
+        const reservedQty = parseInt(row.total_reserved_qty) || 0;
+        const pickedQty = parseInt(row.total_picked_qty) || 0;
+        const available = variantQty - reservedQty - pickedQty;
 
         return {
-          variantId: v.variantId,
-          sku: v.sku,
-          name: v.name,
-          unitsPerVariant: v.unitsPerVariant,
-          baseSku: v.baseSku,
-          variantQty: v.variantQty,
-          reservedQty: v.committed,
-          pickedQty: v.picked,
+          variantId: row.variant_id,
+          sku: row.variant_sku,
+          name: row.variant_name,
+          unitsPerVariant: row.units_per_variant || 1,
+          baseSku: row.base_sku,
+          variantQty,
+          reservedQty,
+          pickedQty,
           available,
-          totalPieces: atpBase,
-          locationCount: v.locationCount,
-          pickableQty: v.pickableQty,
+          locationCount: parseInt(row.location_count) || 0,
+          pickableQty: parseInt(row.pickable_variant_qty) || 0,
         };
       });
 
