@@ -528,7 +528,7 @@ export default function WarehouseLocations() {
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence,min_qty,max_qty,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,bin,1,1,5,50,\nBULK,B,02,B,,Bulk B2,pallet,0,,,100,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,bin_type,is_pickable,pick_sequence,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,pick,bin,1,1,\nBULK,B,02,B,,Bulk B2,reserve,pallet,0,,\nFWD,F,01,,,Floor Pallet F1,pick,pallet,1,,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

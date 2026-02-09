@@ -5697,27 +5697,10 @@ export async function registerRoutes(
       const productVariantId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
       // Inline the replenishment-needed query (formerly on inventoryService)
       const allLocations = await storage.getAllWarehouseLocations() as any[];
-      const locationsWithMinQty = allLocations.filter((l: any) => l.minQty !== null && l.minQty > 0);
+      // Legacy endpoint — warehouse_locations no longer has a minQty column.
+      // Threshold logic is now in replen_tier_defaults / replen_rules / location_replen_config.
+      // Return empty for backwards compatibility; the replenishment service handles this now.
       const locations: any[] = [];
-
-      for (const location of locationsWithMinQty) {
-        const allLevels = await storage.getAllInventoryLevels();
-        const levelsAtLocation = allLevels.filter(l => l.warehouseLocationId === location.id);
-
-        for (const level of levelsAtLocation) {
-          if (productVariantId && level.productVariantId !== productVariantId) continue;
-          if (level.variantQty < (location.minQty || 0)) {
-            locations.push({
-              locationId: location.id,
-              locationCode: location.code,
-              productVariantId: level.productVariantId,
-              currentQty: level.variantQty,
-              minQty: location.minQty || 0,
-              parentLocationId: location.parentLocationId,
-            });
-          }
-        }
-      }
       res.json(locations);
     } catch (error) {
       console.error("Error fetching replenishment needs:", error);
@@ -9027,7 +9010,7 @@ export async function registerRoutes(
         pickLocationType: data.pickLocationType || "pick",
         sourceLocationType: data.sourceLocationType || "reserve",
         sourcePriority: data.sourcePriority || "fifo",
-        minQty: data.minQty || 0,
+        triggerValue: data.triggerValue || 0,
         maxQty: data.maxQty || null,
         replenMethod: data.replenMethod || "case_break",
         priority: data.priority || 5,
@@ -9135,7 +9118,7 @@ export async function registerRoutes(
   
   app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, minQty, maxQty, replenMethod, priority } = req.body;
+      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority } = req.body;
       
       if (!catalogProductId || !pickVariantId || !sourceVariantId) {
         return res.status(400).json({ error: "catalogProductId, pickVariantId, and sourceVariantId are required" });
@@ -9181,7 +9164,7 @@ export async function registerRoutes(
         pickLocationType: pickLocationType || "pick",
         sourceLocationType: sourceLocationType || "reserve",
         sourcePriority: sourcePriority || "fifo",
-        minQty: minQty ?? 0,
+        triggerValue: triggerValue ?? 0,
         maxQty: maxQty ?? null,
         replenMethod: replenMethod || "case_break",
         priority: priority ?? 5,
@@ -9364,7 +9347,7 @@ export async function registerRoutes(
               pickLocationType: (row.pick_location_type || "pick").trim(),
               sourceLocationType: (row.source_location_type || "reserve").trim(),
               sourcePriority: (row.source_priority || "fifo").trim(),
-              minQty: parseInt(row.min_qty) || 0,
+              triggerValue: parseInt(row.trigger_value) || 0,
               maxQty: row.max_qty ? parseInt(row.max_qty) : null,
               replenMethod: (row.replen_method || "case_break").trim(),
               priority: parseInt(row.priority) || 5,
@@ -9385,6 +9368,201 @@ export async function registerRoutes(
     }
   });
   
+  // Location Replen Config — per-location threshold overrides
+  app.get("/api/replen/location-configs", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseLocationId = req.query.warehouseLocationId ? parseInt(req.query.warehouseLocationId as string) : undefined;
+      const configs = await storage.getLocationReplenConfigs(warehouseLocationId);
+
+      // Enrich with location codes and variant SKUs
+      const [allLocations, allVariants] = await Promise.all([
+        storage.getAllWarehouseLocations(),
+        storage.getAllProductVariants(),
+      ]);
+      const locMap = new Map(allLocations.map(l => [l.id, l]));
+      const varMap = new Map(allVariants.map(v => [v.id, v]));
+
+      const enriched = configs.map(c => ({
+        ...c,
+        location: locMap.get(c.warehouseLocationId),
+        variant: c.productVariantId ? varMap.get(c.productVariantId) : null,
+      }));
+
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error fetching location replen configs:", error);
+      res.status(500).json({ error: "Failed to fetch location replen configs" });
+    }
+  });
+
+  app.get("/api/replen/location-configs/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const config = await storage.getLocationReplenConfigById(parseInt(req.params.id));
+      if (!config) return res.status(404).json({ error: "Location replen config not found" });
+      res.json(config);
+    } catch (error) {
+      console.error("Error fetching location replen config:", error);
+      res.status(500).json({ error: "Failed to fetch location replen config" });
+    }
+  });
+
+  app.post("/api/replen/location-configs", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { warehouseLocationId, productVariantId, triggerValue, maxQty, replenMethod, isActive, notes } = req.body;
+      if (!warehouseLocationId) return res.status(400).json({ error: "warehouseLocationId is required" });
+
+      const config = await storage.createLocationReplenConfig({
+        warehouseLocationId,
+        productVariantId: productVariantId || null,
+        triggerValue: triggerValue?.toString() || null,
+        maxQty: maxQty || null,
+        replenMethod: replenMethod || null,
+        isActive: isActive ?? 1,
+        notes: notes || null,
+      });
+      res.json(config);
+    } catch (error) {
+      console.error("Error creating location replen config:", error);
+      res.status(500).json({ error: "Failed to create location replen config" });
+    }
+  });
+
+  app.patch("/api/replen/location-configs/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const updates: any = {};
+      if (req.body.triggerValue !== undefined) updates.triggerValue = req.body.triggerValue?.toString() || null;
+      if (req.body.maxQty !== undefined) updates.maxQty = req.body.maxQty;
+      if (req.body.replenMethod !== undefined) updates.replenMethod = req.body.replenMethod;
+      if (req.body.isActive !== undefined) updates.isActive = req.body.isActive;
+      if (req.body.notes !== undefined) updates.notes = req.body.notes;
+
+      const config = await storage.updateLocationReplenConfig(id, updates);
+      if (!config) return res.status(404).json({ error: "Location replen config not found" });
+      res.json(config);
+    } catch (error) {
+      console.error("Error updating location replen config:", error);
+      res.status(500).json({ error: "Failed to update location replen config" });
+    }
+  });
+
+  app.delete("/api/replen/location-configs/:id", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const deleted = await storage.deleteLocationReplenConfig(parseInt(req.params.id));
+      if (!deleted) return res.status(404).json({ error: "Location replen config not found" });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting location replen config:", error);
+      res.status(500).json({ error: "Failed to delete location replen config" });
+    }
+  });
+
+  // CSV upload for location replen configs
+  app.post("/api/replen/location-configs/upload-csv", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const multer = await import("multer");
+      const Papa = await import("papaparse");
+      const upload = multer.default({ storage: multer.default.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+      upload.single("file")(req, res, async (err: any) => {
+        if (err) return res.status(400).json({ error: "File upload failed: " + err.message });
+        if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+        const csvText = req.file.buffer.toString("utf-8");
+        const parsed = Papa.default.parse(csvText, { header: true, skipEmptyLines: true });
+
+        if (parsed.errors?.length > 0) {
+          return res.status(400).json({ error: "CSV parse error", details: parsed.errors.slice(0, 5) });
+        }
+
+        const allLocations = await storage.getAllWarehouseLocations();
+        const allVariants = await storage.getAllProductVariants();
+        const locByCode = new Map(allLocations.map(l => [l.code.toLowerCase(), l]));
+        const varBySku = new Map(allVariants.map(v => [v.sku.toLowerCase(), v]));
+
+        const results = { created: 0, updated: 0, skipped: 0, errors: [] as string[] };
+
+        for (let i = 0; i < parsed.data.length; i++) {
+          const row = parsed.data[i] as any;
+          const rowNum = i + 2; // 1-indexed, skip header
+
+          const locationCode = (row.location_code || "").trim().toLowerCase();
+          if (!locationCode) {
+            results.errors.push(`Row ${rowNum}: Missing location_code`);
+            results.skipped++;
+            continue;
+          }
+
+          const location = locByCode.get(locationCode);
+          if (!location) {
+            results.errors.push(`Row ${rowNum}: Location '${row.location_code}' not found`);
+            results.skipped++;
+            continue;
+          }
+
+          let variantId: number | null = null;
+          const variantSku = (row.variant_sku || "").trim().toLowerCase();
+          if (variantSku) {
+            const variant = varBySku.get(variantSku);
+            if (!variant) {
+              results.errors.push(`Row ${rowNum}: Variant SKU '${row.variant_sku}' not found`);
+              results.skipped++;
+              continue;
+            }
+            variantId = variant.id;
+          }
+
+          const triggerVal = row.trigger_value ? row.trigger_value.toString().trim() : null;
+          const maxQty = row.max_qty ? parseInt(row.max_qty) : null;
+          const replenMethod = (row.replen_method || "").trim() || null;
+          const notes = (row.notes || "").trim() || null;
+
+          try {
+            // Check if config already exists for this location+variant
+            const existing = await storage.getLocationReplenConfig(location.id, variantId);
+            if (existing) {
+              await storage.updateLocationReplenConfig(existing.id, {
+                triggerValue: triggerVal,
+                maxQty,
+                replenMethod,
+                notes,
+                isActive: 1,
+              });
+              results.updated++;
+            } else {
+              await storage.createLocationReplenConfig({
+                warehouseLocationId: location.id,
+                productVariantId: variantId,
+                triggerValue: triggerVal,
+                maxQty,
+                replenMethod,
+                notes,
+                isActive: 1,
+              });
+              results.created++;
+            }
+          } catch (error) {
+            results.errors.push(`Row ${rowNum}: Failed - ${error}`);
+            results.skipped++;
+          }
+        }
+
+        res.json(results);
+      });
+    } catch (error) {
+      console.error("Error uploading location replen config CSV:", error);
+      res.status(500).json({ error: "Failed to upload CSV" });
+    }
+  });
+
+  // CSV template download
+  app.get("/api/replen/location-configs/csv-template", requirePermission("inventory", "view"), async (_req, res) => {
+    const template = "location_code,variant_sku,trigger_value,replen_method,max_qty,notes\nF-01,,2,pallet_drop,,All SKUs at F-01\nF-03,ESS-TOP-STD-SLV-CLR-C1000,3,pallet_drop,,High-velocity SKU\nA-11,,0,case_break,50,Standard bin\n";
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=location_replen_config_template.csv");
+    res.send(template);
+  });
+
   // Replen Tasks
   app.get("/api/replen/tasks", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -9677,7 +9855,7 @@ export async function registerRoutes(
           }
           
           // Apply SKU override settings if they exist (override nulls = use tier default)
-          const effectiveMinQty = override?.minQty ?? matchedDefault.minQty;
+          const effectiveTriggerValue = override?.triggerValue ?? matchedDefault.triggerValue;
           const effectiveMaxQty = override?.maxQty ?? matchedDefault.maxQty;
           const effectiveSourcePriority = override?.sourcePriority ?? matchedDefault.sourcePriority;
           const effectiveReplenMethod = override?.replenMethod ?? matchedDefault.replenMethod;
@@ -9686,7 +9864,7 @@ export async function registerRoutes(
           const effectiveSourceLocationType = override?.sourceLocationType ?? matchedDefault.sourceLocationType;
           
           // Check if this location needs replen
-          if (pickLoc.currentQty >= effectiveMinQty) {
+          if (pickLoc.currentQty >= effectiveTriggerValue) {
             continue; // Above threshold, no replen needed
           }
           
@@ -9732,11 +9910,11 @@ export async function registerRoutes(
               product: product.sku || product.title,
               reason: "pending_task_exists",
               currentQty: pickLoc.currentQty,
-              minQty: effectiveMinQty,
+              triggerValue: effectiveTriggerValue,
             });
             continue;
           }
-          
+
           // Find best source with available stock
           let selectedSource: { locationId: number; availableQty: number } | null = null;
           for (const src of sourceLocations) {
@@ -9932,7 +10110,7 @@ export async function registerRoutes(
               executionMode,
               warehouseId,
               assignedTo: null,
-              notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < min ${effectiveMinQty}`,
+              notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < trigger ${effectiveTriggerValue}`,
             });
             
             tasksCreated.push({
@@ -9943,14 +10121,14 @@ export async function registerRoutes(
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
               product: product.sku || product.title,
               currentQty: pickLoc.currentQty,
-              minQty: effectiveMinQty,
+              triggerValue: effectiveTriggerValue,
               qtySourceUnits,
               qtyTargetUnits,
               executionMode,
               warehouseId,
             });
           }
-          
+
           // Create overflow task if needed and capacity validated
           if (actualOverflowQty > 0 && overflowBinId) {
             // Use same warehouse settings for overflow
@@ -9992,7 +10170,7 @@ export async function registerRoutes(
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
               product: product.sku || product.title,
               currentQty: 0,
-              minQty: 0,
+              triggerValue: 0,
               qtySourceUnits: actualOverflowSourceUnits,
               qtyTargetUnits: actualOverflowQty,
               isOverflow: true,
@@ -10755,6 +10933,10 @@ export async function registerRoutes(
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
       const filter = (req.query.filter as string) || "all";
+
+      // Fetch velocity lookback days from warehouse settings
+      const wsResult = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
+      const lookbackDays = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 14;
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
       const offset = (page - 1) * pageSize;
@@ -10791,9 +10973,34 @@ export async function registerRoutes(
              ${whFilter}) as aging_receiving_count,
           (SELECT COUNT(*) FROM warehouse_locations wl
            JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+           CROSS JOIN LATERAL (
+             SELECT COALESCE(SUM(ABS(it.variant_qty_delta)), 0) / GREATEST(${lookbackDays}, 1) AS daily_velocity
+             FROM inventory_transactions it
+             WHERE it.product_variant_id = il.product_variant_id
+               AND it.transaction_type = 'pick'
+               AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+           ) vel
+           CROSS JOIN LATERAL (
+             SELECT COALESCE(
+               (SELECT lrc.trigger_value::numeric FROM location_replen_config lrc
+                WHERE lrc.warehouse_location_id = wl.id
+                  AND (lrc.product_variant_id = il.product_variant_id OR lrc.product_variant_id IS NULL)
+                  AND lrc.is_active = 1
+                ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
+               (SELECT rr.trigger_value::numeric FROM replen_rules rr
+                WHERE rr.pick_variant_id = il.product_variant_id
+                  AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
+               (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
+                WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
+                ORDER BY rtd.hierarchy_level LIMIT 1),
+               2
+             ) AS effective_trigger
+           ) trig
            WHERE wl.location_type = 'pick' AND wl.is_pickable = 1
              AND wl.bin_type IN ('pallet', 'floor')
-             AND il.variant_qty > 0 AND il.variant_qty <= 5
+             AND il.variant_qty > 0
+             AND vel.daily_velocity > 0
+             AND (il.variant_qty / vel.daily_velocity) < trig.effective_trigger
              AND EXISTS (
                SELECT 1 FROM inventory_levels il2
                JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
@@ -10852,18 +11059,25 @@ export async function registerRoutes(
 
           UNION ALL
 
-          -- 3. Pallet Drop Needed (priority 2): floor pallet low, air pallet has stock
+          -- 3. Pallet Drop Needed (priority 2): velocity-based threshold, reserve has stock
           SELECT 'pallet_drop'::text, 2,
             il.id, wl.id, wl.code, wl.location_type,
             pv.id, pv.sku, pv.name,
             il.variant_qty,
-            'Reserve: ' || COALESCE(air.air_qty, 0)::text || ' available',
+            ROUND(vel.daily_velocity::numeric, 1) || ' units/day · ~' || ROUND((il.variant_qty / vel.daily_velocity)::numeric, 1) || ' days left',
             'replenish'::text,
             COALESCE(air.air_qty, 0)::int, NULL::text, NULL::int, NULL::int,
             NULL::int, NULL::int
           FROM warehouse_locations wl
           JOIN inventory_levels il ON il.warehouse_location_id = wl.id
           JOIN product_variants pv ON il.product_variant_id = pv.id
+          CROSS JOIN LATERAL (
+            SELECT COALESCE(SUM(ABS(it.variant_qty_delta)), 0) / GREATEST(${lookbackDays}, 1) AS daily_velocity
+            FROM inventory_transactions it
+            WHERE it.product_variant_id = il.product_variant_id
+              AND it.transaction_type = 'pick'
+              AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+          ) vel
           LEFT JOIN LATERAL (
             SELECT SUM(il2.variant_qty) as air_qty
             FROM inventory_levels il2
@@ -10872,9 +11086,27 @@ export async function registerRoutes(
               AND il2.variant_qty > 0
               AND il2.product_variant_id = pv.id
           ) air ON true
+          CROSS JOIN LATERAL (
+            SELECT COALESCE(
+              (SELECT lrc.trigger_value::numeric FROM location_replen_config lrc
+               WHERE lrc.warehouse_location_id = wl.id
+                 AND (lrc.product_variant_id = il.product_variant_id OR lrc.product_variant_id IS NULL)
+                 AND lrc.is_active = 1
+               ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
+              (SELECT rr.trigger_value::numeric FROM replen_rules rr
+               WHERE rr.pick_variant_id = il.product_variant_id
+                 AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
+              (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
+               WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
+               ORDER BY rtd.hierarchy_level LIMIT 1),
+              2
+            ) AS effective_trigger
+          ) trig
           WHERE wl.location_type = 'pick' AND wl.is_pickable = 1
             AND wl.bin_type IN ('pallet', 'floor')
-            AND il.variant_qty > 0 AND il.variant_qty <= 5
+            AND il.variant_qty > 0
+            AND vel.daily_velocity > 0
+            AND (il.variant_qty / vel.daily_velocity) < trig.effective_trigger
             AND COALESCE(air.air_qty, 0) > 0
             ${whFilter}
 

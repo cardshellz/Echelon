@@ -4,9 +4,11 @@ import {
   replenTasks,
   replenTierDefaults,
   inventoryLevels,
+  inventoryTransactions,
   warehouseLocations,
   productVariants,
   catalogProducts,
+  locationReplenConfig,
 } from "@shared/schema";
 import type {
   ReplenTask,
@@ -23,6 +25,7 @@ type DrizzleDb = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: (query: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -75,7 +78,7 @@ class ReplenishmentService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Scan all forward-pick locations that have a minQty threshold configured
+   * Scan all forward-pick locations that have a triggerValue threshold configured
    * (via replen rules or tier defaults) and create replen tasks for any
    * location where variantQty has dropped below the threshold.
    *
@@ -114,7 +117,7 @@ class ReplenishmentService {
 
     if (levels.length === 0) return [];
 
-    // --- 3. Load replen rules and tier defaults ---
+    // --- 3. Load replen rules, tier defaults, and location overrides ---
     const rules: ReplenRule[] = await this.db
       .select()
       .from(replenRules)
@@ -124,6 +127,28 @@ class ReplenishmentService {
       .select()
       .from(replenTierDefaults)
       .where(eq(replenTierDefaults.isActive, 1));
+
+    // Load location-level overrides (most-specific-wins)
+    const locConfigs = await this.db
+      .select()
+      .from(locationReplenConfig)
+      .where(
+        and(
+          eq(locationReplenConfig.isActive, 1),
+          inArray(locationReplenConfig.warehouseLocationId, pickLocationIds),
+        ),
+      );
+    // Index: key = "locationId" or "locationId:variantId"
+    const locConfigMap = new Map<string, typeof locConfigs[0]>();
+    for (const lc of locConfigs) {
+      if (lc.productVariantId != null) {
+        locConfigMap.set(`${lc.warehouseLocationId}:${lc.productVariantId}`, lc);
+      } else {
+        // location-wide default (lower priority than variant-specific)
+        const key = `${lc.warehouseLocationId}`;
+        if (!locConfigMap.has(key)) locConfigMap.set(key, lc);
+      }
+    }
 
     // Index rules by pickProductVariantId for fast lookup
     const ruleByPickVariant = new Map<number, ReplenRule>();
@@ -163,7 +188,9 @@ class ReplenishmentService {
       const location = pickLocationMap.get(level.warehouseLocationId);
       if (!location) continue;
 
-      // Resolve replen parameters: SKU rule overrides tier default
+      // Resolve replen parameters: location config > SKU rule > tier default
+      const locConfig = locConfigMap.get(`${level.warehouseLocationId}:${level.productVariantId}`)
+        || locConfigMap.get(`${level.warehouseLocationId}`);
       const rule = ruleByPickVariant.get(level.productVariantId);
       const tierDefault = this.findTierDefault(
         tierDefaults,
@@ -171,22 +198,39 @@ class ReplenishmentService {
         location.warehouseId ?? undefined,
       );
 
-      const minQty = rule?.minQty ?? tierDefault?.minQty ?? 0;
-      if (minQty <= 0) continue; // No threshold configured
+      const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
+        ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? 0;
+      if (triggerValue <= 0) continue; // No threshold configured
 
-      // Is the location below threshold?
-      if (level.variantQty >= minQty) continue;
+      // Determine replen parameters (resolved early for threshold branching)
+      const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
+      const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
+      const priority = rule?.priority ?? tierDefault?.priority ?? 5;
+      const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+      const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
+
+      // --- Threshold check: branching by replenMethod ---
+      let taskNotes: string;
+
+      if (replenMethod === "pallet_drop") {
+        // triggerValue = coverage days — compare (currentQty / velocity) against it
+        const velocity = await this.computeVariantVelocity(level.productVariantId);
+        if (velocity === 0) continue; // No picks → infinite coverage, skip
+
+        const coverageDays = level.variantQty / velocity;
+        if (coverageDays >= triggerValue) continue; // Coverage still sufficient
+
+        taskNotes = `Auto-generated (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
+      } else {
+        // case_break / full_case: triggerValue = min units threshold
+        if (level.variantQty >= triggerValue) continue;
+
+        taskNotes = `Auto-generated: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
+      }
 
       // Skip if a task already exists for this product+location
       const key = `${level.productVariantId}:${level.warehouseLocationId}`;
       if (activeTaskKeys.has(key)) continue;
-
-      // Determine replen parameters
-      const maxQty = rule?.maxQty ?? tierDefault?.maxQty ?? null;
-      const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
-      const priority = rule?.priority ?? tierDefault?.priority ?? 5;
-      const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-      const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
       // Find a source location with stock (try dedicated parent first)
       const sourceLocation = await this.findSourceLocation(
@@ -198,7 +242,7 @@ class ReplenishmentService {
       if (!sourceLocation) continue; // No stock to replenish from
 
       // Calculate target quantity (how many base units to move)
-      const qtyNeeded = (maxQty ?? minQty * 2) - level.variantQty;
+      const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
       const sourceVariant = sourceVariantId != null
         ? variantMap.get(sourceVariantId) ?? variant
         : variant;
@@ -223,7 +267,7 @@ class ReplenishmentService {
           triggeredBy: "min_max",
           executionMode: "queue",
           warehouseId: location.warehouseId ?? undefined,
-          notes: `Auto-generated: onHand=${level.variantQty}, minQty=${minQty}`,
+          notes: taskNotes,
         } satisfies InsertReplenTask)
         .returning();
 
@@ -529,7 +573,7 @@ class ReplenishmentService {
   /**
    * Called after every pick operation to check whether the pick location
    * now needs replenishment. If the on-hand quantity has dropped below the
-   * configured minQty threshold and no active task already exists for this
+   * configured triggerValue threshold and no active task already exists for this
    * product+location, a new pending replen task is created and returned.
    *
    * This is the "auto-trigger" that runs inline after picks so the warehouse
@@ -569,18 +613,59 @@ class ReplenishmentService {
 
     if (!variant) return null;
 
-    // Resolve minQty threshold -- SKU rule overrides tier default
+    // Resolve triggerValue threshold -- location config > SKU rule > tier default
+    // Check location-specific override first (most specific wins)
+    const locConfigVariant = await this.db
+      .select().from(locationReplenConfig)
+      .where(and(
+        eq(locationReplenConfig.warehouseLocationId, warehouseLocationId),
+        eq(locationReplenConfig.productVariantId, productVariantId),
+        eq(locationReplenConfig.isActive, 1),
+      )).limit(1);
+    const locConfigWide = locConfigVariant.length > 0 ? null : (await this.db
+      .select().from(locationReplenConfig)
+      .where(and(
+        eq(locationReplenConfig.warehouseLocationId, warehouseLocationId),
+        isNull(locationReplenConfig.productVariantId),
+        eq(locationReplenConfig.isActive, 1),
+      )).limit(1))[0] || null;
+    const locConfig = locConfigVariant[0] || locConfigWide;
+
     const rule = await this.findRuleForVariant(productVariantId);
     const tierDefault = await this.findTierDefaultForVariant(
       variant.hierarchyLevel,
       location.warehouseId ?? undefined,
     );
 
-    const minQty = rule?.minQty ?? tierDefault?.minQty ?? 0;
-    if (minQty <= 0) return null;
+    const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
+      ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? 0;
+    if (triggerValue <= 0) return null;
 
-    // Is the location below threshold?
-    if (level.variantQty >= minQty) return null;
+    // Determine replen parameters (resolved early for threshold branching)
+    const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
+    const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
+    const priority = rule?.priority ?? tierDefault?.priority ?? 5;
+    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+    const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
+
+    // --- Threshold check: branching by replenMethod ---
+    let taskNotes: string;
+
+    if (replenMethod === "pallet_drop") {
+      // triggerValue = coverage days — compare (currentQty / velocity) against it
+      const velocity = await this.computeVariantVelocity(productVariantId);
+      if (velocity === 0) return null; // No picks → infinite coverage, skip
+
+      const coverageDays = level.variantQty / velocity;
+      if (coverageDays >= triggerValue) return null; // Coverage still sufficient
+
+      taskNotes = `Auto-triggered after pick (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
+    } else {
+      // case_break / full_case: triggerValue = min units threshold
+      if (level.variantQty >= triggerValue) return null;
+
+      taskNotes = `Auto-triggered after pick: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
+    }
 
     // Check for existing active task
     const [existingTask] = await this.db
@@ -596,13 +681,6 @@ class ReplenishmentService {
       .limit(1);
 
     if (existingTask) return null; // Already queued
-
-    // Determine replen parameters
-    const maxQty = rule?.maxQty ?? tierDefault?.maxQty ?? null;
-    const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
-    const priority = rule?.priority ?? tierDefault?.priority ?? 5;
-    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-    const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
     // Find source location with stock (try dedicated parent first)
     const sourceLocation = await this.findSourceLocation(
@@ -622,7 +700,7 @@ class ReplenishmentService {
           .limit(1))[0] ?? variant
       : variant;
 
-    const qtyNeeded = (maxQty ?? minQty * 2) - level.variantQty;
+    const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
@@ -644,7 +722,7 @@ class ReplenishmentService {
         triggeredBy: "inline_pick",
         executionMode: "queue",
         warehouseId: location.warehouseId ?? undefined,
-        notes: `Auto-triggered after pick: onHand=${level.variantQty}, minQty=${minQty}`,
+        notes: taskNotes,
       } satisfies InsertReplenTask)
       .returning();
 
@@ -654,6 +732,27 @@ class ReplenishmentService {
   // ---------------------------------------------------------------------------
   // PRIVATE HELPERS
   // ---------------------------------------------------------------------------
+
+  /**
+   * Compute the average daily pick velocity for a variant over the last N days.
+   * Queries inventory_transactions for pick-type outbound and returns the daily
+   * average (total picked / lookbackDays). Returns 0 if no picks occurred.
+   */
+  private async computeVariantVelocity(
+    productVariantId: number,
+    lookbackDays: number = 14,
+  ): Promise<number> {
+    const result = await this.db.execute(
+      sql`SELECT COALESCE(SUM(ABS(${inventoryTransactions.variantQtyDelta})), 0) AS total_picked
+          FROM ${inventoryTransactions}
+          WHERE ${inventoryTransactions.productVariantId} = ${productVariantId}
+            AND ${inventoryTransactions.transactionType} = 'pick'
+            AND ${inventoryTransactions.createdAt} > NOW() - MAKE_INTERVAL(days => ${lookbackDays})`,
+    );
+
+    const totalPicked = Number(result.rows?.[0]?.total_picked ?? 0);
+    return totalPicked / lookbackDays;
+  }
 
   /**
    * Find the tier default that applies for a given hierarchy level and

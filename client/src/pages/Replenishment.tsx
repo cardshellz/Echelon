@@ -87,7 +87,7 @@ interface ReplenTierDefault {
   pickLocationType: string;
   sourceLocationType: string;
   sourcePriority: string;
-  minQty: number;
+  triggerValue: number;
   maxQty: number | null;
   replenMethod: string;
   priority: number;
@@ -104,7 +104,7 @@ interface ReplenRule {
   pickLocationType: string | null;
   sourceLocationType: string | null;
   sourcePriority: string | null;
-  minQty: number | null;
+  triggerValue: number | null;
   maxQty: number | null;
   replenMethod: string | null;
   priority: number | null;
@@ -159,6 +159,7 @@ interface WarehouseSettings {
   minMaxPriority: number | null;
   scheduledReplenIntervalMinutes: number | null;
   scheduledReplenEnabled: number | null;
+  velocityLookbackDays: number;
   pickPathOptimization: string | null;
   maxOrdersPerWave: number | null;
   maxItemsPerWave: number | null;
@@ -166,6 +167,21 @@ interface WarehouseSettings {
   isActive: number;
   createdAt: string;
   updatedAt: string;
+}
+
+interface LocationReplenConfig {
+  id: number;
+  warehouseLocationId: number;
+  productVariantId: number | null;
+  triggerValue: string | null;
+  maxQty: number | null;
+  replenMethod: string | null;
+  isActive: number;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  location?: { id: number; code: string; locationType: string | null; binType: string | null; zone: string | null };
+  variant?: { id: number; sku: string | null; name: string };
 }
 
 const LOCATION_TYPES = [
@@ -203,10 +219,15 @@ export default function Replenishment() {
   const [showCsvDialog, setShowCsvDialog] = useState(false);
   const [editingTierDefault, setEditingTierDefault] = useState<ReplenTierDefault | null>(null);
   const [editingOverride, setEditingOverride] = useState<ReplenRule | null>(null);
+  const [showLocConfigDialog, setShowLocConfigDialog] = useState(false);
+  const [showLocCsvDialog, setShowLocCsvDialog] = useState(false);
+  const [editingLocConfig, setEditingLocConfig] = useState<LocationReplenConfig | null>(null);
+  const [locConfigSearch, setLocConfigSearch] = useState("");
   const [taskFilter, setTaskFilter] = useState("pending");
   const [warehouseFilter, setWarehouseFilter] = useState("all");
   const [modeFilter, setModeFilter] = useState("all");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const locCsvInputRef = useRef<HTMLInputElement>(null);
 
   const [tierDefaultForm, setTierDefaultForm] = useState({
     hierarchyLevel: "1",
@@ -214,7 +235,7 @@ export default function Replenishment() {
     pickLocationType: "pick",
     sourceLocationType: "reserve",
     sourcePriority: "fifo",
-    minQty: "0",
+    triggerValue: "0",
     maxQty: "",
     replenMethod: "case_break",
     priority: "5",
@@ -227,7 +248,7 @@ export default function Replenishment() {
     pickLocationType: "",
     sourceLocationType: "",
     sourcePriority: "",
-    minQty: "",
+    triggerValue: "",
     maxQty: "",
     replenMethod: "",
     priority: "",
@@ -242,12 +263,30 @@ export default function Replenishment() {
     notes: "",
   });
 
+  const [locConfigForm, setLocConfigForm] = useState({
+    warehouseLocationId: "",
+    productVariantId: "",
+    triggerValue: "",
+    maxQty: "",
+    replenMethod: "",
+    notes: "",
+  });
+
   const { data: tierDefaults = [], isLoading: tierDefaultsLoading } = useQuery<ReplenTierDefault[]>({
     queryKey: ["/api/replen/tier-defaults"],
   });
 
   const { data: overrides = [], isLoading: overridesLoading } = useQuery<ReplenRule[]>({
     queryKey: ["/api/replen/rules"],
+  });
+
+  const { data: locationConfigs = [], isLoading: locConfigsLoading } = useQuery<LocationReplenConfig[]>({
+    queryKey: ["/api/replen/location-configs"],
+    queryFn: async () => {
+      const res = await fetch("/api/replen/location-configs", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch location configs");
+      return res.json();
+    },
   });
 
   const { data: tasks = [], isLoading: tasksLoading } = useQuery<ReplenTask[]>({
@@ -312,6 +351,7 @@ export default function Replenishment() {
     replenMode: "queue",
     shortPickAction: "partial_pick",
     inlineReplenMaxUnits: "50",
+    velocityLookbackDays: "14",
   });
 
   // Auto-select first warehouse when data loads
@@ -328,12 +368,13 @@ export default function Replenishment() {
         replenMode: selectedWarehouse.replenMode,
         shortPickAction: selectedWarehouse.shortPickAction,
         inlineReplenMaxUnits: selectedWarehouse.inlineReplenMaxUnits?.toString() || "50",
+        velocityLookbackDays: selectedWarehouse.velocityLookbackDays?.toString() || "14",
       });
     }
   }, [selectedWarehouse]);
 
   const saveSettingsMutation = useMutation({
-    mutationFn: async (data: { replenMode: string; shortPickAction: string; inlineReplenMaxUnits: number | null }) => {
+    mutationFn: async (data: { replenMode: string; shortPickAction: string; inlineReplenMaxUnits: number | null; velocityLookbackDays: number }) => {
       if (!selectedWarehouseData) throw new Error("No warehouse selected");
       
       if (selectedWarehouse?.id) {
@@ -396,7 +437,7 @@ export default function Replenishment() {
           pickLocationType: data.pickLocationType,
           sourceLocationType: data.sourceLocationType,
           sourcePriority: data.sourcePriority,
-          minQty: parseInt(data.minQty) || 0,
+          triggerValue: parseInt(data.triggerValue) || 0,
           maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod,
           priority: parseInt(data.priority),
@@ -465,7 +506,7 @@ export default function Replenishment() {
           pickLocationType: data.pickLocationType || null,
           sourceLocationType: data.sourceLocationType || null,
           sourcePriority: data.sourcePriority || null,
-          minQty: data.minQty ? parseInt(data.minQty) : null,
+          triggerValue: data.triggerValue ? parseInt(data.triggerValue) : null,
           maxQty: data.maxQty ? parseInt(data.maxQty) : null,
           replenMethod: data.replenMethod || null,
           priority: data.priority ? parseInt(data.priority) : null,
@@ -617,6 +658,99 @@ export default function Replenishment() {
     },
   });
 
+  // Location Replen Config mutations
+  const createLocConfigMutation = useMutation({
+    mutationFn: async (data: typeof locConfigForm) => {
+      const res = await fetch("/api/replen/location-configs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          warehouseLocationId: parseInt(data.warehouseLocationId),
+          productVariantId: data.productVariantId ? parseInt(data.productVariantId) : null,
+          triggerValue: data.triggerValue ? parseFloat(data.triggerValue) : null,
+          maxQty: data.maxQty ? parseInt(data.maxQty) : null,
+          replenMethod: data.replenMethod || null,
+          notes: data.notes || null,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create location config");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/location-configs"] });
+      setShowLocConfigDialog(false);
+      resetLocConfigForm();
+      toast({ title: "Location config created" });
+    },
+    onError: () => {
+      toast({ title: "Failed to create location config", variant: "destructive" });
+    },
+  });
+
+  const updateLocConfigMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: number; data: any }) => {
+      const res = await fetch(`/api/replen/location-configs/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to update location config");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/location-configs"] });
+      setShowLocConfigDialog(false);
+      setEditingLocConfig(null);
+      resetLocConfigForm();
+      toast({ title: "Location config updated" });
+    },
+  });
+
+  const deleteLocConfigMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/replen/location-configs/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to delete location config");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/location-configs"] });
+      toast({ title: "Location config deleted" });
+    },
+  });
+
+  const uploadLocCsvMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/replen/location-configs/upload-csv", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "Failed to upload CSV");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/location-configs"] });
+      setShowLocCsvDialog(false);
+      toast({
+        title: "CSV uploaded successfully",
+        description: `Created ${data.created}, updated ${data.updated}, skipped ${data.skipped} rows`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to upload CSV", description: error.message, variant: "destructive" });
+    },
+  });
+
   const resetTierDefaultForm = () => {
     setTierDefaultForm({
       hierarchyLevel: "1",
@@ -624,7 +758,7 @@ export default function Replenishment() {
       pickLocationType: "pick",
       sourceLocationType: "reserve",
       sourcePriority: "fifo",
-      minQty: "0",
+      triggerValue: "0",
       maxQty: "",
       replenMethod: "case_break",
       priority: "5",
@@ -639,7 +773,7 @@ export default function Replenishment() {
       pickLocationType: "",
       sourceLocationType: "",
       sourcePriority: "",
-      minQty: "",
+      triggerValue: "",
       maxQty: "",
       replenMethod: "",
       priority: "",
@@ -657,6 +791,61 @@ export default function Replenishment() {
     });
   };
 
+  const resetLocConfigForm = () => {
+    setLocConfigForm({
+      warehouseLocationId: "",
+      productVariantId: "",
+      triggerValue: "",
+      maxQty: "",
+      replenMethod: "",
+      notes: "",
+    });
+  };
+
+  const handleEditLocConfig = (config: LocationReplenConfig) => {
+    setEditingLocConfig(config);
+    setLocConfigForm({
+      warehouseLocationId: config.warehouseLocationId.toString(),
+      productVariantId: config.productVariantId?.toString() || "",
+      triggerValue: config.triggerValue?.toString() || "",
+      maxQty: config.maxQty?.toString() || "",
+      replenMethod: config.replenMethod || "",
+      notes: config.notes || "",
+    });
+    setShowLocConfigDialog(true);
+  };
+
+  const handleSaveLocConfig = () => {
+    if (editingLocConfig) {
+      updateLocConfigMutation.mutate({
+        id: editingLocConfig.id,
+        data: {
+          triggerValue: locConfigForm.triggerValue ? parseFloat(locConfigForm.triggerValue) : null,
+          maxQty: locConfigForm.maxQty ? parseInt(locConfigForm.maxQty) : null,
+          replenMethod: locConfigForm.replenMethod || null,
+          notes: locConfigForm.notes || null,
+        },
+      });
+    } else {
+      createLocConfigMutation.mutate(locConfigForm);
+    }
+  };
+
+  const handleLocCsvUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      uploadLocCsvMutation.mutate(file);
+    }
+  };
+
+  const filteredLocationConfigs = locationConfigs.filter((config) => {
+    if (!locConfigSearch) return true;
+    const search = locConfigSearch.toLowerCase();
+    const locationCode = config.location?.code?.toLowerCase() || "";
+    const variantSku = config.variant?.sku?.toLowerCase() || "";
+    return locationCode.includes(search) || variantSku.includes(search);
+  });
+
   const handleEditTierDefault = (tierDefault: ReplenTierDefault) => {
     setEditingTierDefault(tierDefault);
     setTierDefaultForm({
@@ -665,7 +854,7 @@ export default function Replenishment() {
       pickLocationType: tierDefault.pickLocationType,
       sourceLocationType: tierDefault.sourceLocationType,
       sourcePriority: tierDefault.sourcePriority,
-      minQty: tierDefault.minQty.toString(),
+      triggerValue: tierDefault.triggerValue.toString(),
       maxQty: tierDefault.maxQty?.toString() || "",
       replenMethod: tierDefault.replenMethod,
       priority: tierDefault.priority.toString(),
@@ -682,7 +871,7 @@ export default function Replenishment() {
       pickLocationType: override.pickLocationType || "",
       sourceLocationType: override.sourceLocationType || "",
       sourcePriority: override.sourcePriority || "",
-      minQty: override.minQty?.toString() || "",
+      triggerValue: override.triggerValue?.toString() || "",
       maxQty: override.maxQty?.toString() || "",
       replenMethod: override.replenMethod || "",
       priority: override.priority?.toString() || "",
@@ -700,7 +889,7 @@ export default function Replenishment() {
           pickLocationType: tierDefaultForm.pickLocationType,
           sourceLocationType: tierDefaultForm.sourceLocationType,
           sourcePriority: tierDefaultForm.sourcePriority,
-          minQty: parseInt(tierDefaultForm.minQty) || 0,
+          triggerValue: parseInt(tierDefaultForm.triggerValue) || 0,
           maxQty: tierDefaultForm.maxQty ? parseInt(tierDefaultForm.maxQty) : null,
           replenMethod: tierDefaultForm.replenMethod,
           priority: parseInt(tierDefaultForm.priority),
@@ -722,7 +911,7 @@ export default function Replenishment() {
           pickLocationType: overrideForm.pickLocationType || null,
           sourceLocationType: overrideForm.sourceLocationType || null,
           sourcePriority: overrideForm.sourcePriority || null,
-          minQty: overrideForm.minQty ? parseInt(overrideForm.minQty) : null,
+          triggerValue: overrideForm.triggerValue ? parseInt(overrideForm.triggerValue) : null,
           maxQty: overrideForm.maxQty ? parseInt(overrideForm.maxQty) : null,
           replenMethod: overrideForm.replenMethod || null,
           priority: overrideForm.priority ? parseInt(overrideForm.priority) : null,
@@ -839,6 +1028,10 @@ export default function Replenishment() {
           <TabsTrigger value="rules" className="gap-2">
             <Settings className="w-4 h-4" />
             Replen Rules
+          </TabsTrigger>
+          <TabsTrigger value="location-overrides" className="gap-2">
+            <MapPin className="w-4 h-4" />
+            Location Overrides
           </TabsTrigger>
           <TabsTrigger value="settings" className="gap-2">
             <Warehouse className="w-4 h-4" />
@@ -1063,7 +1256,7 @@ export default function Replenishment() {
                       <TableHead className="text-xs hidden md:table-cell">Source Level</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Location Types</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Priority</TableHead>
-                      <TableHead className="text-xs hidden sm:table-cell">Min/Max</TableHead>
+                      <TableHead className="text-xs hidden sm:table-cell">Trigger/Max</TableHead>
                       <TableHead className="text-xs hidden md:table-cell">Method</TableHead>
                       <TableHead className="text-xs">Status</TableHead>
                       <TableHead className="text-xs">Actions</TableHead>
@@ -1089,7 +1282,7 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="hidden sm:table-cell py-2">
                           <span className="font-mono text-xs">
-                            {tierDefault.minQty} / {tierDefault.maxQty ?? "auto"}
+                            {tierDefault.triggerValue} / {tierDefault.maxQty ?? "auto"}
                           </span>
                         </TableCell>
                         <TableCell className="hidden md:table-cell py-2">
@@ -1195,7 +1388,7 @@ export default function Replenishment() {
                         <TableCell className="hidden sm:table-cell py-2">
                           <div className="flex flex-wrap gap-1">
                             {override.replenMethod && <Badge variant="outline" className="text-xs">{override.replenMethod}</Badge>}
-                            {override.minQty !== null && <Badge variant="secondary" className="text-xs">Min: {override.minQty}</Badge>}
+                            {override.triggerValue !== null && <Badge variant="secondary" className="text-xs">Trigger: {override.triggerValue}</Badge>}
                             {override.maxQty !== null && <Badge variant="secondary" className="text-xs">Max: {override.maxQty}</Badge>}
                             {override.sourcePriority && <Badge variant="secondary" className="text-xs">{override.sourcePriority}</Badge>}
                             {override.pickLocationType && <Badge variant="outline" className="text-xs">{override.pickLocationType}</Badge>}
@@ -1239,6 +1432,134 @@ export default function Replenishment() {
                   </TableBody>
                 </Table>
                 </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="location-overrides" className="space-y-4">
+          <Card>
+            <CardHeader className="p-3 md:p-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                <div>
+                  <CardTitle className="text-base md:text-lg">Location-Level Overrides</CardTitle>
+                  <CardDescription className="text-xs md:text-sm">
+                    Per-location replenishment thresholds. Overrides SKU rules and tier defaults.
+                  </CardDescription>
+                </div>
+                <div className="flex gap-2 w-full sm:w-auto">
+                  <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowLocCsvDialog(true)}>
+                    <Upload className="w-4 h-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Import CSV</span>
+                  </Button>
+                  <Button className="flex-1 sm:flex-none min-h-[44px]" onClick={() => { resetLocConfigForm(); setEditingLocConfig(null); setShowLocConfigDialog(true); }}>
+                    <Plus className="w-4 h-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Add Override</span>
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              {locConfigsLoading ? (
+                <div className="flex justify-center p-8">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                </div>
+              ) : locationConfigs.length === 0 ? (
+                <div className="text-center p-8 text-muted-foreground">
+                  <MapPin className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                  <p>No location overrides configured</p>
+                  <p className="text-sm">Add overrides to customize thresholds per location or use CSV import for bulk setup</p>
+                </div>
+              ) : (
+                <>
+                  <div className="px-3 md:px-6 pb-3">
+                    <Input
+                      placeholder="Search by location code or SKU..."
+                      className="h-10 max-w-sm"
+                      value={locConfigSearch}
+                      onChange={(e) => setLocConfigSearch(e.target.value)}
+                    />
+                  </div>
+                  <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Location</TableHead>
+                        <TableHead className="text-xs hidden sm:table-cell">Zone</TableHead>
+                        <TableHead className="text-xs hidden md:table-cell">Bin Type</TableHead>
+                        <TableHead className="text-xs">SKU</TableHead>
+                        <TableHead className="text-xs">Trigger</TableHead>
+                        <TableHead className="text-xs hidden sm:table-cell">Method</TableHead>
+                        <TableHead className="text-xs hidden md:table-cell">Max</TableHead>
+                        <TableHead className="text-xs">Status</TableHead>
+                        <TableHead className="text-xs">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredLocationConfigs.map((config) => (
+                        <TableRow key={config.id}>
+                          <TableCell className="py-2">
+                            <span className="font-mono text-xs font-medium">{config.location?.code || "?"}</span>
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell py-2">
+                            <span className="text-xs text-muted-foreground">{config.location?.zone || "-"}</span>
+                          </TableCell>
+                          <TableCell className="hidden md:table-cell py-2">
+                            <Badge variant="outline" className="text-xs">{config.location?.binType || "-"}</Badge>
+                          </TableCell>
+                          <TableCell className="py-2">
+                            {config.variant ? (
+                              <span className="text-xs">{config.variant.sku}</span>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs">All SKUs</Badge>
+                            )}
+                          </TableCell>
+                          <TableCell className="py-2">
+                            <span className="font-mono text-xs">
+                              {config.triggerValue ?? "-"}
+                              <span className="text-muted-foreground ml-1 text-[10px]">
+                                {config.replenMethod === "pallet_drop" ? "days" : "units"}
+                              </span>
+                            </span>
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell py-2">
+                            <Badge variant="outline" className="text-xs">{config.replenMethod || "default"}</Badge>
+                          </TableCell>
+                          <TableCell className="hidden md:table-cell py-2">
+                            <span className="font-mono text-xs">{config.maxQty ?? "-"}</span>
+                          </TableCell>
+                          <TableCell className="py-2">
+                            {config.isActive ? (
+                              <Badge className="bg-green-500 text-xs">Active</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs">Inactive</Badge>
+                            )}
+                          </TableCell>
+                          <TableCell className="py-2">
+                            <div className="flex gap-1">
+                              <Button size="icon" variant="ghost" className="h-9 w-9 min-h-[36px]" onClick={() => handleEditLocConfig(config)}>
+                                <Edit className="w-4 h-4" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-9 w-9 min-h-[36px]"
+                                onClick={() => {
+                                  if (confirm("Delete this location override?")) {
+                                    deleteLocConfigMutation.mutate(config.id);
+                                  }
+                                }}
+                              >
+                                <Trash2 className="w-4 h-4 text-red-500" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
@@ -1392,15 +1713,32 @@ export default function Replenishment() {
                     </div>
                   </div>
 
+                  <div className="pt-4 border-t">
+                    <Label className="text-sm md:text-base font-semibold">Velocity Lookback Days</Label>
+                    <p className="text-xs md:text-sm text-muted-foreground mb-3">
+                      Days of pick history used to calculate SKU velocity for pallet drop thresholds
+                    </p>
+                    <Input
+                      type="number"
+                      className="w-full sm:w-32 h-10"
+                      min="1"
+                      max="90"
+                      value={settingsForm.velocityLookbackDays}
+                      onChange={(e) => setSettingsForm({ ...settingsForm, velocityLookbackDays: e.target.value })}
+                      autoComplete="off"
+                    />
+                  </div>
+
                   <div className="flex justify-end pt-4 border-t">
-                    <Button 
+                    <Button
                       className="w-full sm:w-auto min-h-[44px]"
                       onClick={() => saveSettingsMutation.mutate({
                         replenMode: settingsForm.replenMode,
                         shortPickAction: settingsForm.shortPickAction,
-                        inlineReplenMaxUnits: settingsForm.replenMode === "hybrid" 
-                          ? parseInt(settingsForm.inlineReplenMaxUnits) || 50 
+                        inlineReplenMaxUnits: settingsForm.replenMode === "hybrid"
+                          ? parseInt(settingsForm.inlineReplenMaxUnits) || 50
                           : null,
+                        velocityLookbackDays: parseInt(settingsForm.velocityLookbackDays) || 14,
                       })}
                       disabled={saveSettingsMutation.isPending}
                       data-testid="button-save-settings"
@@ -1519,17 +1857,20 @@ export default function Replenishment() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label className="text-xs md:text-sm">Min Qty (Trigger)</Label>
+                <Label className="text-xs md:text-sm">
+                  {tierDefaultForm.replenMethod === "pallet_drop" ? "Coverage Days" : "Trigger Value (Min Units)"}
+                </Label>
                 <Input
                   type="number"
                   className="h-10"
-                  value={tierDefaultForm.minQty}
-                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, minQty: e.target.value })}
+                  value={tierDefaultForm.triggerValue}
+                  onChange={(e) => setTierDefaultForm({ ...tierDefaultForm, triggerValue: e.target.value })}
+                  placeholder={tierDefaultForm.replenMethod === "pallet_drop" ? "e.g. 2 (days)" : "e.g. 5 (units)"}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="off"
                   spellCheck={false}
-                  data-testid="input-tier-min-qty"
+                  data-testid="input-tier-trigger-value"
                 />
               </div>
               <div>
@@ -1709,18 +2050,20 @@ export default function Replenishment() {
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <Label className="text-xs md:text-sm">Min Qty Override</Label>
+                <Label className="text-xs md:text-sm">
+                  {overrideForm.replenMethod === "pallet_drop" ? "Coverage Days" : "Trigger Value"}
+                </Label>
                 <Input
                   type="number"
                   className="h-10"
-                  value={overrideForm.minQty}
-                  onChange={(e) => setOverrideForm({ ...overrideForm, minQty: e.target.value })}
+                  value={overrideForm.triggerValue}
+                  onChange={(e) => setOverrideForm({ ...overrideForm, triggerValue: e.target.value })}
                   placeholder="Use default"
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="off"
                   spellCheck={false}
-                  data-testid="input-override-min-qty"
+                  data-testid="input-override-trigger-value"
                 />
               </div>
               <div>
@@ -1777,9 +2120,9 @@ export default function Replenishment() {
                 variant="outline"
                 className="w-full sm:w-auto min-h-[44px]"
                 onClick={() => {
-                  const headers = "product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority";
+                  const headers = "product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,trigger_value,max_qty,replen_method,priority";
                   const example = "SHELL-001,SHELL-001-EA,SHELL-001-CS12,pick,reserve,fifo,5,60,case_break,5";
-                  const instructions = "# INSTRUCTIONS - Delete this row before uploading\n# product_sku: Product SKU from your catalog (REQUIRED)\n# pick_variant_sku: SKU of the variant to pick INTO (eaches) (REQUIRED)\n# source_variant_sku: SKU of the variant to pick FROM (cases) (REQUIRED)\n# pick_location_type: pick or bin (default: pick)\n# source_location_type: reserve or pallet (default: reserve)\n# source_priority: fifo (oldest first) or smallest_first (consolidate partials) (default: fifo)\n# min_qty: Trigger replen when qty drops below this (default: 0)\n# max_qty: Fill up to this qty (leave empty to replen 1 source unit)\n# replen_method: case_break, full_case, or pallet_drop (default: case_break)\n# priority: 1-10 where 1 is highest priority (default: 5)";
+                  const instructions = "# INSTRUCTIONS - Delete this row before uploading\n# product_sku: Product SKU from your catalog (REQUIRED)\n# pick_variant_sku: SKU of the variant to pick INTO (eaches) (REQUIRED)\n# source_variant_sku: SKU of the variant to pick FROM (cases) (REQUIRED)\n# pick_location_type: pick or bin (default: pick)\n# source_location_type: reserve or pallet (default: reserve)\n# source_priority: fifo (oldest first) or smallest_first (consolidate partials) (default: fifo)\n# trigger_value: Trigger value - min units for case_break, coverage days for pallet_drop (default: 0)\n# max_qty: Fill up to this qty (leave empty to replen 1 source unit)\n# replen_method: case_break, full_case, or pallet_drop (default: case_break)\n# priority: 1-10 where 1 is highest priority (default: 5)";
                   const csv = instructions + "\n" + headers + "\n" + example;
                   const blob = new Blob([csv], { type: 'text/csv' });
                   const url = URL.createObjectURL(blob);
@@ -1838,8 +2181,8 @@ export default function Replenishment() {
                   <span className="text-center text-muted-foreground">No</span>
                 </div>
                 <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
-                  <code className="text-xs bg-muted px-1 rounded">min_qty</code>
-                  <span className="text-muted-foreground">Trigger replen when below this (default: 0)</span>
+                  <code className="text-xs bg-muted px-1 rounded">trigger_value</code>
+                  <span className="text-muted-foreground">Min units (case_break) or coverage days (pallet_drop) (default: 0)</span>
                   <span className="text-center text-muted-foreground">No</span>
                 </div>
                 <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
@@ -1877,6 +2220,195 @@ export default function Replenishment() {
                 data-testid="button-select-csv"
               >
                 {uploadCsvMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <Upload className="w-4 h-4 mr-2" />
+                )}
+                Select CSV File to Upload
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Location Config Dialog */}
+      <Dialog open={showLocConfigDialog} onOpenChange={setShowLocConfigDialog}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle className="text-base md:text-lg">{editingLocConfig ? "Edit Location Override" : "Create Location Override"}</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
+              Set per-location replenishment thresholds. These override SKU rules and tier defaults.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label className="text-xs md:text-sm">Location</Label>
+              <Select
+                value={locConfigForm.warehouseLocationId}
+                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, warehouseLocationId: v })}
+                disabled={!!editingLocConfig}
+              >
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Select location..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {locations.filter(l => l.locationType === "pick").map((loc) => (
+                    <SelectItem key={loc.id} value={loc.id.toString()}>
+                      {loc.code} {loc.name ? `(${loc.name})` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <Label className="text-xs md:text-sm">Variant (Optional — blank = all SKUs at location)</Label>
+              <Select
+                value={locConfigForm.productVariantId}
+                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, productVariantId: v })}
+                disabled={!!editingLocConfig}
+              >
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="All SKUs at location" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">All SKUs</SelectItem>
+                  {variants.map((v) => (
+                    <SelectItem key={v.id} value={v.id.toString()}>
+                      {v.sku || v.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <Label className="text-xs md:text-sm">Replen Method</Label>
+              <Select
+                value={locConfigForm.replenMethod}
+                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, replenMethod: v })}
+              >
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Use default" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">Use default</SelectItem>
+                  {REPLEN_METHODS.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label className="text-xs md:text-sm">
+                  {locConfigForm.replenMethod === "pallet_drop" ? "Coverage Days" : "Trigger Value"}
+                </Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  className="h-10"
+                  value={locConfigForm.triggerValue}
+                  onChange={(e) => setLocConfigForm({ ...locConfigForm, triggerValue: e.target.value })}
+                  placeholder={locConfigForm.replenMethod === "pallet_drop" ? "e.g. 2" : "e.g. 5"}
+                  autoComplete="off"
+                />
+              </div>
+              <div>
+                <Label className="text-xs md:text-sm">Max Qty</Label>
+                <Input
+                  type="number"
+                  className="h-10"
+                  value={locConfigForm.maxQty}
+                  onChange={(e) => setLocConfigForm({ ...locConfigForm, maxQty: e.target.value })}
+                  placeholder="Optional"
+                  autoComplete="off"
+                />
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-xs md:text-sm">Notes</Label>
+              <Input
+                className="h-10"
+                value={locConfigForm.notes}
+                onChange={(e) => setLocConfigForm({ ...locConfigForm, notes: e.target.value })}
+                placeholder="Optional notes"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowLocConfigDialog(false)}>
+                Cancel
+              </Button>
+              <Button
+                className="min-h-[44px]"
+                onClick={handleSaveLocConfig}
+                disabled={!locConfigForm.warehouseLocationId}
+              >
+                {editingLocConfig ? "Update Override" : "Create Override"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Location Config CSV Dialog */}
+      <Dialog open={showLocCsvDialog} onOpenChange={setShowLocCsvDialog}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle className="text-base md:text-lg">Import Location Overrides</DialogTitle>
+            <DialogDescription className="text-xs md:text-sm">
+              Bulk import location-level replenishment overrides. Existing entries will be updated.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3 bg-primary/5 border border-primary/20 rounded-lg">
+              <div>
+                <p className="font-medium text-sm">Download Template</p>
+                <p className="text-xs text-muted-foreground">CSV with headers and examples</p>
+              </div>
+              <Button
+                variant="outline"
+                className="w-full sm:w-auto min-h-[44px]"
+                onClick={() => {
+                  window.open("/api/replen/location-configs/csv-template", "_blank");
+                }}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Template
+              </Button>
+            </div>
+
+            <div className="border rounded-lg overflow-hidden text-sm">
+              <div className="bg-muted px-4 py-2 border-b font-medium">Columns</div>
+              <div className="divide-y text-xs">
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">location_code</code> — Location code (required)</div>
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">variant_sku</code> — Variant SKU (blank = all SKUs)</div>
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">trigger_value</code> — Min units or coverage days</div>
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">replen_method</code> — case_break, full_case, pallet_drop</div>
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">max_qty</code> — Max qty (optional)</div>
+                <div className="px-4 py-2"><code className="bg-muted px-1 rounded">notes</code> — Notes (optional)</div>
+              </div>
+            </div>
+
+            <div>
+              <input
+                ref={locCsvInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleLocCsvUpload}
+                className="hidden"
+              />
+              <Button
+                onClick={() => locCsvInputRef.current?.click()}
+                disabled={uploadLocCsvMutation.isPending}
+                className="w-full min-h-[44px]"
+                size="lg"
+              >
+                {uploadLocCsvMutation.isPending ? (
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 ) : (
                   <Upload className="w-4 h-4 mr-2" />

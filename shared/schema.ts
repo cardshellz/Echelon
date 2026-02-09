@@ -684,7 +684,10 @@ export const warehouseSettings = pgTable("warehouse_settings", {
   
   // Order combining settings
   enableOrderCombining: integer("enable_order_combining").notNull().default(1), // Show combine badges to pickers
-  
+
+  // Velocity calculation
+  velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
+
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -713,7 +716,7 @@ export const replenTierDefaults = pgTable("replen_tier_defaults", {
   pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("pick"),
   sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("reserve"),
   sourcePriority: varchar("source_priority", { length: 20 }).notNull().default("fifo"), // fifo, smallest_first
-  minQty: integer("min_qty").notNull().default(0), // Trigger replen when qty drops below this
+  triggerValue: integer("trigger_value").notNull().default(0), // case_break/full_case: min units. pallet_drop: coverage days
   maxQty: integer("max_qty"), // Fill up to this qty (null = use bin capacity or one source unit)
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
   priority: integer("priority").notNull().default(5), // 1 = highest priority
@@ -741,7 +744,7 @@ export const replenRules = pgTable("replen_rules", {
   pickLocationType: varchar("pick_location_type", { length: 30 }), // Override: different pick location type
   sourceLocationType: varchar("source_location_type", { length: 30 }), // Override: different source location type
   sourcePriority: varchar("source_priority", { length: 20 }), // Override: different priority (fifo, smallest_first)
-  minQty: integer("min_qty"), // Override: different trigger threshold
+  triggerValue: integer("trigger_value"), // Override: case_break/full_case: min units. pallet_drop: coverage days
   maxQty: integer("max_qty"), // Override: different fill target
   replenMethod: varchar("replen_method", { length: 30 }), // Override: different method (case_break, full_case, pallet_drop)
   priority: integer("priority"), // Override: different task priority
@@ -758,6 +761,30 @@ export const insertReplenRuleSchema = createInsertSchema(replenRules).omit({
 
 export type InsertReplenRule = z.infer<typeof insertReplenRuleSchema>;
 export type ReplenRule = typeof replenRules.$inferSelect;
+
+// Per-location replen configuration overrides
+// product_variant_id NULL = location-wide default, non-NULL = SKU-specific override at that location
+export const locationReplenConfig = pgTable("location_replen_config", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
+  triggerValue: varchar("trigger_value", { length: 20 }), // numeric(8,2) in DB — case_break: min units, pallet_drop: coverage days
+  maxQty: integer("max_qty"),
+  replenMethod: varchar("replen_method", { length: 30 }),
+  isActive: integer("is_active").notNull().default(1),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertLocationReplenConfigSchema = createInsertSchema(locationReplenConfig).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertLocationReplenConfig = z.infer<typeof insertLocationReplenConfigSchema>;
+export type LocationReplenConfig = typeof locationReplenConfig.$inferSelect;
 
 // Replenishment tasks - work queue for warehouse workers
 export const replenTasks = pgTable("replen_tasks", {

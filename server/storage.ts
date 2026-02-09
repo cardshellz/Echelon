@@ -59,6 +59,8 @@ import {
   type InsertReceivingLine,
   type ReplenRule,
   type InsertReplenRule,
+  type LocationReplenConfig,
+  type InsertLocationReplenConfig,
   type ReplenTask,
   type InsertReplenTask,
   type WarehouseSettings,
@@ -90,6 +92,7 @@ import {
   receivingLines,
   replenTierDefaults,
   replenRules,
+  locationReplenConfig,
   replenTasks,
   warehouseSettings,
   generateLocationCode,
@@ -428,7 +431,15 @@ export interface IStorage {
   updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
   deleteReplenRule(id: number): Promise<boolean>;
   getActiveReplenRules(): Promise<ReplenRule[]>;
-  
+
+  // Location Replen Config (per-location overrides)
+  getLocationReplenConfigs(warehouseLocationId?: number): Promise<LocationReplenConfig[]>;
+  getLocationReplenConfig(warehouseLocationId: number, productVariantId: number | null): Promise<LocationReplenConfig | undefined>;
+  getLocationReplenConfigById(id: number): Promise<LocationReplenConfig | undefined>;
+  createLocationReplenConfig(data: InsertLocationReplenConfig): Promise<LocationReplenConfig>;
+  updateLocationReplenConfig(id: number, updates: Partial<InsertLocationReplenConfig>): Promise<LocationReplenConfig | null>;
+  deleteLocationReplenConfig(id: number): Promise<boolean>;
+
   // Replen Tasks
   getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]>;
   getReplenTaskById(id: number): Promise<ReplenTask | undefined>;
@@ -3243,7 +3254,54 @@ export class DatabaseStorage implements IStorage {
     const result = await db.delete(replenRules).where(eq(replenRules.id, id));
     return (result.rowCount ?? 0) > 0;
   }
-  
+
+  // Location Replen Config
+  async getLocationReplenConfigs(warehouseLocationId?: number): Promise<LocationReplenConfig[]> {
+    if (warehouseLocationId !== undefined) {
+      return await db.select().from(locationReplenConfig)
+        .where(eq(locationReplenConfig.warehouseLocationId, warehouseLocationId))
+        .orderBy(asc(locationReplenConfig.id));
+    }
+    return await db.select().from(locationReplenConfig).orderBy(asc(locationReplenConfig.id));
+  }
+
+  async getLocationReplenConfig(warehouseLocationId: number, productVariantId: number | null): Promise<LocationReplenConfig | undefined> {
+    const conditions = [eq(locationReplenConfig.warehouseLocationId, warehouseLocationId)];
+    if (productVariantId !== null) {
+      conditions.push(eq(locationReplenConfig.productVariantId, productVariantId));
+    } else {
+      conditions.push(isNull(locationReplenConfig.productVariantId));
+    }
+    const result = await db.select().from(locationReplenConfig)
+      .where(and(...conditions))
+      .limit(1);
+    return result[0];
+  }
+
+  async getLocationReplenConfigById(id: number): Promise<LocationReplenConfig | undefined> {
+    const result = await db.select().from(locationReplenConfig)
+      .where(eq(locationReplenConfig.id, id)).limit(1);
+    return result[0];
+  }
+
+  async createLocationReplenConfig(data: InsertLocationReplenConfig): Promise<LocationReplenConfig> {
+    const result = await db.insert(locationReplenConfig).values(data).returning();
+    return result[0];
+  }
+
+  async updateLocationReplenConfig(id: number, updates: Partial<InsertLocationReplenConfig>): Promise<LocationReplenConfig | null> {
+    const result = await db.update(locationReplenConfig)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(locationReplenConfig.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteLocationReplenConfig(id: number): Promise<boolean> {
+    const result = await db.delete(locationReplenConfig).where(eq(locationReplenConfig.id, id));
+    return (result.rowCount ?? 0) > 0;
+  }
+
   // Replen Tasks
   async getAllReplenTasks(filters?: { status?: string; assignedTo?: string }): Promise<ReplenTask[]> {
     let query = db.select().from(replenTasks);
