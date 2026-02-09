@@ -1334,7 +1334,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }, 500);
     } else {
       setTimeout(() => {
@@ -1427,7 +1427,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }, 500);
     } else if (!isListView) {
       setTimeout(() => {
@@ -1589,7 +1589,7 @@ export default function Picking() {
           setActiveOrderId(null);
           setActiveBatchId(null);
           setCurrentItemIndex(0);
-          setView("complete");
+          setView("queue");
         }, 500);
       }
       return allDone;
@@ -1707,7 +1707,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }, 500);
     }
   };
@@ -1903,7 +1903,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }, 500);
     }
   };
@@ -2031,7 +2031,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }, 500);
     }
     
@@ -2086,7 +2086,7 @@ export default function Picking() {
         playSound("complete");
         triggerHaptic("heavy");
         setCurrentItemIndex(0);
-        setView("complete");
+        setView("queue");
       }
     }
   };
@@ -3641,7 +3641,7 @@ export default function Picking() {
                   }
                   playSound("complete");
                   triggerHaptic("heavy");
-                  setView("complete");
+                  setView("queue");
                 }}
                 data-testid="button-complete-all"
               >
