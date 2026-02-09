@@ -1616,7 +1616,7 @@ export async function registerRoutes(
                  unit_count, total_amount, source, created_at,
                  combined_group_id, combined_role
           FROM orders 
-          WHERE status = 'ready' 
+          WHERE warehouse_status = 'ready' 
             AND on_hold = 0
             AND combined_group_id IS NULL
         `);
@@ -1630,7 +1630,7 @@ export async function registerRoutes(
                    shipping_postal_code, shipping_country, item_count, 
                    unit_count, total_amount, source, created_at
             FROM orders 
-            WHERE status = 'ready' 
+            WHERE warehouse_status = 'ready' 
               AND on_hold = 0
           `);
         } else {
