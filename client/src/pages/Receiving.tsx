@@ -31,16 +31,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { 
@@ -243,8 +233,6 @@ export default function Receiving() {
   const [resolveSkuResults, setResolveSkuResults] = useState<{sku: string; name: string; productVariantId: number}[]>([]);
   const [resolveLocSearch, setResolveLocSearch] = useState("");
   const resolveSkuTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Pre-close validation state
-  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [newLine, setNewLine] = useState({
     sku: "",
     productName: "",
@@ -402,17 +390,41 @@ DEF-456,25,,,5.00,,Location TBD`;
   const closeReceiptMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/receiving/${id}/close`, { method: "POST" });
-      if (!res.ok) throw new Error("Failed to close receipt");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        if (body?.issues) {
+          const err = new Error(body.error) as Error & { issues: any[] };
+          err.issues = body.issues;
+          throw err;
+        }
+        throw new Error(body?.error || "Failed to close receipt");
+      }
       return res.json();
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
-      toast({ 
-        title: "Receipt closed", 
-        description: `${result.unitsReceived} units received across ${result.linesProcessed} lines` 
+      toast({
+        title: "Receipt closed",
+        description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
       });
       setShowReceiptDetail(false);
+    },
+    onError: (error: any) => {
+      if (error.issues) {
+        const missingSku = error.issues.filter((i: any) => i.missingVariant).length;
+        const missingLoc = error.issues.filter((i: any) => i.missingLocation).length;
+        const parts: string[] = [];
+        if (missingSku) parts.push(`${missingSku} missing product link`);
+        if (missingLoc) parts.push(`${missingLoc} missing location`);
+        toast({
+          title: "Cannot close receipt",
+          description: `Resolve issues first: ${parts.join(", ")}`,
+          variant: "destructive",
+        });
+      } else {
+        toast({ title: "Failed to close receipt", description: error.message, variant: "destructive" });
+      }
     },
   });
 
@@ -753,16 +765,10 @@ DEF-456,25,,,5.00,,Location TBD`;
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
   };
 
-  // Pre-close validation: check for lines that will be skipped
+  // Close receipt — server auto-resolves SKU→variant and blocks if data is missing
   const handlePreCloseValidation = () => {
     if (!selectedReceipt?.lines) return;
-    const received = selectedReceipt.lines.filter(l => l.receivedQty > 0);
-    const skipped = received.filter(l => !l.productVariantId || !l.putawayLocationId);
-    if (skipped.length === 0) {
-      closeReceiptMutation.mutate(selectedReceipt.id);
-      return;
-    }
-    setShowCloseConfirm(true);
+    closeReceiptMutation.mutate(selectedReceipt.id);
   };
 
   // Compute issue counts for the current receipt
@@ -2201,61 +2207,8 @@ DEF-456,25,,,5.00,,Location TBD`;
         </DialogContent>
       </Dialog>
 
-      {/* Pre-Close Validation Dialog */}
-      <AlertDialog open={showCloseConfirm} onOpenChange={setShowCloseConfirm}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
-              Close Receipt with Unresolved Lines?
-            </AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-3">
-                {selectedReceipt?.lines && (() => {
-                  const received = selectedReceipt.lines.filter(l => l.receivedQty > 0);
-                  const processable = received.filter(l => l.productVariantId && l.putawayLocationId);
-                  const missingSku = received.filter(l => !l.productVariantId);
-                  const missingLoc = received.filter(l => l.productVariantId && !l.putawayLocationId);
-                  const missingBoth = received.filter(l => !l.productVariantId && !l.putawayLocationId);
-                  const totalSkipped = received.length - processable.length;
-                  const affectedSkus = Array.from(new Set(received.filter(l => !l.productVariantId || !l.putawayLocationId).map(l => l.sku).filter((s): s is string => !!s)));
-                  return (
-                    <>
-                      <div className="text-sm">
-                        <span className="font-medium text-green-700">{processable.length}</span> of{' '}
-                        <span className="font-medium">{received.length}</span> received lines will update inventory.
-                      </div>
-                      <div className="bg-amber-50 border border-amber-200 rounded-md p-3 space-y-1">
-                        <div className="font-medium text-amber-800 text-sm">{totalSkipped} line{totalSkipped !== 1 ? 's' : ''} will be SKIPPED:</div>
-                        {missingSku.length > 0 && <div className="text-xs text-amber-700">{missingSku.length} missing product variant link</div>}
-                        {missingLoc.length > 0 && <div className="text-xs text-amber-700">{missingLoc.length} missing putaway location</div>}
-                      </div>
-                      {affectedSkus.length > 0 && (
-                        <div className="text-xs max-h-20 overflow-y-auto">
-                          <span className="font-medium">Affected SKUs: </span>
-                          <span className="font-mono">{affectedSkus.join(', ')}</span>
-                        </div>
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel className="min-h-[44px]">Go Back to Resolve</AlertDialogCancel>
-            <AlertDialogAction
-              className="min-h-[44px] bg-amber-600 hover:bg-amber-700"
-              onClick={() => {
-                if (selectedReceipt) closeReceiptMutation.mutate(selectedReceipt.id);
-                setShowCloseConfirm(false);
-              }}
-            >
-              Close Anyway (skip {issueLines.length} line{issueLines.length !== 1 ? 's' : ''})
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Pre-Close Validation Dialog removed — server now auto-resolves SKU→variant
+          and returns 400 with structured issues if lines can't be processed */}
     </div>
   );
 }

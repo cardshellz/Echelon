@@ -8176,16 +8176,50 @@ export async function registerRoutes(
       
       const lines = await storage.getReceivingLines(id);
       const userId = req.session.user?.id || null;
-      
+
+      // Auto-resolve missing productVariantId from SKU before processing
+      for (const line of lines) {
+        if (line.receivedQty > 0 && !line.productVariantId && line.sku) {
+          const variant = await storage.getProductVariantBySku(line.sku);
+          if (variant) {
+            await storage.updateReceivingLine(line.id, { productVariantId: variant.id });
+            (line as any).productVariantId = variant.id;
+          }
+        }
+      }
+
+      // Block close if any received lines are still missing required data
+      const unresolvable = lines.filter(l => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId));
+      if (unresolvable.length > 0) {
+        const issues = unresolvable.map(l => ({
+          lineId: l.id,
+          sku: l.sku || "(no SKU)",
+          missingVariant: !l.productVariantId,
+          missingLocation: !l.putawayLocationId,
+        }));
+        return res.status(400).json({
+          error: `${unresolvable.length} received line(s) cannot be processed`,
+          issues,
+          hint: "Link SKUs to product variants and assign putaway locations before closing.",
+        });
+      }
+
       // Create inventory transactions for each line
       const batchId = `RCV-${id}-${Date.now()}`;
       let totalReceived = 0;
       let linesReceived = 0;
-      
+
+      // Diagnostic: log every line's state before processing
+      console.log(`[Receiving Close] Order ${id} (${order.receiptNumber}): ${lines.length} line(s)`);
+      for (const line of lines) {
+        console.log(`[Receiving Close]   Line ${line.id}: sku=${line.sku}, receivedQty=${line.receivedQty} (type ${typeof line.receivedQty}), productVariantId=${line.productVariantId} (type ${typeof line.productVariantId}), putawayLocationId=${line.putawayLocationId} (type ${typeof line.putawayLocationId}), status=${line.status}`);
+      }
+
       for (const line of lines) {
         if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
           // Get or create inventory level at location by productVariantId (source of truth)
           let level = await storage.getInventoryLevelByLocationAndVariant(line.putawayLocationId, line.productVariantId);
+          console.log(`[Receiving Close]   Line ${line.id}: existing level=${level?.id ?? 'NONE'}, currentQty=${level?.variantQty ?? 0}, adding ${line.receivedQty}`);
 
           const qtyToAdd = line.receivedQty;
 
@@ -8196,12 +8230,13 @@ export async function registerRoutes(
             });
           } else {
             // Create new level - productVariantId is required
-            await storage.createInventoryLevel({
+            const newLevel = await storage.createInventoryLevel({
               productVariantId: line.productVariantId,
               warehouseLocationId: line.putawayLocationId,
               variantQty: qtyToAdd,
               reservedQty: 0,
             });
+            console.log(`[Receiving Close]   Line ${line.id}: created inventory_level ${newLevel.id} with qty=${qtyToAdd}`);
           }
 
           // Create transaction record
@@ -8221,18 +8256,22 @@ export async function registerRoutes(
             notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
             userId,
           });
-          
+
           // Mark line as put away
           await storage.updateReceivingLine(line.id, {
             putawayComplete: 1,
             status: "complete",
           });
-          
+
           totalReceived += qtyToAdd;
           linesReceived++;
+        } else {
+          console.warn(`[Receiving Close]   Line ${line.id} SKIPPED: receivedQty=${line.receivedQty}, productVariantId=${line.productVariantId}, putawayLocationId=${line.putawayLocationId}`);
         }
       }
-      
+
+      console.log(`[Receiving Close] Order ${id}: ${linesReceived}/${lines.length} lines processed, ${totalReceived} units received`);
+
       // Update order totals and close
       const updated = await storage.updateReceivingOrder(id, {
         status: "closed",
@@ -8241,9 +8280,9 @@ export async function registerRoutes(
         receivedLineCount: linesReceived,
         receivedTotalUnits: totalReceived,
       });
-      
-      res.json({ 
-        success: true, 
+
+      res.json({
+        success: true,
         order: updated,
         linesProcessed: linesReceived,
         unitsReceived: totalReceived,
