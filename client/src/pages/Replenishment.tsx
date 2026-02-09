@@ -2264,15 +2264,15 @@ export default function Replenishment() {
             <div>
               <Label className="text-xs md:text-sm">Variant (Optional — blank = all SKUs at location)</Label>
               <Select
-                value={locConfigForm.productVariantId}
-                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, productVariantId: v })}
+                value={locConfigForm.productVariantId || "_all"}
+                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, productVariantId: v === "_all" ? "" : v })}
                 disabled={!!editingLocConfig}
               >
                 <SelectTrigger className="h-10">
                   <SelectValue placeholder="All SKUs at location" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">All SKUs</SelectItem>
+                  <SelectItem value="_all">All SKUs</SelectItem>
                   {variants.map((v) => (
                     <SelectItem key={v.id} value={v.id.toString()}>
                       {v.sku || v.name}
@@ -2285,14 +2285,14 @@ export default function Replenishment() {
             <div>
               <Label className="text-xs md:text-sm">Replen Method</Label>
               <Select
-                value={locConfigForm.replenMethod}
-                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, replenMethod: v })}
+                value={locConfigForm.replenMethod || "_default"}
+                onValueChange={(v) => setLocConfigForm({ ...locConfigForm, replenMethod: v === "_default" ? "" : v })}
               >
                 <SelectTrigger className="h-10">
                   <SelectValue placeholder="Use default" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Use default</SelectItem>
+                  <SelectItem value="_default">Use default</SelectItem>
                   {REPLEN_METHODS.map((m) => (
                     <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
                   ))}
