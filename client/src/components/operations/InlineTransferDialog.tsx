@@ -132,6 +132,7 @@ export default function InlineTransferDialog({
       toast({ title: "Transfer complete", description: `Moved ${quantity} ${sku} units` });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/bin-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/action-queue"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/exceptions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/pick-readiness"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/unassigned-inventory"] });

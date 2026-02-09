@@ -10626,6 +10626,207 @@ export async function registerRoutes(
     }
   });
 
+  // 7. Action Queue — unified actionable items across all exception types
+  app.get("/api/operations/action-queue", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const filter = (req.query.filter as string) || "all";
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
+      const offset = (page - 1) * pageSize;
+
+      const VALID_FILTERS = ["all", "negative_inventory", "empty_pick_face", "stale_bin", "pending_replen", "unassigned"];
+      const safeFilter = VALID_FILTERS.includes(filter) ? filter : "all";
+
+      const SORT_COLS: Record<string, string> = {
+        priority: "priority ASC, location_code",
+        type: "type ASC, priority",
+        location: "location_code",
+        sku: "sku",
+        qty: "qty",
+      };
+      const sortField = (req.query.sortField as string) || "priority";
+      const sortDir = (req.query.sortDir as string) === "desc" ? "DESC" : "ASC";
+      const sortExpr = SORT_COLS[sortField] || "priority ASC, location_code";
+      const orderClause = sql.raw(`${sortExpr} ${sortDir} NULLS LAST`);
+
+      const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
+      const filterClause = safeFilter !== "all" ? sql`WHERE type = ${safeFilter}` : sql``;
+
+      // Counts query — always all 5 types (lightweight, for KPI badges)
+      const countsPromise = db.execute(sql`
+        SELECT
+          (SELECT COUNT(*) FROM inventory_levels il
+           JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+           WHERE il.variant_qty < 0 ${whFilter}) as negative_count,
+          (SELECT COUNT(*) FROM warehouse_locations wl
+           WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
+             AND NOT EXISTS (SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0)
+             ${whFilter}) as empty_pick_count,
+          (SELECT COUNT(*) FROM warehouse_locations wl
+           JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+           WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
+             AND il.variant_qty > 0 AND il.variant_qty <= 5
+             ${whFilter}) as replen_count,
+          (SELECT COUNT(*) FROM inventory_levels il
+           JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+           WHERE il.variant_qty > 0
+             AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)) as unassigned_count,
+          (SELECT COUNT(DISTINCT wl.id) FROM warehouse_locations wl
+           JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+           WHERE NOT EXISTS (
+             SELECT 1 FROM inventory_transactions it
+             WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
+               AND it.created_at > NOW() - INTERVAL '90 days')
+           ${whFilter}) as stale_count
+      `);
+
+      // Items query — UNION ALL wrapped for filtering + pagination
+      const itemsPromise = db.execute(sql`
+        SELECT * FROM (
+          SELECT 'negative_inventory'::text as type, 1 as priority,
+            il.id as source_id, wl.id as location_id, wl.code as location_code, wl.location_type,
+            pv.id as variant_id, pv.sku, pv.name,
+            il.variant_qty as qty, NULL::text as detail, 'adjust'::text as action,
+            NULL::int as bulk_available, NULL::text as pending_replen_status,
+            NULL::int as days_since_movement, NULL::int as sku_count
+          FROM inventory_levels il
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+          WHERE il.variant_qty < 0 ${whFilter}
+
+          UNION ALL
+
+          SELECT 'empty_pick_face'::text, 2,
+            wl.id, wl.id, wl.code, wl.location_type,
+            NULL::int, NULL::text, NULL::text,
+            0, NULL::text, 'replenish'::text,
+            NULL::int, NULL::text, NULL::int, NULL::int
+          FROM warehouse_locations wl
+          WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
+            AND NOT EXISTS (SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0)
+            ${whFilter}
+
+          UNION ALL
+
+          SELECT 'pending_replen'::text, 3,
+            il.id, wl.id, wl.code, wl.location_type,
+            pv.id, pv.sku, pv.name,
+            il.variant_qty,
+            CASE WHEN COALESCE(bulk.bulk_qty, 0) > 0
+              THEN 'Bulk: ' || COALESCE(bulk.bulk_qty, 0)::text
+              ELSE 'No bulk supply' END,
+            'replenish'::text,
+            COALESCE(bulk.bulk_qty, 0)::int,
+            rt.status,
+            NULL::int, NULL::int
+          FROM warehouse_locations wl
+          JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          LEFT JOIN LATERAL (
+            SELECT SUM(il2.variant_qty) as bulk_qty
+            FROM inventory_levels il2
+            JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
+            WHERE wl2.location_type = 'bulk_storage' AND il2.variant_qty > 0
+              AND il2.product_variant_id = pv.id
+          ) bulk ON true
+          LEFT JOIN LATERAL (
+            SELECT rt2.status
+            FROM replen_tasks rt2
+            WHERE rt2.to_location_id = wl.id
+              AND rt2.pick_product_variant_id = pv.id
+              AND rt2.status IN ('pending', 'assigned', 'in_progress')
+            ORDER BY rt2.created_at DESC LIMIT 1
+          ) rt ON true
+          WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
+            AND il.variant_qty > 0 AND il.variant_qty <= 5
+            ${whFilter}
+
+          UNION ALL
+
+          SELECT 'unassigned'::text, 3,
+            il.id, wl.id, wl.code, wl.location_type,
+            pv.id, pv.sku, pv.name,
+            il.variant_qty, wl.location_type::text, 'move'::text,
+            NULL::int, NULL::text, NULL::int, NULL::int
+          FROM inventory_levels il
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+          WHERE il.variant_qty > 0
+            AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
+
+          UNION ALL
+
+          SELECT 'stale_bin'::text, 4,
+            wl.id, wl.id, wl.code, wl.location_type,
+            NULL::int, NULL::text, NULL::text,
+            COALESCE(SUM(il.variant_qty), 0)::int,
+            EXTRACT(DAY FROM NOW() - MAX(last_move.last_at))::text || 'd stale',
+            'move'::text,
+            NULL::int, NULL::text,
+            EXTRACT(DAY FROM NOW() - MAX(last_move.last_at))::int,
+            COUNT(DISTINCT il.product_variant_id)::int
+          FROM warehouse_locations wl
+          JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
+          LEFT JOIN LATERAL (
+            SELECT MAX(it.created_at) as last_at
+            FROM inventory_transactions it
+            WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id
+          ) last_move ON true
+          WHERE NOT EXISTS (
+            SELECT 1 FROM inventory_transactions it
+            WHERE (it.from_location_id = wl.id OR it.to_location_id = wl.id)
+              AND it.created_at > NOW() - INTERVAL '90 days')
+          ${whFilter}
+          GROUP BY wl.id, wl.code, wl.location_type
+        ) action_queue
+        ${filterClause}
+        ORDER BY ${orderClause}
+        LIMIT ${pageSize} OFFSET ${offset}
+      `);
+
+      const [countsResult, itemsResult] = await Promise.all([countsPromise, itemsPromise]);
+      const c = countsResult.rows[0] as any;
+
+      const counts = {
+        negative_inventory: parseInt(c.negative_count) || 0,
+        empty_pick_face: parseInt(c.empty_pick_count) || 0,
+        stale_bin: parseInt(c.stale_count) || 0,
+        pending_replen: parseInt(c.replen_count) || 0,
+        unassigned: parseInt(c.unassigned_count) || 0,
+      };
+
+      // Derive total from counts based on active filter
+      const total = safeFilter === "all"
+        ? Object.values(counts).reduce((a, b) => a + b, 0)
+        : counts[safeFilter as keyof typeof counts] || 0;
+
+      const items = (itemsResult.rows as any[]).map((r: any) => ({
+        id: `${r.type}-${r.source_id}`,
+        type: r.type,
+        priority: parseInt(r.priority),
+        locationId: r.location_id,
+        locationCode: r.location_code,
+        locationType: r.location_type,
+        variantId: r.variant_id || null,
+        sku: r.sku || null,
+        name: r.name || null,
+        qty: r.qty != null ? parseInt(r.qty) : null,
+        detail: r.detail || null,
+        action: r.action,
+        bulkAvailable: r.bulk_available != null ? parseInt(r.bulk_available) : null,
+        pendingReplenStatus: r.pending_replen_status || null,
+        daysSinceMovement: r.days_since_movement != null ? parseInt(r.days_since_movement) : null,
+        skuCount: r.sku_count != null ? parseInt(r.sku_count) : null,
+      }));
+
+      res.json({ items, total, page, pageSize, counts });
+    } catch (error) {
+      console.error("Error fetching action queue:", error);
+      res.status(500).json({ error: "Failed to fetch action queue" });
+    }
+  });
+
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/reorder-analysis", requirePermission("inventory", "view"), async (req, res) => {
     try {

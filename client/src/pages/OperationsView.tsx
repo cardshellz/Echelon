@@ -1,15 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import OpsKpiCards from "@/components/operations/OpsKpiCards";
+import ActionQueueSection from "@/components/operations/ActionQueueSection";
 import BinInventorySection from "@/components/operations/BinInventorySection";
 import SkuLocatorSection from "@/components/operations/SkuLocatorSection";
-import UnassignedSection from "@/components/operations/UnassignedSection";
-import PickReadinessSection from "@/components/operations/PickReadinessSection";
-import ExceptionsSection from "@/components/operations/ExceptionsSection";
 import RecentActivitySection from "@/components/operations/RecentActivitySection";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import InlineAdjustDialog from "@/components/operations/InlineAdjustDialog";
+import type { ActionFilter, ActionQueueCounts } from "@/components/operations/types";
 
 interface OperationsViewProps {
   warehouseId: number | null;
@@ -42,6 +41,10 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
   const [transferDialog, setTransferDialog] = useState<TransferDialogState>({ open: false });
   const [adjustDialog, setAdjustDialog] = useState<AdjustDialogState>({ open: false });
 
+  // Action queue filter state
+  const [activeFilter, setActiveFilter] = useState<ActionFilter>("all");
+  const [queueCounts, setQueueCounts] = useState<ActionQueueCounts | undefined>();
+
   // Activity panel state
   const [activityLocationId, setActivityLocationId] = useState<number | null>(null);
   const [activityVariantId, setActivityVariantId] = useState<number | null>(null);
@@ -71,8 +74,35 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
 
   return (
     <div className="space-y-6 flex-1 overflow-auto pb-6">
-      <OpsKpiCards data={healthQuery.data} isLoading={healthQuery.isLoading} />
+      {/* Top zone: KPI cards + action queue */}
+      <OpsKpiCards
+        healthData={healthQuery.data}
+        queueCounts={queueCounts}
+        isLoading={healthQuery.isLoading}
+        activeFilter={activeFilter}
+        onFilterChange={setActiveFilter}
+      />
 
+      <ActionQueueSection
+        warehouseId={warehouseId}
+        activeFilter={activeFilter}
+        canEdit={canEdit}
+        onTransferFrom={openTransferFrom}
+        onTransferTo={openTransferTo}
+        onAdjust={openAdjust}
+        onCountsLoaded={setQueueCounts}
+      />
+
+      {/* Visual divider */}
+      <div className="flex items-center gap-3 pt-2">
+        <div className="h-px flex-1 bg-border" />
+        <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+          Inventory Tools
+        </span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+
+      {/* Bottom zone: lookup tools */}
       <BinInventorySection
         warehouseId={warehouseId}
         searchQuery={searchQuery}
@@ -85,28 +115,6 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
       <SkuLocatorSection
         canEdit={canEdit}
         onTransfer={openTransferFrom}
-      />
-
-      <UnassignedSection
-        canEdit={canEdit}
-        onTransfer={openTransferFrom}
-      />
-
-      <PickReadinessSection
-        warehouseId={warehouseId}
-        canEdit={canEdit}
-        onTransfer={(toLocationId, toLocationCode, variantId, sku) =>
-          openTransferTo(toLocationId, toLocationCode, variantId, sku)
-        }
-        onAdjust={openAdjust}
-      />
-
-      <ExceptionsSection
-        warehouseId={warehouseId}
-        canEdit={canEdit}
-        onAdjust={openAdjust}
-        onTransferTo={openTransferTo}
-        onTransferFrom={openTransferFrom}
       />
 
       <RecentActivitySection
