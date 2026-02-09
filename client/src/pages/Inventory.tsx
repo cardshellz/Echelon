@@ -278,9 +278,8 @@ export default function Inventory() {
   const [exporting, setExporting] = useState(false);
   
   const locationTypeOptions = [
-    { value: "forward_pick", label: "Forward Pick" },
-    { value: "bulk_storage", label: "Bulk Storage" },
-    { value: "overflow", label: "Overflow" },
+    { value: "pick", label: "Pick" },
+    { value: "reserve", label: "Reserve" },
     { value: "receiving", label: "Receiving" },
     { value: "staging", label: "Staging" },
   ];
@@ -288,8 +287,8 @@ export default function Inventory() {
     { value: "bin", label: "Bin" },
     { value: "pallet", label: "Pallet" },
     { value: "carton_flow", label: "Carton Flow" },
-    { value: "bulk_reserve", label: "Bulk Reserve" },
     { value: "shelf", label: "Shelf" },
+    { value: "floor", label: "Floor" },
   ];
   
   const handleExport = async () => {

@@ -130,9 +130,9 @@ export default function SkuLocatorSection({ canEdit, onTransfer }: SkuLocatorSec
                                 <Badge
                                   variant="outline"
                                   className={`text-[10px] ${
-                                    loc.locationType === "forward_pick"
+                                    loc.locationType === "pick"
                                       ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
-                                      : loc.locationType === "bulk_storage"
+                                      : loc.locationType === "reserve"
                                       ? "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400"
                                       : "bg-muted"
                                   }`}

@@ -397,7 +397,7 @@ export async function registerRoutes(
         await storage.createWarehouseLocation({
           code,
           name: `Bin ${code}`,
-          locationType: "forward_pick",
+          locationType: "pick",
           zone: safeZone,
           isPickable: 1,
           movementPolicy: "implicit",
@@ -1256,7 +1256,7 @@ export async function registerRoutes(
               .sort((a: any, b: any) => {
                 const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
                 const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
-                const priorityOrder = { forward_pick: 0, pallet: 1, bulk_storage: 2, receiving: 3 };
+                const priorityOrder = { pick: 0, pallet: 1, reserve: 2, receiving: 3 };
                 const priorityA = priorityOrder[locA?.locationType as keyof typeof priorityOrder] ?? 99;
                 const priorityB = priorityOrder[locB?.locationType as keyof typeof priorityOrder] ?? 99;
                 return priorityA - priorityB;
@@ -2400,7 +2400,7 @@ export async function registerRoutes(
               warehouseLoc = await storage.createWarehouseLocation({
                 code: v.location,
                 name: v.location,
-                locationType: 'forward_pick',
+                locationType: 'pick',
                 zone: v.location.charAt(0) || 'A',
                 isPickable: 1,
                 movementPolicy: 'implicit'
@@ -2461,7 +2461,7 @@ export async function registerRoutes(
             warehouseLoc = await storage.createWarehouseLocation({
               code: item.location,
               name: item.location,
-              locationType: 'forward_pick',
+              locationType: 'pick',
               zone: item.location.charAt(0) || 'A',
               isPickable: 1,
               movementPolicy: 'implicit'
@@ -4713,7 +4713,7 @@ export async function registerRoutes(
         name: catalogProduct.title,
         location: warehouseLocation.code,
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
-        locationType: locationType || "forward_pick",
+        locationType: locationType || "pick",
         isPrimary: isPrimary ?? 1,
         imageUrl,
         barcode,
@@ -6654,7 +6654,7 @@ export async function registerRoutes(
             await storage.createWarehouseLocation({
               code,
               name: `Bin ${code}`,
-              locationType: "forward_pick",
+              locationType: "pick",
               zone,
               isPickable: 1,
               movementPolicy: "implicit",
@@ -8985,8 +8985,8 @@ export async function registerRoutes(
       const tierDefault = await storage.createReplenTierDefault({
         hierarchyLevel: data.hierarchyLevel,
         sourceHierarchyLevel: data.sourceHierarchyLevel,
-        pickLocationType: data.pickLocationType || "forward_pick",
-        sourceLocationType: data.sourceLocationType || "bulk_storage",
+        pickLocationType: data.pickLocationType || "pick",
+        sourceLocationType: data.sourceLocationType || "reserve",
         sourcePriority: data.sourcePriority || "fifo",
         minQty: data.minQty || 0,
         maxQty: data.maxQty || null,
@@ -9139,8 +9139,8 @@ export async function registerRoutes(
         catalogProductId,
         pickVariantId,
         sourceVariantId,
-        pickLocationType: pickLocationType || "forward_pick",
-        sourceLocationType: sourceLocationType || "bulk_storage",
+        pickLocationType: pickLocationType || "pick",
+        sourceLocationType: sourceLocationType || "reserve",
         sourcePriority: sourcePriority || "fifo",
         minQty: minQty ?? 0,
         maxQty: maxQty ?? null,
@@ -9322,8 +9322,8 @@ export async function registerRoutes(
               catalogProductId: product.id,
               pickVariantId: pickVariant.id,
               sourceVariantId: sourceVariant.id,
-              pickLocationType: (row.pick_location_type || "forward_pick").trim(),
-              sourceLocationType: (row.source_location_type || "bulk_storage").trim(),
+              pickLocationType: (row.pick_location_type || "pick").trim(),
+              sourceLocationType: (row.source_location_type || "reserve").trim(),
               sourcePriority: (row.source_priority || "fifo").trim(),
               minQty: parseInt(row.min_qty) || 0,
               maxQty: row.max_qty ? parseInt(row.max_qty) : null,
@@ -9562,7 +9562,7 @@ export async function registerRoutes(
         inventoryByVariantAndType.set(key, existing);
       }
       
-      // Find all forward_pick inventory that needs replen
+      // Find all pick-location inventory that needs replen
       // Group by product and variant to check against tier defaults
       const pickLocationsNeedingReplen = new Map<number, Array<{
         locationId: number;
@@ -9573,7 +9573,7 @@ export async function registerRoutes(
       
       for (const level of inventoryLevels) {
         const location = locationMap.get(level.warehouseLocationId);
-        if (!location || location.locationType !== "forward_pick") continue;
+        if (!location || location.locationType !== "pick") continue;
         
         const variant = variantMap.get(level.productVariantId);
         if (!variant) continue;
@@ -9599,7 +9599,7 @@ export async function registerRoutes(
       // Sort tier defaults by priority (1 = highest)
       const sortedTierDefaults = [...tierDefaults].sort((a, b) => a.priority - b.priority);
       
-      // Process each product with forward_pick inventory
+      // Process each product with pick-location inventory
       for (const [productId, pickLocs] of pickLocationsNeedingReplen) {
         const product = productMap.get(productId);
         if (!product) continue;
@@ -10452,7 +10452,7 @@ export async function registerRoutes(
           SELECT
             COUNT(*) as total_locations,
             COUNT(*) FILTER (WHERE wl.is_pickable = 1) as pick_locations,
-            COUNT(*) FILTER (WHERE wl.location_type = 'bulk_storage') as bulk_locations,
+            COUNT(*) FILTER (WHERE wl.location_type = 'reserve') as bulk_locations,
             COUNT(*) FILTER (WHERE NOT EXISTS (
               SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
             )) as empty_locations,
@@ -10488,7 +10488,7 @@ export async function registerRoutes(
         emptyLocations: parseInt(loc.empty_locations) || 0,
         pickLocations: parseInt(loc.pick_locations) || 0,
         emptyPickLocations: parseInt(loc.empty_pick_locations) || 0,
-        bulkLocations: parseInt(loc.bulk_locations) || 0,
+        reserveLocations: parseInt(loc.bulk_locations) || 0,
         negativeInventoryCount: parseInt(loc.negative_inventory_count) || 0,
         pendingReplenTasks: parseInt(aux.pending_replen_tasks) || 0,
         recentTransferCount: parseInt(aux.recent_transfer_count) || 0,
@@ -10531,7 +10531,7 @@ export async function registerRoutes(
                 WHERE it.from_location_id = wl.id OR it.to_location_id = wl.id) as last_movement_at
         FROM warehouse_locations wl
         WHERE wl.is_pickable = 1
-          AND wl.location_type = 'forward_pick'
+          AND wl.location_type = 'pick'
           AND NOT EXISTS (
             SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0
           )
@@ -10616,7 +10616,7 @@ export async function registerRoutes(
           SELECT SUM(il2.variant_qty) as bulk_qty
           FROM inventory_levels il2
           JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
-          WHERE wl2.location_type = 'bulk_storage' AND il2.variant_qty > 0
+          WHERE wl2.location_type = 'reserve' AND il2.variant_qty > 0
             AND il2.product_variant_id = pv.id
         ) bulk ON true
         LEFT JOIN LATERAL (
@@ -10628,7 +10628,7 @@ export async function registerRoutes(
           ORDER BY rt2.created_at DESC LIMIT 1
         ) rt ON true
         WHERE wl.is_pickable = 1
-          AND wl.location_type = 'forward_pick'
+          AND wl.location_type = 'pick'
           AND il.variant_qty <= ${threshold}
           ${warehouseFilter}
         ORDER BY il.variant_qty ASC, pv.sku
@@ -10720,7 +10720,7 @@ export async function registerRoutes(
       const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
       const offset = (page - 1) * pageSize;
 
-      const VALID_FILTERS = ["all", "negative_inventory", "empty_pick_face", "stale_bin", "pending_replen", "unassigned"];
+      const VALID_FILTERS = ["all", "negative_inventory", "aging_receiving", "pallet_drop", "stuck_replen", "stale_bin"];
       const safeFilter = VALID_FILTERS.includes(filter) ? filter : "all";
 
       const SORT_COLS: Record<string, string> = {
@@ -10744,19 +10744,29 @@ export async function registerRoutes(
           (SELECT COUNT(*) FROM inventory_levels il
            JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
            WHERE il.variant_qty < 0 ${whFilter}) as negative_count,
-          (SELECT COUNT(*) FROM warehouse_locations wl
-           WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
-             AND NOT EXISTS (SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0)
-             ${whFilter}) as empty_pick_count,
-          (SELECT COUNT(*) FROM warehouse_locations wl
-           JOIN inventory_levels il ON il.warehouse_location_id = wl.id
-           WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
-             AND il.variant_qty > 0 AND il.variant_qty <= 5
-             ${whFilter}) as replen_count,
           (SELECT COUNT(*) FROM inventory_levels il
            JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
            WHERE il.variant_qty > 0
-             AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)) as unassigned_count,
+             AND wl.location_type IN ('receiving', 'staging')
+             AND il.updated_at < NOW() - INTERVAL '24 hours'
+             ${whFilter}) as aging_receiving_count,
+          (SELECT COUNT(*) FROM warehouse_locations wl
+           JOIN inventory_levels il ON il.warehouse_location_id = wl.id
+           WHERE wl.location_type = 'pick' AND wl.is_pickable = 1
+             AND wl.bin_type IN ('pallet', 'floor')
+             AND il.variant_qty > 0 AND il.variant_qty <= 5
+             AND EXISTS (
+               SELECT 1 FROM inventory_levels il2
+               JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
+               WHERE wl2.location_type = 'reserve' AND wl2.is_pickable = 0
+                 AND il2.product_variant_id = il.product_variant_id AND il2.variant_qty > 0
+             )
+             ${whFilter}) as pallet_drop_count,
+          (SELECT COUNT(*) FROM replen_tasks rt
+           LEFT JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+           WHERE rt.status IN ('pending', 'assigned')
+             AND rt.created_at < NOW() - INTERVAL '4 hours'
+             ${whFilter}) as stuck_replen_count,
           (SELECT COUNT(DISTINCT wl.id) FROM warehouse_locations wl
            JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
            WHERE NOT EXISTS (
@@ -10769,12 +10779,14 @@ export async function registerRoutes(
       // Items query — UNION ALL wrapped for filtering + pagination
       const itemsPromise = db.execute(sql`
         SELECT * FROM (
+          -- 1. Negative Inventory (priority 1): locations with qty < 0
           SELECT 'negative_inventory'::text as type, 1 as priority,
             il.id as source_id, wl.id as location_id, wl.code as location_code, wl.location_type,
             pv.id as variant_id, pv.sku, pv.name,
             il.variant_qty as qty, NULL::text as detail, 'adjust'::text as action,
             NULL::int as bulk_available, NULL::text as pending_replen_status,
-            NULL::int as days_since_movement, NULL::int as sku_count
+            NULL::int as days_since_movement, NULL::int as sku_count,
+            NULL::int as hours_aging, NULL::int as task_id
           FROM inventory_levels il
           JOIN product_variants pv ON il.product_variant_id = pv.id
           JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
@@ -10782,66 +10794,72 @@ export async function registerRoutes(
 
           UNION ALL
 
-          SELECT 'empty_pick_face'::text, 2,
-            wl.id, wl.id, wl.code, wl.location_type,
-            NULL::int, NULL::text, NULL::text,
-            0, NULL::text, 'replenish'::text,
-            NULL::int, NULL::text, NULL::int, NULL::int
-          FROM warehouse_locations wl
-          WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
-            AND NOT EXISTS (SELECT 1 FROM inventory_levels il WHERE il.warehouse_location_id = wl.id AND il.variant_qty > 0)
+          -- 2. Aging Receiving (priority 2): inventory in receiving/staging > 24h
+          SELECT 'aging_receiving'::text, 2,
+            il.id, wl.id, wl.code, wl.location_type,
+            pv.id, pv.sku, pv.name,
+            il.variant_qty,
+            EXTRACT(HOUR FROM NOW() - il.updated_at)::text || 'h in ' || wl.location_type,
+            'move'::text,
+            NULL::int, NULL::text, NULL::int, NULL::int,
+            EXTRACT(HOUR FROM NOW() - il.updated_at)::int, NULL::int
+          FROM inventory_levels il
+          JOIN product_variants pv ON il.product_variant_id = pv.id
+          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+          WHERE il.variant_qty > 0
+            AND wl.location_type IN ('receiving', 'staging')
+            AND il.updated_at < NOW() - INTERVAL '24 hours'
             ${whFilter}
 
           UNION ALL
 
-          SELECT 'pending_replen'::text, 3,
+          -- 3. Pallet Drop Needed (priority 2): floor pallet low, air pallet has stock
+          SELECT 'pallet_drop'::text, 2,
             il.id, wl.id, wl.code, wl.location_type,
             pv.id, pv.sku, pv.name,
             il.variant_qty,
-            CASE WHEN COALESCE(bulk.bulk_qty, 0) > 0
-              THEN 'Bulk: ' || COALESCE(bulk.bulk_qty, 0)::text
-              ELSE 'No bulk supply' END,
+            'Reserve: ' || COALESCE(air.air_qty, 0)::text || ' available',
             'replenish'::text,
-            COALESCE(bulk.bulk_qty, 0)::int,
-            rt.status,
+            COALESCE(air.air_qty, 0)::int, NULL::text, NULL::int, NULL::int,
             NULL::int, NULL::int
           FROM warehouse_locations wl
           JOIN inventory_levels il ON il.warehouse_location_id = wl.id
           JOIN product_variants pv ON il.product_variant_id = pv.id
           LEFT JOIN LATERAL (
-            SELECT SUM(il2.variant_qty) as bulk_qty
+            SELECT SUM(il2.variant_qty) as air_qty
             FROM inventory_levels il2
             JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
-            WHERE wl2.location_type = 'bulk_storage' AND il2.variant_qty > 0
+            WHERE wl2.location_type = 'reserve' AND wl2.is_pickable = 0
+              AND il2.variant_qty > 0
               AND il2.product_variant_id = pv.id
-          ) bulk ON true
-          LEFT JOIN LATERAL (
-            SELECT rt2.status
-            FROM replen_tasks rt2
-            WHERE rt2.to_location_id = wl.id
-              AND rt2.pick_product_variant_id = pv.id
-              AND rt2.status IN ('pending', 'assigned', 'in_progress')
-            ORDER BY rt2.created_at DESC LIMIT 1
-          ) rt ON true
-          WHERE wl.is_pickable = 1 AND wl.location_type = 'forward_pick'
+          ) air ON true
+          WHERE wl.location_type = 'pick' AND wl.is_pickable = 1
+            AND wl.bin_type IN ('pallet', 'floor')
             AND il.variant_qty > 0 AND il.variant_qty <= 5
+            AND COALESCE(air.air_qty, 0) > 0
             ${whFilter}
 
           UNION ALL
 
-          SELECT 'unassigned'::text, 3,
-            il.id, wl.id, wl.code, wl.location_type,
+          -- 4. Stuck Replen (priority 3): replen tasks pending/assigned > 4h
+          SELECT 'stuck_replen'::text, 3,
+            rt.id, wl.id, wl.code, wl.location_type,
             pv.id, pv.sku, pv.name,
-            il.variant_qty, wl.location_type::text, 'move'::text,
-            NULL::int, NULL::text, NULL::int, NULL::int
-          FROM inventory_levels il
-          JOIN product_variants pv ON il.product_variant_id = pv.id
-          JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-          WHERE il.variant_qty > 0
-            AND (wl.location_type IN ('receiving', 'staging') OR wl.warehouse_id IS NULL)
+            rt.qty_target_units,
+            rt.status || ' for ' || EXTRACT(HOUR FROM NOW() - rt.created_at)::text || 'h',
+            'investigate'::text,
+            NULL::int, rt.status, NULL::int, NULL::int,
+            EXTRACT(HOUR FROM NOW() - rt.created_at)::int, rt.id
+          FROM replen_tasks rt
+          JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+          LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
+          WHERE rt.status IN ('pending', 'assigned')
+            AND rt.created_at < NOW() - INTERVAL '4 hours'
+            ${whFilter}
 
           UNION ALL
 
+          -- 5. Stale Bins (priority 4): no movement in 90+ days
           SELECT 'stale_bin'::text, 4,
             wl.id, wl.id, wl.code, wl.location_type,
             NULL::int, NULL::text, NULL::text,
@@ -10850,7 +10868,8 @@ export async function registerRoutes(
             'move'::text,
             NULL::int, NULL::text,
             EXTRACT(DAY FROM NOW() - MAX(last_move.last_at))::int,
-            COUNT(DISTINCT il.product_variant_id)::int
+            COUNT(DISTINCT il.product_variant_id)::int,
+            NULL::int, NULL::int
           FROM warehouse_locations wl
           JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
           LEFT JOIN LATERAL (
@@ -10875,10 +10894,10 @@ export async function registerRoutes(
 
       const counts = {
         negative_inventory: parseInt(c.negative_count) || 0,
-        empty_pick_face: parseInt(c.empty_pick_count) || 0,
+        aging_receiving: parseInt(c.aging_receiving_count) || 0,
+        pallet_drop: parseInt(c.pallet_drop_count) || 0,
+        stuck_replen: parseInt(c.stuck_replen_count) || 0,
         stale_bin: parseInt(c.stale_count) || 0,
-        pending_replen: parseInt(c.replen_count) || 0,
-        unassigned: parseInt(c.unassigned_count) || 0,
       };
 
       // Derive total from counts based on active filter
@@ -10903,6 +10922,8 @@ export async function registerRoutes(
         pendingReplenStatus: r.pending_replen_status || null,
         daysSinceMovement: r.days_since_movement != null ? parseInt(r.days_since_movement) : null,
         skuCount: r.sku_count != null ? parseInt(r.sku_count) : null,
+        hoursAging: r.hours_aging != null ? parseInt(r.hours_aging) : null,
+        taskId: r.task_id != null ? parseInt(r.task_id) : null,
       }));
 
       res.json({ items, total, page, pageSize, counts });

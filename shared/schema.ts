@@ -50,7 +50,7 @@ export type InsertUserAudit = z.infer<typeof insertUserAuditSchema>;
 export type UserAudit = typeof userAudit.$inferSelect;
 
 // Location types for multi-location WMS support
-export const locationTypeEnum = ["forward_pick", "bulk_storage", "overflow", "receiving", "staging"] as const;
+export const locationTypeEnum = ["pick", "reserve", "receiving", "staging"] as const;
 export type LocationType = typeof locationTypeEnum[number];
 
 export const productLocations = pgTable("product_locations", {
@@ -62,7 +62,7 @@ export const productLocations = pgTable("product_locations", {
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
   warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // FK to warehouse_locations
-  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"), // forward_pick, bulk_storage, overflow
+  locationType: varchar("location_type", { length: 30 }).notNull().default("pick"), // pick, reserve, receiving, staging
   isPrimary: integer("is_primary").notNull().default(1), // 1 = primary pick location, 0 = secondary/bulk
   status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   imageUrl: text("image_url"),
@@ -325,7 +325,7 @@ export const warehouseZones = pgTable("warehouse_zones", {
   code: varchar("code", { length: 10 }).notNull().unique(), // RCV, BULK, FWD, PACK, SHIP
   name: varchar("name", { length: 50 }).notNull(), // "Receiving Dock", "Bulk Storage", etc.
   description: text("description"),
-  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"),
+  locationType: varchar("location_type", { length: 30 }).notNull().default("pick"),
   isPickable: integer("is_pickable").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -417,14 +417,14 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   bin: varchar("bin", { length: 5 }), // 1, 2, 3... (subdivision within level)
   
   // Location metadata
-  locationType: varchar("location_type", { length: 30 }).notNull().default("forward_pick"), // forward_pick, bulk_storage, receiving, packing, shipping
-  binType: varchar("bin_type", { length: 30 }).notNull().default("bin"), // bin, pallet, carton_flow, bulk_reserve, shelf
+  locationType: varchar("location_type", { length: 30 }).notNull().default("pick"), // pick, reserve, receiving, staging
+  binType: varchar("bin_type", { length: 30 }).notNull().default("bin"), // bin, shelf, pallet, carton_flow, floor
   isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
   pickSequence: integer("pick_sequence"), // Walk order for optimized picking (null = not sequenced)
   
   // Replenishment chain
   parentLocationId: integer("parent_location_id"), // Specific location that feeds this one (optional)
-  replenSourceType: varchar("replen_source_type", { length: 30 }), // Location type that feeds this: bulk_storage, case_pick, pallet_pick
+  replenSourceType: varchar("replen_source_type", { length: 30 }), // Location type that feeds this: reserve, case_pick, pallet_pick
   movementPolicy: varchar("movement_policy", { length: 20 }).notNull().default("implicit"),
   
   // Capacity constraints (dimensions in mm for cube calculations)
@@ -710,8 +710,8 @@ export const replenTierDefaults = pgTable("replen_tier_defaults", {
   warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this rule applies to (null = global default for all warehouses)
   hierarchyLevel: integer("hierarchy_level").notNull(), // Which tier this applies to (1=each, 2=pack, 3=case, etc.)
   sourceHierarchyLevel: integer("source_hierarchy_level").notNull(), // What tier to pull from
-  pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("forward_pick"),
-  sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("bulk_storage"),
+  pickLocationType: varchar("pick_location_type", { length: 30 }).notNull().default("pick"),
+  sourceLocationType: varchar("source_location_type", { length: 30 }).notNull().default("reserve"),
   sourcePriority: varchar("source_priority", { length: 20 }).notNull().default("fifo"), // fifo, smallest_first
   minQty: integer("min_qty").notNull().default(0), // Trigger replen when qty drops below this
   maxQty: integer("max_qty"), // Fill up to this qty (null = use bin capacity or one source unit)

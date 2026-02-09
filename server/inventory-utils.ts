@@ -85,7 +85,7 @@ export function calculateRemainingCapacity(
   return { remainingCubicMm: remaining, maxUnits };
 }
 
-/** Find best overflow bin for excess inventory. Prioritizes most available capacity. */
+/** Find best reserve location for excess inventory. Prioritizes most available capacity. */
 export function findOverflowBin(
   warehouseId: number | null,
   variant: { widthMm: number | null; heightMm: number | null; depthMm: number | null },
@@ -106,13 +106,13 @@ export function findOverflowBin(
   const variantCube = getVariantCubicMm(variant);
   if (!variantCube) return null;
 
-  const overflowLocations = allLocations.filter(
-    (l) => l.locationType === "overflow" && (warehouseId === null || l.warehouseId === warehouseId),
+  const reserveLocations = allLocations.filter(
+    (l) => l.locationType === "reserve" && (warehouseId === null || l.warehouseId === warehouseId),
   );
 
   let bestBin: { locationId: number; maxUnits: number; remainingCube: number } | null = null;
 
-  for (const loc of overflowLocations) {
+  for (const loc of reserveLocations) {
     const capacity = calculateRemainingCapacity(loc, variant, inventoryLevels, variantMap);
     if (!capacity || capacity.maxUnits <= 0) continue;
 

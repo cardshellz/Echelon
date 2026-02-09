@@ -58,8 +58,8 @@ const LOCATION_TYPES = [
   { value: "bin", label: "Bin (Eaches Pick)" },
   { value: "pallet", label: "Pallet (Case Pick)" },
   { value: "carton_flow", label: "Carton Flow" },
-  { value: "bulk_reserve", label: "Bulk Reserve" },
-  { value: "overflow", label: "Overflow" },
+  { value: "shelf", label: "Shelf" },
+  { value: "floor", label: "Floor" },
   { value: "receiving", label: "Receiving" },
   { value: "putaway_staging", label: "Putaway Staging" },
   { value: "packing", label: "Packing" },
@@ -75,7 +75,7 @@ const LOCATION_TYPES = [
 
 const DEFAULT_ZONES = [
   { code: "RCV", name: "Receiving Dock", locationType: "receiving" },
-  { code: "BULK", name: "Bulk Reserve", locationType: "bulk_reserve" },
+  { code: "BULK", name: "Bulk Reserve", locationType: "pallet" },
   { code: "FWD", name: "Forward Pick", locationType: "bin" },
   { code: "PACK", name: "Packing Station", locationType: "packing" },
   { code: "SHIP", name: "Shipping Lane", locationType: "shipping_lane" },
@@ -528,7 +528,7 @@ export default function WarehouseLocations() {
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence,min_qty,max_qty,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,bin,1,1,5,50,\nBULK,B,02,B,,Bulk B2,bulk_reserve,0,,,100,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence,min_qty,max_qty,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,bin,1,1,5,50,\nBULK,B,02,B,,Bulk B2,pallet,0,,,100,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1446,7 +1446,7 @@ export default function WarehouseLocations() {
                   className="font-mono text-xs h-32 md:h-48"
                   placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
 FWD,A,01,A,1,Forward Pick A1,bin,1,1
-BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
+BULK,B,02,B,,Bulk B2,pallet,0,"
                   value={csvData}
                   onChange={(e) => setCsvData(e.target.value)}
                   data-testid="textarea-csv-data"
@@ -1463,7 +1463,7 @@ BULK,B,02,B,,Bulk B2,bulk_reserve,0,"
                 <ul className="list-disc list-inside space-y-1">
                   <li><code>zone, aisle, bay, level, bin</code> - Location hierarchy</li>
                   <li><code>name</code> - Friendly name (optional)</li>
-                  <li><code>location_type</code> - bin, pallet, bulk_reserve, etc.</li>
+                  <li><code>location_type</code> - bin, shelf, pallet, carton_flow, floor</li>
                   <li><code>is_pickable</code> - 1 or 0</li>
                   <li><code>pick_sequence</code> - Picking order (optional)</li>
                   <li><code>warehouse_id</code> - Warehouse ID (optional)</li>

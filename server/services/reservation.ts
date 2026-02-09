@@ -107,7 +107,7 @@ class ReservationService {
         const unitsNeeded = item.quantity;
 
         // 3. Find the best location to reserve from
-        //    Prefer forward_pick locations with sufficient available stock,
+        //    Prefer pick locations with sufficient available stock,
         //    ordered by pick_sequence for walk-path efficiency.
         const levels = await this.db
           .select()

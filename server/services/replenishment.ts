@@ -92,7 +92,7 @@ class ReplenishmentService {
       .from(warehouseLocations)
       .where(
         and(
-          eq(warehouseLocations.locationType, "forward_pick"),
+          eq(warehouseLocations.locationType, "pick"),
           eq(warehouseLocations.isPickable, 1),
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
@@ -185,7 +185,7 @@ class ReplenishmentService {
       const maxQty = rule?.maxQty ?? tierDefault?.maxQty ?? null;
       const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
       const priority = rule?.priority ?? tierDefault?.priority ?? 5;
-      const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "bulk_storage";
+      const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
       const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
       // Find a source location with stock (try dedicated parent first)
@@ -558,7 +558,7 @@ class ReplenishmentService {
       .where(eq(warehouseLocations.id, warehouseLocationId))
       .limit(1);
 
-    if (!location || location.locationType !== "forward_pick") return null;
+    if (!location || location.locationType !== "pick") return null;
 
     // Get variant for hierarchy level
     const [variant] = await this.db
@@ -601,7 +601,7 @@ class ReplenishmentService {
     const maxQty = rule?.maxQty ?? tierDefault?.maxQty ?? null;
     const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
     const priority = rule?.priority ?? tierDefault?.priority ?? 5;
-    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "bulk_storage";
+    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
     const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
 
     // Find source location with stock (try dedicated parent first)

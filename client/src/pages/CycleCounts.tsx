@@ -119,9 +119,8 @@ export default function CycleCounts() {
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
   const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
-    { value: "forward_pick", label: "Forward Pick" },
-    { value: "bulk_storage", label: "Bulk Storage" },
-    { value: "overflow", label: "Overflow" },
+    { value: "pick", label: "Pick" },
+    { value: "reserve", label: "Reserve" },
     { value: "receiving", label: "Receiving" },
     { value: "staging", label: "Staging" },
   ];
@@ -129,8 +128,8 @@ export default function CycleCounts() {
     { value: "bin", label: "Bin" },
     { value: "pallet", label: "Pallet" },
     { value: "carton_flow", label: "Carton Flow" },
-    { value: "bulk_reserve", label: "Bulk Reserve" },
     { value: "shelf", label: "Shelf" },
+    { value: "floor", label: "Floor" },
   ];
   const [countForm, setCountForm] = useState({ countedSku: "", countedQty: "", notes: "" });
   const [skuSearch, setSkuSearch] = useState("");

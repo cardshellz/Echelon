@@ -537,7 +537,7 @@ export class DatabaseStorage implements IStorage {
 
   // NEW: Get bin location from inventory_levels instead of product_locations
   // Returns location data for picking based on where inventory actually exists
-  // CRITICAL: Prioritizes forward_pick locations over bulk_storage to ensure pickers go to pickable bins
+  // CRITICAL: Prioritizes pick locations over reserve to ensure pickers go to pickable bins
   async getBinLocationFromInventoryBySku(sku: string): Promise<{
     location: string;
     zone: string;
@@ -546,7 +546,7 @@ export class DatabaseStorage implements IStorage {
   } | undefined> {
     // Look up product variant by SKU, then find any inventory level for that variant
     // barcode and image_url are on product_variants / products
-    // Priority: forward_pick first, then bulk_storage, then by pick sequence, then by quantity
+    // Priority: pick first, then reserve, then by pick sequence, then by quantity
     const result = await db.execute<{
       location_code: string;
       zone: string | null;
@@ -567,10 +567,9 @@ export class DatabaseStorage implements IStorage {
         AND wl.is_pickable = 1
       ORDER BY
         CASE wl.location_type
-          WHEN 'forward_pick' THEN 1
-          WHEN 'overflow' THEN 2
-          WHEN 'bulk_storage' THEN 3
-          ELSE 4
+          WHEN 'pick' THEN 1
+          WHEN 'reserve' THEN 2
+          ELSE 3
         END,
         wl.is_pickable DESC,
         wl.pick_sequence ASC NULLS LAST,
@@ -687,7 +686,7 @@ export class DatabaseStorage implements IStorage {
       name: data.name,
       location: data.location.toUpperCase(),
       zone: data.zone.toUpperCase(),
-      locationType: data.locationType || "forward_pick",
+      locationType: data.locationType || "pick",
       isPrimary: data.isPrimary ?? 1,
       status: "active",
       imageUrl: data.imageUrl || null,

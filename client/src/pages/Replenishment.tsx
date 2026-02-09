@@ -169,9 +169,8 @@ interface WarehouseSettings {
 }
 
 const LOCATION_TYPES = [
-  { value: "forward_pick", label: "Forward Pick" },
-  { value: "bulk_storage", label: "Bulk Storage" },
-  { value: "overflow", label: "Overflow" },
+  { value: "pick", label: "Pick" },
+  { value: "reserve", label: "Reserve" },
   { value: "receiving", label: "Receiving" },
   { value: "staging", label: "Staging" },
 ];
@@ -212,8 +211,8 @@ export default function Replenishment() {
   const [tierDefaultForm, setTierDefaultForm] = useState({
     hierarchyLevel: "1",
     sourceHierarchyLevel: "3",
-    pickLocationType: "forward_pick",
-    sourceLocationType: "bulk_storage",
+    pickLocationType: "pick",
+    sourceLocationType: "reserve",
     sourcePriority: "fifo",
     minQty: "0",
     maxQty: "",
@@ -622,8 +621,8 @@ export default function Replenishment() {
     setTierDefaultForm({
       hierarchyLevel: "1",
       sourceHierarchyLevel: "3",
-      pickLocationType: "forward_pick",
-      sourceLocationType: "bulk_storage",
+      pickLocationType: "pick",
+      sourceLocationType: "reserve",
       sourcePriority: "fifo",
       minQty: "0",
       maxQty: "",
@@ -1779,8 +1778,8 @@ export default function Replenishment() {
                 className="w-full sm:w-auto min-h-[44px]"
                 onClick={() => {
                   const headers = "product_sku,pick_variant_sku,source_variant_sku,pick_location_type,source_location_type,source_priority,min_qty,max_qty,replen_method,priority";
-                  const example = "SHELL-001,SHELL-001-EA,SHELL-001-CS12,forward_pick,bulk_storage,fifo,5,60,case_break,5";
-                  const instructions = "# INSTRUCTIONS - Delete this row before uploading\n# product_sku: Product SKU from your catalog (REQUIRED)\n# pick_variant_sku: SKU of the variant to pick INTO (eaches) (REQUIRED)\n# source_variant_sku: SKU of the variant to pick FROM (cases) (REQUIRED)\n# pick_location_type: forward_pick or bin (default: forward_pick)\n# source_location_type: bulk_storage or pallet (default: bulk_storage)\n# source_priority: fifo (oldest first) or smallest_first (consolidate partials) (default: fifo)\n# min_qty: Trigger replen when qty drops below this (default: 0)\n# max_qty: Fill up to this qty (leave empty to replen 1 source unit)\n# replen_method: case_break, full_case, or pallet_drop (default: case_break)\n# priority: 1-10 where 1 is highest priority (default: 5)";
+                  const example = "SHELL-001,SHELL-001-EA,SHELL-001-CS12,pick,reserve,fifo,5,60,case_break,5";
+                  const instructions = "# INSTRUCTIONS - Delete this row before uploading\n# product_sku: Product SKU from your catalog (REQUIRED)\n# pick_variant_sku: SKU of the variant to pick INTO (eaches) (REQUIRED)\n# source_variant_sku: SKU of the variant to pick FROM (cases) (REQUIRED)\n# pick_location_type: pick or bin (default: pick)\n# source_location_type: reserve or pallet (default: reserve)\n# source_priority: fifo (oldest first) or smallest_first (consolidate partials) (default: fifo)\n# min_qty: Trigger replen when qty drops below this (default: 0)\n# max_qty: Fill up to this qty (leave empty to replen 1 source unit)\n# replen_method: case_break, full_case, or pallet_drop (default: case_break)\n# priority: 1-10 where 1 is highest priority (default: 5)";
                   const csv = instructions + "\n" + headers + "\n" + example;
                   const blob = new Blob([csv], { type: 'text/csv' });
                   const url = URL.createObjectURL(blob);
@@ -1825,12 +1824,12 @@ export default function Replenishment() {
                 </div>
                 <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
                   <code className="text-xs bg-muted px-1 rounded">pick_location_type</code>
-                  <span className="text-muted-foreground">forward_pick, bin (default: forward_pick)</span>
+                  <span className="text-muted-foreground">pick, bin (default: pick)</span>
                   <span className="text-center text-muted-foreground">No</span>
                 </div>
                 <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">
                   <code className="text-xs bg-muted px-1 rounded">source_location_type</code>
-                  <span className="text-muted-foreground">bulk_storage, pallet (default: bulk_storage)</span>
+                  <span className="text-muted-foreground">reserve, pallet (default: reserve)</span>
                   <span className="text-center text-muted-foreground">No</span>
                 </div>
                 <div className="grid grid-cols-[140px,1fr,80px] gap-2 px-4 py-2">

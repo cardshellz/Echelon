@@ -1,17 +1,17 @@
 export type ActionFilter =
   | "all"
   | "negative_inventory"
-  | "empty_pick_face"
-  | "stale_bin"
-  | "pending_replen"
-  | "unassigned";
+  | "aging_receiving"
+  | "pallet_drop"
+  | "stuck_replen"
+  | "stale_bin";
 
 export interface ActionQueueCounts {
   negative_inventory: number;
-  empty_pick_face: number;
+  aging_receiving: number;
+  pallet_drop: number;
+  stuck_replen: number;
   stale_bin: number;
-  pending_replen: number;
-  unassigned: number;
 }
 
 export interface ActionQueueItem {
@@ -26,11 +26,13 @@ export interface ActionQueueItem {
   name: string | null;
   qty: number | null;
   detail: string | null;
-  action: "adjust" | "replenish" | "move";
+  action: "adjust" | "replenish" | "move" | "investigate";
   bulkAvailable: number | null;
   pendingReplenStatus: string | null;
   daysSinceMovement: number | null;
   skuCount: number | null;
+  hoursAging: number | null;
+  taskId: number | null;
 }
 
 export interface ActionQueueResponse {

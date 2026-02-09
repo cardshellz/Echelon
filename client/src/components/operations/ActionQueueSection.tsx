@@ -2,14 +2,15 @@ import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  PackageX,
-  RefreshCw,
+  PackageCheck,
+  ArrowDown,
   Clock,
   ArrowLeftRight,
   Edit,
   ArrowRight,
   ListChecks,
-  X,
+  Timer,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -40,9 +41,9 @@ interface ActionQueueSectionProps {
 
 const TYPE_CONFIG: Record<string, { label: string; badge: string; icon: typeof AlertTriangle }> = {
   negative_inventory: { label: "Negative Inv", badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", icon: AlertTriangle },
-  empty_pick_face: { label: "Empty Pick", badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", icon: PackageX },
-  pending_replen: { label: "Low Stock", badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400", icon: RefreshCw },
-  unassigned: { label: "Unassigned", badge: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400", icon: PackageX },
+  aging_receiving: { label: "Aging Recv", badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", icon: PackageCheck },
+  pallet_drop: { label: "Pallet Drop", badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400", icon: ArrowDown },
+  stuck_replen: { label: "Stuck Replen", badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400", icon: Timer },
   stale_bin: { label: "Stale", badge: "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400", icon: Clock },
 };
 
@@ -57,14 +58,15 @@ const ACTION_LABELS: Record<string, { label: string; icon: typeof Edit }> = {
   adjust: { label: "Fix", icon: Edit },
   replenish: { label: "Replen", icon: ArrowRight },
   move: { label: "Move", icon: ArrowLeftRight },
+  investigate: { label: "View", icon: Search },
 };
 
 const FILTER_LABELS: Record<string, string> = {
   negative_inventory: "Negative Inventory",
-  empty_pick_face: "Empty Pick Faces",
-  pending_replen: "Pending Replen",
+  aging_receiving: "Aging Receiving",
+  pallet_drop: "Pallet Drop Needed",
+  stuck_replen: "Stuck Replen Tasks",
   stale_bin: "Stale Bins",
-  unassigned: "Unassigned",
 };
 
 export default function ActionQueueSection({
@@ -111,18 +113,34 @@ export default function ActionQueueSection({
       case "negative_inventory":
         onAdjust(item.locationId, item.locationCode, item.variantId!, item.sku!, item.qty!);
         break;
-      case "empty_pick_face":
-        onTransferTo(item.locationId, item.locationCode);
+      case "aging_receiving":
+        // Put away from receiving/staging to a pick or reserve location
+        onTransferFrom(item.locationId, item.locationCode, item.variantId!, item.sku!);
         break;
-      case "pending_replen":
+      case "pallet_drop":
+        // Transfer from reserve (air pallet) to floor pallet location
         onTransferTo(item.locationId, item.locationCode, item.variantId!, item.sku!);
         break;
-      case "unassigned":
-        onTransferFrom(item.locationId, item.locationCode, item.variantId!, item.sku!);
+      case "stuck_replen":
+        // View the stuck task — open transfer dialog with pre-filled source/dest
+        if (item.variantId && item.sku) {
+          onTransferTo(item.locationId, item.locationCode, item.variantId, item.sku);
+        }
         break;
       case "stale_bin":
         onTransferFrom(item.locationId, item.locationCode);
         break;
+    }
+  };
+
+  const getMobileActionLabel = (type: string) => {
+    switch (type) {
+      case "negative_inventory": return "Fix";
+      case "aging_receiving": return "Put Away";
+      case "pallet_drop": return "Drop Pallet";
+      case "stuck_replen": return "View Task";
+      case "stale_bin": return "Move";
+      default: return "Act";
     }
   };
 
@@ -150,12 +168,12 @@ export default function ActionQueueSection({
           <TableHeader>
             <TableRow>
               <TableHead className="w-[32px]"></TableHead>
-              <TableHead className="w-[100px]">Type</TableHead>
+              <TableHead className="w-[110px]">Type</TableHead>
               <TableHead>Location</TableHead>
               <TableHead>SKU</TableHead>
               <TableHead>Details</TableHead>
               <TableHead className="text-right w-[80px]">Qty</TableHead>
-              {canEdit && <TableHead className="w-[90px]"></TableHead>}
+              {canEdit && <TableHead className="w-[100px]"></TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -272,10 +290,7 @@ export default function ActionQueueSection({
                       onClick={() => handleAction(item)}
                     >
                       <ActionIcon className="h-3 w-3 mr-1" />
-                      {item.type === "negative_inventory" ? "Fix" :
-                       item.type === "empty_pick_face" ? "Replenish" :
-                       item.type === "pending_replen" ? "Replenish" :
-                       item.type === "unassigned" ? "Put Away" : "Move"}
+                      {getMobileActionLabel(item.type)}
                     </Button>
                   </div>
                 )}

@@ -81,9 +81,8 @@ interface BinInventorySectionProps {
 
 const LOCATION_TYPES = [
   { value: "all", label: "All Types" },
-  { value: "forward_pick", label: "Forward Pick" },
-  { value: "bulk_storage", label: "Bulk Storage" },
-  { value: "overflow", label: "Overflow" },
+  { value: "pick", label: "Pick" },
+  { value: "reserve", label: "Reserve" },
   { value: "receiving", label: "Receiving" },
   { value: "staging", label: "Staging" },
 ];
@@ -170,9 +169,8 @@ export default function BinInventorySection({
 
   const locationTypeBadge = (type: string) => {
     const colors: Record<string, string> = {
-      forward_pick: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
-      bulk_storage: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-      overflow: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
+      pick: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+      reserve: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
       receiving: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
       staging: "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400",
     };
