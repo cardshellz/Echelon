@@ -70,7 +70,7 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
     setAdjustDialog({ open: true, locationId, locationCode, variantId, sku, currentQty });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 flex-1 overflow-auto pb-6">
       <OpsKpiCards data={healthQuery.data} isLoading={healthQuery.isLoading} />
 
       <BinInventorySection
