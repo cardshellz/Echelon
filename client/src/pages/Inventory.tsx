@@ -256,6 +256,40 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   );
 }
 
+/** Compact purchasing summary for the summary bar (deduplicates with PurchasingView query) */
+function PurchasingSummary() {
+  const { data } = useQuery<{
+    summary: { belowReorderPoint: number; orderSoon: number; noMovement: number };
+  }>({
+    queryKey: ["/api/purchasing/reorder-analysis", 90],
+    queryFn: async () => {
+      const res = await fetch("/api/purchasing/reorder-analysis?lookbackDays=90", { credentials: "include" });
+      if (!res.ok) throw new Error("Failed");
+      return res.json();
+    },
+    staleTime: 60_000,
+  });
+  if (!data) return null;
+  const { belowReorderPoint, orderSoon, noMovement } = data.summary;
+  return (
+    <>
+      {belowReorderPoint > 0 ? (
+        <span className="text-red-600 font-medium">{belowReorderPoint} need ordering</span>
+      ) : (
+        <span>0 need ordering</span>
+      )}
+      <span className="text-muted-foreground/40">·</span>
+      {orderSoon > 0 ? (
+        <span className="text-amber-600 font-medium">{orderSoon} order soon</span>
+      ) : (
+        <span>0 order soon</span>
+      )}
+      <span className="text-muted-foreground/40">·</span>
+      <span>{noMovement} no movement</span>
+    </>
+  );
+}
+
 export default function Inventory() {
   const [, navigate] = useLocation();
   const [searchQuery, setSearchQuery] = useState("");
@@ -371,24 +405,22 @@ export default function Inventory() {
     queryKey: ["/api/warehouses"],
   });
 
-  const { data: inventorySummary = [], isLoading: loadingInventory, refetch: refetchInventory } = useQuery<InventoryItemSummary[]>({
-    queryKey: ["/api/inventory/summary", selectedWarehouseId],
+  // Location health for summary bar (React Query deduplicates with OperationsView)
+  const { data: locationHealth } = useQuery<{
+    totalLocations: number;
+    occupiedLocations: number;
+    transfersToday: number;
+    adjustmentsToday: number;
+  }>({
+    queryKey: ["/api/operations/location-health", selectedWarehouseId],
     queryFn: async () => {
-      const url = selectedWarehouseId 
-        ? `/api/inventory/summary?warehouseId=${selectedWarehouseId}`
-        : "/api/inventory/summary";
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) throw new Error("Failed to fetch inventory summary");
-      return response.json();
+      const params = new URLSearchParams();
+      if (selectedWarehouseId) params.set("warehouseId", selectedWarehouseId.toString());
+      const res = await fetch(`/api/operations/location-health?${params}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch location health");
+      return res.json();
     },
-  });
-
-  const { data: locations = [], isLoading: loadingLocations } = useQuery<WarehouseLocation[]>({
-    queryKey: ["/api/inventory/locations"],
-  });
-
-  const { data: variants = [] } = useQuery<ProductVariant[]>({
-    queryKey: ["/api/product-variants"],
+    staleTime: 30_000,
   });
 
   const { data: variantLevels = [], isLoading: loadingVariantLevels } = useQuery<VariantLevel[]>({
@@ -401,7 +433,7 @@ export default function Inventory() {
       if (!response.ok) throw new Error("Failed to fetch inventory levels");
       return response.json();
     },
-    enabled: activeTab === "physical",
+    staleTime: 30_000,
   });
 
   const createItemMutation = useMutation({
@@ -427,7 +459,7 @@ export default function Inventory() {
     },
     onSuccess: () => {
       toast({ title: "Inventory adjusted successfully" });
-      queryClient.invalidateQueries({ queryKey: ["/api/inventory/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       setAdjustDialogOpen(false);
       setSelectedItem(null);
       setAdjustmentQty("");
@@ -455,10 +487,9 @@ export default function Inventory() {
     },
   });
 
-  const totalOnHand = inventorySummary.reduce((sum, item) => sum + Number(item.totalOnHandPieces || 0), 0);
-  const totalReserved = inventorySummary.reduce((sum, item) => sum + Number(item.totalReservedPieces || 0), 0);
-  const totalATP = inventorySummary.reduce((sum, item) => sum + Number(item.totalAtpPieces || 0), 0);
-  const lowStockItems = inventorySummary.filter(item => Number(item.totalAtpPieces || 0) <= 0).length;
+  // Summary bar stats derived from tab data
+  const lowStockCount = variantLevels.filter(v => v.available <= 0 && v.variantQty > 0).length;
+  const oosCount = variantLevels.filter(v => v.variantQty === 0).length;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -490,23 +521,11 @@ export default function Inventory() {
       return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
     });
 
-  const handleAdjustClick = (item: InventoryItemSummary) => {
-    setSelectedItem(item);
-    setAdjustDialogOpen(true);
-  };
-
   const handleAdjustSubmit = () => {
     if (!selectedItem || !adjustmentQty || !adjustmentReason) return;
-    
-    const firstLocation = locations[0];
-    if (!firstLocation) {
-      toast({ title: "No warehouse location available", variant: "destructive" });
-      return;
-    }
-    
     adjustInventoryMutation.mutate({
       productVariantId: selectedItem.productVariantId,
-      warehouseLocationId: firstLocation.id,
+      warehouseLocationId: 0,
       qtyDelta: parseInt(adjustmentQty),
       reason: adjustmentReason,
     });
@@ -558,92 +577,20 @@ export default function Inventory() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <div className="border-b bg-card p-4 md:p-6 pb-4 shrink-0">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-          <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-tight flex items-center gap-2">
-              <Package className="h-5 w-5 md:h-6 md:w-6 text-primary" />
-              Inventory Management
-            </h1>
-            <p className="text-muted-foreground mt-1 text-sm">
-              Manage stock levels, locations, and inventory adjustments.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => refetchInventory()}>
-              <RefreshCw size={16} className="mr-1" /> <span className="hidden sm:inline">Refresh</span>
-            </Button>
-            <Button 
-              variant="outline" 
-              size="sm"
-              onClick={() => migrateLocationsMutation.mutate()}
-              disabled={migrateLocationsMutation.isPending}
-              data-testid="button-sync-locations"
-            >
-              <MapPin size={16} className="mr-1" /> 
-              <span className="hidden sm:inline">{migrateLocationsMutation.isPending ? "Syncing..." : "Sync Locations"}</span>
-              <span className="sm:hidden">{migrateLocationsMutation.isPending ? "..." : "Sync"}</span>
-            </Button>
-            <Button variant="outline" size="sm" className="gap-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
-              <Upload size={16} /> <span className="hidden sm:inline">Upload CSV</span>
-            </Button>
-            <Button variant="outline" size="sm" className="gap-2" onClick={() => setExportDialogOpen(true)} data-testid="button-export">
-              <Download size={16} /> <span className="hidden sm:inline">Export</span>
-            </Button>
-            <Button size="sm" className="gap-2" onClick={() => navigate("/receiving")} data-testid="button-receive-stock">
-              <Plus size={16} /> <span className="hidden sm:inline">Receive Stock</span>
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-4">
-          <div className="bg-muted/30 p-3 rounded-lg border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <Boxes size={12} /> Total SKUs
-            </div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">{variants.length}</div>
-          </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <Package size={12} /> Total On Hand
-            </div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">{totalOnHand.toLocaleString()}</div>
-          </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <AlertTriangle size={12} /> Low/Out of Stock
-            </div>
-            <div className="text-2xl font-bold font-mono text-amber-600 mt-1">{lowStockItems}</div>
-          </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <MapPin size={12} /> Locations
-            </div>
-            <div className="text-2xl font-bold font-mono text-foreground mt-1">{locations.length}</div>
-          </div>
-        </div>
-
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mt-6">
-          <div className="flex items-center gap-2 flex-1 max-w-2xl">
-            <div className="relative flex-1 max-w-sm">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
-              <Input 
-                placeholder="Search by SKU or Name..." 
-                className="pl-9 h-11 w-full"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-              />
-            </div>
-            <Select 
-              value={selectedWarehouseId?.toString() || "all"} 
+      <div className="border-b bg-card px-4 md:px-6 py-3 shrink-0 space-y-2">
+        {/* Row 1: Title + warehouse filter + action buttons */}
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-lg font-bold tracking-tight flex items-center gap-2 shrink-0">
+            <Package className="h-5 w-5 text-primary" />
+            Inventory
+          </h1>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Select
+              value={selectedWarehouseId?.toString() || "all"}
               onValueChange={(v) => setSelectedWarehouseId(v === "all" ? null : parseInt(v))}
             >
-              <SelectTrigger className="w-[180px] h-11" data-testid="select-warehouse-filter">
-                <Building2 className="h-4 w-4 mr-2 text-muted-foreground" />
+              <SelectTrigger className="w-[160px] h-8 text-xs" data-testid="select-warehouse-filter">
+                <Building2 className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
                 <SelectValue placeholder="All Warehouses" />
               </SelectTrigger>
               <SelectContent>
@@ -655,14 +602,58 @@ export default function Inventory() {
                 ))}
               </SelectContent>
             </Select>
+            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => {
+              queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/operations"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/purchasing"] });
+            }}>
+              <RefreshCw size={14} />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 px-2"
+              onClick={() => migrateLocationsMutation.mutate()}
+              disabled={migrateLocationsMutation.isPending}
+              data-testid="button-sync-locations"
+            >
+              <MapPin size={14} className="mr-1" />
+              <span className="hidden lg:inline text-xs">{migrateLocationsMutation.isPending ? "Syncing..." : "Sync"}</span>
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
+              <Upload size={14} />
+              <span className="hidden lg:inline text-xs ml-1">Upload</span>
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setExportDialogOpen(true)} data-testid="button-export">
+              <Download size={14} />
+              <span className="hidden lg:inline text-xs ml-1">Export</span>
+            </Button>
+            <Button size="sm" className="h-8 px-2" onClick={() => navigate("/receiving")} data-testid="button-receive-stock">
+              <Plus size={14} />
+              <span className="hidden lg:inline text-xs ml-1">Receive</span>
+            </Button>
           </div>
-          
+        </div>
+
+        {/* Row 2: Search bar */}
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
+          <Input
+            placeholder="Search by SKU or Name..."
+            className="pl-9 h-9 w-full"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+          />
         </div>
       </div>
 
-      <div className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col min-h-0">
+      <div className="flex-1 px-4 md:px-6 pt-2 pb-4 overflow-hidden flex flex-col min-h-0">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
-          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent mb-4">
+          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="physical"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
@@ -685,6 +676,45 @@ export default function Inventory() {
               Operations
             </TabsTrigger>
           </TabsList>
+
+          {/* Compact summary bar — context changes per active tab */}
+          <div className="flex items-center gap-3 text-xs text-muted-foreground py-2 px-1">
+            {activeTab === "physical" && (
+              <>
+                <span>{variantLevels.length} SKUs</span>
+                <span className="text-muted-foreground/40">·</span>
+                {lowStockCount > 0 ? (
+                  <span className="text-amber-600 font-medium">{lowStockCount} low stock</span>
+                ) : (
+                  <span>0 low stock</span>
+                )}
+                <span className="text-muted-foreground/40">·</span>
+                {oosCount > 0 ? (
+                  <span className="text-red-600 font-medium">{oosCount} out of stock</span>
+                ) : (
+                  <span>0 out of stock</span>
+                )}
+                {locationHealth && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <span>{locationHealth.occupiedLocations}/{locationHealth.totalLocations} locations</span>
+                  </>
+                )}
+              </>
+            )}
+            {activeTab === "purchasing" && (
+              <PurchasingSummary />
+            )}
+            {activeTab === "operations" && locationHealth && (
+              <>
+                <span>{locationHealth.occupiedLocations}/{locationHealth.totalLocations} locations</span>
+                <span className="text-muted-foreground/40">·</span>
+                <span>{locationHealth.transfersToday} transfers today</span>
+                <span className="text-muted-foreground/40">·</span>
+                <span>{locationHealth.adjustmentsToday} adjustments today</span>
+              </>
+            )}
+          </div>
 
           {/* ====== TAB 1: Physical Inventory ====== */}
           <TabsContent value="physical" className="flex-1 flex flex-col mt-0 min-h-0">

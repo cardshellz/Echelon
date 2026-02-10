@@ -32,6 +32,7 @@ import type {
 interface ActionQueueSectionProps {
   warehouseId: number | null;
   activeFilter: ActionFilter;
+  searchQuery?: string;
   canEdit: boolean;
   onTransferFrom: (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) => void;
   onTransferTo: (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string) => void;
@@ -72,6 +73,7 @@ const FILTER_LABELS: Record<string, string> = {
 export default function ActionQueueSection({
   warehouseId,
   activeFilter,
+  searchQuery,
   canEdit,
   onTransferFrom,
   onTransferTo,
@@ -81,15 +83,16 @@ export default function ActionQueueSection({
   const [page, setPage] = useState(1);
   const pageSize = 50;
 
-  // Reset page when filter changes
-  useEffect(() => { setPage(1); }, [activeFilter]);
+  // Reset page when filter or search changes
+  useEffect(() => { setPage(1); }, [activeFilter, searchQuery]);
 
   const { data, isLoading } = useQuery<ActionQueueResponse>({
-    queryKey: ["/api/operations/action-queue", warehouseId, activeFilter, page],
+    queryKey: ["/api/operations/action-queue", warehouseId, activeFilter, searchQuery, page],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (warehouseId) params.set("warehouseId", warehouseId.toString());
       params.set("filter", activeFilter);
+      if (searchQuery) params.set("search", searchQuery);
       params.set("page", page.toString());
       params.set("pageSize", pageSize.toString());
       params.set("sortField", "priority");

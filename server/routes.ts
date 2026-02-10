@@ -10913,7 +10913,18 @@ export async function registerRoutes(
       const orderClause = sql.raw(`${sortExpr} ${sortDir} NULLS LAST`);
 
       const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
-      const filterClause = safeFilter !== "all" ? sql`WHERE type = ${safeFilter}` : sql``;
+      const searchTerm = (req.query.search as string) || "";
+      const hasTypeFilter = safeFilter !== "all";
+      const hasSearch = searchTerm.length > 0;
+      const searchPattern = `%${searchTerm}%`;
+      // Build WHERE clause combining type filter and search
+      const filterClause = hasTypeFilter && hasSearch
+        ? sql`WHERE type = ${safeFilter} AND (sku ILIKE ${searchPattern} OR location_code ILIKE ${searchPattern} OR name ILIKE ${searchPattern})`
+        : hasTypeFilter
+          ? sql`WHERE type = ${safeFilter}`
+          : hasSearch
+            ? sql`WHERE sku ILIKE ${searchPattern} OR location_code ILIKE ${searchPattern} OR name ILIKE ${searchPattern}`
+            : sql``;
 
       // Counts query — always all 5 types (lightweight, for KPI badges)
       const countsPromise = db.execute(sql`

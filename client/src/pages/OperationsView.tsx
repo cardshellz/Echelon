@@ -4,7 +4,6 @@ import { useAuth } from "@/lib/auth";
 import OpsKpiCards from "@/components/operations/OpsKpiCards";
 import ActionQueueSection from "@/components/operations/ActionQueueSection";
 import BinInventorySection from "@/components/operations/BinInventorySection";
-import SkuLocatorSection from "@/components/operations/SkuLocatorSection";
 import RecentActivitySection from "@/components/operations/RecentActivitySection";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import InlineAdjustDialog from "@/components/operations/InlineAdjustDialog";
@@ -86,6 +85,7 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
       <ActionQueueSection
         warehouseId={warehouseId}
         activeFilter={activeFilter}
+        searchQuery={searchQuery}
         canEdit={canEdit}
         onTransferFrom={openTransferFrom}
         onTransferTo={openTransferTo}
@@ -93,16 +93,6 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         onCountsLoaded={setQueueCounts}
       />
 
-      {/* Visual divider */}
-      <div className="flex items-center gap-3 pt-2">
-        <div className="h-px flex-1 bg-border" />
-        <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-          Inventory Tools
-        </span>
-        <div className="h-px flex-1 bg-border" />
-      </div>
-
-      {/* Bottom zone: lookup tools */}
       <BinInventorySection
         warehouseId={warehouseId}
         searchQuery={searchQuery}
@@ -110,11 +100,6 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         onTransfer={openTransferFrom}
         onAdjust={openAdjust}
         onViewActivity={(locationId) => setActivityLocationId(locationId)}
-      />
-
-      <SkuLocatorSection
-        canEdit={canEdit}
-        onTransfer={openTransferFrom}
       />
 
       <RecentActivitySection

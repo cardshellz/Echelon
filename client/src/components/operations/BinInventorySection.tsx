@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   MoreHorizontal,
@@ -9,10 +9,8 @@ import {
   Edit,
   History,
   Filter,
-  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -110,8 +108,6 @@ export default function BinInventorySection({
   const [page, setPage] = useState(1);
   const [locationType, setLocationType] = useState("all");
   const [hasInventory, setHasInventory] = useState("all");
-  const [binSearch, setBinSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sortField, setSortField] = useState("code");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const pageSize = 50;
@@ -131,16 +127,7 @@ export default function BinInventorySection({
     return sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />;
   };
 
-  // Debounce bin search input (300ms)
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(binSearch);
-      setPage(1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [binSearch]);
-
-  const effectiveSearch = debouncedSearch || searchQuery;
+  const effectiveSearch = searchQuery;
 
   const { data, isLoading } = useQuery<BinInventoryResponse>({
     queryKey: ["/api/operations/bin-inventory", warehouseId, locationType, hasInventory, effectiveSearch, page, sortField, sortDir],
@@ -197,15 +184,6 @@ export default function BinInventorySection({
           )}
         </div>
         <div className="flex flex-wrap gap-2">
-          <div className="relative w-[200px]">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search bins..."
-              value={binSearch}
-              onChange={(e) => setBinSearch(e.target.value)}
-              className="pl-9 h-9"
-            />
-          </div>
           <Select value={locationType} onValueChange={(v) => { setLocationType(v); setPage(1); }}>
             <SelectTrigger className="w-[160px] h-9">
               <Filter className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
