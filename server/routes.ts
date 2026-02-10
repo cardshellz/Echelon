@@ -4172,7 +4172,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
       const variants = await storage.getProductVariantsByProductId(id);
-      res.json({ ...product, variants });
+
+      // Look up linked catalog product via any variant's productVariantId
+      let catalogProduct = null;
+      let assets: any[] = [];
+      for (const v of variants) {
+        const cp = await storage.getCatalogProductByProductVariantId(v.id);
+        if (cp) {
+          catalogProduct = cp;
+          assets = await storage.getCatalogAssetsByProductId(cp.id);
+          break;
+        }
+      }
+
+      res.json({ ...product, productId: product.id, variants, catalogProduct, assets });
     } catch (error) {
       console.error("Error fetching product:", error);
       res.status(500).json({ error: "Failed to fetch product" });
@@ -4874,45 +4887,7 @@ export async function registerRoutes(
     }
   });
 
-  // Single product with all related data (for detail views) - uses catalog_products as master
-  app.get("/api/products/:id", async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const catalogProduct = await storage.getCatalogProductById(id);
-
-      if (!catalogProduct) {
-        return res.status(404).json({ error: "Product not found" });
-      }
-
-      // Get linked product variant and parent product
-      const linkedVariant = catalogProduct.productVariantId
-        ? await storage.getProductVariantById(catalogProduct.productVariantId)
-        : null;
-      const parentProduct = linkedVariant
-        ? await storage.getProductById(linkedVariant.productId)
-        : null;
-      const assets = await storage.getCatalogAssetsByProductId(catalogProduct.id);
-      const variants = parentProduct
-        ? await storage.getProductVariantsByProductId(parentProduct.id)
-        : [];
-
-      res.json({
-        id: catalogProduct.id,
-        baseSku: catalogProduct.sku,
-        name: catalogProduct.title,
-        imageUrl: parentProduct?.imageUrl || null,
-        active: catalogProduct.status === "active" ? 1 : 0,
-        description: catalogProduct.description,
-        baseUnit: parentProduct?.baseUnit || "each",
-        catalogProduct,
-        variants,
-        assets,
-      });
-    } catch (error) {
-      console.error("Error fetching product:", error);
-      res.status(500).json({ error: "Failed to fetch product" });
-    }
-  });
+  // NOTE: Duplicate GET /api/products/:id removed — catalog data now included in the primary handler above
 
   // Products with joined data (for list views) - uses catalog_products as master
   app.get("/api/products", async (req, res) => {
@@ -6582,8 +6557,8 @@ export async function registerRoutes(
     "company_name", "company_address", "company_city", "company_state", 
     "company_postal_code", "company_country", "default_timezone", 
     "default_warehouse_id", "low_stock_threshold", "critical_stock_threshold",
-    "enable_low_stock_alerts", "allow_multiple_skus_per_bin", "picking_batch_size", 
-    "auto_release_delay_minutes"
+    "enable_low_stock_alerts", "allow_multiple_skus_per_bin", "picking_batch_size",
+    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_qty"
   ] as const;
 
   const settingsUpdateSchema = z.record(

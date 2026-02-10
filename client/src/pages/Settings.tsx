@@ -45,6 +45,8 @@ export default function Settings() {
     allow_multiple_skus_per_bin: "true",
     picking_batch_size: "20",
     auto_release_delay_minutes: "30",
+    default_lead_time_days: "120",
+    default_safety_stock_qty: "0",
   });
 
   const { data: settings, isLoading } = useQuery<Settings>({
@@ -340,6 +342,43 @@ export default function Settings() {
                     data-testid="input-critical-stock-threshold"
                   />
                   <p className="text-xs text-muted-foreground">Items at or below this level are flagged as critical</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Procurement Defaults</CardTitle>
+              <CardDescription>Default lead time and safety stock for products without overrides</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="default_lead_time_days" className="text-sm">Default Lead Time (days)</Label>
+                  <Input
+                    id="default_lead_time_days"
+                    type="number"
+                    value={formData.default_lead_time_days || "120"}
+                    onChange={(e) => setFormData({ ...formData, default_lead_time_days: e.target.value })}
+                    disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">Products without a specific lead time will use this value</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="default_safety_stock_qty" className="text-sm">Default Safety Stock (units)</Label>
+                  <Input
+                    id="default_safety_stock_qty"
+                    type="number"
+                    value={formData.default_safety_stock_qty || "0"}
+                    onChange={(e) => setFormData({ ...formData, default_safety_stock_qty: e.target.value })}
+                    disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">Products without specific safety stock will use this value</p>
                 </div>
               </div>
             </CardContent>
