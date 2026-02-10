@@ -6970,27 +6970,34 @@ export async function registerRoutes(
         ORDER BY pv.sku
       `);
       
-      // Reserved and Picked now come directly from inventory_levels (bin-level truth)
-      const levels = inventoryResult.rows.map(row => {
-        const variantQty = parseInt(row.total_variant_qty) || 0;
-        const reservedQty = parseInt(row.total_reserved_qty) || 0;
-        const pickedQty = parseInt(row.total_picked_qty) || 0;
-        const available = variantQty - reservedQty - pickedQty;
+      // Build per-variant rows
+      const levels = inventoryResult.rows.map(row => ({
+        variantId: row.variant_id,
+        sku: row.variant_sku,
+        name: row.variant_name,
+        unitsPerVariant: row.units_per_variant || 1,
+        baseSku: row.base_sku,
+        productId: row.product_id,
+        variantQty: parseInt(row.total_variant_qty) || 0,
+        reservedQty: parseInt(row.total_reserved_qty) || 0,
+        pickedQty: parseInt(row.total_picked_qty) || 0,
+        available: 0, // set below from fungible ATP
+        locationCount: parseInt(row.location_count) || 0,
+        pickableQty: parseInt(row.pickable_variant_qty) || 0,
+      }));
 
-        return {
-          variantId: row.variant_id,
-          sku: row.variant_sku,
-          name: row.variant_name,
-          unitsPerVariant: row.units_per_variant || 1,
-          baseSku: row.base_sku,
-          variantQty,
-          reservedQty,
-          pickedQty,
-          available,
-          locationCount: parseInt(row.location_count) || 0,
-          pickableQty: parseInt(row.pickable_variant_qty) || 0,
-        };
-      });
+      // Use inventory-atp service for fungible ATP (accounts for reserved+picked+packed)
+      const { atp } = app.locals.services as any;
+      const productIds = Array.from(new Set(levels.filter(l => l.productId != null).map(l => l.productId as number)));
+      const atpMap: Map<number, number> = productIds.length > 0 ? await atp.getBulkAtp(productIds) : new Map();
+
+      for (const lv of levels) {
+        if (lv.productId != null && atpMap.has(lv.productId)) {
+          lv.available = Math.floor(atpMap.get(lv.productId)! / lv.unitsPerVariant);
+        } else {
+          lv.available = lv.variantQty - lv.reservedQty - lv.pickedQty;
+        }
+      }
 
       res.json(levels);
     } catch (error) {

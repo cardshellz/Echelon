@@ -488,9 +488,9 @@ export default function Inventory() {
     },
   });
 
-  // Summary bar stats derived from tab data
-  const lowStockCount = variantLevels.filter(v => v.available <= 0 && v.variantQty > 0).length;
-  const oosCount = variantLevels.filter(v => v.variantQty === 0).length;
+  // Summary bar stats — available is fungible ATP (product-pool level)
+  const lowStockCount = variantLevels.filter(v => v.available > 0 && v.available <= 3).length;
+  const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -507,8 +507,8 @@ export default function Inventory() {
       (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
     )
     .filter(v =>
-      stockFilter === "low" ? v.available <= 0 && v.variantQty > 0 :
-      stockFilter === "oos" ? v.variantQty === 0 :
+      stockFilter === "low" ? v.available > 0 && v.available <= 3 :
+      stockFilter === "oos" ? v.available <= 0 :
       true
     )
     .sort((a, b) => {
@@ -687,7 +687,12 @@ export default function Inventory() {
           <div className="flex items-center gap-3 text-xs text-muted-foreground py-2 px-1">
             {activeTab === "physical" && (
               <>
-                <span>{variantLevels.length} SKUs</span>
+                <button
+                  className={`hover:underline ${stockFilter === "all" ? "font-semibold" : ""}`}
+                  onClick={() => setStockFilter("all")}
+                >
+                  {variantLevels.length} SKUs
+                </button>
                 <span className="text-muted-foreground/40">·</span>
                 <button
                   className={`hover:underline ${stockFilter === "low" ? "underline font-semibold" : ""} ${lowStockCount > 0 ? "text-amber-600 font-medium" : ""}`}
