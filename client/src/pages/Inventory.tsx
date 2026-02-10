@@ -388,7 +388,7 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
-  const [stockFilter, setStockFilter] = useState<"all" | "low" | "oos">("all");
+  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos">("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -436,6 +436,28 @@ export default function Inventory() {
     },
     staleTime: 30_000,
   });
+
+  // Reorder analysis for low stock indicators (from purchasing logic)
+  const { data: reorderData } = useQuery<{ items: Array<{ sku: string; status: string }> }>({
+    queryKey: ["/api/purchasing/reorder-analysis"],
+    staleTime: 60_000,
+  });
+
+  const orderNowSkus = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of reorderData?.items ?? []) {
+      if (item.status === "order_now" || item.status === "stockout") set.add(item.sku);
+    }
+    return set;
+  }, [reorderData]);
+
+  const orderSoonSkus = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of reorderData?.items ?? []) {
+      if (item.status === "order_soon") set.add(item.sku);
+    }
+    return set;
+  }, [reorderData]);
 
   const createItemMutation = useMutation({
     mutationFn: async (data: { baseSku: string; name: string; description?: string }) => {
@@ -488,8 +510,9 @@ export default function Inventory() {
     },
   });
 
-  // Summary bar stats — available is fungible ATP (product-pool level)
-  const lowStockCount = variantLevels.filter(v => v.available > 0 && v.available <= 3).length;
+  // Summary bar stats — driven by purchasing reorder analysis (product-level DOC)
+  const orderNowCount = variantLevels.filter(v => v.baseSku && orderNowSkus.has(v.baseSku)).length;
+  const orderSoonCount = variantLevels.filter(v => v.baseSku && orderSoonSkus.has(v.baseSku)).length;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
   // BaseSkus where any variant has stock (expandable to show fungible pool)
@@ -516,7 +539,8 @@ export default function Inventory() {
       (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
     )
     .filter(v =>
-      stockFilter === "low" ? v.available > 0 && v.available <= 3 :
+      stockFilter === "order_now" ? (v.baseSku && orderNowSkus.has(v.baseSku)) :
+      stockFilter === "order_soon" ? (v.baseSku && orderSoonSkus.has(v.baseSku)) :
       stockFilter === "oos" ? v.available <= 0 :
       true
     )
@@ -704,10 +728,17 @@ export default function Inventory() {
                 </button>
                 <span className="text-muted-foreground/40">·</span>
                 <button
-                  className={`hover:underline ${stockFilter === "low" ? "underline font-semibold" : ""} ${lowStockCount > 0 ? "text-amber-600 font-medium" : ""}`}
-                  onClick={() => setStockFilter(stockFilter === "low" ? "all" : "low")}
+                  className={`hover:underline ${stockFilter === "order_now" ? "underline font-semibold" : ""} ${orderNowCount > 0 ? "text-red-600 font-medium" : ""}`}
+                  onClick={() => setStockFilter(stockFilter === "order_now" ? "all" : "order_now")}
                 >
-                  {lowStockCount} low stock
+                  {orderNowCount} order now
+                </button>
+                <span className="text-muted-foreground/40">·</span>
+                <button
+                  className={`hover:underline ${stockFilter === "order_soon" ? "underline font-semibold" : ""} ${orderSoonCount > 0 ? "text-amber-600 font-medium" : ""}`}
+                  onClick={() => setStockFilter(stockFilter === "order_soon" ? "all" : "order_soon")}
+                >
+                  {orderSoonCount} order soon
                 </button>
                 <span className="text-muted-foreground/40">·</span>
                 <button

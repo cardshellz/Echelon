@@ -6556,9 +6556,9 @@ export async function registerRoutes(
   const allowedSettingsKeys = [
     "company_name", "company_address", "company_city", "company_state", 
     "company_postal_code", "company_country", "default_timezone", 
-    "default_warehouse_id", "low_stock_threshold", "critical_stock_threshold",
-    "enable_low_stock_alerts", "allow_multiple_skus_per_bin", "picking_batch_size",
-    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_qty"
+    "default_warehouse_id",
+    "allow_multiple_skus_per_bin", "picking_batch_size",
+    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_days"
   ] as const;
 
   const settingsUpdateSchema = z.record(
@@ -11156,7 +11156,10 @@ export async function registerRoutes(
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/reorder-analysis", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const lookbackDays = parseInt(req.query.lookbackDays as string) || 90;
+      // Use velocity_lookback_days from warehouse_settings as the default lookback
+      const wsResult = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
+      const configuredLookback = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 90;
+      const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
 
       // Product-level query: aggregate inventory and velocity in base units (pieces)
       const rows = await db.execute(sql`
@@ -11165,7 +11168,7 @@ export async function registerRoutes(
           p.sku AS base_sku,
           p.name AS product_name,
           p.lead_time_days,
-          p.safety_stock_qty,
+          p.safety_stock_days,
           COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
           COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
           COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
@@ -11207,11 +11210,11 @@ export async function registerRoutes(
         const totalReserved = Number(r.total_reserved_pieces);
         const totalOutbound = Number(r.total_outbound_pieces);
         const leadTimeDays = Number(r.lead_time_days);
-        const safetyStockQty = Number(r.safety_stock_qty);
+        const safetyStockDays = Number(r.safety_stock_days);
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
         const daysOfSupply = avgDailyUsage > 0 ? Math.round(totalOnHand / avgDailyUsage) : totalOnHand > 0 ? 9999 : 0;
-        const reorderPoint = Math.ceil(leadTimeDays * avgDailyUsage) + safetyStockQty;
-        const suggestedOrderQty = Math.max(0, Math.ceil((leadTimeDays * avgDailyUsage) + safetyStockQty - totalOnHand));
+        const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+        const suggestedOrderQty = Math.max(0, Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage - totalOnHand));
 
         let status: string;
         if (avgDailyUsage === 0) {
@@ -11238,7 +11241,7 @@ export async function registerRoutes(
           avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
           daysOfSupply,
           leadTimeDays,
-          safetyStockQty,
+          safetyStockDays,
           reorderPoint,
           suggestedOrderQty,
           status,

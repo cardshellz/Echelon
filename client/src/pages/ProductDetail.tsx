@@ -61,7 +61,7 @@ interface ProductDetailData {
   imageUrl: string | null;
   isActive: boolean;
   leadTimeDays: number;
-  safetyStockQty: number;
+  safetyStockDays: number;
   catalogProduct: {
     id: number;
     title: string;
@@ -106,7 +106,7 @@ export default function ProductDetail() {
     queryKey: ["/api/settings"],
   });
   const globalDefaultLeadTime = parseInt(settings?.default_lead_time_days || "120") || 120;
-  const globalDefaultSafetyStock = parseInt(settings?.default_safety_stock_qty || "0") || 0;
+  const globalDefaultSafetyStock = parseInt(settings?.default_safety_stock_days || "7") || 7;
 
   // --- Overview edit state ---
   const [editForm, setEditForm] = useState({
@@ -115,7 +115,7 @@ export default function ProductDetail() {
     baseUnit: "",
     description: "",
     leadTimeDays: 120,
-    safetyStockQty: 0,
+    safetyStockDays: 7,
   });
   const [isDirty, setIsDirty] = useState(false);
 
@@ -127,7 +127,7 @@ export default function ProductDetail() {
         baseUnit: product.baseUnit || "piece",
         description: product.description || "",
         leadTimeDays: product.leadTimeDays ?? 120,
-        safetyStockQty: product.safetyStockQty ?? 0,
+        safetyStockDays: product.safetyStockDays ?? 7,
       });
       setIsDirty(false);
     }
@@ -150,7 +150,7 @@ export default function ProductDetail() {
           baseUnit: data.baseUnit,
           description: data.description || null,
           leadTimeDays: data.leadTimeDays,
-          safetyStockQty: data.safetyStockQty,
+          safetyStockDays: data.safetyStockDays,
         }),
       });
       if (!res.ok) throw new Error("Failed to update product");
@@ -489,16 +489,16 @@ export default function ProductDetail() {
                       </p>
                     </div>
                     <div className="space-y-1.5">
-                      <Label className="text-xs md:text-sm">Safety Stock (units)</Label>
+                      <Label className="text-xs md:text-sm">Safety Stock (days of cover)</Label>
                       <Input
                         type="number"
                         min={0}
-                        value={editForm.safetyStockQty}
-                        onChange={(e) => updateField("safetyStockQty", parseInt(e.target.value) || 0)}
+                        value={editForm.safetyStockDays}
+                        onChange={(e) => updateField("safetyStockDays", parseInt(e.target.value) || 0)}
                         className="h-9"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Default: {globalDefaultSafetyStock} units
+                        Default: {globalDefaultSafetyStock} days
                       </p>
                     </div>
                   </div>

@@ -39,7 +39,7 @@ interface ReorderItem {
   avgDailyUsage: number;
   daysOfSupply: number;
   leadTimeDays: number;
-  safetyStockQty: number;
+  safetyStockDays: number;
   reorderPoint: number;
   suggestedOrderQty: number;
   status: string;
@@ -72,14 +72,13 @@ const STATUS_CONFIG: Record<string, { label: string; className: string; priority
 
 export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
   const [statusFilter, setStatusFilter] = useState("all");
-  const [lookbackDays, setLookbackDays] = useState("90");
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const { data, isLoading } = useQuery<ReorderAnalysis>({
-    queryKey: ["/api/purchasing/reorder-analysis", lookbackDays],
+    queryKey: ["/api/purchasing/reorder-analysis"],
     queryFn: async () => {
-      const res = await fetch(`/api/purchasing/reorder-analysis?lookbackDays=${lookbackDays}`);
+      const res = await fetch("/api/purchasing/reorder-analysis");
       if (!res.ok) throw new Error("Failed to fetch reorder analysis");
       return res.json();
     },
@@ -192,18 +191,12 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             <SelectItem value="no_movement">No Movement</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={lookbackDays} onValueChange={setLookbackDays}>
-          <SelectTrigger className="w-[160px] h-9 text-sm">
-            <TrendingDown className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="30">30-day velocity</SelectItem>
-            <SelectItem value="60">60-day velocity</SelectItem>
-            <SelectItem value="90">90-day velocity</SelectItem>
-            <SelectItem value="180">180-day velocity</SelectItem>
-          </SelectContent>
-        </Select>
+        {data && (
+          <Badge variant="outline" className="h-9 px-3 flex items-center text-xs text-muted-foreground">
+            <TrendingDown className="h-3.5 w-3.5 mr-1.5" />
+            {data.lookbackDays}d velocity window
+          </Badge>
+        )}
       </div>
 
       {isLoading ? (
@@ -233,7 +226,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                       <div className={`font-mono font-bold ${dosColor(item)}`}>{formatDos(item.daysOfSupply)}</div>
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">{lookbackDays}d Usage</div>
+                      <div className="text-muted-foreground">{data?.lookbackDays ?? ""}d Usage</div>
                       <div className="font-mono font-bold">{item.periodUsage > 0 ? item.periodUsage.toLocaleString() : "—"}</div>
                     </div>
                   </div>
@@ -262,7 +255,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
                     <div className="flex items-center justify-end gap-1">On Hand (pcs) <SortIcon field="onHand" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
-                    <div className="flex items-center justify-end gap-1">{lookbackDays}d Usage <SortIcon field="usage" /></div>
+                    <div className="flex items-center justify-end gap-1">{data?.lookbackDays ?? ""}d Usage <SortIcon field="usage" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("dos")}>
                     <div className="flex items-center justify-end gap-1">Days Supply <SortIcon field="dos" /></div>
@@ -323,7 +316,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} products
               {" · "}All quantities in pieces
-              {" · "}Default lead time: 120 days
+              {" · "}Velocity: {data?.lookbackDays ?? ""}d lookback
             </div>
           )}
         </div>
