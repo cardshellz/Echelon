@@ -893,7 +893,7 @@ export default function Inventory() {
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.variantQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.reservedQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                                          {((sib.variantQty - sib.reservedQty - sib.pickedQty) * sib.unitsPerVariant).toLocaleString()} pcs
+                                          {Math.floor((sib.variantQty - sib.reservedQty - sib.pickedQty) * sib.unitsPerVariant / level.unitsPerVariant).toLocaleString()}
                                         </TableCell>
                                         {canEdit && <TableCell></TableCell>}
                                       </TableRow>
