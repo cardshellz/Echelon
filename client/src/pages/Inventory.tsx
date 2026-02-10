@@ -492,14 +492,12 @@ export default function Inventory() {
   const lowStockCount = variantLevels.filter(v => v.available > 0 && v.available <= 3).length;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
-  // BaseSkus with 2+ stocked variants (expandable to show fungible pool)
+  // BaseSkus where any variant has stock (expandable to show fungible pool)
   const fungibleBaseSkus = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const v of variantLevels) {
-      if (v.baseSku && v.variantQty > 0) counts.set(v.baseSku, (counts.get(v.baseSku) || 0) + 1);
-    }
     const result = new Set<string>();
-    counts.forEach((count, sku) => { if (count >= 2) result.add(sku); });
+    for (const v of variantLevels) {
+      if (v.baseSku && v.variantQty > 0) result.add(v.baseSku);
+    }
     return result;
   }, [variantLevels]);
 
