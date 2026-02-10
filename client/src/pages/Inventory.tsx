@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
@@ -492,6 +492,17 @@ export default function Inventory() {
   const lowStockCount = variantLevels.filter(v => v.available > 0 && v.available <= 3).length;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
+  // BaseSkus with 2+ stocked variants (expandable to show fungible pool)
+  const fungibleBaseSkus = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const v of variantLevels) {
+      if (v.baseSku && v.variantQty > 0) counts.set(v.baseSku, (counts.get(v.baseSku) || 0) + 1);
+    }
+    const result = new Set<string>();
+    counts.forEach((count, sku) => { if (count >= 2) result.add(sku); });
+    return result;
+  }, [variantLevels]);
+
   const handleSort = (field: string) => {
     if (sortField === field) {
       setSortDirection(sortDirection === "asc" ? "desc" : "asc");
@@ -809,11 +820,15 @@ export default function Inventory() {
                     <TableBody>
                       {sortedVariantLevels.map((level) => (
                         <React.Fragment key={level.variantId}>
+                          {(() => {
+                            const canExpand = level.locationCount > 0 || (level.baseSku ? fungibleBaseSkus.has(level.baseSku) : false);
+                            return (
+                          <>
                           <TableRow
                             data-testid={`row-variant-${level.variantId}`}
-                            className={level.locationCount > 0 ? "cursor-pointer hover:bg-muted/50" : ""}
+                            className={canExpand ? "cursor-pointer hover:bg-muted/50" : ""}
                             onClick={() => {
-                              if (level.locationCount > 0) {
+                              if (canExpand) {
                                 const newExpanded = new Set(expandedVariants);
                                 if (newExpanded.has(level.variantId)) {
                                   newExpanded.delete(level.variantId);
@@ -826,7 +841,7 @@ export default function Inventory() {
                           >
                             <TableCell className="font-mono font-medium text-primary">
                               <div className="flex items-center gap-1">
-                                {level.locationCount > 0 && (
+                                {canExpand && (
                                   expandedVariants.has(level.variantId) ?
                                     <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
                                     <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -841,22 +856,56 @@ export default function Inventory() {
                             {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
-                            <VariantLocationRows
-                              variantId={level.variantId}
-                              sku={level.sku}
-                              warehouses={warehouses}
-                              canEdit={canEdit}
-                              onTransfer={(fromLocationId, fromLocationCode, variantId, sku) => {
-                                setTransferDialog({
-                                  open: true,
-                                  fromLocationId,
-                                  fromLocationCode,
-                                  variantId,
-                                  sku,
-                                });
-                              }}
-                            />
+                            <>
+                              <VariantLocationRows
+                                variantId={level.variantId}
+                                sku={level.sku}
+                                warehouses={warehouses}
+                                canEdit={canEdit}
+                                onTransfer={(fromLocationId, fromLocationCode, variantId, sku) => {
+                                  setTransferDialog({
+                                    open: true,
+                                    fromLocationId,
+                                    fromLocationCode,
+                                    variantId,
+                                    sku,
+                                  });
+                                }}
+                              />
+                              {/* Sibling variants in the fungible pool */}
+                              {(() => {
+                                const siblings = level.baseSku
+                                  ? variantLevels.filter(v => v.baseSku === level.baseSku && v.variantId !== level.variantId && v.variantQty > 0)
+                                  : [];
+                                if (siblings.length === 0) return null;
+                                return (
+                                  <>
+                                    <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
+                                      <TableCell colSpan={canEdit ? 6 : 5} className="py-1.5 pl-8 text-xs text-muted-foreground">
+                                        <Boxes className="h-3 w-3 inline mr-1.5" />
+                                        Fungible pool — convertible via case break
+                                      </TableCell>
+                                    </TableRow>
+                                    {siblings.map(sib => (
+                                      <TableRow key={sib.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
+                                        <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{sib.sku}</TableCell>
+                                        <TableCell className="text-xs text-muted-foreground">{sib.name}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.variantQty.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.reservedQty.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                                          {((sib.variantQty - sib.reservedQty - sib.pickedQty) * sib.unitsPerVariant).toLocaleString()} pcs
+                                        </TableCell>
+                                        {canEdit && <TableCell></TableCell>}
+                                      </TableRow>
+                                    ))}
+                                  </>
+                                );
+                              })()}
+                            </>
                           )}
+                          </>
+                            );
+                          })()}
                         </React.Fragment>
                       ))}
                     </TableBody>
