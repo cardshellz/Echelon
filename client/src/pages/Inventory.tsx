@@ -388,6 +388,7 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
+  const [stockFilter, setStockFilter] = useState<"all" | "low" | "oos">("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -408,9 +409,9 @@ export default function Inventory() {
   // Location health for summary bar (React Query deduplicates with OperationsView)
   const { data: locationHealth } = useQuery<{
     totalLocations: number;
-    occupiedLocations: number;
-    transfersToday: number;
-    adjustmentsToday: number;
+    emptyLocations: number;
+    recentTransferCount: number;
+    recentAdjustmentCount: number;
   }>({
     queryKey: ["/api/operations/location-health", selectedWarehouseId],
     queryFn: async () => {
@@ -504,6 +505,11 @@ export default function Inventory() {
     .filter(v =>
       (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+    )
+    .filter(v =>
+      stockFilter === "low" ? v.available <= 0 && v.variantQty > 0 :
+      stockFilter === "oos" ? v.variantQty === 0 :
+      true
     )
     .sort((a, b) => {
       let aVal: any, bVal: any;
@@ -652,7 +658,7 @@ export default function Inventory() {
       </div>
 
       <div className="flex-1 px-4 md:px-6 pt-2 pb-4 overflow-hidden flex flex-col min-h-0">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); }} className="flex-1 flex flex-col min-h-0">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="physical"
@@ -683,21 +689,23 @@ export default function Inventory() {
               <>
                 <span>{variantLevels.length} SKUs</span>
                 <span className="text-muted-foreground/40">·</span>
-                {lowStockCount > 0 ? (
-                  <span className="text-amber-600 font-medium">{lowStockCount} low stock</span>
-                ) : (
-                  <span>0 low stock</span>
-                )}
+                <button
+                  className={`hover:underline ${stockFilter === "low" ? "underline font-semibold" : ""} ${lowStockCount > 0 ? "text-amber-600 font-medium" : ""}`}
+                  onClick={() => setStockFilter(stockFilter === "low" ? "all" : "low")}
+                >
+                  {lowStockCount} low stock
+                </button>
                 <span className="text-muted-foreground/40">·</span>
-                {oosCount > 0 ? (
-                  <span className="text-red-600 font-medium">{oosCount} out of stock</span>
-                ) : (
-                  <span>0 out of stock</span>
-                )}
+                <button
+                  className={`hover:underline ${stockFilter === "oos" ? "underline font-semibold" : ""} ${oosCount > 0 ? "text-red-600 font-medium" : ""}`}
+                  onClick={() => setStockFilter(stockFilter === "oos" ? "all" : "oos")}
+                >
+                  {oosCount} out of stock
+                </button>
                 {locationHealth && (
                   <>
                     <span className="text-muted-foreground/40">·</span>
-                    <span>{locationHealth.occupiedLocations}/{locationHealth.totalLocations} locations</span>
+                    <span>{locationHealth.totalLocations - locationHealth.emptyLocations}/{locationHealth.totalLocations} locations</span>
                   </>
                 )}
               </>
@@ -707,11 +715,11 @@ export default function Inventory() {
             )}
             {activeTab === "operations" && locationHealth && (
               <>
-                <span>{locationHealth.occupiedLocations}/{locationHealth.totalLocations} locations</span>
+                <span>{locationHealth.totalLocations - locationHealth.emptyLocations}/{locationHealth.totalLocations} locations</span>
                 <span className="text-muted-foreground/40">·</span>
-                <span>{locationHealth.transfersToday} transfers today</span>
+                <span>{locationHealth.recentTransferCount} transfers today</span>
                 <span className="text-muted-foreground/40">·</span>
-                <span>{locationHealth.adjustmentsToday} adjustments today</span>
+                <span>{locationHealth.recentAdjustmentCount} adjustments today</span>
               </>
             )}
           </div>
