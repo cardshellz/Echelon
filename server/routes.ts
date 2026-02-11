@@ -11172,6 +11172,7 @@ export async function registerRoutes(
       const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
 
       // Product-level query: aggregate inventory and velocity in base units (pieces)
+      // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
       const rows = await db.execute(sql`
         SELECT
           p.id AS product_id,
@@ -11183,6 +11184,9 @@ export async function registerRoutes(
           COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
           COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
           inv.variant_count,
+          order_uom.units_per_variant AS order_uom_units,
+          order_uom.sku AS order_uom_sku,
+          order_uom.hierarchy_level AS order_uom_level,
           (SELECT MAX(it2.created_at)
            FROM inventory_transactions it2
            JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
@@ -11211,9 +11215,18 @@ export async function registerRoutes(
             AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
           GROUP BY pv.product_id
         ) vel ON vel.product_id = p.id
+        LEFT JOIN LATERAL (
+          SELECT pv.units_per_variant, pv.sku, pv.hierarchy_level
+          FROM product_variants pv
+          WHERE pv.product_id = p.id AND pv.is_active = true
+          ORDER BY pv.hierarchy_level DESC
+          LIMIT 1
+        ) order_uom ON true
         WHERE p.is_active = true
         ORDER BY p.sku, p.name
       `);
+
+      const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
 
       const items = (rows.rows as any[]).map((r) => {
         const totalOnHand = Number(r.total_pieces);
@@ -11224,7 +11237,16 @@ export async function registerRoutes(
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
         const daysOfSupply = avgDailyUsage > 0 ? Math.round(totalOnHand / avgDailyUsage) : totalOnHand > 0 ? 9999 : 0;
         const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-        const suggestedOrderQty = Math.max(0, Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage - totalOnHand));
+        const rawOrderQtyPieces = Math.max(0, (leadTimeDays + safetyStockDays) * avgDailyUsage - totalOnHand);
+
+        // Round up to ordering UOM (highest hierarchy variant)
+        const orderUomUnits = Number(r.order_uom_units) || 1;
+        const orderUomLevel = Number(r.order_uom_level) || 0;
+        const orderUomLabel = HIERARCHY_LABELS[orderUomLevel] || (orderUomUnits > 1 ? `${orderUomUnits}pk` : "pcs");
+        const suggestedOrderQty = orderUomUnits > 1
+          ? Math.ceil(rawOrderQtyPieces / orderUomUnits) // in ordering units (cases, boxes, etc.)
+          : Math.ceil(rawOrderQtyPieces); // fallback: pieces
+        const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
 
         let status: string;
         if (avgDailyUsage === 0) {
@@ -11254,6 +11276,9 @@ export async function registerRoutes(
           safetyStockDays,
           reorderPoint,
           suggestedOrderQty,
+          suggestedOrderPieces,
+          orderUomUnits,
+          orderUomLabel,
           status,
           lastReceivedAt: r.last_received_at,
         };

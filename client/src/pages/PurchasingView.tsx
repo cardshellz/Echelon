@@ -38,6 +38,9 @@ interface ReorderItem {
   safetyStockDays: number;
   reorderPoint: number;
   suggestedOrderQty: number;
+  suggestedOrderPieces: number;
+  orderUomUnits: number;
+  orderUomLabel: string;
   status: string;
   lastReceivedAt: string | null;
 }
@@ -237,7 +240,8 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                   </div>
                   {item.suggestedOrderQty > 0 && (
                     <div className="mt-2 text-xs bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800/30 rounded p-2">
-                      Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span> pcs
+                      Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span> {item.orderUomUnits > 1 ? item.orderUomLabel.toLowerCase() + (item.suggestedOrderQty !== 1 ? "s" : "") : "pcs"}
+                      {item.orderUomUnits > 1 && <span className="text-muted-foreground"> ({item.suggestedOrderPieces.toLocaleString()} pcs)</span>}
                     </div>
                   )}
                 </div>
@@ -295,7 +299,12 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         {item.suggestedOrderQty > 0 ? (
-                          <span className="font-bold text-orange-600">{item.suggestedOrderQty.toLocaleString()}</span>
+                          <div>
+                            <span className="font-bold text-orange-600">{item.suggestedOrderQty.toLocaleString()} {item.orderUomUnits > 1 ? item.orderUomLabel.toLowerCase() : "pcs"}{item.suggestedOrderQty !== 1 && item.orderUomUnits > 1 ? "s" : ""}</span>
+                            {item.orderUomUnits > 1 && (
+                              <div className="text-[10px] text-muted-foreground">{item.suggestedOrderPieces.toLocaleString()} pcs</div>
+                            )}
+                          </div>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
@@ -320,7 +329,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
           {filtered.length > 0 && (
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} products
-              {" · "}All quantities in pieces
+              {" · "}Order qty rounded up to ordering UOM
             </div>
           )}
         </div>
