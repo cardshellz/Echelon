@@ -862,7 +862,7 @@ export default function Picking() {
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
   const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
-  const [releaseOrderId, setReleaseOrderId] = useState<number | null>(null);
+  const [releaseOrderId, setReleaseOrderId] = useState<string | null>(null);
   
   // Scanner mode settings
   const [scannerMode, setScannerMode] = useState(false);
@@ -2096,19 +2096,20 @@ export default function Picking() {
     // Release the order if we're picking a real order (from API)
     // BUT only if the picker hasn't started picking anything yet
     if (activeOrderId && pickingMode === "single") {
-      const numericId = parseInt(activeOrderId);
-      // Compare as numbers - ordersFromApi has numeric IDs
-      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === String(numericId));
-      
+      const subOrderIds = getSubOrderIds(activeOrderId);
+      const isRealOrder = subOrderIds.length > 0 && ordersFromApi.some(o => o.id === activeOrderId);
+
       if (isRealOrder) {
         // Check if any items have been picked
         const activeOrder = singleQueue.find(o => o.id === activeOrderId);
         const hasPickedItems = activeOrder?.items.some(item => item.picked > 0 || item.status === "completed" || item.status === "short");
-        
+
         if (!hasPickedItems) {
-          // No items picked yet - release the order so another picker can grab it
+          // No items picked yet - release the order(s) so another picker can grab them
           try {
-            await releaseMutation.mutateAsync({ orderId: numericId });
+            for (const subId of subOrderIds) {
+              await releaseMutation.mutateAsync({ orderId: subId });
+            }
           } catch (error) {
             console.error("Failed to release order:", error);
           }
@@ -2175,26 +2176,50 @@ export default function Picking() {
     }
   };
   
+  // Helper: get all numeric sub-order IDs for a given order ID (handles combined groups)
+  const getSubOrderIds = (id: string): number[] => {
+    if (id.startsWith("combined-")) {
+      const combinedOrder = ordersFromApi.find(o => o.id === id) || singleQueue.find(o => o.id === id);
+      if (combinedOrder?.combinedOrders) {
+        return combinedOrder.combinedOrders
+          .map(o => parseInt(o.id))
+          .filter(n => !isNaN(n));
+      }
+      return [];
+    }
+    const numId = parseInt(id);
+    return isNaN(numId) ? [] : [numId];
+  };
+
   // Release order handler - shows dialog if partially picked
-  const handleReleaseOrder = async (orderId: number) => {
-    console.log("[RELEASE] Attempting to release order:", orderId);
-    const order = singleQueue.find(o => o.id === String(orderId));
+  const handleReleaseOrder = async (orderStringId: string) => {
+    console.log("[RELEASE] Attempting to release order:", orderStringId);
+    const order = singleQueue.find(o => o.id === orderStringId);
     console.log("[RELEASE] Found order in singleQueue:", order ? "yes" : "no");
-    
+
     // Also check API data directly for more accurate item status
-    const apiOrder = ordersFromApi.find(o => o.id === String(orderId));
+    const apiOrder = ordersFromApi.find(o => o.id === orderStringId);
     console.log("[RELEASE] Found order in API data:", apiOrder ? "yes" : "no");
-    
+
     // Use API data if local queue doesn't have the order
     const checkOrder = order || apiOrder;
     const pickedCount = checkOrder?.items.filter(i => i.status === "completed" || i.status === "short" || i.picked > 0).length || 0;
     console.log("[RELEASE] Picked/short item count:", pickedCount);
-    
+
+    const subOrderIds = getSubOrderIds(orderStringId);
+    if (subOrderIds.length === 0) {
+      console.error("[RELEASE] No valid order IDs found for:", orderStringId);
+      toast({ title: "Failed to release", description: "Could not find order IDs", variant: "destructive" });
+      return;
+    }
+
     if (pickedCount === 0) {
       // No items picked - just release immediately
       try {
         console.log("[RELEASE] No picked items, releasing immediately with reset");
-        await releaseMutation.mutateAsync({ orderId, resetProgress: true });
+        for (const subId of subOrderIds) {
+          await releaseMutation.mutateAsync({ orderId: subId, resetProgress: true });
+        }
         toast({ title: "Order released", description: "Order is back in the queue" });
         if (view === "picking") {
           setView("queue");
@@ -2208,7 +2233,7 @@ export default function Picking() {
     } else {
       // Partially picked - show confirmation dialog
       console.log("[RELEASE] Has picked items, showing dialog");
-      setReleaseOrderId(orderId);
+      setReleaseOrderId(orderStringId);
       setReleaseDialogOpen(true);
     }
   };
@@ -2216,12 +2241,19 @@ export default function Picking() {
   // Confirm release with chosen option
   const confirmRelease = async (resetProgress: boolean) => {
     if (releaseOrderId) {
+      const subOrderIds = getSubOrderIds(releaseOrderId);
+      if (subOrderIds.length === 0) {
+        toast({ title: "Failed to release", description: "Could not find order IDs", variant: "destructive" });
+        return;
+      }
       try {
         console.log("[RELEASE] Confirming release with resetProgress:", resetProgress);
-        await releaseMutation.mutateAsync({ orderId: releaseOrderId, resetProgress });
-        toast({ 
-          title: "Order released", 
-          description: resetProgress ? "Order reset and back in queue" : "Order released, progress kept" 
+        for (const subId of subOrderIds) {
+          await releaseMutation.mutateAsync({ orderId: subId, resetProgress });
+        }
+        toast({
+          title: "Order released",
+          description: resetProgress ? "Order reset and back in queue" : "Order released, progress kept"
         });
         setReleaseDialogOpen(false);
         setReleaseOrderId(null);
@@ -2761,7 +2793,10 @@ export default function Picking() {
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setFlashingOrderId(order.id);
-                                      releaseHoldMutation.mutate(parseInt(order.id));
+                                      const holdSubIds = getSubOrderIds(order.id);
+                                      for (const subId of holdSubIds) {
+                                        releaseHoldMutation.mutate(subId);
+                                      }
                                       setTimeout(() => setFlashingOrderId(null), 600);
                                     }}
                                     data-testid={`button-release-hold-${order.id}`}
@@ -2810,7 +2845,7 @@ export default function Picking() {
                             className="h-9 px-2 text-amber-600 hover:text-amber-700 hover:bg-amber-50"
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleReleaseOrder(parseInt(order.id));
+                              handleReleaseOrder(order.id);
                             }}
                             data-testid={`button-release-${order.id}`}
                           >
@@ -2824,7 +2859,10 @@ export default function Picking() {
                             onClick={(e) => {
                               e.stopPropagation();
                               if (confirm(`Force release order ${order.orderNumber}? This will put it back in the queue.`)) {
-                                forceReleaseMutation.mutate({ orderId: parseInt(order.id), resetProgress: false });
+                                const subIds = getSubOrderIds(order.id);
+                                for (const subId of subIds) {
+                                  forceReleaseMutation.mutate({ orderId: subId, resetProgress: false });
+                                }
                               }
                             }}
                             data-testid={`button-force-release-${order.id}`}
@@ -3260,7 +3298,7 @@ export default function Picking() {
               <Button 
                 variant="ghost" 
                 size="sm" 
-                onClick={() => handleReleaseOrder(parseInt(activeOrderId))} 
+                onClick={() => handleReleaseOrder(activeOrderId)}
                 className="text-amber-600 hover:text-amber-700 hover:bg-amber-50 h-8 px-2"
                 title="Release order back to queue"
               >
