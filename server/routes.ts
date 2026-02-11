@@ -7605,15 +7605,15 @@ export async function registerRoutes(
           countedAt: new Date(),
         });
         
-        // Look up product variant for the found SKU
+        // Look up product variant for the found SKU (case-insensitive)
         const foundVariantResult = await db.execute<{ id: number }>(sql`
-          SELECT id FROM product_variants WHERE sku = ${countedSku} LIMIT 1
+          SELECT id FROM product_variants WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
         `);
         const foundProductVariantId = foundVariantResult.rows[0]?.id || null;
-        
-        // Look up catalog product for the found SKU
+
+        // Look up catalog product for the found SKU (case-insensitive)
         const foundCatalogResult = await db.execute<{ id: number }>(sql`
-          SELECT id FROM catalog_products WHERE sku = ${countedSku} LIMIT 1
+          SELECT id FROM catalog_products WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
         `);
         const foundCatalogProductId = foundCatalogResult.rows[0]?.id || null;
         
@@ -7646,6 +7646,22 @@ export async function registerRoutes(
         
       } else if (countedQty > 0 && !item.expectedSku) {
         varianceType = "unexpected_item";
+
+        // Look up product variant for the found SKU (it may already exist in the system)
+        let foundProductVariantId: number | null = null;
+        let foundCatalogProductId: number | null = null;
+        if (countedSku) {
+          const foundVariantResult = await db.execute<{ id: number }>(sql`
+            SELECT id FROM product_variants WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
+          `);
+          foundProductVariantId = foundVariantResult.rows[0]?.id || null;
+
+          const foundCatalogResult = await db.execute<{ id: number }>(sql`
+            SELECT id FROM catalog_products WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
+          `);
+          foundCatalogProductId = foundCatalogResult.rows[0]?.id || null;
+        }
+
         await storage.updateCycleCountItem(itemId, {
           countedSku: countedSku || null,
           countedQty,
@@ -7655,6 +7671,8 @@ export async function registerRoutes(
           status: "variance",
           requiresApproval: 1,
           mismatchType: "unexpected_found",
+          ...(foundProductVariantId && { productVariantId: foundProductVariantId }),
+          ...(foundCatalogProductId && { catalogProductId: foundCatalogProductId }),
           countedBy: userId,
           countedAt: new Date(),
         });
@@ -7877,14 +7895,14 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Can only add items to in-progress cycle counts" });
       }
       
-      // Look up product variant and catalog product for the found SKU
+      // Look up product variant and catalog product for the found SKU (case-insensitive)
       const variantResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM product_variants WHERE sku = ${sku} LIMIT 1
+        SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
       `);
       const productVariantId = variantResult.rows[0]?.id || null;
 
       const catalogResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM catalog_products WHERE sku = ${sku} LIMIT 1
+        SELECT id FROM catalog_products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
       `);
       const catalogProductId = catalogResult.rows[0]?.id || null;
       
