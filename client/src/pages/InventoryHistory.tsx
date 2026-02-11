@@ -84,6 +84,7 @@ interface InventoryTransaction {
   toLocation: WarehouseLocation | null;
   warehouseLocation: WarehouseLocation | null;
   product: Product | null;
+  order: { id: number; orderNumber: string } | null;
 }
 
 const transactionTypeConfig: Record<string, { label: string; icon: React.ElementType; color: string }> = {
@@ -155,7 +156,7 @@ export default function InventoryHistory() {
       qty_after: tx.variantQtyAfter ?? "",
       source_state: tx.sourceState || "",
       target_state: tx.targetState || "",
-      order_id: tx.orderId || "",
+      order: tx.order?.orderNumber || "",
       cycle_count_id: tx.cycleCountId || "",
       reference: tx.referenceId || "",
       notes: tx.notes || "",
@@ -469,11 +470,11 @@ export default function InventoryHistory() {
                             </TableCell>
                             <TableCell>
                               <div className="flex flex-col">
-                                {tx.referenceId && (
-                                  <span className="font-mono text-xs">{tx.referenceId}</span>
+                                {tx.order && (
+                                  <span className="font-mono text-xs">Order #{tx.order.orderNumber}</span>
                                 )}
-                                {tx.orderId && (
-                                  <span className="text-xs text-muted-foreground">Order #{tx.orderId}</span>
+                                {!tx.order && tx.referenceId && (
+                                  <span className="font-mono text-xs">{tx.referenceId}</span>
                                 )}
                                 {tx.notes && (
                                   <span className="text-xs text-muted-foreground truncate max-w-32" title={tx.notes}>

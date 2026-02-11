@@ -5373,26 +5373,31 @@ export async function registerRoutes(
         offset: offset ? parseInt(offset as string) : 0,
       });
 
-      // Enrich with location and variant details
+      // Enrich with location, variant, and order details
       const locIds = new Set<number>();
       const varIds = new Set<number>();
+      const orderIds = new Set<number>();
       for (const tx of transactions) {
         if (tx.fromLocationId) locIds.add(tx.fromLocationId);
         if (tx.toLocationId) locIds.add(tx.toLocationId);
         if (tx.productVariantId) varIds.add(tx.productVariantId);
+        if (tx.orderId) orderIds.add(tx.orderId);
       }
-      const [allLocs, allVariants] = await Promise.all([
+      const [allLocs, allVariants, orderList] = await Promise.all([
         locIds.size > 0 ? storage.getAllWarehouseLocations() : [],
         varIds.size > 0 ? storage.getAllProductVariants() : [],
+        orderIds.size > 0 ? Promise.all([...orderIds].map(id => storage.getOrderById(id))) : [],
       ]);
       const locMap = new Map(allLocs.filter(l => locIds.has(l.id)).map(l => [l.id, l]));
       const varMap = new Map(allVariants.filter(v => varIds.has(v.id)).map(v => [v.id, v]));
+      const orderMap = new Map(orderList.filter(Boolean).map(o => [o!.id, o!]));
 
       res.json(transactions.map(tx => ({
         ...tx,
         fromLocation: tx.fromLocationId ? locMap.get(tx.fromLocationId) ?? null : null,
         toLocation: tx.toLocationId ? locMap.get(tx.toLocationId) ?? null : null,
         product: tx.productVariantId ? varMap.get(tx.productVariantId) ?? null : null,
+        order: tx.orderId ? orderMap.get(tx.orderId) ? { id: orderMap.get(tx.orderId)!.id, orderNumber: orderMap.get(tx.orderId)!.orderNumber } : null : null,
       })));
     } catch (error) {
       console.error("Error fetching transactions:", error);
