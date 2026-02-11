@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { 
   Search, 
@@ -111,27 +111,73 @@ export default function InventoryHistory() {
   const [transactionType, setTransactionType] = useState<string>("all");
   const [dateRange, setDateRange] = useState<string>("7");
   const [searchTerm, setSearchTerm] = useState("");
+  const [locationFilter, setLocationFilter] = useState("");
   const [page, setPage] = useState(0);
   const limit = 50;
 
+  // Debounce location filter to avoid firing on every keystroke
+  const [debouncedLocation, setDebouncedLocation] = useState(locationFilter);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedLocation(locationFilter), 400);
+    return () => clearTimeout(timer);
+  }, [locationFilter]);
+
   const startDate = subDays(new Date(), parseInt(dateRange));
   const endDate = new Date();
-  
+
   const { data: transactions = [], isLoading, refetch } = useQuery<InventoryTransaction[]>({
-    queryKey: ["/api/inventory/transactions", transactionType, dateRange, page],
+    queryKey: ["/api/inventory/transactions", transactionType, dateRange, debouncedLocation, page],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (transactionType !== "all") params.set("transactionType", transactionType);
+      if (debouncedLocation) params.set("locationCode", debouncedLocation);
       params.set("startDate", startDate.toISOString());
       params.set("endDate", endDate.toISOString());
       params.set("limit", limit.toString());
       params.set("offset", (page * limit).toString());
-      
+
       const res = await fetch(`/api/inventory/transactions?${params}`);
       if (!res.ok) throw new Error("Failed to fetch transactions");
       return res.json();
     },
   });
+
+  const downloadCsv = () => {
+    const rows = filteredTransactions.map(tx => ({
+      timestamp: format(new Date(tx.createdAt), "yyyy-MM-dd HH:mm:ss"),
+      type: tx.transactionType,
+      sku: tx.product?.baseSku || "",
+      product: tx.product?.name || "",
+      from_location: tx.fromLocation?.code || "",
+      to_location: tx.toLocation?.code || "",
+      qty_delta: tx.variantQtyDelta,
+      qty_before: tx.variantQtyBefore ?? "",
+      qty_after: tx.variantQtyAfter ?? "",
+      source_state: tx.sourceState || "",
+      target_state: tx.targetState || "",
+      order_id: tx.orderId || "",
+      cycle_count_id: tx.cycleCountId || "",
+      reference: tx.referenceId || "",
+      notes: tx.notes || "",
+      user: tx.userId || "",
+    }));
+    const headers = Object.keys(rows[0] || {});
+    const csv = [
+      headers.join(","),
+      ...rows.map(r => headers.map(h => {
+        const val = String((r as any)[h]);
+        return val.includes(",") || val.includes('"') || val.includes("\n")
+          ? `"${val.replace(/"/g, '""')}"` : val;
+      }).join(",")),
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `inventory-transactions-${format(new Date(), "yyyy-MM-dd")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const filteredTransactions = transactions.filter(tx => {
     if (!searchTerm) return true;
@@ -189,10 +235,16 @@ export default function InventoryHistory() {
           <h1 className="text-xl md:text-2xl font-bold" data-testid="page-title">Inventory History</h1>
           <p className="text-sm text-muted-foreground">View complete audit trail of all inventory movements</p>
         </div>
-        <Button onClick={() => refetch()} variant="outline" data-testid="button-refresh" className="min-h-[44px] w-full md:w-auto">
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex gap-2 w-full md:w-auto">
+          <Button onClick={downloadCsv} variant="outline" disabled={filteredTransactions.length === 0} className="min-h-[44px] flex-1 md:flex-none">
+            <FileText className="h-4 w-4 mr-2" />
+            Export CSV
+          </Button>
+          <Button onClick={() => refetch()} variant="outline" data-testid="button-refresh" className="min-h-[44px] flex-1 md:flex-none">
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -214,8 +266,25 @@ export default function InventoryHistory() {
                 spellCheck={false}
               />
             </div>
-            
-            <Select value={transactionType} onValueChange={setTransactionType}>
+
+            <div className="w-full md:w-40">
+              <div className="relative">
+                <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Location code"
+                  value={locationFilter}
+                  onChange={(e) => { setLocationFilter(e.target.value); setPage(0); }}
+                  className="w-full h-11 pl-9"
+                  data-testid="input-location"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+
+            <Select value={transactionType} onValueChange={(v) => { setTransactionType(v); setPage(0); }}>
               <SelectTrigger className="w-full md:w-40 h-11" data-testid="select-transaction-type">
                 <SelectValue placeholder="All Types" />
               </SelectTrigger>
@@ -233,7 +302,7 @@ export default function InventoryHistory() {
               </SelectContent>
             </Select>
             
-            <Select value={dateRange} onValueChange={setDateRange}>
+            <Select value={dateRange} onValueChange={(v) => { setDateRange(v); setPage(0); }}>
               <SelectTrigger className="w-full md:w-36 h-11" data-testid="select-date-range">
                 <SelectValue placeholder="Date Range" />
               </SelectTrigger>

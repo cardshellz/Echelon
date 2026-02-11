@@ -1992,6 +1992,7 @@ export class DatabaseStorage implements IStorage {
     transactionType?: string;
     startDate?: Date;
     endDate?: Date;
+    locationId?: number;
     limit?: number;
     offset?: number;
   }): Promise<InventoryTransaction[]> {
@@ -2000,18 +2001,24 @@ export class DatabaseStorage implements IStorage {
     if (filters.transactionType) conditions.push(eq(inventoryTransactions.transactionType, filters.transactionType));
     if (filters.startDate) conditions.push(gte(inventoryTransactions.createdAt, filters.startDate));
     if (filters.endDate) conditions.push(lte(inventoryTransactions.createdAt, filters.endDate));
-    
+    if (filters.locationId) {
+      conditions.push(or(
+        eq(inventoryTransactions.fromLocationId, filters.locationId),
+        eq(inventoryTransactions.toLocationId, filters.locationId),
+      )!);
+    }
+
     let query = db
       .select()
       .from(inventoryTransactions)
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(filters.limit || 100)
       .offset(filters.offset || 0);
-    
+
     if (conditions.length > 0) {
       query = query.where(and(...conditions)) as typeof query;
     }
-    
+
     return await query;
   }
 

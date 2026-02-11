@@ -5353,16 +5353,47 @@ export async function registerRoutes(
   // Inventory Transactions History
   app.get("/api/inventory/transactions", async (req, res) => {
     try {
-      const { batchId, transactionType, startDate, endDate, limit, offset } = req.query;
+      const { batchId, transactionType, startDate, endDate, limit, offset, locationCode } = req.query;
+
+      // Resolve locationCode → locationId
+      let locationId: number | undefined;
+      if (locationCode) {
+        const allLocations = await storage.getAllWarehouseLocations();
+        const loc = allLocations.find(l => l.code.toLowerCase() === (locationCode as string).toLowerCase());
+        if (loc) locationId = loc.id;
+      }
+
       const transactions = await storage.getInventoryTransactions({
         batchId: batchId as string,
         transactionType: transactionType as string,
         startDate: startDate ? new Date(startDate as string) : undefined,
         endDate: endDate ? new Date(endDate as string) : undefined,
-        limit: limit ? parseInt(limit as string) : 50,
+        locationId,
+        limit: limit ? Math.min(parseInt(limit as string), 200) : 50,
         offset: offset ? parseInt(offset as string) : 0,
       });
-      res.json(transactions);
+
+      // Enrich with location and variant details
+      const locIds = new Set<number>();
+      const varIds = new Set<number>();
+      for (const tx of transactions) {
+        if (tx.fromLocationId) locIds.add(tx.fromLocationId);
+        if (tx.toLocationId) locIds.add(tx.toLocationId);
+        if (tx.productVariantId) varIds.add(tx.productVariantId);
+      }
+      const [allLocs, allVariants] = await Promise.all([
+        locIds.size > 0 ? storage.getAllWarehouseLocations() : [],
+        varIds.size > 0 ? storage.getAllProductVariants() : [],
+      ]);
+      const locMap = new Map(allLocs.filter(l => locIds.has(l.id)).map(l => [l.id, l]));
+      const varMap = new Map(allVariants.filter(v => varIds.has(v.id)).map(v => [v.id, v]));
+
+      res.json(transactions.map(tx => ({
+        ...tx,
+        fromLocation: tx.fromLocationId ? locMap.get(tx.fromLocationId) ?? null : null,
+        toLocation: tx.toLocationId ? locMap.get(tx.toLocationId) ?? null : null,
+        product: tx.productVariantId ? varMap.get(tx.productVariantId) ?? null : null,
+      })));
     } catch (error) {
       console.error("Error fetching transactions:", error);
       res.status(500).json({ error: "Failed to fetch transactions" });
@@ -9096,55 +9127,6 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error bulk creating receiving lines:", error);
       res.status(500).json({ error: "Failed to create receiving lines" });
-    }
-  });
-
-  // ===== INVENTORY TRANSACTIONS HISTORY (Audit) =====
-  
-  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), async (req, res) => {
-    try {
-      const { transactionType, startDate, endDate, batchId, limit, offset } = req.query;
-      
-      const filters: any = {};
-      if (transactionType) filters.transactionType = transactionType as string;
-      if (batchId) filters.batchId = batchId as string;
-      if (startDate) filters.startDate = new Date(startDate as string);
-      if (endDate) filters.endDate = new Date(endDate as string);
-      filters.limit = limit ? Math.min(parseInt(limit as string), 100) : 50;
-      filters.offset = offset ? parseInt(offset as string) : 0;
-      
-      const transactions = await storage.getInventoryTransactions(filters);
-      
-      // Collect unique IDs for batch lookup
-      const locationIds = new Set<number>();
-      const variantIds = new Set<number>();
-
-      for (const tx of transactions) {
-        if (tx.fromLocationId) locationIds.add(tx.fromLocationId);
-        if (tx.toLocationId) locationIds.add(tx.toLocationId);
-        if (tx.productVariantId) variantIds.add(tx.productVariantId);
-      }
-
-      // Batch fetch only needed data
-      const [allLocations, allVariants] = await Promise.all([
-        locationIds.size > 0 ? storage.getAllWarehouseLocations() : [],
-        variantIds.size > 0 ? storage.getAllProductVariants() : []
-      ]);
-
-      const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
-      const variantMap = new Map(allVariants.filter(v => variantIds.has(v.id)).map(v => [v.id, v]));
-
-      const enriched = transactions.map(tx => ({
-        ...tx,
-        fromLocation: tx.fromLocationId ? locationMap.get(tx.fromLocationId) : null,
-        toLocation: tx.toLocationId ? locationMap.get(tx.toLocationId) : null,
-        productVariant: tx.productVariantId ? variantMap.get(tx.productVariantId) : null,
-      }));
-      
-      res.json(enriched);
-    } catch (error) {
-      console.error("Error fetching inventory transactions:", error);
-      res.status(500).json({ error: "Failed to fetch inventory transactions" });
     }
   });
 
