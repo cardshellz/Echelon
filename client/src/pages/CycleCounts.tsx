@@ -2,13 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useDebounce } from "@/hooks/use-debounce";
 import { playSoundWithHaptic } from "@/lib/sounds";
-import { 
-  ClipboardList, 
-  Plus, 
-  Play, 
-  CheckCircle, 
-  XCircle, 
-  AlertTriangle, 
+import {
+  ClipboardList,
+  Plus,
+  Play,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
   ChevronRight,
   ChevronLeft,
   Search,
@@ -16,7 +16,11 @@ import {
   MapPin,
   Check,
   RotateCcw,
-  Trash2
+  Trash2,
+  Pencil,
+  ArrowRight,
+  ChevronDown,
+  Eye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -142,6 +146,8 @@ export default function CycleCounts() {
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "variance" | "ok">("all");
+  const [varianceSummaryOpen, setVarianceSummaryOpen] = useState(false);
+  const [expandedSummarySkus, setExpandedSummarySkus] = useState<Set<number>>(new Set());
   
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -157,6 +163,24 @@ export default function CycleCounts() {
 
   const { data: adjustmentReasons = [] } = useQuery<AdjustmentReason[]>({
     queryKey: ["/api/inventory/adjustment-reasons"],
+  });
+
+  interface VarianceSummaryEntry {
+    sku: string;
+    productVariantId: number;
+    locations: { locationId: number; locationCode: string; zone?: string; varianceQty: number; varianceType: string; mismatchType?: string; status: string; itemId: number }[];
+    netVariance: number;
+    classification: "misplacement" | "surplus" | "shortage";
+  }
+
+  const { data: varianceSummary } = useQuery<{ skuSummaries: VarianceSummaryEntry[] }>({
+    queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"],
+    queryFn: async () => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/variance-summary`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch variance summary");
+      return res.json();
+    },
+    enabled: !!selectedCount && !!cycleCountDetail && cycleCountDetail.varianceCount > 0,
   });
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
@@ -346,6 +370,50 @@ export default function CycleCounts() {
     },
   });
 
+  const resetMutation = useMutation({
+    mutationFn: async (itemId: number) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${itemId}/reset`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to reset");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Item reset to pending" });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to reset", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const investigateMutation = useMutation({
+    mutationFn: async ({ itemId, notes }: { itemId: number; notes?: string }) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${itemId}/investigate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ notes }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to set investigation hold");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Item marked for investigation" });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to investigate", description: error.message, variant: "destructive" });
+    },
+  });
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "draft": return <Badge variant="outline">Draft</Badge>;
@@ -360,6 +428,8 @@ export default function CycleCounts() {
   const getItemStatusBadge = (item: CycleCountItem) => {
     if (item.status === "pending") return <Badge variant="outline">Pending</Badge>;
     if (item.status === "counted" && !item.varianceType) return <Badge className="bg-emerald-100 text-emerald-700">OK</Badge>;
+    if (item.status === "investigate") return <Badge className="bg-yellow-100 text-yellow-800">Investigating</Badge>;
+    if (item.varianceType && item.status === "approved" && item.varianceReason === "within_tolerance") return <Badge className="bg-sky-100 text-sky-700">Auto-Approved</Badge>;
     if (item.varianceType && item.status === "approved") return <Badge className="bg-blue-100 text-blue-700">Adjusted</Badge>;
     if (item.varianceType) return <Badge className="bg-amber-100 text-amber-700">Variance</Badge>;
     return <Badge variant="outline">{item.status}</Badge>;
@@ -410,12 +480,14 @@ export default function CycleCounts() {
 
   const handleCountClick = (item: CycleCountItem) => {
     setSelectedItem(item);
+    // Pre-fill with previous values if editing, empty if new count
+    const hasPreviousCount = item.countedQty !== null;
     setCountForm({
-      countedSku: item.expectedSku || "",
-      countedQty: "",
-      notes: "",
+      countedSku: (hasPreviousCount && item.countedSku) || item.expectedSku || "",
+      countedQty: hasPreviousCount ? String(item.countedQty) : "",
+      notes: item.varianceNotes || "",
     });
-    setSkuSearch("");
+    setSkuSearch(hasPreviousCount && item.countedSku && item.countedSku !== item.expectedSku ? item.countedSku : "");
     setSkuDropdownOpen(false);
     setUnknownSkuMode(false);
     setCountDialogOpen(true);
@@ -423,6 +495,22 @@ export default function CycleCounts() {
 
   const handleApproveClick = (item: CycleCountItem) => {
     setSelectedItem(item);
+    // Pre-select "misplaced" if this SKU has offsetting (net-zero) variances
+    if (item.productVariantId && cycleCountDetail) {
+      const offsetting = cycleCountDetail.items.filter(i =>
+        i.id !== item.id &&
+        i.productVariantId === item.productVariantId &&
+        i.varianceQty !== null && i.varianceQty !== 0
+      );
+      const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), item.varianceQty ?? 0);
+      if (offsetting.length > 0 && netVar === 0) {
+        setApproveForm({ reasonCode: "misplaced", notes: "" });
+      } else {
+        setApproveForm({ reasonCode: "", notes: "" });
+      }
+    } else {
+      setApproveForm({ reasonCode: "", notes: "" });
+    }
     setApproveDialogOpen(true);
   };
 
@@ -431,6 +519,7 @@ export default function CycleCounts() {
   const [currentBinIndex, setCurrentBinIndex] = useState(0);
   const [quickCountQty, setQuickCountQty] = useState("");
   const [differentSkuMode, setDifferentSkuMode] = useState(false);
+  const [mobileNotes, setMobileNotes] = useState<Record<number, string>>({});
   const [foundSku, setFoundSku] = useState("");
   const [mobileSkuSearch, setMobileSkuSearch] = useState("");
   const [mobileSkuDropdownOpen, setMobileSkuDropdownOpen] = useState(false);
@@ -538,7 +627,8 @@ export default function CycleCounts() {
 
   if (selectedCount && cycleCountDetail) {
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
-    const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved").length;
+    const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "investigate").length;
+    const investigatingCount = cycleCountDetail.items.filter(i => i.status === "investigate").length;
     
     // Group items by location (bin) for multi-SKU support
     const itemsByLocation = cycleCountDetail.items.reduce((acc, item) => {
@@ -652,7 +742,17 @@ export default function CycleCounts() {
               return (
                 <div 
                   key={binItem.id} 
-                  className={`bg-white rounded-lg p-3 shadow-sm shrink-0 ${isConfirmed ? 'border-2 border-emerald-300 bg-emerald-50' : ''}`}
+                  className={`bg-white rounded-lg p-3 shadow-sm shrink-0 ${
+                    isConfirmed
+                      ? binItem.mismatchType === "expected_missing"
+                        ? 'border-2 border-rose-300 bg-rose-50'
+                        : binItem.mismatchType === "unexpected_found"
+                          ? 'border-2 border-amber-300 bg-amber-50'
+                          : binItem.varianceType
+                            ? 'border-2 border-amber-300 bg-amber-50'
+                            : 'border-2 border-emerald-300 bg-emerald-50'
+                      : ''
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="flex-1 min-w-0">
@@ -668,23 +768,61 @@ export default function CycleCounts() {
                   </div>
                   
                   {isConfirmed ? (
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-emerald-600 font-medium flex items-center gap-1">
-                        <Check className="h-4 w-4" /> Counted: {binItem.countedQty}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs"
-                        onClick={() => {
-                          countMutation.mutate({
-                            itemId: binItem.id,
-                            data: { countedSku: null, countedQty: null, notes: null }
-                          });
-                        }}
-                      >
-                        Recount
-                      </Button>
+                    <div className="space-y-1">
+                      {binItem.mismatchType === "expected_missing" ? (
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-rose-600 font-medium flex items-center gap-1">
+                            <XCircle className="h-4 w-4" /> Not Found
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => resetMutation.mutate(binItem.id)}
+                            disabled={resetMutation.isPending}
+                          >
+                            <Pencil className="h-3 w-3 mr-1" /> Edit
+                          </Button>
+                        </div>
+                      ) : binItem.mismatchType === "unexpected_found" ? (
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-amber-600 font-medium flex items-center gap-1">
+                            <AlertTriangle className="h-4 w-4" /> Found: {binItem.countedSku} × {binItem.countedQty}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => resetMutation.mutate(binItem.id)}
+                            disabled={resetMutation.isPending}
+                          >
+                            <Pencil className="h-3 w-3 mr-1" /> Edit
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between text-sm">
+                          <span className={`font-medium flex items-center gap-1 ${binItem.varianceType ? "text-amber-600" : "text-emerald-600"}`}>
+                            <Check className="h-4 w-4" /> Counted: {binItem.countedQty}
+                            {binItem.varianceQty !== null && binItem.varianceQty !== 0 && (
+                              <span className={binItem.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}>
+                                ({binItem.varianceQty > 0 ? "+" : ""}{binItem.varianceQty})
+                              </span>
+                            )}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => resetMutation.mutate(binItem.id)}
+                            disabled={resetMutation.isPending}
+                          >
+                            <Pencil className="h-3 w-3 mr-1" /> Edit
+                          </Button>
+                        </div>
+                      )}
+                      {binItem.varianceNotes && (
+                        <div className="text-xs text-muted-foreground truncate pl-5">{binItem.varianceNotes}</div>
+                      )}
                     </div>
                   ) : (
                     <>
@@ -810,7 +948,7 @@ export default function CycleCounts() {
                                 data: {
                                   countedSku: wrongSkuSearch,
                                   countedQty: parseInt(countVal) || 0,
-                                  notes: `Wrong SKU: Expected ${binItem.expectedSku}, found ${wrongSkuSearch}`,
+                                  notes: `Wrong SKU: Expected ${binItem.expectedSku}, found ${wrongSkuSearch}${mobileNotes[binItem.id] ? '. ' + mobileNotes[binItem.id] : ''}`,
                                 }
                               }, {
                                 onSuccess: () => {
@@ -836,6 +974,20 @@ export default function CycleCounts() {
                         </div>
                       )}
                       
+                      {/* Notes (collapsible) */}
+                      <details className="text-sm mt-2">
+                        <summary className="cursor-pointer text-muted-foreground hover:text-foreground text-xs">
+                          Add notes (optional)
+                        </summary>
+                        <Textarea
+                          value={mobileNotes[binItem.id] || ""}
+                          onChange={(e) => setMobileNotes(prev => ({ ...prev, [binItem.id]: e.target.value }))}
+                          placeholder="Any observations..."
+                          rows={2}
+                          className="mt-1 text-sm"
+                        />
+                      </details>
+
                       {/* Big Confirm button */}
                       <Button
                         size="lg"
@@ -848,11 +1000,12 @@ export default function CycleCounts() {
                             data: {
                               countedSku: binItem.expectedSku || null,
                               countedQty: parseInt(countVal) || 0,
-                              notes: null,
+                              notes: mobileNotes[binItem.id] || null,
                             }
                           }, {
                             onSuccess: () => {
                               playSoundWithHaptic("success", "classic", true);
+                              setMobileNotes(prev => { const n = { ...prev }; delete n[binItem.id]; return n; });
                               const remainingPending = currentBinItems.filter(i => i.status === "pending" && i.id !== binItem.id);
                               if (remainingPending.length === 0 && currentBinIndex < binGroups.length - 1) {
                                 setTimeout(() => {
@@ -1109,8 +1262,8 @@ export default function CycleCounts() {
         )}
 
         {/* Compact stat row - 4 items in a row */}
-        <div className="grid grid-cols-4 gap-1 md:gap-4">
-          <button 
+        <div className="grid grid-cols-5 gap-1 md:gap-4">
+          <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "all" ? "bg-primary/10 ring-1 ring-primary" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("all")}
             data-testid="card-filter-all"
@@ -1118,7 +1271,7 @@ export default function CycleCounts() {
             <div className="text-lg font-bold">{cycleCountDetail.totalBins}</div>
             <div className="text-[10px] text-muted-foreground">Total</div>
           </button>
-          <button 
+          <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "pending" ? "bg-blue-100 ring-1 ring-blue-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("pending")}
             data-testid="card-filter-pending"
@@ -1126,7 +1279,7 @@ export default function CycleCounts() {
             <div className="text-lg font-bold">{pendingCount}</div>
             <div className="text-[10px] text-muted-foreground">Pending</div>
           </button>
-          <button 
+          <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "variance" ? "bg-amber-100 ring-1 ring-amber-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("variance")}
             data-testid="card-filter-variance"
@@ -1134,15 +1287,93 @@ export default function CycleCounts() {
             <div className="text-lg font-bold text-amber-600">{varianceCount}</div>
             <div className="text-[10px] text-muted-foreground">Variance</div>
           </button>
-          <button 
+          {investigatingCount > 0 && (
+            <button
+              className={`p-2 rounded-lg text-center transition-all bg-yellow-100 ${statusFilter === "all" ? "" : ""}`}
+              onClick={() => setStatusFilter("all")}
+            >
+              <div className="text-lg font-bold text-yellow-700">{investigatingCount}</div>
+              <div className="text-[10px] text-muted-foreground">Investigating</div>
+            </button>
+          )}
+          <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "ok" ? "bg-emerald-100 ring-1 ring-emerald-500" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("ok")}
             data-testid="card-filter-ok"
           >
-            <div className="text-lg font-bold text-emerald-600">{cycleCountDetail.countedBins - varianceCount}</div>
+            <div className="text-lg font-bold text-emerald-600">{cycleCountDetail.countedBins - varianceCount - investigatingCount}</div>
             <div className="text-[10px] text-muted-foreground">OK</div>
           </button>
         </div>
+
+        {/* Variance Summary (collapsible) */}
+        {varianceSummary && varianceSummary.skuSummaries.length > 0 && (
+          <div className="rounded-md border bg-card">
+            <button
+              className="w-full flex items-center justify-between px-3 py-2 text-sm font-medium hover:bg-muted/30 transition-colors"
+              onClick={() => setVarianceSummaryOpen(!varianceSummaryOpen)}
+            >
+              <span className="flex items-center gap-2">
+                <Eye className="h-4 w-4 text-muted-foreground" />
+                Variance Summary by SKU ({varianceSummary.skuSummaries.length} SKUs)
+              </span>
+              <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${varianceSummaryOpen ? "rotate-180" : ""}`} />
+            </button>
+            {varianceSummaryOpen && (
+              <div className="border-t px-3 py-2 space-y-1">
+                {varianceSummary.skuSummaries.map(entry => (
+                  <div key={entry.productVariantId} className="rounded border">
+                    <button
+                      className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/20"
+                      onClick={() => {
+                        const next = new Set(expandedSummarySkus);
+                        if (next.has(entry.productVariantId)) next.delete(entry.productVariantId);
+                        else next.add(entry.productVariantId);
+                        setExpandedSummarySkus(next);
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-medium">{entry.sku}</span>
+                        <Badge className={`text-xs ${
+                          entry.classification === "misplacement" ? "bg-blue-100 text-blue-700" :
+                          entry.classification === "surplus" ? "bg-emerald-100 text-emerald-700" :
+                          "bg-rose-100 text-rose-700"
+                        }`}>
+                          {entry.classification === "misplacement" ? "Misplacement" :
+                           entry.classification === "surplus" ? "Surplus" : "Shortage"}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-mono font-bold text-sm ${
+                          entry.netVariance === 0 ? "text-blue-600" :
+                          entry.netVariance > 0 ? "text-emerald-600" : "text-rose-600"
+                        }`}>
+                          Net: {entry.netVariance > 0 ? "+" : ""}{entry.netVariance}
+                        </span>
+                        <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform ${expandedSummarySkus.has(entry.productVariantId) ? "rotate-180" : ""}`} />
+                      </div>
+                    </button>
+                    {expandedSummarySkus.has(entry.productVariantId) && (
+                      <div className="border-t px-3 py-1.5 space-y-0.5 text-xs bg-muted/10">
+                        {entry.locations.map(loc => (
+                          <div key={loc.itemId} className="flex items-center justify-between">
+                            <span className="font-mono">{loc.locationCode}</span>
+                            <div className="flex items-center gap-2">
+                              <span className={`font-mono font-bold ${loc.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                                {loc.varianceQty > 0 ? "+" : ""}{loc.varianceQty}
+                              </span>
+                              <Badge variant="outline" className="text-[10px]">{loc.status}</Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -1205,10 +1436,29 @@ export default function CycleCounts() {
                         Count
                       </Button>
                     )}
-                    {item.varianceType && item.status !== "approved" && (
-                      <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
-                        {item.relatedItemId ? "Approve Pair" : "Approve"}
+                    {(item.status === "counted" || item.status === "variance") && (
+                      <Button size="sm" variant="ghost" onClick={() => {
+                        resetMutation.mutate(item.id, {
+                          onSuccess: () => handleCountClick(item),
+                        });
+                      }} disabled={resetMutation.isPending}>
+                        <Pencil className="h-3 w-3 mr-1" /> Edit
                       </Button>
+                    )}
+                    {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
+                      <>
+                        {item.status !== "investigate" && (
+                          <Button size="sm" variant="ghost" className="text-yellow-700"
+                            onClick={() => investigateMutation.mutate({ itemId: item.id })}
+                            disabled={investigateMutation.isPending}
+                          >
+                            Investigate
+                          </Button>
+                        )}
+                        <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
+                          {item.relatedItemId ? "Approve Pair" : "Approve"}
+                        </Button>
+                      </>
                     )}
                   </div>
                 </div>
@@ -1251,16 +1501,37 @@ export default function CycleCounts() {
                   <TableCell>{getItemStatusBadge(item)}</TableCell>
                   <TableCell>{getVarianceTypeBadge(item.varianceType)}</TableCell>
                   <TableCell>
-                    {item.status === "pending" && (
-                      <Button size="sm" variant="outline" onClick={() => handleCountClick(item)}>
-                        Count
-                      </Button>
-                    )}
-                    {item.varianceType && item.status !== "approved" && (
-                      <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
-                        Approve
-                      </Button>
-                    )}
+                    <div className="flex gap-1">
+                      {item.status === "pending" && (
+                        <Button size="sm" variant="outline" onClick={() => handleCountClick(item)}>
+                          Count
+                        </Button>
+                      )}
+                      {(item.status === "counted" || item.status === "variance") && (
+                        <Button size="sm" variant="ghost" onClick={() => {
+                          resetMutation.mutate(item.id, {
+                            onSuccess: () => handleCountClick(item),
+                          });
+                        }} disabled={resetMutation.isPending}>
+                          <Pencil className="h-3 w-3 mr-1" /> Edit
+                        </Button>
+                      )}
+                      {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
+                        <>
+                          {item.status !== "investigate" && (
+                            <Button size="sm" variant="ghost" className="text-yellow-700"
+                              onClick={() => investigateMutation.mutate({ itemId: item.id })}
+                              disabled={investigateMutation.isPending}
+                            >
+                              Investigate
+                            </Button>
+                          )}
+                          <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
+                            Approve
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -1514,41 +1785,176 @@ export default function CycleCounts() {
         </Dialog>
 
         <Dialog open={approveDialogOpen} onOpenChange={setApproveDialogOpen}>
-          <DialogContent>
+          <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Approve Variance</DialogTitle>
-              <DialogDescription>
-                {selectedItem?.locationCode}: Expected {selectedItem?.expectedQty}, Counted {selectedItem?.countedQty} 
-                ({selectedItem?.varianceQty && selectedItem.varianceQty > 0 ? "+" : ""}{selectedItem?.varianceQty})
-              </DialogDescription>
+              <DialogTitle className="flex items-center gap-2">
+                <MapPin className="h-4 w-4 text-blue-600" />
+                {selectedItem?.locationCode}
+                {selectedItem && getVarianceTypeBadge(selectedItem.varianceType)}
+              </DialogTitle>
             </DialogHeader>
-            <div className="space-y-4">
-              <div>
-                <Label>Reason</Label>
-                <Select value={approveForm.reasonCode} onValueChange={(v) => setApproveForm({ ...approveForm, reasonCode: v })}>
-                  <SelectTrigger data-testid="select-reason">
-                    <SelectValue placeholder="Select reason" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {adjustmentReasons.filter(r => r.transactionType === "adjustment").map((reason) => (
-                      <SelectItem key={reason.code} value={reason.code}>{reason.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label>Notes (optional)</Label>
-                <Textarea
-                  value={approveForm.notes}
-                  onChange={(e) => setApproveForm({ ...approveForm, notes: e.target.value })}
-                  placeholder="Additional notes..."
-                  data-testid="textarea-approve-notes"
-                />
-              </div>
-            </div>
+            {selectedItem && (() => {
+              const linkedItem = selectedItem.relatedItemId
+                ? cycleCountDetail.items.find(i => i.id === selectedItem.relatedItemId)
+                : cycleCountDetail.items.find(i => i.relatedItemId === selectedItem.id);
+
+              // Offsetting variance detection: find other items with same SKU that have variances
+              const offsettingItems = selectedItem.productVariantId
+                ? cycleCountDetail.items.filter(i =>
+                    i.id !== selectedItem.id &&
+                    i.productVariantId === selectedItem.productVariantId &&
+                    i.varianceQty !== null && i.varianceQty !== 0
+                  )
+                : [];
+              const netVarianceForSku = offsettingItems.reduce(
+                (sum, i) => sum + (i.varianceQty ?? 0),
+                selectedItem.varianceQty ?? 0
+              );
+              const hasOffsettingVariances = offsettingItems.length > 0;
+              const isNetZero = hasOffsettingVariances && netVarianceForSku === 0;
+
+              return (
+                <div className="space-y-4">
+                  {/* Offsetting variance banner */}
+                  {hasOffsettingVariances && (
+                    <div className={`rounded-md border p-3 text-sm space-y-1 ${
+                      isNetZero
+                        ? "bg-blue-50 border-blue-200"
+                        : "bg-slate-50 border-slate-200"
+                    }`}>
+                      <div className={`font-medium ${isNetZero ? "text-blue-800" : "text-slate-700"}`}>
+                        {isNetZero
+                          ? "Likely misplacement — net variance for this SKU is zero"
+                          : `This SKU has variances in ${offsettingItems.length} other location${offsettingItems.length > 1 ? "s" : ""}`
+                        }
+                      </div>
+                      <div className="space-y-0.5 text-xs text-muted-foreground">
+                        {offsettingItems.map(oi => (
+                          <div key={oi.id} className="flex items-center gap-1">
+                            <span className="font-mono">{oi.locationCode}</span>:
+                            <span className={`font-bold ${(oi.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              {(oi.varianceQty ?? 0) > 0 ? "+" : ""}{oi.varianceQty}
+                            </span>
+                          </div>
+                        ))}
+                        <div className="pt-1 border-t mt-1 font-medium">
+                          Net variance: <span className={`font-bold ${netVarianceForSku === 0 ? "text-blue-600" : netVarianceForSku > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                            {netVarianceForSku > 0 ? "+" : ""}{netVarianceForSku}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Item details */}
+                  <div className="rounded-md border p-3 space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">SKU</span>
+                      <span className="font-mono font-medium">{selectedItem.expectedSku || selectedItem.countedSku || "(empty)"}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Expected</span>
+                      <span className="font-mono font-bold">{selectedItem.expectedQty}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-muted-foreground">Counted</span>
+                      <span className="font-mono font-bold">{selectedItem.countedQty ?? "—"}</span>
+                    </div>
+                    {selectedItem.varianceQty !== null && selectedItem.varianceQty !== 0 && (
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">Variance</span>
+                        <span className={`font-mono font-bold ${selectedItem.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {selectedItem.varianceQty > 0 ? "+" : ""}{selectedItem.varianceQty}
+                        </span>
+                      </div>
+                    )}
+                    {selectedItem.countedBy && (
+                      <div className="flex items-center justify-between text-xs text-muted-foreground pt-1 border-t">
+                        <span>Counted by {selectedItem.countedBy}</span>
+                        {selectedItem.countedAt && <span>{format(new Date(selectedItem.countedAt), "MMM d, h:mm a")}</span>}
+                      </div>
+                    )}
+                    {selectedItem.varianceNotes && (
+                      <div className="text-xs bg-muted/50 rounded p-2 mt-1">{selectedItem.varianceNotes}</div>
+                    )}
+                  </div>
+
+                  {/* Linked mismatch item */}
+                  {linkedItem && (
+                    <div className="rounded-md border border-purple-200 bg-purple-50/50 p-3 space-y-2">
+                      <div className="text-xs font-medium text-purple-700 flex items-center gap-1">
+                        <AlertTriangle className="h-3 w-3" /> Linked Mismatch Item
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">SKU</span>
+                        <span className="font-mono font-medium">{linkedItem.expectedSku || linkedItem.countedSku || "(empty)"}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">Variance</span>
+                        <span className={`font-mono font-bold ${(linkedItem.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {(linkedItem.varianceQty ?? 0) > 0 ? "+" : ""}{linkedItem.varianceQty}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Adjustment preview */}
+                  <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm space-y-1">
+                    <div className="font-medium text-amber-800">Inventory Adjustment Preview</div>
+                    {selectedItem.productVariantId && selectedItem.varianceQty !== null && selectedItem.varianceQty !== 0 && (
+                      <div className="flex items-center gap-1 text-amber-700">
+                        <ArrowRight className="h-3 w-3" />
+                        <span className="font-mono">{selectedItem.expectedSku || selectedItem.countedSku}</span>
+                        <span>at {selectedItem.locationCode}:</span>
+                        <span className={`font-bold ${selectedItem.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {selectedItem.varianceQty > 0 ? "+" : ""}{selectedItem.varianceQty}
+                        </span>
+                      </div>
+                    )}
+                    {linkedItem && linkedItem.productVariantId && linkedItem.varianceQty !== null && linkedItem.varianceQty !== 0 && (
+                      <div className="flex items-center gap-1 text-amber-700">
+                        <ArrowRight className="h-3 w-3" />
+                        <span className="font-mono">{linkedItem.expectedSku || linkedItem.countedSku}</span>
+                        <span>at {linkedItem.locationCode}:</span>
+                        <span className={`font-bold ${(linkedItem.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                          {(linkedItem.varianceQty ?? 0) > 0 ? "+" : ""}{linkedItem.varianceQty}
+                        </span>
+                      </div>
+                    )}
+                    {!selectedItem.productVariantId && (
+                      <div className="text-xs text-amber-600">No matching product variant — manual investigation needed</div>
+                    )}
+                  </div>
+
+                  {/* Reason */}
+                  <div>
+                    <Label>Reason</Label>
+                    <Select value={approveForm.reasonCode} onValueChange={(v) => setApproveForm({ ...approveForm, reasonCode: v })}>
+                      <SelectTrigger data-testid="select-reason">
+                        <SelectValue placeholder="Select reason" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {adjustmentReasons.filter(r => r.transactionType === "adjustment").map((reason) => (
+                          <SelectItem key={reason.code} value={reason.code}>{reason.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Notes (optional)</Label>
+                    <Textarea
+                      value={approveForm.notes}
+                      onChange={(e) => setApproveForm({ ...approveForm, notes: e.target.value })}
+                      placeholder="Additional notes..."
+                      data-testid="textarea-approve-notes"
+                    />
+                  </div>
+                </div>
+              );
+            })()}
             <DialogFooter>
               <Button variant="outline" onClick={() => setApproveDialogOpen(false)}>Cancel</Button>
-              <Button 
+              <Button
                 onClick={() => selectedItem && approveMutation.mutate({
                   itemId: selectedItem.id,
                   data: {

@@ -24,6 +24,11 @@ export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
   { code: "replenishment", name: "Replenishment", description: "Moved from bulk to pick location", transactionType: "replenish", requiresNote: 0, sortOrder: 100 },
   { code: "relocation", name: "Relocation", description: "Moved to different bin", transactionType: "transfer", requiresNote: 0, sortOrder: 110 },
   { code: "misplaced", name: "Misplaced", description: "Found in wrong location", transactionType: "transfer", requiresNote: 1, sortOrder: 120 },
+
+  // Cycle count specific
+  { code: "receiving_error", name: "Receiving Error", description: "Variance due to incorrect receiving", transactionType: "adjustment", requiresNote: 1, sortOrder: 130 },
+  { code: "picking_error", name: "Picking Error", description: "Variance due to incorrect pick", transactionType: "adjustment", requiresNote: 1, sortOrder: 140 },
+  { code: "within_tolerance", name: "Within Tolerance", description: "Small variance auto-approved within tolerance", transactionType: "adjustment", requiresNote: 0, sortOrder: 150 },
 ];
 
 // Default permissions for Echelon

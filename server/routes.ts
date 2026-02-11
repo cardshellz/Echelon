@@ -6568,7 +6568,8 @@ export async function registerRoutes(
     "company_postal_code", "company_country", "default_timezone", 
     "default_warehouse_id",
     "allow_multiple_skus_per_bin", "picking_batch_size",
-    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_days"
+    "auto_release_delay_minutes", "default_lead_time_days", "default_safety_stock_days",
+    "cycle_count_auto_approve_tolerance", "cycle_count_approval_threshold"
   ] as const;
 
   const settingsUpdateSchema = z.record(
@@ -7340,6 +7341,64 @@ export async function registerRoutes(
     }
   });
 
+  // Get variance summary grouped by SKU
+  app.get("/api/cycle-counts/:id/variance-summary", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const items = await storage.getCycleCountItems(id);
+
+      // Group items with variances by productVariantId
+      const variantMap = new Map<number, { sku: string; productVariantId: number; locations: any[]; totalVariance: number }>();
+
+      for (const item of items) {
+        if (!item.varianceType || !item.productVariantId) continue;
+
+        const sku = item.expectedSku || item.countedSku || "Unknown";
+        const existing = variantMap.get(item.productVariantId);
+        const location = await storage.getWarehouseLocationById(item.warehouseLocationId);
+
+        const locEntry = {
+          locationId: item.warehouseLocationId,
+          locationCode: location?.code || "?",
+          zone: location?.zone,
+          varianceQty: item.varianceQty ?? 0,
+          varianceType: item.varianceType,
+          mismatchType: item.mismatchType,
+          status: item.status,
+          itemId: item.id,
+        };
+
+        if (existing) {
+          existing.locations.push(locEntry);
+          existing.totalVariance += item.varianceQty ?? 0;
+        } else {
+          variantMap.set(item.productVariantId, {
+            sku,
+            productVariantId: item.productVariantId,
+            locations: [locEntry],
+            totalVariance: item.varianceQty ?? 0,
+          });
+        }
+      }
+
+      // Classify each SKU
+      const skuSummaries = Array.from(variantMap.values()).map(entry => ({
+        ...entry,
+        netVariance: entry.totalVariance,
+        classification: entry.totalVariance === 0
+          ? "misplacement"
+          : entry.totalVariance > 0
+            ? "surplus"
+            : "shortage",
+      }));
+
+      res.json({ skuSummaries });
+    } catch (error) {
+      console.error("Error fetching variance summary:", error);
+      res.status(500).json({ error: "Failed to fetch variance summary" });
+    }
+  });
+
   // Create new cycle count
   app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
@@ -7572,20 +7631,56 @@ export async function registerRoutes(
         } else if (varianceQty < 0) {
           varianceType = "quantity_under";
         }
-        
-        const requiresApproval = Math.abs(varianceQty) > 10;
-        
-        await storage.updateCycleCountItem(itemId, {
-          countedSku: countedSku || null,
-          countedQty,
-          varianceQty,
-          varianceType,
-          varianceNotes: notes || null,
-          status: varianceType ? "variance" : "counted",
-          requiresApproval: requiresApproval ? 1 : 0,
-          countedBy: userId,
-          countedAt: new Date(),
-        });
+
+        // Fetch configurable tolerance and threshold from settings
+        const toleranceSetting = await storage.getSetting("cycle_count_auto_approve_tolerance");
+        const thresholdSetting = await storage.getSetting("cycle_count_approval_threshold");
+        const autoApproveTolerance = parseInt(toleranceSetting || "0", 10);
+        const approvalThreshold = parseInt(thresholdSetting || "10", 10);
+
+        const absVariance = Math.abs(varianceQty);
+        const withinTolerance = autoApproveTolerance > 0 && absVariance > 0 && absVariance <= autoApproveTolerance;
+        const requiresApproval = absVariance > approvalThreshold;
+
+        if (withinTolerance && varianceType && item.productVariantId) {
+          // Auto-approve: apply adjustment immediately
+          const { inventoryCore: autoCore } = req.app.locals.services as any;
+          await autoCore.adjustInventory({
+            productVariantId: item.productVariantId,
+            warehouseLocationId: item.warehouseLocationId,
+            qtyDelta: varianceQty,
+            reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}`,
+            cycleCountId: item.cycleCountId,
+            userId,
+          });
+
+          await storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: "approved",
+            varianceReason: "within_tolerance",
+            requiresApproval: 0,
+            approvedBy: userId,
+            approvedAt: new Date(),
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+        } else {
+          await storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: varianceType ? "variance" : "counted",
+            requiresApproval: requiresApproval ? 1 : 0,
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+        }
       }
       
       // Update cycle count progress
@@ -7612,6 +7707,116 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error recording count:", error);
       res.status(500).json({ error: "Failed to record count" });
+    }
+  });
+
+  // Reset a counted item back to pending (for recount)
+  app.post("/api/cycle-counts/:id/items/:itemId/reset", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+
+      const item = await storage.getCycleCountItemById(itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+
+      if (item.status === "approved" || item.status === "adjusted") {
+        return res.status(400).json({ error: "Cannot reset an approved/adjusted item" });
+      }
+
+      // Clean up linked mismatch items
+      // If this item has a relatedItemId, delete the linked auto-created item
+      if (item.relatedItemId) {
+        const linkedItem = await storage.getCycleCountItemById(item.relatedItemId);
+        if (linkedItem && linkedItem.status !== "approved") {
+          await storage.deleteCycleCountItem(item.relatedItemId);
+        }
+      }
+
+      // Check if another item points TO this one (reverse relationship)
+      const reverseResult = await db.execute<{ id: number; status: string }>(sql`
+        SELECT id, status FROM cycle_count_items
+        WHERE related_item_id = ${itemId}
+        AND status != 'approved'
+      `);
+      for (const rev of reverseResult.rows) {
+        await storage.deleteCycleCountItem(rev.id);
+      }
+
+      // Reset item to pending
+      await storage.updateCycleCountItem(itemId, {
+        countedSku: null,
+        countedQty: null,
+        varianceQty: null,
+        varianceType: null,
+        varianceNotes: null,
+        varianceReason: null,
+        mismatchType: null,
+        relatedItemId: null,
+        requiresApproval: 0,
+        countedBy: null,
+        countedAt: null,
+        status: "pending",
+      });
+
+      // Recompute cycle count progress
+      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
+      if (cycleCount) {
+        const allItems = await storage.getCycleCountItems(item.cycleCountId);
+        const countedCount = allItems.filter(i => i.status !== "pending").length;
+        const varianceCount = allItems.filter(i => i.varianceType).length;
+
+        await storage.updateCycleCount(item.cycleCountId, {
+          countedBins: countedCount,
+          varianceCount,
+        });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error resetting count item:", error);
+      res.status(500).json({ error: "Failed to reset count item" });
+    }
+  });
+
+  // Put a variance item on investigation hold
+  app.post("/api/cycle-counts/:id/items/:itemId/investigate", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const itemId = parseInt(req.params.itemId);
+      const userId = req.session.user?.id;
+      const { notes } = req.body;
+
+      const item = await storage.getCycleCountItemById(itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+
+      if (item.status === "approved" || item.status === "adjusted") {
+        return res.status(400).json({ error: "Cannot investigate an already approved item" });
+      }
+
+      await storage.updateCycleCountItem(itemId, {
+        status: "investigate",
+        varianceNotes: notes ? `${item.varianceNotes || ''}\n[Investigation] ${notes}`.trim() : item.varianceNotes,
+      });
+
+      // Recompute cycle count progress
+      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
+      if (cycleCount) {
+        const allItems = await storage.getCycleCountItems(item.cycleCountId);
+        const countedCount = allItems.filter(i => i.status !== "pending").length;
+        const varianceCount = allItems.filter(i => i.varianceType).length;
+
+        await storage.updateCycleCount(item.cycleCountId, {
+          countedBins: countedCount,
+          varianceCount,
+        });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error setting investigation hold:", error);
+      res.status(500).json({ error: "Failed to set investigation hold" });
     }
   });
 
@@ -7701,15 +7906,16 @@ export async function registerRoutes(
       
       // Track adjustments made for audit response
       const adjustmentsMade: any[] = [];
-      
+      const { inventoryCore: ccCore } = req.app.locals.services as any;
+
       // Apply inventory adjustment if we have a product variant
       if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
-        const { inventoryCore: ccCore } = req.app.locals.services as any;
         await ccCore.adjustInventory({
           productVariantId: item.productVariantId,
           warehouseLocationId: item.warehouseLocationId,
           qtyDelta: item.varianceQty,
           reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`,
+          cycleCountId: item.cycleCountId,
           userId,
         });
         adjustmentsMade.push({
@@ -7740,6 +7946,7 @@ export async function registerRoutes(
               warehouseLocationId: relatedItem.warehouseLocationId,
               qtyDelta: relatedItem.varianceQty,
               reason: `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`,
+              cycleCountId: relatedItem.cycleCountId,
               userId,
             });
             adjustmentsMade.push({
@@ -7749,7 +7956,7 @@ export async function registerRoutes(
               locationId: relatedItem.warehouseLocationId
             });
           }
-          
+
           // Update related item as approved
           await storage.updateCycleCountItem(relatedItem.id, {
             status: "approved",
@@ -7780,6 +7987,7 @@ export async function registerRoutes(
               warehouseLocationId: reverseItem.warehouseLocationId,
               qtyDelta: reverseItem.varianceQty,
               reason: `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`,
+              cycleCountId: reverseItem.cycleCountId,
               userId,
             });
             adjustmentsMade.push({
@@ -7839,9 +8047,14 @@ export async function registerRoutes(
         return res.status(400).json({ error: `${pendingItems.length} items still pending` });
       }
       
-      // Check all variances are approved
+      // Check all variances are approved (investigate status also blocks completion)
       const unapprovedVariances = items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "adjusted");
-      
+      const investigatingItems = items.filter(i => i.status === "investigate");
+
+      if (investigatingItems.length > 0) {
+        return res.status(400).json({ error: `${investigatingItems.length} items still under investigation` });
+      }
+
       if (unapprovedVariances.length > 0) {
         return res.status(400).json({ error: `${unapprovedVariances.length} variances not approved` });
       }

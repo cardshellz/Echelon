@@ -44,6 +44,8 @@ export default function Settings() {
     auto_release_delay_minutes: "30",
     default_lead_time_days: "120",
     default_safety_stock_days: "7",
+    cycle_count_auto_approve_tolerance: "0",
+    cycle_count_approval_threshold: "10",
   });
 
   const { data: settings, isLoading } = useQuery<Settings>({
@@ -365,6 +367,45 @@ export default function Settings() {
                   disabled={!canEdit}
                   data-testid="switch-allow-multiple-skus"
                 />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Cycle Count Settings</CardTitle>
+              <CardDescription>Configure cycle count variance handling and auto-approval thresholds</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="cycle_count_auto_approve_tolerance" className="text-sm">Auto-Approve Tolerance (units)</Label>
+                  <Input
+                    id="cycle_count_auto_approve_tolerance"
+                    type="number"
+                    value={formData.cycle_count_auto_approve_tolerance || "0"}
+                    onChange={(e) => setFormData({ ...formData, cycle_count_auto_approve_tolerance: e.target.value })}
+                    disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    min="0"
+                  />
+                  <p className="text-xs text-muted-foreground">Variances within this range are auto-approved during counting. Set to 0 to disable.</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="cycle_count_approval_threshold" className="text-sm">Approval Threshold (units)</Label>
+                  <Input
+                    id="cycle_count_approval_threshold"
+                    type="number"
+                    value={formData.cycle_count_approval_threshold || "10"}
+                    onChange={(e) => setFormData({ ...formData, cycle_count_approval_threshold: e.target.value })}
+                    disabled={!canEdit}
+                    className="h-11"
+                    autoComplete="off"
+                    min="0"
+                  />
+                  <p className="text-xs text-muted-foreground">Variances above this threshold are flagged as requiring approval</p>
+                </div>
               </div>
             </CardContent>
           </Card>
