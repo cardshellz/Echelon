@@ -355,6 +355,7 @@ export default function Inventory() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos">("all");
+  const [purchasingFilter, setPurchasingFilter] = useState("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -660,7 +661,7 @@ export default function Inventory() {
       </div>
 
       <div className="flex-1 px-4 md:px-6 pt-2 pb-4 overflow-hidden flex flex-col min-h-0">
-        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); }} className="flex-1 flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); setPurchasingFilter("all"); }} className="flex-1 flex flex-col min-h-0">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="physical"
@@ -726,21 +727,33 @@ export default function Inventory() {
             )}
             {activeTab === "purchasing" && reorderData && (
               <>
-                <span>{reorderData.items?.length ?? 0} products</span>
+                <button
+                  className={`hover:underline ${purchasingFilter === "all" ? "font-semibold" : ""}`}
+                  onClick={() => setPurchasingFilter("all")}
+                >
+                  {reorderData.items?.length ?? 0} products
+                </button>
                 <span className="text-muted-foreground/40">·</span>
-                {reorderData.summary.belowReorderPoint > 0 ? (
-                  <span className="text-red-600 font-medium">{reorderData.summary.belowReorderPoint} need ordering</span>
-                ) : (
-                  <span>0 need ordering</span>
-                )}
+                <button
+                  className={`hover:underline ${purchasingFilter === "need_ordering" ? "underline font-semibold" : ""} ${reorderData.summary.belowReorderPoint > 0 ? "text-red-600 font-medium" : ""}`}
+                  onClick={() => setPurchasingFilter(purchasingFilter === "need_ordering" ? "all" : "need_ordering")}
+                >
+                  {reorderData.summary.belowReorderPoint} need ordering
+                </button>
                 <span className="text-muted-foreground/40">·</span>
-                {reorderData.summary.orderSoon > 0 ? (
-                  <span className="text-amber-600 font-medium">{reorderData.summary.orderSoon} order soon</span>
-                ) : (
-                  <span>0 order soon</span>
-                )}
+                <button
+                  className={`hover:underline ${purchasingFilter === "order_soon" ? "underline font-semibold" : ""} ${reorderData.summary.orderSoon > 0 ? "text-amber-600 font-medium" : ""}`}
+                  onClick={() => setPurchasingFilter(purchasingFilter === "order_soon" ? "all" : "order_soon")}
+                >
+                  {reorderData.summary.orderSoon} order soon
+                </button>
                 <span className="text-muted-foreground/40">·</span>
-                <span>{reorderData.summary.noMovement} no movement</span>
+                <button
+                  className={`hover:underline ${purchasingFilter === "no_movement" ? "underline font-semibold" : ""}`}
+                  onClick={() => setPurchasingFilter(purchasingFilter === "no_movement" ? "all" : "no_movement")}
+                >
+                  {reorderData.summary.noMovement} no movement
+                </button>
               </>
             )}
             {activeTab === "operations" && locationHealth && (
@@ -937,7 +950,7 @@ export default function Inventory() {
 
           {/* ====== TAB 2: Purchasing / Reorder ====== */}
           <TabsContent value="purchasing" className="flex-1 flex flex-col mt-0 min-h-0">
-            <PurchasingView searchQuery={searchQuery} />
+            <PurchasingView searchQuery={searchQuery} statusFilter={purchasingFilter} setStatusFilter={setPurchasingFilter} />
           </TabsContent>
 
           {/* ====== TAB 3: Operations ====== */}

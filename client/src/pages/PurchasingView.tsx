@@ -56,6 +56,8 @@ interface ReorderAnalysis {
 
 interface PurchasingViewProps {
   searchQuery: string;
+  statusFilter: string;
+  setStatusFilter: (filter: string) => void;
 }
 
 const STATUS_CONFIG: Record<string, { label: string; className: string; priority: number }> = {
@@ -75,8 +77,7 @@ const LOOKBACK_OPTIONS = [
   { value: "180", label: "180d" },
 ];
 
-export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
-  const [statusFilter, setStatusFilter] = useState("all");
+export default function PurchasingView({ searchQuery, statusFilter, setStatusFilter }: PurchasingViewProps) {
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const queryClient = useQueryClient();
