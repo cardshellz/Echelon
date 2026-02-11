@@ -9944,6 +9944,19 @@ export async function registerRoutes(
     }
   });
   
+  // Execute a replen task (actually move inventory from source to pick location)
+  app.post("/api/replen/tasks/:id/execute", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { replenishment } = req.app.locals.services;
+      const result = await replenishment.executeTask(id, req.session.user?.id);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error executing replen task:", error);
+      res.status(400).json({ error: error.message || "Failed to execute replen task" });
+    }
+  });
+
   app.delete("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);

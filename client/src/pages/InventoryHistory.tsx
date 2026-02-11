@@ -366,6 +366,11 @@ export default function InventoryHistory() {
                           <div className="text-xs text-muted-foreground">
                             {format(new Date(tx.createdAt), "MMM d, h:mm a")}
                           </div>
+                          {tx.variantQtyBefore != null && tx.variantQtyAfter != null && (
+                            <span className="font-mono text-xs text-muted-foreground">
+                              {tx.variantQtyBefore} → {tx.variantQtyAfter}
+                            </span>
+                          )}
                           {getLocationDisplay(tx)}
                         </div>
                         {(tx.sourceState && tx.targetState && tx.sourceState !== tx.targetState) && (
@@ -396,6 +401,7 @@ export default function InventoryHistory() {
                       <TableHead>Location</TableHead>
                       <TableHead className="w-32">State Change</TableHead>
                       <TableHead className="w-20 text-right">Qty</TableHead>
+                      <TableHead className="w-28 text-right">Before / After</TableHead>
                       <TableHead>Reference</TableHead>
                       <TableHead>User</TableHead>
                     </TableRow>
@@ -403,7 +409,7 @@ export default function InventoryHistory() {
                   <TableBody>
                     {filteredTransactions.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                        <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                           No transactions found
                         </TableCell>
                       </TableRow>
@@ -462,11 +468,20 @@ export default function InventoryHistory() {
                             <TableCell className="text-right">
                               <span className={cn(
                                 "font-mono font-medium",
-                                tx.variantQtyDelta > 0 ? "text-green-600" : 
+                                tx.variantQtyDelta > 0 ? "text-green-600" :
                                 tx.variantQtyDelta < 0 ? "text-red-600" : "text-muted-foreground"
                               )}>
                                 {tx.variantQtyDelta > 0 ? "+" : ""}{tx.variantQtyDelta}
                               </span>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              {tx.variantQtyBefore != null && tx.variantQtyAfter != null ? (
+                                <span className="font-mono text-xs text-muted-foreground">
+                                  {tx.variantQtyBefore} → {tx.variantQtyAfter}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">-</span>
+                              )}
                             </TableCell>
                             <TableCell>
                               <div className="flex flex-col">

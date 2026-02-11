@@ -284,7 +284,7 @@ export class InventoryCoreService {
         productVariantId: params.productVariantId,
         fromLocationId: params.warehouseLocationId,
         transactionType: "pick",
-        variantQtyDelta: 0,
+        variantQtyDelta: -params.qty,
         variantQtyBefore: level.variantQty,
         variantQtyAfter: updated.variantQty,
         sourceState: "on_hand",
