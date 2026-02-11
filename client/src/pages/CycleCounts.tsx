@@ -497,9 +497,10 @@ export default function CycleCounts() {
   };
 
   const filteredItems = cycleCountDetail?.items.filter(item => {
-    const matchesSearch = !searchQuery || 
+    const matchesSearch = !searchQuery ||
       item.locationCode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.expectedSku?.toLowerCase().includes(searchQuery.toLowerCase());
+      item.expectedSku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      item.countedSku?.toLowerCase().includes(searchQuery.toLowerCase());
     
     if (!matchesSearch) return false;
     
@@ -1440,11 +1441,13 @@ export default function CycleCounts() {
                   <div className="flex-1 min-w-0">
                     <div className="font-mono font-bold text-lg text-blue-600">{item.locationCode}</div>
                     <div className="text-sm truncate">
-                      {item.mismatchType === "unexpected_found" 
-                        ? <span className="text-amber-700">Found: {item.countedSku}</span>
-                        : (item.expectedSku || "(empty)")
-                      }
+                      {item.expectedSku || <span className="text-muted-foreground">(empty bin)</span>}
                     </div>
+                    {item.countedSku && item.countedSku !== item.expectedSku && (
+                      <div className="text-sm text-amber-700 font-medium truncate">
+                        Actual: {item.countedSku}
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center gap-2 mt-2 text-sm">
                       <span>Expected: <strong>{item.expectedQty}</strong></span>
                       {item.countedQty !== null && (
@@ -1456,7 +1459,6 @@ export default function CycleCounts() {
                         </span>
                       )}
                     </div>
-                    {/* Show linked item indicator */}
                     {item.relatedItemId && (
                       <div className="mt-2 text-xs text-purple-600 flex items-center gap-1">
                         <AlertTriangle className="h-3 w-3" />
@@ -1464,7 +1466,7 @@ export default function CycleCounts() {
                       </div>
                     )}
                     {item.varianceNotes && (
-                      <div className="mt-1 text-xs text-muted-foreground truncate">{item.varianceNotes}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">{item.varianceNotes}</div>
                     )}
                   </div>
                   <div className="flex flex-col items-end gap-2">
@@ -1511,21 +1513,32 @@ export default function CycleCounts() {
           <Table>
             <TableHeader className="bg-muted/40 sticky top-0">
               <TableRow>
-                <TableHead className="w-[120px]">Location</TableHead>
+                <TableHead className="w-[100px]">Location</TableHead>
                 <TableHead>Expected SKU</TableHead>
-                <TableHead className="text-right w-[100px]">Expected</TableHead>
-                <TableHead className="text-right w-[100px]">Counted</TableHead>
-                <TableHead className="text-right w-[100px]">Variance</TableHead>
-                <TableHead className="w-[120px]">Status</TableHead>
-                <TableHead className="w-[120px]">Type</TableHead>
-                <TableHead className="w-[100px]"></TableHead>
+                <TableHead>Counted SKU</TableHead>
+                <TableHead className="text-right w-[80px]">Expected</TableHead>
+                <TableHead className="text-right w-[80px]">Counted</TableHead>
+                <TableHead className="text-right w-[80px]">Variance</TableHead>
+                <TableHead className="w-[110px]">Status</TableHead>
+                <TableHead className="w-[110px]">Type</TableHead>
+                <TableHead>Notes</TableHead>
+                <TableHead className="w-[120px]"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredItems.map((item) => (
-                <TableRow key={item.id} className={item.varianceType ? "bg-amber-50/50" : ""}>
+                <TableRow key={item.id} className={
+                  item.status === "investigate" ? "bg-yellow-50/50" : item.varianceType ? "bg-amber-50/50" : ""
+                }>
                   <TableCell className="font-mono font-medium">{item.locationCode}</TableCell>
                   <TableCell>{item.expectedSku || <span className="text-muted-foreground">(empty)</span>}</TableCell>
+                  <TableCell>
+                    {item.countedSku ? (
+                      <span className={item.countedSku !== item.expectedSku ? "text-amber-700 font-medium" : ""}>
+                        {item.countedSku}
+                      </span>
+                    ) : <span className="text-muted-foreground">-</span>}
+                  </TableCell>
                   <TableCell className="text-right font-mono">{item.expectedQty}</TableCell>
                   <TableCell className="text-right font-mono">
                     {item.countedQty !== null ? item.countedQty : "-"}
@@ -1539,6 +1552,11 @@ export default function CycleCounts() {
                   </TableCell>
                   <TableCell>{getItemStatusBadge(item)}</TableCell>
                   <TableCell>{getVarianceTypeBadge(item.varianceType)}</TableCell>
+                  <TableCell className="max-w-[200px]">
+                    {item.varianceNotes && (
+                      <span className="text-xs text-muted-foreground truncate block" title={item.varianceNotes}>{item.varianceNotes}</span>
+                    )}
+                  </TableCell>
                   <TableCell>
                     <div className="flex gap-1">
                       {item.status === "pending" && (
