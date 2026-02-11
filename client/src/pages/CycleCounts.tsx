@@ -1608,19 +1608,24 @@ export default function CycleCounts() {
 
         <Dialog open={countDialogOpen} onOpenChange={setCountDialogOpen}>
           <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
-            {/* Compact header with expected info */}
-            <div className="flex items-center justify-between gap-2 pb-2 border-b">
-              <div className="flex items-center gap-2">
-                <MapPin className="h-4 w-4 text-blue-600 shrink-0" />
-                <span className="font-bold text-lg">{selectedItem?.locationCode}</span>
-              </div>
-              <div className="text-right">
-                <div className="text-xs text-muted-foreground">Expected</div>
-                <div className="font-bold">{selectedItem?.expectedSku || "(empty)"} × {selectedItem?.expectedQty}</div>
-              </div>
+            {/* Header: location only (clear of X button) */}
+            <div className="flex items-center gap-2 pb-2 border-b">
+              <MapPin className="h-4 w-4 text-blue-600 shrink-0" />
+              <span className="font-bold text-lg">{selectedItem?.locationCode}</span>
             </div>
-            
-            <div className="space-y-3 pt-2">
+
+            {/* Expected info - prominent, below divider */}
+            <div className="rounded-md bg-muted/50 border px-3 py-2 flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">Expected</span>
+              <span className="font-mono font-bold">
+                {selectedItem?.expectedSku || <span className="text-muted-foreground italic">(empty bin)</span>}
+                {" "}
+                <span className="text-muted-foreground font-normal">×</span>
+                {" "}{selectedItem?.expectedQty}
+              </span>
+            </div>
+
+            <div className="space-y-3">
               {/* Primary action: Confirm match */}
               <Button 
                 variant="default" 
