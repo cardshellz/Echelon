@@ -2997,7 +2997,7 @@ export class DatabaseStorage implements IStorage {
   
   // Cycle Count Items
   async getCycleCountItems(cycleCountId: number): Promise<CycleCountItem[]> {
-    return await db.select().from(cycleCountItems).where(eq(cycleCountItems.cycleCountId, cycleCountId));
+    return await db.select().from(cycleCountItems).where(eq(cycleCountItems.cycleCountId, cycleCountId)).orderBy(asc(cycleCountItems.id));
   }
   
   async getCycleCountItemById(id: number): Promise<CycleCountItem | undefined> {

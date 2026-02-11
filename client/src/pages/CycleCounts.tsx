@@ -1488,6 +1488,15 @@ export default function CycleCounts() {
                     )}
                     {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                       <>
+                        {item.status === "investigate" && (
+                          <Button size="sm" variant="ghost" onClick={() => {
+                            resetMutation.mutate(item.id, {
+                              onSuccess: () => handleCountClick(item),
+                            });
+                          }} disabled={resetMutation.isPending}>
+                            <Pencil className="h-3 w-3 mr-1" /> Recount
+                          </Button>
+                        )}
                         {item.status !== "investigate" && (
                           <Button size="sm" variant="ghost" className="text-yellow-700"
                             onClick={() => investigateMutation.mutate({ itemId: item.id })}
@@ -1575,6 +1584,15 @@ export default function CycleCounts() {
                       )}
                       {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                         <>
+                          {item.status === "investigate" && (
+                            <Button size="sm" variant="ghost" onClick={() => {
+                              resetMutation.mutate(item.id, {
+                                onSuccess: () => handleCountClick(item),
+                              });
+                            }} disabled={resetMutation.isPending}>
+                              <Pencil className="h-3 w-3 mr-1" /> Recount
+                            </Button>
+                          )}
                           {item.status !== "investigate" && (
                             <Button size="sm" variant="ghost" className="text-yellow-700"
                               onClick={() => investigateMutation.mutate({ itemId: item.id })}
