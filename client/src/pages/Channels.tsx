@@ -170,6 +170,11 @@ export default function Channels() {
     },
   });
 
+  // Shopify connection credentials (for setup)
+  const [connectDomain, setConnectDomain] = useState("");
+  const [connectToken, setConnectToken] = useState("");
+  const [connecting, setConnecting] = useState(false);
+
   // Shopify location mapping state
   const [shopifyLocations, setShopifyLocations] = useState<ShopifyLocation[]>([]);
   const [locationMappings, setLocationMappings] = useState<Record<string, number | null>>({});
@@ -620,55 +625,95 @@ export default function Channels() {
                       )}
                     </div>
                   ) : (
-                    <div className="text-center py-8">
-                      <Settings className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                      <p className="text-muted-foreground">No connection configured yet.</p>
+                    <div className="py-4">
                       {selectedChannel.provider === 'shopify' ? (
-                        <Button
-                          className="mt-4 min-h-[44px]"
-                          onClick={async () => {
-                            try {
-                              const res = await fetch(`/api/channels/${selectedChannel.id}/setup-shopify`, {
-                                method: 'POST',
-                                credentials: 'include',
-                              });
-                              const data = await res.json();
-                              if (!res.ok) {
-                                toast({
-                                  title: "Connection failed",
-                                  description: data.message || data.error,
-                                  variant: "destructive"
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Store className="h-5 w-5 text-muted-foreground" />
+                            <p className="font-medium">Connect to Shopify</p>
+                          </div>
+                          <div className="space-y-3">
+                            <div>
+                              <Label htmlFor="shopDomain" className="text-sm">Shop Domain</Label>
+                              <Input
+                                id="shopDomain"
+                                placeholder="your-store.myshopify.com"
+                                value={connectDomain}
+                                onChange={(e) => setConnectDomain(e.target.value)}
+                                className="mt-1"
+                                spellCheck={false}
+                              />
+                            </div>
+                            <div>
+                              <Label htmlFor="accessToken" className="text-sm">Access Token</Label>
+                              <Input
+                                id="accessToken"
+                                type="password"
+                                placeholder="shpat_..."
+                                value={connectToken}
+                                onChange={(e) => setConnectToken(e.target.value)}
+                                className="mt-1"
+                                spellCheck={false}
+                              />
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Admin API access token from your Shopify custom app.
+                              </p>
+                            </div>
+                          </div>
+                          <Button
+                            className="w-full min-h-[44px]"
+                            disabled={!connectDomain || !connectToken || connecting}
+                            onClick={async () => {
+                              setConnecting(true);
+                              try {
+                                const res = await fetch(`/api/channels/${selectedChannel.id}/setup-shopify`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  credentials: 'include',
+                                  body: JSON.stringify({ shopDomain: connectDomain, accessToken: connectToken }),
                                 });
-                                return;
-                              }
-                              toast({ title: "Connected to Shopify!", description: `Shop: ${data.shop?.name}` });
-                              // Load locations from the setup response
-                              if (data.locations?.length) {
-                                setShopifyLocations(data.locations);
-                                const map: Record<string, number | null> = {};
-                                for (const loc of data.locations) {
-                                  const existing = (data.mappings || []).find((m: any) => m.shopifyLocationId === loc.id);
-                                  map[loc.id] = existing ? existing.warehouseId : null;
+                                const data = await res.json();
+                                if (!res.ok) {
+                                  toast({
+                                    title: "Connection failed",
+                                    description: data.message || data.error,
+                                    variant: "destructive"
+                                  });
+                                  return;
                                 }
-                                setLocationMappings(map);
+                                toast({ title: "Connected to Shopify!", description: `Shop: ${data.shop?.name}` });
+                                setConnectDomain("");
+                                setConnectToken("");
+                                // Load locations from the setup response
+                                if (data.locations?.length) {
+                                  setShopifyLocations(data.locations);
+                                  const map: Record<string, number | null> = {};
+                                  for (const loc of data.locations) {
+                                    const existing = (data.mappings || []).find((m: any) => m.shopifyLocationId === loc.id);
+                                    map[loc.id] = existing ? existing.warehouseId : null;
+                                  }
+                                  setLocationMappings(map);
+                                }
+                                queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+                                // Refresh selectedChannel to show connected state
+                                const refreshRes = await fetch("/api/channels", { credentials: "include" });
+                                if (refreshRes.ok) {
+                                  const channels: Channel[] = await refreshRes.json();
+                                  const updated = channels.find(c => c.id === selectedChannel.id);
+                                  if (updated) setSelectedChannel(updated);
+                                }
+                              } catch (err) {
+                                toast({ title: "Error", description: "Failed to connect", variant: "destructive" });
+                              } finally {
+                                setConnecting(false);
                               }
-                              queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
-                              // Refresh selectedChannel to show connected state
-                              const refreshRes = await fetch("/api/channels", { credentials: "include" });
-                              if (refreshRes.ok) {
-                                const channels: Channel[] = await refreshRes.json();
-                                const updated = channels.find(c => c.id === selectedChannel.id);
-                                if (updated) setSelectedChannel(updated);
-                              }
-                            } catch (err) {
-                              toast({ title: "Error", description: "Failed to connect", variant: "destructive" });
-                            }
-                          }}
-                          data-testid="button-setup-shopify"
-                        >
-                          <Store className="h-4 w-4 mr-2" />
-                          Connect to Shopify
-                        </Button>
+                            }}
+                            data-testid="button-setup-shopify"
+                          >
+                            <Store className="h-4 w-4 mr-2" />
+                            {connecting ? "Connecting..." : "Connect to Shopify"}
+                          </Button>
+                        </div>
                       ) : (
                         <Button className="mt-4 min-h-[44px]" variant="outline">
                           Configure Connection

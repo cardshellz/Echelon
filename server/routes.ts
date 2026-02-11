@@ -5,7 +5,7 @@ import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, getShopifyConfig, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -6496,16 +6496,17 @@ export async function registerRoutes(
         return res.status(400).json({ error: "This channel is not a Shopify channel" });
       }
       
-      let shopifyConfig;
-      try {
-        shopifyConfig = getShopifyConfig();
-      } catch {
+      // Read credentials from request body (per-channel, not env vars)
+      const { shopDomain: rawDomain, accessToken } = req.body as { shopDomain?: string; accessToken?: string };
+      if (!rawDomain || !accessToken) {
         return res.status(400).json({
-          error: "Shopify credentials not configured",
-          message: "Please set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN in your environment"
+          error: "Missing credentials",
+          message: "Please provide shopDomain and accessToken",
         });
       }
-      const { store, domain: shopDomain, accessToken } = shopifyConfig;
+      // Normalize: "my-store" → "my-store.myshopify.com"
+      const shopDomain = rawDomain.includes('.myshopify.com') ? rawDomain : `${rawDomain}.myshopify.com`;
+      const store = shopDomain.replace(/\.myshopify\.com$/, '');
 
       // Test the connection by fetching shop info
       const testResponse = await fetch(
@@ -6527,10 +6528,11 @@ export async function registerRoutes(
 
       const shopData = await testResponse.json();
 
-      // Create/update the connection
+      // Create/update the connection (store credentials per-channel)
       const connection = await storage.upsertChannelConnection({
         channelId,
         shopDomain,
+        accessToken,
         syncStatus: 'connected',
         lastSyncAt: new Date(),
       });
@@ -6597,18 +6599,18 @@ export async function registerRoutes(
       if (!channel) return res.status(404).json({ error: "Channel not found" });
       if (channel.provider !== 'shopify') return res.status(400).json({ error: "Not a Shopify channel" });
 
-      let shopifyConfig;
-      try {
-        shopifyConfig = getShopifyConfig();
-      } catch {
-        return res.status(400).json({ error: "Shopify credentials not configured" });
+      // Read credentials from channel's stored connection
+      const connRecord = await storage.getChannelConnection(channelId);
+      if (!connRecord?.shopDomain || !connRecord?.accessToken) {
+        return res.status(400).json({ error: "Channel has no Shopify credentials. Please connect first." });
       }
+      const store = connRecord.shopDomain.replace(/\.myshopify\.com$/, '');
 
       const locResponse = await fetch(
-        `https://${shopifyConfig.store}.myshopify.com/admin/api/2024-01/locations.json`,
+        `https://${store}.myshopify.com/admin/api/2024-01/locations.json`,
         {
           headers: {
-            "X-Shopify-Access-Token": shopifyConfig.accessToken,
+            "X-Shopify-Access-Token": connRecord.accessToken,
             "Content-Type": "application/json",
           },
         }

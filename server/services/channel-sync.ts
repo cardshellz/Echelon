@@ -1,6 +1,7 @@
 import { eq, and, sql, inArray } from "drizzle-orm";
 import {
   channelFeeds,
+  channelConnections,
   channels,
   productVariants,
   products,
@@ -8,12 +9,12 @@ import {
 } from "@shared/schema";
 import type {
   ChannelFeed,
+  ChannelConnection,
   Channel,
   ProductVariant,
   Product,
   Warehouse,
 } from "@shared/schema";
-import { getShopifyConfig } from "../shopify";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -440,21 +441,36 @@ class ChannelSyncService {
    * Push inventory quantity to Shopify via the Inventory Levels `set.json`
    * REST API endpoint.
    *
-   * Supports multiple Shopify locations: queries all warehouses with a
-   * `shopify_location_id` configured and pushes that warehouse's ATP to
-   * the corresponding Shopify location. Falls back to `SHOPIFY_LOCATION_ID`
-   * env var with global ATP if no warehouses are configured.
+   * Reads credentials from the channel's `channel_connections` record
+   * (per-channel, not env vars). Supports multiple Shopify locations:
+   * queries all warehouses with a `shopify_location_id` configured and
+   * pushes that warehouse's ATP to the corresponding Shopify location.
+   * Falls back to `SHOPIFY_LOCATION_ID` env var with global ATP if no
+   * warehouses are configured.
    *
    * @param feed      The channel feed with `channelVariantId` containing the
    *                  Shopify inventory item ID.
    * @param atpUnits  The global ATP quantity (used as fallback).
-   * @throws On missing env vars or Shopify API errors.
+   * @throws On missing credentials or Shopify API errors.
    */
   private async pushToShopify(
     feed: ChannelFeed,
     atpUnits: number,
   ): Promise<void> {
-    const { domain: shopifyDomain, accessToken } = getShopifyConfig();
+    // Read credentials from the channel's stored connection
+    if (!feed.channelId) {
+      throw new Error(`Feed ${feed.id} has no channelId — cannot resolve Shopify credentials`);
+    }
+    const [conn] = await this.db
+      .select()
+      .from(channelConnections)
+      .where(eq(channelConnections.channelId, feed.channelId))
+      .limit(1);
+    if (!conn?.shopDomain || !conn?.accessToken) {
+      throw new Error(`Channel ${feed.channelId} has no Shopify credentials configured`);
+    }
+    const shopifyDomain = conn.shopDomain;
+    const accessToken = conn.accessToken;
     const shopifyInventoryItemId = feed.channelVariantId;
 
     // Look up warehouses with Shopify location IDs configured

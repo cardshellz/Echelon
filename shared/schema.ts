@@ -827,6 +827,7 @@ export type ChannelType = typeof channelTypeEnum[number];
 
 export const channelFeeds = pgTable("channel_feeds", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").references(() => channels.id),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   channelType: varchar("channel_type", { length: 30 }).notNull().default("shopify"),
   channelVariantId: varchar("channel_variant_id", { length: 100 }).notNull(), // Shopify variant ID
