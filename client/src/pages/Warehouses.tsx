@@ -45,6 +45,7 @@ export default function Warehouses() {
     timezone: "America/New_York",
     isActive: 1,
     isDefault: 0,
+    shopifyLocationId: "",
   });
 
   const canView = hasPermission("inventory", "view");
@@ -134,6 +135,7 @@ export default function Warehouses() {
       timezone: "America/New_York",
       isActive: 1,
       isDefault: 0,
+      shopifyLocationId: "",
     });
   };
 
@@ -150,6 +152,7 @@ export default function Warehouses() {
       timezone: warehouse.timezone || "America/New_York",
       isActive: warehouse.isActive,
       isDefault: warehouse.isDefault,
+      shopifyLocationId: (warehouse as any).shopifyLocationId || "",
     });
   };
 
@@ -158,10 +161,14 @@ export default function Warehouses() {
       toast({ title: "Error", description: "Code and name are required", variant: "destructive" });
       return;
     }
+    const payload = {
+      ...formData,
+      shopifyLocationId: formData.shopifyLocationId.trim() || null,
+    };
     if (editingWarehouse) {
-      updateMutation.mutate({ id: editingWarehouse.id, data: formData });
+      updateMutation.mutate({ id: editingWarehouse.id, data: payload });
     } else {
-      createMutation.mutate(formData);
+      createMutation.mutate(payload as any);
     }
   };
 
@@ -516,6 +523,33 @@ export default function Warehouses() {
                       data-testid="input-warehouse-timezone"
                     />
                   </div>
+                </div>
+              </div>
+            </details>
+
+            <details className="group">
+              <summary className="text-xs md:text-sm font-medium cursor-pointer list-none flex items-center gap-2 py-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Channel Integration
+              </summary>
+              <div className="space-y-3 pt-2">
+                <div className="space-y-1">
+                  <Label htmlFor="shopifyLocationId" className="text-xs md:text-sm">Shopify Location ID</Label>
+                  <Input
+                    id="shopifyLocationId"
+                    placeholder="e.g. 61234567890"
+                    value={formData.shopifyLocationId}
+                    onChange={(e) => setFormData({ ...formData, shopifyLocationId: e.target.value })}
+                    className="h-11"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    data-testid="input-warehouse-shopify-location"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Found in Shopify Admin → Settings → Locations (ID in URL)
+                  </p>
                 </div>
               </div>
             </details>
