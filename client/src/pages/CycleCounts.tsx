@@ -21,6 +21,7 @@ import {
   ArrowRight,
   ChevronDown,
   Eye,
+  ListChecks,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +52,7 @@ import {
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 
@@ -120,6 +122,9 @@ export default function CycleCounts() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
+  const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
+  const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkApproveForm, setBulkApproveForm] = useState({ reasonCode: "", notes: "" });
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
   const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
@@ -326,6 +331,33 @@ export default function CycleCounts() {
     },
   });
 
+  const bulkApproveMutation = useMutation({
+    mutationFn: async ({ itemIds, reasonCode, notes }: { itemIds: number[]; reasonCode: string; notes?: string }) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/bulk-approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ itemIds, reasonCode, notes }),
+      });
+      if (!res.ok) throw new Error("Failed to bulk approve");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Bulk approve complete",
+        description: `${data.approved} approved, ${data.adjustmentsMade} adjustments made${data.skipped ? `, ${data.skipped} skipped` : ""}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"] });
+      setBulkApproveOpen(false);
+      setBulkSelectedIds(new Set());
+      setBulkApproveForm({ reasonCode: "", notes: "" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Bulk approve failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const createVariantMutation = useMutation({
     mutationFn: async (itemId: number) => {
       const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${itemId}/create-variant`, {
@@ -341,7 +373,8 @@ export default function CycleCounts() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
       if (selectedItem && data.item) {
-        setSelectedItem(data.item);
+        // Preserve enrichment fields (locationCode, zone) from the current selectedItem
+        setSelectedItem({ ...data.item, locationCode: selectedItem.locationCode, zone: selectedItem.zone });
       }
       const verb = data.alreadyExisted ? "Linked existing" : "Created & linked";
       const extra = data.siblingItemsLinked > 0 ? ` (also linked ${data.siblingItemsLinked} other item${data.siblingItemsLinked > 1 ? "s" : ""})` : "";
@@ -533,25 +566,48 @@ export default function CycleCounts() {
     setCountDialogOpen(true);
   };
 
-  const handleApproveClick = (item: CycleCountItem) => {
+  const handleApproveClick = async (item: CycleCountItem) => {
+    let linkedItem = item;
     setSelectedItem(item);
+    setApproveForm({ reasonCode: "", notes: "" });
+    setApproveDialogOpen(true);
+
+    // Auto-link variant if countedSku exists but productVariantId is null
+    if (!item.productVariantId && item.countedSku && selectedCount) {
+      try {
+        const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${item.id}/create-variant`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.item) {
+            // Preserve enrichment fields from the original item
+            linkedItem = { ...data.item, locationCode: item.locationCode, zone: item.zone };
+            setSelectedItem(linkedItem);
+          }
+          queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+          const verb = data.alreadyExisted ? "Linked existing" : "Created & linked";
+          toast({ title: `${verb} variant`, description: `${data.variant.sku} (${data.variant.name})` });
+        }
+      } catch (e) {
+        // Silently fail auto-link - user can still click "Create & Link SKU" manually
+        console.log("[CycleCount] Auto-link failed:", e);
+      }
+    }
+
     // Pre-select "misplaced" if this SKU has offsetting (net-zero) variances
-    if (item.productVariantId && cycleCountDetail) {
+    if (linkedItem.productVariantId && cycleCountDetail) {
       const offsetting = cycleCountDetail.items.filter(i =>
-        i.id !== item.id &&
-        i.productVariantId === item.productVariantId &&
+        i.id !== linkedItem.id &&
+        i.productVariantId === linkedItem.productVariantId &&
         i.varianceQty !== null && i.varianceQty !== 0
       );
-      const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), item.varianceQty ?? 0);
+      const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), linkedItem.varianceQty ?? 0);
       if (offsetting.length > 0 && netVar === 0) {
         setApproveForm({ reasonCode: "misplaced", notes: "" });
-      } else {
-        setApproveForm({ reasonCode: "", notes: "" });
       }
-    } else {
-      setApproveForm({ reasonCode: "", notes: "" });
     }
-    setApproveDialogOpen(true);
   };
 
   // Mobile counting mode state
@@ -1415,15 +1471,32 @@ export default function CycleCounts() {
           </div>
         )}
 
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search by location or SKU..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-10"
-            data-testid="input-search"
-          />
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search by location or SKU..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+              data-testid="input-search"
+            />
+          </div>
+          {varianceCount > 0 && (
+            <Button
+              variant="outline"
+              size="default"
+              className="shrink-0"
+              onClick={() => {
+                setBulkSelectedIds(new Set());
+                setBulkApproveForm({ reasonCode: "", notes: "" });
+                setBulkApproveOpen(true);
+              }}
+            >
+              <ListChecks className="h-4 w-4 mr-2" />
+              Bulk Approve
+            </Button>
+          )}
         </div>
 
         {/* Mobile-friendly card list */}
@@ -2067,6 +2140,222 @@ export default function CycleCounts() {
                 disabled={approveMutation.isPending || !approveForm.reasonCode}
               >
                 Approve & Adjust
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Bulk Approve Dialog */}
+        <Dialog open={bulkApproveOpen} onOpenChange={setBulkApproveOpen}>
+          <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle>Bulk Approve Variances</DialogTitle>
+              <DialogDescription>
+                Select items to approve. {bulkSelectedIds.size > 0 && <strong>{bulkSelectedIds.size} selected</strong>}
+              </DialogDescription>
+            </DialogHeader>
+
+            {(() => {
+              // Get all approvable items (have variance, not yet approved)
+              const approvableItems = cycleCountDetail.items.filter(i =>
+                i.varianceType &&
+                (i.status === "variance" || i.status === "investigate") &&
+                i.productVariantId
+              );
+
+              // Group by variance type
+              const groups: Record<string, CycleCountItem[]> = {};
+              for (const item of approvableItems) {
+                const key = item.varianceType || "other";
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(item);
+              }
+
+              // Items without productVariantId (can't auto-approve)
+              const unlinkableItems = cycleCountDetail.items.filter(i =>
+                i.varianceType &&
+                (i.status === "variance" || i.status === "investigate") &&
+                !i.productVariantId
+              );
+
+              const varianceTypeLabels: Record<string, string> = {
+                quantity_diff: "Quantity Difference",
+                missing_item: "Missing Item",
+                unexpected_item: "Unexpected Item",
+                sku_mismatch: "SKU Mismatch",
+                over_count: "Over Count",
+                under_count: "Under Count",
+                other: "Other",
+              };
+
+              const toggleGroup = (items: CycleCountItem[]) => {
+                const ids = items.map(i => i.id);
+                const allSelected = ids.every(id => bulkSelectedIds.has(id));
+                const next = new Set(bulkSelectedIds);
+                if (allSelected) {
+                  ids.forEach(id => next.delete(id));
+                } else {
+                  ids.forEach(id => next.add(id));
+                }
+                setBulkSelectedIds(next);
+              };
+
+              const toggleItem = (id: number) => {
+                const next = new Set(bulkSelectedIds);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                setBulkSelectedIds(next);
+              };
+
+              const selectAll = () => {
+                setBulkSelectedIds(new Set(approvableItems.map(i => i.id)));
+              };
+
+              const deselectAll = () => {
+                setBulkSelectedIds(new Set());
+              };
+
+              return (
+                <>
+                  <div className="flex items-center justify-between border-b pb-2">
+                    <span className="text-sm text-muted-foreground">
+                      {approvableItems.length} approvable items
+                      {unlinkableItems.length > 0 && (
+                        <span className="text-amber-600 ml-2">({unlinkableItems.length} missing SKU link)</span>
+                      )}
+                    </span>
+                    <div className="flex gap-2">
+                      <Button variant="ghost" size="sm" onClick={selectAll}>Select All</Button>
+                      <Button variant="ghost" size="sm" onClick={deselectAll}>Deselect All</Button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-auto space-y-3 min-h-0">
+                    {Object.entries(groups).map(([type, items]) => {
+                      const groupIds = items.map(i => i.id);
+                      const allGroupSelected = groupIds.every(id => bulkSelectedIds.has(id));
+                      const someGroupSelected = groupIds.some(id => bulkSelectedIds.has(id));
+
+                      return (
+                        <div key={type} className="border rounded-lg">
+                          {/* Group header */}
+                          <button
+                            type="button"
+                            className="w-full flex items-center gap-3 px-3 py-2 hover:bg-muted/30 transition-colors"
+                            onClick={() => toggleGroup(items)}
+                          >
+                            <Checkbox
+                              checked={allGroupSelected ? true : someGroupSelected ? "indeterminate" : false}
+                              onCheckedChange={() => toggleGroup(items)}
+                            />
+                            <div className="flex items-center gap-2 flex-1">
+                              <span className="font-medium text-sm">
+                                {varianceTypeLabels[type] || type}
+                              </span>
+                              <Badge variant="secondary" className="text-xs">{items.length}</Badge>
+                            </div>
+                            <span className="text-xs text-muted-foreground">
+                              {items.reduce((s, i) => s + (i.varianceQty ?? 0), 0) > 0 ? "+" : ""}
+                              {items.reduce((s, i) => s + (i.varianceQty ?? 0), 0)} net
+                            </span>
+                          </button>
+
+                          {/* Individual items */}
+                          <div className="border-t divide-y">
+                            {items.map(item => (
+                              <label
+                                key={item.id}
+                                className="flex items-center gap-3 px-3 py-1.5 hover:bg-muted/20 cursor-pointer text-sm"
+                              >
+                                <Checkbox
+                                  checked={bulkSelectedIds.has(item.id)}
+                                  onCheckedChange={() => toggleItem(item.id)}
+                                />
+                                <span className="font-mono text-xs text-blue-600 w-20 shrink-0">{item.locationCode}</span>
+                                <span className="flex-1 truncate">
+                                  {item.expectedSku || item.countedSku || "(empty)"}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {item.expectedQty} → {item.countedQty ?? "—"}
+                                </span>
+                                <span className={`font-mono text-xs font-bold w-10 text-right ${
+                                  (item.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"
+                                }`}>
+                                  {(item.varianceQty ?? 0) > 0 ? "+" : ""}{item.varianceQty}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {unlinkableItems.length > 0 && (
+                      <div className="border rounded-lg border-amber-200 bg-amber-50/50">
+                        <div className="px-3 py-2 text-sm text-amber-700 flex items-center gap-2">
+                          <AlertTriangle className="h-4 w-4" />
+                          <span>{unlinkableItems.length} items can't be bulk approved (no SKU link)</span>
+                        </div>
+                        <div className="border-t border-amber-200 divide-y divide-amber-100">
+                          {unlinkableItems.map(item => (
+                            <div key={item.id} className="flex items-center gap-3 px-3 py-1.5 text-sm text-amber-800">
+                              <span className="font-mono text-xs w-20 shrink-0">{item.locationCode}</span>
+                              <span className="flex-1 truncate">{item.countedSku || "(no SKU)"}</span>
+                              <span className="text-xs">Use individual approve to link first</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="border-t pt-3 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <Label>Reason Code</Label>
+                        <Select
+                          value={bulkApproveForm.reasonCode}
+                          onValueChange={(v) => setBulkApproveForm({ ...bulkApproveForm, reasonCode: v })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select reason" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {adjustmentReasons.filter(r => r.transactionType === "adjustment").map((reason) => (
+                              <SelectItem key={reason.code} value={reason.code}>{reason.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label>Notes (optional)</Label>
+                        <Input
+                          value={bulkApproveForm.notes}
+                          onChange={(e) => setBulkApproveForm({ ...bulkApproveForm, notes: e.target.value })}
+                          placeholder="Bulk approval notes..."
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setBulkApproveOpen(false)}>Cancel</Button>
+              <Button
+                onClick={() => {
+                  bulkApproveMutation.mutate({
+                    itemIds: Array.from(bulkSelectedIds),
+                    reasonCode: bulkApproveForm.reasonCode,
+                    notes: bulkApproveForm.notes || undefined,
+                  });
+                }}
+                disabled={bulkApproveMutation.isPending || bulkSelectedIds.size === 0 || !bulkApproveForm.reasonCode}
+              >
+                {bulkApproveMutation.isPending
+                  ? "Approving..."
+                  : `Approve ${bulkSelectedIds.size} Items`}
               </Button>
             </DialogFooter>
           </DialogContent>

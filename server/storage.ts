@@ -1673,7 +1673,7 @@ export class DatabaseStorage implements IStorage {
 
   async getProductVariantBySku(sku: string): Promise<ProductVariant | undefined> {
     const result = await db.select().from(productVariants)
-      .where(eq(productVariants.sku, sku.toUpperCase()));
+      .where(sql`UPPER(${productVariants.sku}) = ${sku.trim().toUpperCase()}`);
     return result[0];
   }
 
