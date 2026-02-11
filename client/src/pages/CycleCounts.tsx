@@ -145,7 +145,7 @@ export default function CycleCounts() {
   const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "variance" | "ok">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "variance" | "investigate" | "ok">("all");
   const [varianceSummaryOpen, setVarianceSummaryOpen] = useState(false);
   const [expandedSummarySkus, setExpandedSummarySkus] = useState<Set<number>>(new Set());
   
@@ -507,7 +507,9 @@ export default function CycleCounts() {
       case "pending":
         return item.status === "pending";
       case "variance":
-        return item.varianceType && item.status !== "approved";
+        return item.varianceType && item.status !== "approved" && item.status !== "investigate";
+      case "investigate":
+        return item.status === "investigate";
       case "ok":
         return item.status !== "pending" && !item.varianceType;
       default:
@@ -1292,14 +1294,14 @@ export default function CycleCounts() {
             <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
           </Button>
         )}
-        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && (
+        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && investigatingCount === 0 && (
           <Button className="w-full" onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
             <CheckCircle className="h-4 w-4 mr-2" /> Complete
           </Button>
         )}
 
-        {/* Compact stat row - 4 items in a row */}
-        <div className="grid grid-cols-5 gap-1 md:gap-4">
+        {/* Compact stat row */}
+        <div className={`grid gap-1 md:gap-4 ${investigatingCount > 0 ? "grid-cols-5" : "grid-cols-4"}`}>
           <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "all" ? "bg-primary/10 ring-1 ring-primary" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("all")}
@@ -1326,8 +1328,8 @@ export default function CycleCounts() {
           </button>
           {investigatingCount > 0 && (
             <button
-              className={`p-2 rounded-lg text-center transition-all bg-yellow-100 ${statusFilter === "all" ? "" : ""}`}
-              onClick={() => setStatusFilter("all")}
+              className={`p-2 rounded-lg text-center transition-all ${statusFilter === "investigate" ? "bg-yellow-100 ring-1 ring-yellow-500" : "bg-yellow-50"}`}
+              onClick={() => setStatusFilter("investigate")}
             >
               <div className="text-lg font-bold text-yellow-700">{investigatingCount}</div>
               <div className="text-[10px] text-muted-foreground">Investigating</div>
