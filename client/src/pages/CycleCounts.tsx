@@ -341,7 +341,8 @@ export default function CycleCounts() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
       if (selectedItem && data.item) {
-        setSelectedItem(data.item);
+        // Preserve enrichment fields (locationCode, zone) from the current selectedItem
+        setSelectedItem({ ...data.item, locationCode: selectedItem.locationCode, zone: selectedItem.zone });
       }
       const verb = data.alreadyExisted ? "Linked existing" : "Created & linked";
       const extra = data.siblingItemsLinked > 0 ? ` (also linked ${data.siblingItemsLinked} other item${data.siblingItemsLinked > 1 ? "s" : ""})` : "";
@@ -533,25 +534,48 @@ export default function CycleCounts() {
     setCountDialogOpen(true);
   };
 
-  const handleApproveClick = (item: CycleCountItem) => {
+  const handleApproveClick = async (item: CycleCountItem) => {
+    let linkedItem = item;
     setSelectedItem(item);
+    setApproveForm({ reasonCode: "", notes: "" });
+    setApproveDialogOpen(true);
+
+    // Auto-link variant if countedSku exists but productVariantId is null
+    if (!item.productVariantId && item.countedSku && selectedCount) {
+      try {
+        const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${item.id}/create-variant`, {
+          method: "POST",
+          credentials: "include",
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.item) {
+            // Preserve enrichment fields from the original item
+            linkedItem = { ...data.item, locationCode: item.locationCode, zone: item.zone };
+            setSelectedItem(linkedItem);
+          }
+          queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+          const verb = data.alreadyExisted ? "Linked existing" : "Created & linked";
+          toast({ title: `${verb} variant`, description: `${data.variant.sku} (${data.variant.name})` });
+        }
+      } catch (e) {
+        // Silently fail auto-link - user can still click "Create & Link SKU" manually
+        console.log("[CycleCount] Auto-link failed:", e);
+      }
+    }
+
     // Pre-select "misplaced" if this SKU has offsetting (net-zero) variances
-    if (item.productVariantId && cycleCountDetail) {
+    if (linkedItem.productVariantId && cycleCountDetail) {
       const offsetting = cycleCountDetail.items.filter(i =>
-        i.id !== item.id &&
-        i.productVariantId === item.productVariantId &&
+        i.id !== linkedItem.id &&
+        i.productVariantId === linkedItem.productVariantId &&
         i.varianceQty !== null && i.varianceQty !== 0
       );
-      const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), item.varianceQty ?? 0);
+      const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), linkedItem.varianceQty ?? 0);
       if (offsetting.length > 0 && netVar === 0) {
         setApproveForm({ reasonCode: "misplaced", notes: "" });
-      } else {
-        setApproveForm({ reasonCode: "", notes: "" });
       }
-    } else {
-      setApproveForm({ reasonCode: "", notes: "" });
     }
-    setApproveDialogOpen(true);
   };
 
   // Mobile counting mode state
