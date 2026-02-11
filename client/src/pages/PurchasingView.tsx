@@ -1,11 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle,
-  ShoppingCart,
-  Clock,
   TrendingDown,
-  PackageX,
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
@@ -157,49 +153,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 gap-4">
-      {/* Summary cards */}
-      {data && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
-          <div
-            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "all" ? "bg-muted/60 ring-1 ring-primary/30" : "bg-muted/30 hover:bg-muted/50"}`}
-            onClick={() => setStatusFilter("all")}
-          >
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <ShoppingCart size={12} /> Products
-            </div>
-            <div className="text-2xl font-bold font-mono mt-1">{data.summary.totalProducts}</div>
-          </div>
-          <div
-            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "need_ordering" ? "bg-red-50 dark:bg-red-900/20 ring-1 ring-red-400" : "bg-muted/30 hover:bg-muted/50"} border-red-200 dark:border-red-800/40`}
-            onClick={() => setStatusFilter(statusFilter === "need_ordering" ? "all" : "need_ordering")}
-          >
-            <div className="text-xs text-red-600 font-medium uppercase tracking-wider flex items-center gap-1">
-              <AlertTriangle size={12} /> Need Ordering
-            </div>
-            <div className="text-2xl font-bold font-mono text-red-600 mt-1">{data.summary.belowReorderPoint}</div>
-          </div>
-          <div
-            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "order_soon" ? "bg-amber-50 dark:bg-amber-900/20 ring-1 ring-amber-400" : "bg-muted/30 hover:bg-muted/50"} border-amber-200 dark:border-amber-800/40`}
-            onClick={() => setStatusFilter(statusFilter === "order_soon" ? "all" : "order_soon")}
-          >
-            <div className="text-xs text-amber-600 font-medium uppercase tracking-wider flex items-center gap-1">
-              <Clock size={12} /> Order Soon
-            </div>
-            <div className="text-2xl font-bold font-mono text-amber-600 mt-1">{data.summary.orderSoon}</div>
-          </div>
-          <div
-            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "no_movement" ? "bg-muted/60 ring-1 ring-primary/30" : "bg-muted/30 hover:bg-muted/50"}`}
-            onClick={() => setStatusFilter(statusFilter === "no_movement" ? "all" : "no_movement")}
-          >
-            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
-              <PackageX size={12} /> No Movement
-            </div>
-            <div className="text-2xl font-bold font-mono text-muted-foreground mt-1">{data.summary.noMovement}</div>
-          </div>
-        </div>
-      )}
-
+    <div className="flex-1 flex flex-col min-h-0 gap-3">
       {/* Filters */}
       <div className="flex flex-wrap gap-2 shrink-0">
         <Select value={statusFilter} onValueChange={setStatusFilter}>

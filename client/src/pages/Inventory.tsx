@@ -256,40 +256,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   );
 }
 
-/** Compact purchasing summary for the summary bar (deduplicates with PurchasingView query) */
-function PurchasingSummary() {
-  const { data } = useQuery<{
-    summary: { belowReorderPoint: number; orderSoon: number; noMovement: number };
-  }>({
-    queryKey: ["/api/purchasing/reorder-analysis"],
-    queryFn: async () => {
-      const res = await fetch("/api/purchasing/reorder-analysis", { credentials: "include" });
-      if (!res.ok) throw new Error("Failed");
-      return res.json();
-    },
-    staleTime: 60_000,
-  });
-  if (!data) return null;
-  const { belowReorderPoint, orderSoon, noMovement } = data.summary;
-  return (
-    <>
-      {belowReorderPoint > 0 ? (
-        <span className="text-red-600 font-medium">{belowReorderPoint} need ordering</span>
-      ) : (
-        <span>0 need ordering</span>
-      )}
-      <span className="text-muted-foreground/40">·</span>
-      {orderSoon > 0 ? (
-        <span className="text-amber-600 font-medium">{orderSoon} order soon</span>
-      ) : (
-        <span>0 order soon</span>
-      )}
-      <span className="text-muted-foreground/40">·</span>
-      <span>{noMovement} no movement</span>
-    </>
-  );
-}
-
 export default function Inventory() {
   const [, navigate] = useLocation();
   const [searchQuery, setSearchQuery] = useState("");
@@ -438,7 +404,10 @@ export default function Inventory() {
   });
 
   // Reorder analysis for low stock indicators (from purchasing logic)
-  const { data: reorderData } = useQuery<{ items: Array<{ sku: string; status: string }> }>({
+  const { data: reorderData } = useQuery<{
+    items: Array<{ sku: string; status: string }>;
+    summary: { belowReorderPoint: number; orderSoon: number; noMovement: number };
+  }>({
     queryKey: ["/api/purchasing/reorder-analysis"],
     staleTime: 60_000,
   });
@@ -510,9 +479,9 @@ export default function Inventory() {
     },
   });
 
-  // Summary bar stats — driven by purchasing reorder analysis (product-level DOC)
-  const orderNowCount = variantLevels.filter(v => v.baseSku && orderNowSkus.has(v.baseSku)).length;
-  const orderSoonCount = variantLevels.filter(v => v.baseSku && orderSoonSkus.has(v.baseSku)).length;
+  // Summary bar stats — product-level counts from purchasing reorder analysis
+  const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
+  const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
   // BaseSkus where any variant has stock (expandable to show fungible pool)
@@ -731,7 +700,7 @@ export default function Inventory() {
                   className={`hover:underline ${stockFilter === "order_now" ? "underline font-semibold" : ""} ${orderNowCount > 0 ? "text-red-600 font-medium" : ""}`}
                   onClick={() => setStockFilter(stockFilter === "order_now" ? "all" : "order_now")}
                 >
-                  {orderNowCount} order now
+                  {orderNowCount} need ordering
                 </button>
                 <span className="text-muted-foreground/40">·</span>
                 <button
@@ -755,8 +724,24 @@ export default function Inventory() {
                 )}
               </>
             )}
-            {activeTab === "purchasing" && (
-              <PurchasingSummary />
+            {activeTab === "purchasing" && reorderData && (
+              <>
+                <span>{reorderData.items?.length ?? 0} products</span>
+                <span className="text-muted-foreground/40">·</span>
+                {reorderData.summary.belowReorderPoint > 0 ? (
+                  <span className="text-red-600 font-medium">{reorderData.summary.belowReorderPoint} need ordering</span>
+                ) : (
+                  <span>0 need ordering</span>
+                )}
+                <span className="text-muted-foreground/40">·</span>
+                {reorderData.summary.orderSoon > 0 ? (
+                  <span className="text-amber-600 font-medium">{reorderData.summary.orderSoon} order soon</span>
+                ) : (
+                  <span>0 order soon</span>
+                )}
+                <span className="text-muted-foreground/40">·</span>
+                <span>{reorderData.summary.noMovement} no movement</span>
+              </>
             )}
             {activeTab === "operations" && locationHealth && (
               <>

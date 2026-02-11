@@ -11275,7 +11275,7 @@ export async function registerRoutes(
   });
 
   // PATCH velocity lookback days
-  app.patch("/api/purchasing/velocity-lookback", requirePermission("inventory", "manage"), async (req, res) => {
+  app.patch("/api/purchasing/velocity-lookback", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const days = parseInt(req.body.days);
       if (!days || days < 7 || days > 365) {
