@@ -2627,12 +2627,12 @@ export class DatabaseStorage implements IStorage {
     offset?: number;
   }): Promise<(Order & { items: OrderItem[]; pickerName?: string })[]> {
     const conditions = [];
-    
-    // Default to completed/shipped/cancelled orders (historical)
-    const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
-    const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
-    conditions.push(inArray(orders.warehouseStatus, statuses as any));
-    
+
+    // Only filter by status if explicitly requested
+    if (filters.status && filters.status.length > 0) {
+      conditions.push(inArray(orders.warehouseStatus, filters.status as any));
+    }
+
     if (filters.orderNumber) {
       conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
     }
@@ -2648,12 +2648,12 @@ export class DatabaseStorage implements IStorage {
     if (filters.channel) {
       conditions.push(eq(orders.source, filters.channel));
     }
-    // Use COALESCE(completedAt, createdAt) so orders without completedAt still appear
+    // Filter by order placed date (when Shopify received the order)
     if (filters.startDate) {
-      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
+      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
     }
     if (filters.endDate) {
-      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
+      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
     }
 
     // If filtering by SKU, find matching order IDs first (before pagination)
@@ -2676,8 +2676,8 @@ export class DatabaseStorage implements IStorage {
     if (conditions.length > 0) {
       query = query.where(and(...conditions)) as any;
     }
-    
-    query = query.orderBy(desc(orders.completedAt), desc(orders.createdAt)) as any;
+
+    query = query.orderBy(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) DESC`) as any;
     
     const limit = filters.limit || 50;
     query = query.limit(limit) as any;
@@ -2718,11 +2718,11 @@ export class DatabaseStorage implements IStorage {
     endDate?: Date;
   }): Promise<number> {
     const conditions = [];
-    
-    const defaultStatuses = ['completed', 'shipped', 'cancelled', 'exception'];
-    const statuses = filters.status && filters.status.length > 0 ? filters.status : defaultStatuses;
-    conditions.push(inArray(orders.warehouseStatus, statuses as any));
-    
+
+    if (filters.status && filters.status.length > 0) {
+      conditions.push(inArray(orders.warehouseStatus, filters.status as any));
+    }
+
     if (filters.orderNumber) {
       conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
     }
@@ -2739,10 +2739,10 @@ export class DatabaseStorage implements IStorage {
       conditions.push(eq(orders.source, filters.channel));
     }
     if (filters.startDate) {
-      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
+      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
     }
     if (filters.endDate) {
-      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
+      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
     }
 
     // If filtering by SKU, we need a subquery approach

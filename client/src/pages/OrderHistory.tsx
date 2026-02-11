@@ -100,6 +100,8 @@ const DATE_PRESETS = [
 
 const STATUS_OPTIONS = [
   { label: "All", value: "" },
+  { label: "Ready", value: "ready" },
+  { label: "In Progress", value: "in_progress" },
   { label: "Completed", value: "completed" },
   { label: "Shipped", value: "shipped" },
   { label: "Exception", value: "exception" },
@@ -115,6 +117,10 @@ const PRIORITY_OPTIONS = [
 
 function getStatusColor(status: string) {
   switch (status) {
+    case "ready":
+      return "bg-sky-100 text-sky-800 border-sky-200";
+    case "in_progress":
+      return "bg-purple-100 text-purple-800 border-purple-200";
     case "completed":
       return "bg-green-100 text-green-800 border-green-200";
     case "shipped":
@@ -308,7 +314,7 @@ export default function OrderHistory() {
           <div>
             <h1 className="text-xl md:text-2xl font-bold">Order History</h1>
             <p className="text-xs md:text-sm text-muted-foreground">
-              Search and view completed orders
+              Search and view all orders
             </p>
           </div>
           <Button variant="outline" onClick={handleExport} className="min-h-[44px]" data-testid="button-export">
@@ -582,7 +588,7 @@ export default function OrderHistory() {
                       <TableHead>Items</TableHead>
                       <TableHead>Picker</TableHead>
                       <TableHead>Status</TableHead>
-                      <TableHead>Completed</TableHead>
+                      <TableHead>Order Date</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
                   </TableHeader>
@@ -625,7 +631,7 @@ export default function OrderHistory() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {order.completedAt ? format(new Date(order.completedAt), "MMM d, h:mm a") : "—"}
+                          {(order.orderPlacedAt || order.createdAt) ? format(new Date(order.orderPlacedAt || order.createdAt), "MMM d, h:mm a") : "—"}
                         </TableCell>
                         <TableCell>
                           <ChevronRight className="h-4 w-4 text-muted-foreground" />
