@@ -6532,7 +6532,7 @@ export async function registerRoutes(
         channelId,
         shopDomain,
         syncStatus: 'connected',
-        lastSyncAt: new Date().toISOString(),
+        lastSyncAt: new Date(),
       });
       
       // Update channel status to active
