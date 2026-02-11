@@ -10769,13 +10769,19 @@ export async function registerRoutes(
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string) || 50));
       const offset = (page - 1) * pageSize;
-      const SORT_COLUMNS: Record<string, string> = {
-        code: "wl.code", qty: "total_variant_qty", skus: "sku_count",
-        reserved: "total_reserved_qty", zone: "wl.zone", type: "wl.location_type",
+
+      // Build ORDER BY from validated sort params
+      const SORT_EXPRESSIONS: Record<string, { asc: ReturnType<typeof sql>; desc: ReturnType<typeof sql> }> = {
+        code: { asc: sql`wl.code ASC`, desc: sql`wl.code DESC` },
+        qty: { asc: sql`total_variant_qty ASC, wl.code ASC`, desc: sql`total_variant_qty DESC, wl.code ASC` },
+        skus: { asc: sql`sku_count ASC, wl.code ASC`, desc: sql`sku_count DESC, wl.code ASC` },
+        reserved: { asc: sql`total_reserved_qty ASC, wl.code ASC`, desc: sql`total_reserved_qty DESC, wl.code ASC` },
+        zone: { asc: sql`wl.zone ASC, wl.code ASC`, desc: sql`wl.zone DESC, wl.code ASC` },
+        type: { asc: sql`wl.location_type ASC, wl.code ASC`, desc: sql`wl.location_type DESC, wl.code ASC` },
       };
-      const sortColumn = SORT_COLUMNS[(req.query.sortField as string)] || "wl.code";
-      const sortDirection = (req.query.sortDir as string) === "desc" ? "DESC" : "ASC";
-      const orderClause = sql.raw(`${sortColumn} ${sortDirection}, wl.code ASC`);
+      const sortKey = (req.query.sortField as string) in SORT_EXPRESSIONS ? (req.query.sortField as string) : "code";
+      const sortDir = (req.query.sortDir as string) === "desc" ? "desc" : "asc";
+      const orderClause = SORT_EXPRESSIONS[sortKey][sortDir];
 
       // Compose filter fragments using Drizzle sql template literals
       const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
@@ -10791,10 +10797,10 @@ export async function registerRoutes(
 
       // Count total for pagination
       const countResult = await db.execute(sql`
-        SELECT COUNT(*) as total FROM warehouse_locations wl
+        SELECT COUNT(*)::int as total FROM warehouse_locations wl
         WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
       `);
-      const total = parseInt((countResult.rows[0] as any)?.total) || 0;
+      const total = Number((countResult.rows[0] as any)?.total) || 0;
 
       // Get bins with aggregated inventory
       const binsResult = await db.execute(sql`
@@ -10809,9 +10815,9 @@ export async function registerRoutes(
           wl.warehouse_id,
           wl.capacity_cubic_mm,
           w.code as warehouse_code,
-          COUNT(DISTINCT CASE WHEN il.variant_qty > 0 THEN il.product_variant_id END) as sku_count,
-          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.variant_qty ELSE 0 END), 0) as total_variant_qty,
-          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.reserved_qty ELSE 0 END), 0) as total_reserved_qty
+          COUNT(DISTINCT CASE WHEN il.variant_qty > 0 THEN il.product_variant_id END)::int as sku_count,
+          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.variant_qty ELSE 0 END), 0)::int as total_variant_qty,
+          COALESCE(SUM(CASE WHEN il.variant_qty > 0 THEN il.reserved_qty ELSE 0 END), 0)::int as total_reserved_qty
         FROM warehouse_locations wl
         LEFT JOIN warehouses w ON wl.warehouse_id = w.id
         LEFT JOIN inventory_levels il ON il.warehouse_location_id = wl.id
@@ -10872,9 +10878,9 @@ export async function registerRoutes(
         page,
         pageSize,
       });
-    } catch (error) {
-      console.error("Error fetching bin inventory:", error);
-      res.status(500).json({ error: "Failed to fetch bin inventory" });
+    } catch (error: any) {
+      console.error("Error fetching bin inventory:", error?.message || error);
+      res.status(500).json({ error: "Failed to fetch bin inventory", detail: error?.message });
     }
   });
 
@@ -11215,17 +11221,16 @@ export async function registerRoutes(
       const VALID_FILTERS = ["all", "negative_inventory", "aging_receiving", "pallet_drop", "stuck_replen", "stale_bin"];
       const safeFilter = VALID_FILTERS.includes(filter) ? filter : "all";
 
-      const SORT_COLS: Record<string, string> = {
-        priority: "priority ASC, location_code",
-        type: "type ASC, priority",
-        location: "location_code",
-        sku: "sku",
-        qty: "qty",
+      const SORT_EXPRESSIONS: Record<string, { asc: ReturnType<typeof sql>; desc: ReturnType<typeof sql> }> = {
+        priority: { asc: sql`priority ASC, location_code ASC`, desc: sql`priority DESC NULLS LAST, location_code ASC` },
+        type: { asc: sql`type ASC, priority ASC`, desc: sql`type DESC, priority ASC` },
+        location: { asc: sql`location_code ASC`, desc: sql`location_code DESC` },
+        sku: { asc: sql`sku ASC NULLS LAST`, desc: sql`sku DESC NULLS LAST` },
+        qty: { asc: sql`qty ASC NULLS LAST`, desc: sql`qty DESC NULLS LAST` },
       };
       const sortField = (req.query.sortField as string) || "priority";
-      const sortDir = (req.query.sortDir as string) === "desc" ? "DESC" : "ASC";
-      const sortExpr = SORT_COLS[sortField] || "priority ASC, location_code";
-      const orderClause = sql.raw(`${sortExpr} ${sortDir} NULLS LAST`);
+      const aqSortDir = (req.query.sortDir as string) === "desc" ? "desc" : "asc";
+      const orderClause = (SORT_EXPRESSIONS[sortField] || SORT_EXPRESSIONS.priority)[aqSortDir];
 
       const whFilter = warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``;
       const searchTerm = (req.query.search as string) || "";
