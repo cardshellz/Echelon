@@ -1489,11 +1489,7 @@ export default function CycleCounts() {
                     {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                       <>
                         {item.status === "investigate" && (
-                          <Button size="sm" variant="ghost" onClick={() => {
-                            resetMutation.mutate(item.id, {
-                              onSuccess: () => handleCountClick(item),
-                            });
-                          }} disabled={resetMutation.isPending}>
+                          <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
                             <Pencil className="h-3 w-3 mr-1" /> Recount
                           </Button>
                         )}
@@ -1585,11 +1581,7 @@ export default function CycleCounts() {
                       {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                         <>
                           {item.status === "investigate" && (
-                            <Button size="sm" variant="ghost" onClick={() => {
-                              resetMutation.mutate(item.id, {
-                                onSuccess: () => handleCountClick(item),
-                              });
-                            }} disabled={resetMutation.isPending}>
+                            <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
                               <Pencil className="h-3 w-3 mr-1" /> Recount
                             </Button>
                           )}
