@@ -2648,13 +2648,14 @@ export class DatabaseStorage implements IStorage {
     if (filters.channel) {
       conditions.push(eq(orders.source, filters.channel));
     }
+    // Use COALESCE(completedAt, createdAt) so orders without completedAt still appear
     if (filters.startDate) {
-      conditions.push(gte(orders.completedAt, filters.startDate));
+      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
     }
     if (filters.endDate) {
-      conditions.push(lte(orders.completedAt, filters.endDate));
+      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
     }
-    
+
     // If filtering by SKU, find matching order IDs first (before pagination)
     if (filters.sku) {
       const skuFilter = filters.sku.toUpperCase();
@@ -2663,15 +2664,15 @@ export class DatabaseStorage implements IStorage {
         .from(orderItems)
         .where(like(orderItems.sku, `%${skuFilter}%`));
       const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
-      
+
       if (matchingOrderIds.length === 0) {
         return []; // No orders match the SKU filter
       }
       conditions.push(inArray(orders.id, matchingOrderIds));
     }
-    
+
     let query = db.select().from(orders);
-    
+
     if (conditions.length > 0) {
       query = query.where(and(...conditions)) as any;
     }
@@ -2738,12 +2739,12 @@ export class DatabaseStorage implements IStorage {
       conditions.push(eq(orders.source, filters.channel));
     }
     if (filters.startDate) {
-      conditions.push(gte(orders.completedAt, filters.startDate));
+      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
     }
     if (filters.endDate) {
-      conditions.push(lte(orders.completedAt, filters.endDate));
+      conditions.push(sql`COALESCE(${orders.completedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
     }
-    
+
     // If filtering by SKU, we need a subquery approach
     if (filters.sku) {
       const skuFilter = filters.sku.toUpperCase();

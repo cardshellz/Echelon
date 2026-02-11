@@ -77,10 +77,10 @@ export async function syncNewOrders() {
       fulfillment_status: string | null;
       cancelled_at: Date | null;
     }>(sql`
-      SELECT * FROM shopify_orders 
+      SELECT * FROM shopify_orders
       WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
-      ORDER BY created_at DESC
-      LIMIT 50
+      ORDER BY created_at ASC
+      LIMIT 100
     `);
     
     let created = 0;
@@ -170,6 +170,12 @@ export async function syncNewOrders() {
             ? "ready"
             : "completed";
 
+      // Set completedAt for orders that arrive already fulfilled/cancelled
+      const isTerminal = warehouseStatus === "shipped" || warehouseStatus === "completed" || warehouseStatus === "cancelled";
+      const completedAt = isTerminal
+        ? (rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : new Date())
+        : undefined;
+
       const newOrder = await storage.createOrderWithItems({
         shopifyOrderId: rawOrder.id,
         externalOrderId: rawOrder.id,
@@ -188,6 +194,7 @@ export async function syncNewOrders() {
         financialStatus: rawOrder.financial_status,
         shopifyFulfillmentStatus: rawOrder.fulfillment_status,
         cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
+        completedAt,
         priority: "normal",
         warehouseStatus,
         itemCount: enrichedItems.length,
@@ -307,6 +314,20 @@ export async function setupOrderSyncListener() {
     await listenerClient.connect();
     console.log("[ORDER SYNC] Connected to database for LISTEN");
     
+    // Backfill completedAt for terminal orders that have NULL completedAt
+    setTimeout(async () => {
+      try {
+        const result = await db.execute(sql`
+          UPDATE orders SET completed_at = COALESCE(order_placed_at, created_at)
+          WHERE completed_at IS NULL
+            AND warehouse_status IN ('completed', 'shipped', 'cancelled')
+        `);
+        console.log(`[ORDER SYNC] Backfilled completedAt for terminal orders`);
+      } catch (e) {
+        console.error("[ORDER SYNC] Backfill error:", e);
+      }
+    }, 1000);
+
     // Sync any orders that arrived while server was down
     setTimeout(() => {
       console.log("[ORDER SYNC] Running startup sync for missed orders...");
