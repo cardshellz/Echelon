@@ -7569,8 +7569,9 @@ export async function registerRoutes(
     try {
       const itemId = parseInt(req.params.itemId);
       const userId = req.session.user?.id;
-      const { countedSku, countedQty, notes } = req.body;
-      
+      const { countedSku: rawCountedSku, countedQty, notes } = req.body;
+      const countedSku = rawCountedSku?.trim() || null;
+
       const item = await storage.getCycleCountItemById(itemId);
       if (!item) {
         return res.status(404).json({ error: "Item not found" });
@@ -7879,8 +7880,9 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const userId = req.session.user?.id;
-      const { sku, quantity, warehouseLocationId, notes } = req.body;
-      
+      const { sku: rawSku, quantity, warehouseLocationId, notes } = req.body;
+      const sku = rawSku?.trim() || null;
+
       if (!sku || quantity === undefined || !warehouseLocationId) {
         return res.status(400).json({ error: "SKU, quantity, and location are required" });
       }
@@ -8097,12 +8099,21 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Item does not belong to this cycle count" });
       }
 
-      const sku = item.countedSku;
+      const sku = item.countedSku?.trim();
       if (!sku) {
         return res.status(400).json({ error: "Item has no counted SKU to create a variant from" });
       }
       if (item.productVariantId) {
-        return res.status(400).json({ error: "Item already has a linked product variant" });
+        // Already linked - return the current item (idempotent)
+        const existingVariant = await storage.getProductVariantById(item.productVariantId);
+        const product = existingVariant ? await storage.getProductById(existingVariant.productId) : null;
+        return res.json({
+          item,
+          product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
+          variant: existingVariant ? { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant } : null,
+          alreadyExisted: true,
+          siblingItemsLinked: 0,
+        });
       }
 
       // Race condition check: variant may already exist
