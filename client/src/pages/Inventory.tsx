@@ -261,9 +261,9 @@ function PurchasingSummary() {
   const { data } = useQuery<{
     summary: { belowReorderPoint: number; orderSoon: number; noMovement: number };
   }>({
-    queryKey: ["/api/purchasing/reorder-analysis", 90],
+    queryKey: ["/api/purchasing/reorder-analysis"],
     queryFn: async () => {
-      const res = await fetch("/api/purchasing/reorder-analysis?lookbackDays=90", { credentials: "include" });
+      const res = await fetch("/api/purchasing/reorder-analysis", { credentials: "include" });
       if (!res.ok) throw new Error("Failed");
       return res.json();
     },

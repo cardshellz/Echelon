@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ShoppingCart,
@@ -70,10 +70,20 @@ const STATUS_CONFIG: Record<string, { label: string; className: string; priority
   no_movement: { label: "No Movement", className: "bg-gray-100 text-gray-600 dark:bg-gray-800/30 dark:text-gray-400", priority: 4 },
 };
 
+const LOOKBACK_OPTIONS = [
+  { value: "7", label: "7d" },
+  { value: "14", label: "14d" },
+  { value: "30", label: "30d" },
+  { value: "60", label: "60d" },
+  { value: "90", label: "90d" },
+  { value: "180", label: "180d" },
+];
+
 export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery<ReorderAnalysis>({
     queryKey: ["/api/purchasing/reorder-analysis"],
@@ -95,7 +105,9 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
 
   const filtered = (data?.items ?? [])
     .filter((item) => {
-      if (statusFilter !== "all" && item.status !== statusFilter) return false;
+      if (statusFilter === "need_ordering") {
+        if (item.status !== "order_now" && item.status !== "stockout") return false;
+      } else if (statusFilter !== "all" && item.status !== statusFilter) return false;
       if (searchQuery) {
         const q = searchQuery.toLowerCase();
         return (
@@ -149,25 +161,37 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
       {/* Summary cards */}
       {data && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
-          <div className="bg-muted/30 p-3 rounded-lg border">
+          <div
+            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "all" ? "bg-muted/60 ring-1 ring-primary/30" : "bg-muted/30 hover:bg-muted/50"}`}
+            onClick={() => setStatusFilter("all")}
+          >
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
               <ShoppingCart size={12} /> Products
             </div>
             <div className="text-2xl font-bold font-mono mt-1">{data.summary.totalProducts}</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border border-red-200 dark:border-red-800/40">
+          <div
+            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "need_ordering" ? "bg-red-50 dark:bg-red-900/20 ring-1 ring-red-400" : "bg-muted/30 hover:bg-muted/50"} border-red-200 dark:border-red-800/40`}
+            onClick={() => setStatusFilter(statusFilter === "need_ordering" ? "all" : "need_ordering")}
+          >
             <div className="text-xs text-red-600 font-medium uppercase tracking-wider flex items-center gap-1">
               <AlertTriangle size={12} /> Need Ordering
             </div>
             <div className="text-2xl font-bold font-mono text-red-600 mt-1">{data.summary.belowReorderPoint}</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border border-amber-200 dark:border-amber-800/40">
+          <div
+            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "order_soon" ? "bg-amber-50 dark:bg-amber-900/20 ring-1 ring-amber-400" : "bg-muted/30 hover:bg-muted/50"} border-amber-200 dark:border-amber-800/40`}
+            onClick={() => setStatusFilter(statusFilter === "order_soon" ? "all" : "order_soon")}
+          >
             <div className="text-xs text-amber-600 font-medium uppercase tracking-wider flex items-center gap-1">
               <Clock size={12} /> Order Soon
             </div>
             <div className="text-2xl font-bold font-mono text-amber-600 mt-1">{data.summary.orderSoon}</div>
           </div>
-          <div className="bg-muted/30 p-3 rounded-lg border">
+          <div
+            className={`p-3 rounded-lg border cursor-pointer transition-colors ${statusFilter === "no_movement" ? "bg-muted/60 ring-1 ring-primary/30" : "bg-muted/30 hover:bg-muted/50"}`}
+            onClick={() => setStatusFilter(statusFilter === "no_movement" ? "all" : "no_movement")}
+          >
             <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider flex items-center gap-1">
               <PackageX size={12} /> No Movement
             </div>
@@ -184,6 +208,7 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
+            <SelectItem value="need_ordering">Need Ordering</SelectItem>
             <SelectItem value="stockout">Stockout</SelectItem>
             <SelectItem value="order_now">Order Now</SelectItem>
             <SelectItem value="order_soon">Order Soon</SelectItem>
@@ -192,10 +217,35 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
           </SelectContent>
         </Select>
         {data && (
-          <Badge variant="outline" className="h-9 px-3 flex items-center text-xs text-muted-foreground">
-            <TrendingDown className="h-3.5 w-3.5 mr-1.5" />
-            {data.lookbackDays}d velocity window
-          </Badge>
+          <div className="flex items-center gap-1.5">
+            <TrendingDown className="h-3.5 w-3.5 text-muted-foreground" />
+            <Select
+              value={String(data.lookbackDays)}
+              onValueChange={async (val) => {
+                try {
+                  await fetch("/api/purchasing/velocity-lookback", {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ days: parseInt(val) }),
+                  });
+                  queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
+                } catch (e) {
+                  console.error("Failed to update velocity lookback", e);
+                }
+              }}
+            >
+              <SelectTrigger className="w-[130px] h-9 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LOOKBACK_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label} velocity window
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         )}
       </div>
 
@@ -316,7 +366,6 @@ export default function PurchasingView({ searchQuery }: PurchasingViewProps) {
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} products
               {" · "}All quantities in pieces
-              {" · "}Velocity: {data?.lookbackDays ?? ""}d lookback
             </div>
           )}
         </div>

@@ -1,10 +1,10 @@
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { z } from "zod";
-import { eq, inArray, sql, isNull, and } from "drizzle-orm";
+import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
@@ -36,6 +36,16 @@ function requirePermission(resource: string, action: string) {
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!req.session.user) {
     return res.status(401).json({ error: "Authentication required" });
+  }
+  next();
+}
+
+// Internal API authentication for cross-service communication (Archon sync)
+function requireInternalApiKey(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  const key = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!key || key !== process.env.INTERNAL_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
   next();
 }
@@ -11158,7 +11168,7 @@ export async function registerRoutes(
     try {
       // Use velocity_lookback_days from warehouse_settings as the default lookback
       const wsResult = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
-      const configuredLookback = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 90;
+      const configuredLookback = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 14;
       const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
 
       // Product-level query: aggregate inventory and velocity in base units (pieces)
@@ -11261,6 +11271,112 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error fetching reorder analysis:", error);
       res.status(500).json({ error: "Failed to fetch reorder analysis" });
+    }
+  });
+
+  // PATCH velocity lookback days
+  app.patch("/api/purchasing/velocity-lookback", requirePermission("inventory", "manage"), async (req, res) => {
+    try {
+      const days = parseInt(req.body.days);
+      if (!days || days < 7 || days > 365) {
+        return res.status(400).json({ error: "Days must be between 7 and 365" });
+      }
+      await db.execute(sql`UPDATE warehouse_settings SET velocity_lookback_days = ${days}, updated_at = NOW()`);
+      res.json({ ok: true, days });
+    } catch (error) {
+      console.error("Error updating velocity lookback:", error);
+      res.status(500).json({ error: "Failed to update velocity lookback" });
+    }
+  });
+
+  // ===== INTERNAL API (for Archon cross-service sync) =====
+
+  app.get("/api/internal/orders", requireInternalApiKey, async (req, res) => {
+    try {
+      const since = req.query.since ? new Date(req.query.since as string) : null;
+
+      const baseQuery = db
+        .select({
+          order: orders,
+          shipment: shipments,
+        })
+        .from(orders)
+        .leftJoin(shipments, eq(shipments.orderId, orders.id));
+
+      const results = since
+        ? await baseQuery.where(gte(orders.createdAt, since))
+        : await baseQuery;
+
+      // Deduplicate: an order may have multiple shipments — take the latest
+      const orderMap = new Map<number, (typeof results)[number]>();
+      for (const r of results) {
+        const existing = orderMap.get(r.order.id);
+        if (!existing || (r.shipment?.createdAt && (!existing.shipment?.createdAt || r.shipment.createdAt > existing.shipment.createdAt))) {
+          orderMap.set(r.order.id, r);
+        }
+      }
+
+      const orderList = Array.from(orderMap.values()).map(r => ({
+        id: r.order.id,
+        source: r.order.source,
+        externalOrderId: r.order.externalOrderId,
+        shopifyOrderId: r.order.shopifyOrderId,
+        orderNumber: r.order.orderNumber,
+        customerName: r.order.customerName,
+        customerEmail: r.order.customerEmail,
+        warehouseStatus: r.order.warehouseStatus,
+        orderPlacedAt: r.order.orderPlacedAt?.toISOString() ?? null,
+        totalAmount: r.order.totalAmount,
+        shipment: r.shipment ? {
+          carrier: r.shipment.carrier,
+          trackingNumber: r.shipment.trackingNumber,
+          trackingUrl: r.shipment.trackingUrl,
+          status: r.shipment.status,
+          shippedAt: r.shipment.shippedAt?.toISOString() ?? null,
+        } : null,
+      }));
+
+      res.json({
+        orders: orderList,
+        total: orderList.length,
+        syncedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Internal API - orders error:", error);
+      res.status(500).json({ error: "Failed to fetch orders" });
+    }
+  });
+
+  app.get("/api/internal/shipments", requireInternalApiKey, async (req, res) => {
+    try {
+      const orderIdsParam = req.query.orderIds as string;
+      if (!orderIdsParam) {
+        return res.status(400).json({ error: "orderIds query parameter required" });
+      }
+
+      const orderIds = orderIdsParam.split(",").map(id => parseInt(id.trim(), 10)).filter(id => !isNaN(id));
+      if (orderIds.length === 0) {
+        return res.json({ shipments: [] });
+      }
+
+      const results = await db
+        .select()
+        .from(shipments)
+        .where(inArray(shipments.orderId, orderIds));
+
+      res.json({
+        shipments: results.map(s => ({
+          orderId: s.orderId,
+          carrier: s.carrier,
+          trackingNumber: s.trackingNumber,
+          trackingUrl: s.trackingUrl,
+          status: s.status,
+          shippedAt: s.shippedAt?.toISOString() ?? null,
+        })),
+      });
+    } catch (error: any) {
+      console.error("Internal API - shipments error:", error);
+      res.status(500).json({ error: "Failed to fetch shipments" });
     }
   });
 
