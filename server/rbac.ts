@@ -8,27 +8,27 @@ import { eq, and, inArray, sql } from "drizzle-orm";
 // Default adjustment reasons for inventory operations
 export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
   // Receipt reasons
-  { code: "po_received", name: "PO Received", description: "Inventory received from purchase order", transactionType: "receipt", requiresNote: 0, sortOrder: 10 },
-  { code: "rma_return", name: "RMA Return", description: "Customer return received", transactionType: "receipt", requiresNote: 1, sortOrder: 20 },
-  
+  { code: "PO_RECEIVED", name: "PO Received", description: "Inventory received from purchase order", transactionType: "receipt", requiresNote: 0, sortOrder: 10 },
+  { code: "RMA_RETURN", name: "RMA Return", description: "Customer return received", transactionType: "receipt", requiresNote: 1, sortOrder: 20 },
+
   // Adjustment reasons (cycle count / audit)
-  { code: "cycle_count", name: "Cycle Count", description: "Variance found during cycle count", transactionType: "adjustment", requiresNote: 0, sortOrder: 30 },
-  { code: "damaged", name: "Damaged", description: "Product damaged and removed from inventory", transactionType: "adjustment", requiresNote: 1, sortOrder: 40 },
-  { code: "shrinkage", name: "Shrinkage", description: "Inventory loss (theft, miscount)", transactionType: "adjustment", requiresNote: 1, sortOrder: 50 },
-  { code: "found", name: "Found Stock", description: "Additional stock found during audit", transactionType: "adjustment", requiresNote: 0, sortOrder: 60 },
-  { code: "expired", name: "Expired", description: "Product expired and disposed", transactionType: "adjustment", requiresNote: 0, sortOrder: 70 },
-  { code: "sample", name: "Sample", description: "Product removed as sample", transactionType: "adjustment", requiresNote: 0, sortOrder: 80 },
-  { code: "donation", name: "Donation", description: "Product donated", transactionType: "adjustment", requiresNote: 0, sortOrder: 90 },
-  
+  { code: "CYCLE_COUNT", name: "Cycle Count", description: "Variance found during cycle count", transactionType: "adjustment", requiresNote: 0, sortOrder: 30 },
+  { code: "DAMAGED", name: "Damaged", description: "Product damaged and removed from inventory", transactionType: "adjustment", requiresNote: 1, sortOrder: 40 },
+  { code: "SHRINKAGE", name: "Shrinkage", description: "Inventory loss (theft, miscount)", transactionType: "adjustment", requiresNote: 1, sortOrder: 50 },
+  { code: "FOUND", name: "Found Stock", description: "Additional stock found during audit", transactionType: "adjustment", requiresNote: 0, sortOrder: 60 },
+  { code: "EXPIRED", name: "Expired", description: "Product expired and disposed", transactionType: "adjustment", requiresNote: 0, sortOrder: 70 },
+  { code: "SAMPLE", name: "Sample", description: "Product removed as sample", transactionType: "adjustment", requiresNote: 0, sortOrder: 80 },
+  { code: "DONATION", name: "Donation", description: "Product donated", transactionType: "adjustment", requiresNote: 0, sortOrder: 90 },
+
   // Transfer reasons
-  { code: "replenishment", name: "Replenishment", description: "Moved from bulk to pick location", transactionType: "replenish", requiresNote: 0, sortOrder: 100 },
-  { code: "relocation", name: "Relocation", description: "Moved to different bin", transactionType: "transfer", requiresNote: 0, sortOrder: 110 },
-  { code: "misplaced", name: "Misplaced", description: "Found in wrong location", transactionType: "transfer", requiresNote: 1, sortOrder: 120 },
+  { code: "REPLENISHMENT", name: "Replenishment", description: "Moved from bulk to pick location", transactionType: "replenish", requiresNote: 0, sortOrder: 100 },
+  { code: "RELOCATION", name: "Relocation", description: "Moved to different bin", transactionType: "transfer", requiresNote: 0, sortOrder: 110 },
+  { code: "MISPLACED", name: "Misplaced", description: "Found in wrong location", transactionType: "adjustment", requiresNote: 1, sortOrder: 120 },
 
   // Cycle count specific
-  { code: "receiving_error", name: "Receiving Error", description: "Variance due to incorrect receiving", transactionType: "adjustment", requiresNote: 1, sortOrder: 130 },
-  { code: "picking_error", name: "Picking Error", description: "Variance due to incorrect pick", transactionType: "adjustment", requiresNote: 1, sortOrder: 140 },
-  { code: "within_tolerance", name: "Within Tolerance", description: "Small variance auto-approved within tolerance", transactionType: "adjustment", requiresNote: 0, sortOrder: 150 },
+  { code: "RECEIVING_ERROR", name: "Receiving Error", description: "Variance due to incorrect receiving", transactionType: "adjustment", requiresNote: 1, sortOrder: 130 },
+  { code: "PICKING_ERROR", name: "Picking Error", description: "Variance due to incorrect pick", transactionType: "adjustment", requiresNote: 1, sortOrder: 140 },
+  { code: "WITHIN_TOLERANCE", name: "Within Tolerance", description: "Small variance auto-approved within tolerance", transactionType: "adjustment", requiresNote: 0, sortOrder: 150 },
 ];
 
 // Default permissions for Echelon
@@ -395,7 +395,7 @@ export async function assignUserRoles(userId: string, roleIds: number[]): Promis
 // Seed adjustment reasons for inventory operations
 export async function seedAdjustmentReasons() {
   console.log("Checking adjustment reasons...");
-  
+
   try {
     // Check if table exists
     await db.select().from(adjustmentReasons).limit(1);
@@ -403,7 +403,21 @@ export async function seedAdjustmentReasons() {
     console.log("Adjustment reasons table not yet created - skipping seed.");
     return;
   }
-  
+
+  // Clean up old lowercase duplicates (codes were previously stored lowercase)
+  const oldLowercaseCodes = [
+    "po_received", "rma_return", "cycle_count", "damaged", "shrinkage",
+    "found", "expired", "sample", "donation", "replenishment", "relocation",
+    "misplaced", "receiving_error", "picking_error", "within_tolerance",
+  ];
+  for (const code of oldLowercaseCodes) {
+    try {
+      await db.delete(adjustmentReasons).where(eq(adjustmentReasons.code, code));
+    } catch (e) {
+      // Ignore - may not exist
+    }
+  }
+
   // Insert all adjustment reasons (ignore duplicates)
   for (const reason of DEFAULT_ADJUSTMENT_REASONS) {
     try {
@@ -412,6 +426,6 @@ export async function seedAdjustmentReasons() {
       // Already exists
     }
   }
-  
+
   console.log("Adjustment reasons seeding complete!");
 }

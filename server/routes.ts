@@ -8085,6 +8085,129 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk approve variances
+  app.post("/api/cycle-counts/:id/bulk-approve", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const cycleCountId = parseInt(req.params.id);
+      const userId = req.session.user?.id;
+      const { itemIds, reasonCode, notes } = req.body;
+
+      if (!Array.isArray(itemIds) || itemIds.length === 0) {
+        return res.status(400).json({ error: "itemIds array is required" });
+      }
+      if (!reasonCode) {
+        return res.status(400).json({ error: "reasonCode is required" });
+      }
+
+      const { inventoryCore: ccCore } = req.app.locals.services as any;
+      let approved = 0;
+      let skipped = 0;
+      let adjustmentsMade = 0;
+      const errors: string[] = [];
+      const processedIds = new Set<number>();
+
+      for (const rawId of itemIds) {
+        const itemId = parseInt(rawId);
+        if (isNaN(itemId) || processedIds.has(itemId)) continue;
+        processedIds.add(itemId);
+
+        try {
+          const item = await storage.getCycleCountItemById(itemId);
+          if (!item || item.cycleCountId !== cycleCountId) {
+            skipped++;
+            continue;
+          }
+          if (item.status === "approved" || item.status === "adjusted") {
+            skipped++;
+            continue;
+          }
+          if (!item.varianceType) {
+            skipped++;
+            continue;
+          }
+
+          // Apply inventory adjustment if we have a product variant
+          if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
+            await ccCore.adjustInventory({
+              productVariantId: item.productVariantId,
+              warehouseLocationId: item.warehouseLocationId,
+              qtyDelta: item.varianceQty,
+              reason: `Cycle count bulk adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`.trim(),
+              cycleCountId: item.cycleCountId,
+              userId,
+            });
+            adjustmentsMade++;
+          }
+
+          // Mark as approved
+          await storage.updateCycleCountItem(itemId, {
+            status: "approved",
+            approvedBy: userId,
+            approvedAt: new Date(),
+            varianceReason: reasonCode,
+          });
+          approved++;
+
+          // Handle linked items (mismatch pairs)
+          const linkedIds: number[] = [];
+          if (item.relatedItemId) linkedIds.push(item.relatedItemId);
+          const reverseResult = await db.execute<{ id: number }>(sql`
+            SELECT id FROM cycle_count_items
+            WHERE related_item_id = ${itemId} AND status != 'approved'
+          `);
+          for (const row of reverseResult.rows) {
+            linkedIds.push(row.id);
+          }
+
+          for (const linkedId of linkedIds) {
+            if (processedIds.has(linkedId)) continue;
+            processedIds.add(linkedId);
+
+            const linked = await storage.getCycleCountItemById(linkedId);
+            if (!linked || linked.status === "approved") continue;
+
+            if (linked.productVariantId && linked.varianceQty !== null && linked.varianceQty !== 0) {
+              await ccCore.adjustInventory({
+                productVariantId: linked.productVariantId,
+                warehouseLocationId: linked.warehouseLocationId,
+                qtyDelta: linked.varianceQty,
+                reason: `Cycle count bulk adjustment (linked): ${linked.expectedSku || linked.countedSku}. ${notes || ''}`.trim(),
+                cycleCountId: linked.cycleCountId,
+                userId,
+              });
+              adjustmentsMade++;
+            }
+            await storage.updateCycleCountItem(linkedId, {
+              status: "approved",
+              approvedBy: userId,
+              approvedAt: new Date(),
+              varianceReason: reasonCode,
+            });
+            approved++;
+          }
+        } catch (e: any) {
+          errors.push(`Item ${itemId}: ${e.message}`);
+        }
+      }
+
+      // Update cycle count approved count
+      const allItems = await storage.getCycleCountItems(cycleCountId);
+      const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
+      await storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
+
+      res.json({
+        success: true,
+        approved,
+        skipped,
+        adjustmentsMade,
+        errors: errors.length > 0 ? errors : undefined,
+      });
+    } catch (error) {
+      console.error("Error bulk approving variances:", error);
+      res.status(500).json({ error: "Failed to bulk approve variances" });
+    }
+  });
+
   // Create & link a product variant from an unknown SKU found during cycle count
   app.post("/api/cycle-counts/:id/items/:itemId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
