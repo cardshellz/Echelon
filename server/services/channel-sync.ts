@@ -4,12 +4,14 @@ import {
   channels,
   productVariants,
   products,
+  warehouses,
 } from "@shared/schema";
 import type {
   ChannelFeed,
   Channel,
   ProductVariant,
   Product,
+  Warehouse,
 } from "@shared/schema";
 
 type DrizzleDb = {
@@ -22,6 +24,14 @@ type DrizzleDb = {
 
 type InventoryAtpService = {
   getAtpPerVariant: (productId: number) => Promise<Array<{
+    productVariantId: number;
+    sku: string;
+    name: string;
+    unitsPerVariant: number;
+    atpUnits: number;
+    atpBase: number;
+  }>>;
+  getAtpPerVariantByWarehouse: (productId: number, warehouseId: number) => Promise<Array<{
     productVariantId: number;
     sku: string;
     name: string;
@@ -429,12 +439,14 @@ class ChannelSyncService {
    * Push inventory quantity to Shopify via the Inventory Levels `set.json`
    * REST API endpoint.
    *
-   * Uses environment variables for authentication. In a SaaS model,
-   * credentials would come from the `channels` / `channel_connections` tables.
+   * Supports multiple Shopify locations: queries all warehouses with a
+   * `shopify_location_id` configured and pushes that warehouse's ATP to
+   * the corresponding Shopify location. Falls back to `SHOPIFY_LOCATION_ID`
+   * env var with global ATP if no warehouses are configured.
    *
    * @param feed      The channel feed with `channelVariantId` containing the
    *                  Shopify inventory item ID.
-   * @param atpUnits  The quantity to set as available.
+   * @param atpUnits  The global ATP quantity (used as fallback).
    * @throws On missing env vars or Shopify API errors.
    */
   private async pushToShopify(
@@ -450,17 +462,78 @@ class ChannelSyncService {
       );
     }
 
-    // The channelVariantId on the feed stores the Shopify inventory_item_id.
-    // The Shopify location_id comes from environment or channel config.
     const shopifyInventoryItemId = feed.channelVariantId;
-    const shopifyLocationId = process.env.SHOPIFY_LOCATION_ID;
 
-    if (!shopifyLocationId) {
-      throw new Error(
-        "Missing SHOPIFY_LOCATION_ID environment variable for inventory sync",
+    // Look up warehouses with Shopify location IDs configured
+    const warehouseRows: Warehouse[] = await this.db
+      .select()
+      .from(warehouses)
+      .where(
+        and(
+          eq(warehouses.isActive, 1),
+          sql`${warehouses.shopifyLocationId} IS NOT NULL`,
+        ),
+      );
+
+    if (warehouseRows.length > 0) {
+      // Multi-warehouse mode: push per-warehouse ATP to each Shopify location
+      for (const wh of warehouseRows) {
+        // Resolve the product that owns this variant for ATP calculation
+        const [variant] = await this.db
+          .select({ productId: productVariants.productId })
+          .from(productVariants)
+          .where(eq(productVariants.id, feed.productVariantId))
+          .limit(1);
+
+        if (!variant) continue;
+
+        const warehouseAtp = await this.atpService.getAtpPerVariantByWarehouse(
+          variant.productId,
+          wh.id,
+        );
+        const variantAtp = warehouseAtp.find(
+          (v) => v.productVariantId === feed.productVariantId,
+        );
+        const qty = variantAtp?.atpUnits ?? 0;
+
+        await this.pushToShopifyLocation(
+          shopifyDomain,
+          accessToken,
+          shopifyInventoryItemId,
+          wh.shopifyLocationId!,
+          qty,
+        );
+      }
+    } else {
+      // Fallback: single location from env var (backward compatible)
+      const shopifyLocationId = process.env.SHOPIFY_LOCATION_ID;
+      if (!shopifyLocationId) {
+        throw new Error(
+          "No warehouses with shopify_location_id configured and " +
+          "SHOPIFY_LOCATION_ID environment variable is not set",
+        );
+      }
+
+      await this.pushToShopifyLocation(
+        shopifyDomain,
+        accessToken,
+        shopifyInventoryItemId,
+        shopifyLocationId,
+        atpUnits,
       );
     }
+  }
 
+  /**
+   * Push a single inventory level to a specific Shopify location.
+   */
+  private async pushToShopifyLocation(
+    shopifyDomain: string,
+    accessToken: string,
+    inventoryItemId: string,
+    shopifyLocationId: string,
+    available: number,
+  ): Promise<void> {
     const url = `https://${shopifyDomain}/admin/api/2024-01/inventory_levels/set.json`;
 
     const response = await fetch(url, {
@@ -471,21 +544,21 @@ class ChannelSyncService {
       },
       body: JSON.stringify({
         location_id: Number(shopifyLocationId),
-        inventory_item_id: Number(shopifyInventoryItemId),
-        available: atpUnits,
+        inventory_item_id: Number(inventoryItemId),
+        available,
       }),
     });
 
     if (!response.ok) {
       const body = await response.text();
       throw new Error(
-        `Shopify API error ${response.status}: ${body}`,
+        `Shopify API error ${response.status} for location ${shopifyLocationId}: ${body}`,
       );
     }
 
     console.log(
-      `[ChannelSync] Pushed ${atpUnits} units to Shopify for ` +
-      `inventory_item_id=${shopifyInventoryItemId}`,
+      `[ChannelSync] Pushed ${available} units to Shopify ` +
+      `location=${shopifyLocationId} for inventory_item_id=${inventoryItemId}`,
     );
   }
 

@@ -390,6 +390,7 @@ export const warehouses = pgTable("warehouses", {
   timezone: varchar("timezone", { length: 50 }).default("America/New_York"),
   isActive: integer("is_active").notNull().default(1),
   isDefault: integer("is_default").notNull().default(0), // Default warehouse for new orders
+  shopifyLocationId: varchar("shopify_location_id", { length: 50 }), // Maps to Shopify location_id for inventory sync
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

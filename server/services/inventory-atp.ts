@@ -4,6 +4,7 @@ import {
   productVariants,
   inventoryLevels,
   channelFeeds,
+  warehouseLocations,
 } from "@shared/schema";
 
 // ============================================================================
@@ -127,6 +128,95 @@ class InventoryAtpService {
   async getAtpBase(productId: number): Promise<number> {
     const totals = await this.getTotalBaseUnits(productId);
     return totals.onHand - totals.reserved - totals.picked - totals.packed;
+  }
+
+  // --------------------------------------------------------------------------
+  // 2b. getAtpBaseByWarehouse
+  // --------------------------------------------------------------------------
+
+  /**
+   * Calculate the fungible ATP pool for a product in base units,
+   * scoped to a single warehouse.
+   *
+   * Used by channel sync to push per-warehouse quantities to
+   * Shopify locations.
+   */
+  async getAtpBaseByWarehouse(
+    productId: number,
+    warehouseId: number,
+  ): Promise<number> {
+    const [row] = await this.db
+      .select({
+        onHand: sql<number>`COALESCE(SUM(${inventoryLevels.variantQty} * ${productVariants.unitsPerVariant}), 0)`,
+        reserved: sql<number>`COALESCE(SUM(${inventoryLevels.reservedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        picked: sql<number>`COALESCE(SUM(${inventoryLevels.pickedQty} * ${productVariants.unitsPerVariant}), 0)`,
+        packed: sql<number>`COALESCE(SUM(${inventoryLevels.packedQty} * ${productVariants.unitsPerVariant}), 0)`,
+      })
+      .from(inventoryLevels)
+      .innerJoin(
+        productVariants,
+        eq(inventoryLevels.productVariantId, productVariants.id),
+      )
+      .innerJoin(
+        warehouseLocations,
+        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+      )
+      .where(
+        and(
+          eq(productVariants.productId, productId),
+          eq(warehouseLocations.warehouseId, warehouseId),
+        ),
+      );
+
+    const onHand = Number(row?.onHand ?? 0);
+    const reserved = Number(row?.reserved ?? 0);
+    const picked = Number(row?.picked ?? 0);
+    const packed = Number(row?.packed ?? 0);
+    return onHand - reserved - picked - packed;
+  }
+
+  /**
+   * Per-variant ATP scoped to a single warehouse. Returns sellable
+   * variant units for each active variant based on that warehouse's
+   * inventory only.
+   */
+  async getAtpPerVariantByWarehouse(
+    productId: number,
+    warehouseId: number,
+  ): Promise<VariantAtp[]> {
+    const [atpBase, variants] = await Promise.all([
+      this.getAtpBaseByWarehouse(productId, warehouseId),
+      this.db
+        .select({
+          id: productVariants.id,
+          sku: productVariants.sku,
+          name: productVariants.name,
+          unitsPerVariant: productVariants.unitsPerVariant,
+        })
+        .from(productVariants)
+        .where(
+          and(
+            eq(productVariants.productId, productId),
+            eq(productVariants.isActive, true),
+          ),
+        ),
+    ]);
+
+    return variants.map(
+      (v: {
+        id: number;
+        sku: string | null;
+        name: string;
+        unitsPerVariant: number;
+      }) => ({
+        productVariantId: v.id,
+        sku: v.sku ?? "",
+        name: v.name,
+        unitsPerVariant: v.unitsPerVariant,
+        atpUnits: Math.floor(atpBase / v.unitsPerVariant),
+        atpBase,
+      }),
+    );
   }
 
   // --------------------------------------------------------------------------

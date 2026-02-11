@@ -5,7 +5,7 @@ import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, syncInventoryItemToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -1300,10 +1300,8 @@ export async function registerRoutes(
 
             console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
 
-            // Sync to Shopify (async - don't block response)
-            syncInventoryItemToShopify(productVariant.id, storage).catch(err =>
-              console.warn(`[Inventory] Shopify sync failed for variant ${productVariant.id}:`, err)
-            );
+            // NOTE: No channel sync here — picks are order-driven and Shopify
+            // already decremented available qty at checkout. Syncing would double-dip.
 
             // Auto-trigger replenishment check (fire-and-forget)
             const { replenishment } = req.app.locals.services as any;
@@ -3900,8 +3898,31 @@ export async function registerRoutes(
       // Only process successful fulfillments
       if (fulfillmentStatus === "success" && lineItems.length > 0) {
         await processFulfillmentLineItems(shopifyOrderId, lineItems, "create webhook");
+
+        // Record shipment and release picked inventory via FulfillmentService
+        // NOTE: No channel sync here — shipments are order-driven and Shopify
+        // already tracks fulfillments. Syncing would double-dip.
+        const { fulfillment: fulfillmentSvc } = app.locals.services;
+        if (fulfillmentSvc) {
+          try {
+            const shipment = await fulfillmentSvc.processShopifyFulfillment({
+              shopifyOrderId,
+              fulfillmentId: String(payload.id),
+              trackingNumber: payload.tracking_number || undefined,
+              trackingUrl: payload.tracking_url || undefined,
+              trackingCompany: payload.tracking_company || undefined,
+              lineItems: lineItems.map((li: any) => ({
+                sku: li.sku || "",
+                quantity: li.quantity,
+              })),
+            });
+            console.log(`Fulfillment create webhook: shipment ${shipment.id} recorded for order ${shopifyOrderId}`);
+          } catch (fulfillErr: any) {
+            console.error(`Fulfillment create webhook: shipment recording failed for order ${shopifyOrderId}:`, fulfillErr.message);
+          }
+        }
       }
-      
+
       res.status(200).json({ received: true });
     } catch (error) {
       console.error("Fulfillment create webhook error:", error);
@@ -5082,6 +5103,14 @@ export async function registerRoutes(
         userId,
       });
 
+      // Sync to sales channels after adjustment (fire-and-forget)
+      const { channelSync: adjSync } = req.app.locals.services as any;
+      if (adjSync) {
+        adjSync.queueSyncAfterInventoryChange(adjustVariantId).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, err)
+        );
+      }
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error adjusting inventory:", error);
@@ -5318,6 +5347,14 @@ export async function registerRoutes(
         userId,
         notes: typeof notes === "string" ? notes : undefined,
       });
+
+      // Sync to sales channels after transfer (fire-and-forget)
+      const { channelSync: xfrSync } = req.app.locals.services as any;
+      if (xfrSync) {
+        xfrSync.queueSyncAfterInventoryChange(varId).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-transfer sync failed for variant ${varId}:`, err)
+        );
+      }
 
       res.json({ success: true });
     } catch (error) {
@@ -5627,6 +5664,14 @@ export async function registerRoutes(
         notes: notes || "Stock received via UI",
         userId,
       });
+
+      // Sync to sales channels after receive (fire-and-forget)
+      const { channelSync: rcvSync } = req.app.locals.services as any;
+      if (rcvSync) {
+        rcvSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err)
+        );
+      }
 
       res.json({ success: true, variantQtyReceived: variantQty });
     } catch (error) {
@@ -7181,6 +7226,14 @@ export async function registerRoutes(
         userId,
       });
 
+      // Sync to sales channels (fire-and-forget)
+      const { channelSync: addSync } = req.app.locals.services as any;
+      if (addSync) {
+        addSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, err)
+        );
+      }
+
       res.json({ success: true, variantQtyAdded: variantQty });
     } catch (error) {
       console.error("Error adding stock:", error);
@@ -7211,6 +7264,14 @@ export async function registerRoutes(
         reason: reasonCode,
         userId,
       });
+
+      // Sync to sales channels (fire-and-forget)
+      const { channelSync: adjStockSync } = req.app.locals.services as any;
+      if (adjStockSync) {
+        adjStockSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, err)
+        );
+      }
 
       res.json({ success: true, variantQtyDelta });
     } catch (error) {
@@ -8054,7 +8115,23 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ 
+      // Sync affected variants to sales channels (fire-and-forget)
+      const { channelSync: ccSync } = req.app.locals.services as any;
+      if (ccSync && adjustmentsMade.length > 0) {
+        const syncedVariants = new Set<number>();
+        for (const adj of adjustmentsMade) {
+          // Resolve variant from SKU
+          const adjVariant = await storage.getProductVariantBySku(adj.sku);
+          if (adjVariant && !syncedVariants.has(adjVariant.id)) {
+            syncedVariants.add(adjVariant.id);
+            ccSync.queueSyncAfterInventoryChange(adjVariant.id).catch((err: any) =>
+              console.warn(`[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, err)
+            );
+          }
+        }
+      }
+
+      res.json({
         success: true,
         adjustmentsMade,
         linkedItemsApproved: (item.relatedItemId ? 1 : 0) + reverseRelatedResult.rows.length
@@ -10739,6 +10816,21 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Error syncing all products:", error);
       res.status(500).json({ error: error.message || "Failed to sync products" });
+    }
+  });
+
+  // --- Inventory Alerts (anomaly detection) ---
+
+  app.get("/api/inventory/alerts", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { inventoryAlerts } = req.app.locals.services;
+      const alerts = await inventoryAlerts.checkAll();
+      const critical = alerts.filter(a => a.severity === "critical").length;
+      const warning = alerts.filter(a => a.severity === "warning").length;
+      res.json({ alerts, summary: { total: alerts.length, critical, warning } });
+    } catch (error: any) {
+      console.error("Error checking inventory alerts:", error);
+      res.status(500).json({ error: error.message || "Failed to check alerts" });
     }
   });
 

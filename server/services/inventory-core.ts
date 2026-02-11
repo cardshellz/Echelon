@@ -208,7 +208,7 @@ export class InventoryCoreService {
         variantQtyDelta: params.qty,
         variantQtyBefore: level.variantQty,
         variantQtyAfter: level.variantQty + params.qty,
-        sourceState: null,
+        sourceState: "external",
         targetState: "on_hand",
         referenceType: "receiving",
         referenceId: params.referenceId,
@@ -305,8 +305,15 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Record a shipment confirmation. Decrements `pickedQty` and `variantQty`
-   * (the stock has left the building). All quantities in variant units.
+   * Record a shipment confirmation. Releases inventory that has left the
+   * building. All quantities in variant units.
+   *
+   * Happy path (Echelon pick flow): stock was already moved from variantQty
+   * into pickedQty during the pick step, so we only decrement pickedQty.
+   *
+   * Edge case (shipped without picking — e.g. ShipStation direct): stock
+   * is still in variantQty (possibly with reservedQty held). We decrement
+   * variantQty directly and release any matching reservedQty.
    */
   async recordShipment(params: {
     productVariantId: number;
@@ -336,16 +343,28 @@ export class InventoryCoreService {
         );
       }
 
-      if (level.pickedQty < params.qty) {
-        throw new Error(
-          `Cannot ship ${params.qty} units: only ` +
-            `${level.pickedQty} in picked state`,
-        );
+      // Determine how much comes from picked vs on-hand
+      const fromPicked = Math.min(level.pickedQty, params.qty);
+      const fromOnHand = params.qty - fromPicked;
+
+      if (fromPicked > 0) {
+        await svc.adjustLevel(level.id, {
+          pickedQty: -fromPicked,
+        });
       }
 
-      await svc.adjustLevel(level.id, {
-        pickedQty: -params.qty,
-      });
+      if (fromOnHand > 0) {
+        // Stock was never picked — decrement variantQty directly
+        // Also release any reservedQty that was held for this order
+        const reservedToRelease = Math.min(level.reservedQty, fromOnHand);
+        await svc.adjustLevel(level.id, {
+          variantQty: -fromOnHand,
+          ...(reservedToRelease > 0 ? { reservedQty: -reservedToRelease } : {}),
+        });
+      }
+
+      // Determine source state for audit log
+      const sourceState = fromOnHand > 0 ? "on_hand" : "picked";
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
@@ -353,14 +372,17 @@ export class InventoryCoreService {
         transactionType: "ship",
         variantQtyDelta: -params.qty,
         variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty - params.qty,
-        sourceState: "picked",
+        variantQtyAfter: level.variantQty - fromOnHand,
+        sourceState,
         targetState: "shipped",
         orderId: params.orderId,
         orderItemId: params.orderItemId ?? null,
         referenceType: "order",
         referenceId: params.shipmentId ?? String(params.orderId),
         userId: params.userId ?? null,
+        notes: fromOnHand > 0
+          ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand`
+          : null,
       });
     });
   }
@@ -636,15 +658,31 @@ export class InventoryCoreService {
         variantQty: params.qty,
       });
 
-      // --- AUDIT ---
+      // --- AUDIT (two entries: source decrement + dest increment) ---
+      await svc.logTransaction({
+        productVariantId: params.productVariantId,
+        fromLocationId: params.fromLocationId,
+        toLocationId: params.toLocationId,
+        transactionType: "transfer",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: sourceLevel.variantQty,
+        variantQtyAfter: decremented.variantQty,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "manual",
+        notes: params.notes ?? null,
+        userId: params.userId ?? null,
+      });
+
+      const updatedDest = await svc.getLevel(params.productVariantId, params.toLocationId);
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.fromLocationId,
         toLocationId: params.toLocationId,
         transactionType: "transfer",
         variantQtyDelta: params.qty,
-        variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: decremented.variantQty,
+        variantQtyBefore: destLevel.variantQty,
+        variantQtyAfter: updatedDest?.variantQty ?? destLevel.variantQty + params.qty,
         sourceState: "on_hand",
         targetState: "on_hand",
         referenceType: "manual",

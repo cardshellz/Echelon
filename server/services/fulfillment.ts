@@ -1,10 +1,12 @@
-import { eq } from "drizzle-orm";
+import { eq, and, sql, desc } from "drizzle-orm";
 import {
   shipments,
   shipmentItems,
   orders,
   orderItems,
   productVariants,
+  inventoryLevels,
+  inventoryTransactions,
 } from "@shared/schema";
 import type {
   Shipment,
@@ -343,17 +345,61 @@ class FulfillmentService {
 
         const productVariantId = (variant as ProductVariant | undefined)?.id ?? null;
 
-        // Attempt to determine fromLocationId from the order item's
-        // assigned pick location (if it was tracked during picking).
-        // Falls back to null if no pick location is available.
+        // Resolve fromLocationId from pick transactions or inventory levels
         let fromLocationId: number | null = null;
-        if (matchedOrderItem?.catalogProductId) {
-          // Look up the primary forward-pick location via
-          // product_locations.  This is a best-effort lookup --
-          // if the item was picked from a different location we
-          // won't have that data from the webhook alone.
-          // For now, leave null and let confirmShipment handle it
-          // gracefully.
+        if (productVariantId && internalOrder.id) {
+          // First try: find the location from pick transaction history
+          const [pickTx] = await tx
+            .select({ fromLocationId: inventoryTransactions.fromLocationId })
+            .from(inventoryTransactions)
+            .where(
+              and(
+                eq(inventoryTransactions.orderId, internalOrder.id),
+                eq(inventoryTransactions.productVariantId, productVariantId),
+                eq(inventoryTransactions.transactionType, "pick"),
+              ),
+            )
+            .orderBy(desc(inventoryTransactions.createdAt))
+            .limit(1);
+
+          if (pickTx?.fromLocationId) {
+            fromLocationId = pickTx.fromLocationId;
+          } else {
+            // Fallback 2: find any location with pickedQty > 0 for this variant
+            const [pickedLevel] = await tx
+              .select({ warehouseLocationId: inventoryLevels.warehouseLocationId })
+              .from(inventoryLevels)
+              .where(
+                and(
+                  eq(inventoryLevels.productVariantId, productVariantId),
+                  sql`${inventoryLevels.pickedQty} > 0`,
+                ),
+              )
+              .limit(1);
+
+            if (pickedLevel) {
+              fromLocationId = pickedLevel.warehouseLocationId;
+            } else {
+              // Fallback 3 (Edge Case A — shipped without picking):
+              // Find the location with the most on-hand stock for this variant.
+              // recordShipment() will decrement variantQty directly.
+              const [onHandLevel] = await tx
+                .select({ warehouseLocationId: inventoryLevels.warehouseLocationId })
+                .from(inventoryLevels)
+                .where(
+                  and(
+                    eq(inventoryLevels.productVariantId, productVariantId),
+                    sql`${inventoryLevels.variantQty} > 0`,
+                  ),
+                )
+                .orderBy(sql`${inventoryLevels.variantQty} DESC`)
+                .limit(1);
+
+              if (onHandLevel) {
+                fromLocationId = onHandLevel.warehouseLocationId;
+              }
+            }
+          }
         }
 
         shipmentItemValues.push({

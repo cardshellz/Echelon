@@ -33,6 +33,7 @@ import { createReservationService } from "./reservation";
 import { createReplenishmentService } from "./replenishment";
 import { createChannelSyncService } from "./channel-sync";
 import { createReturnsService } from "./returns";
+import { createInventoryAlertService } from "./inventory-alerts";
 
 export function createServices(db: any) {
   // Foundation
@@ -49,6 +50,9 @@ export function createServices(db: any) {
   // Depends on atp
   const channelSync = createChannelSyncService(db, atp);
 
+  // Standalone
+  const inventoryAlerts = createInventoryAlertService(db);
+
   return {
     inventoryCore,
     atp,
@@ -58,6 +62,7 @@ export function createServices(db: any) {
     replenishment,
     channelSync,
     returns,
+    inventoryAlerts,
   };
 }
 
@@ -70,6 +75,7 @@ export { createReservationService } from "./reservation";
 export { createReplenishmentService } from "./replenishment";
 export { createChannelSyncService } from "./channel-sync";
 export { createReturnsService } from "./returns";
+export { createInventoryAlertService } from "./inventory-alerts";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";

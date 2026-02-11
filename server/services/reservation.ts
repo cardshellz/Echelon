@@ -218,7 +218,9 @@ class ReservationService {
     orderId: number,
     reason: string,
     userId?: string,
-  ): Promise<void> {
+  ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }> {
+    const result = { released: 0, failed: [] as Array<{ sku: string; orderItemId: number; reason: string }> };
+
     const items = await this.db
       .select()
       .from(orderItems)
@@ -234,9 +236,11 @@ class ReservationService {
           .limit(1);
 
         if (!variant) {
-          console.warn(
-            `[RESERVATION] Cannot release reservation for SKU "${item.sku}": variant not found`,
-          );
+          result.failed.push({
+            sku: item.sku,
+            orderItemId: item.id,
+            reason: `Variant not found for SKU "${item.sku}"`,
+          });
           continue;
         }
 
@@ -272,28 +276,46 @@ class ReservationService {
               userId,
             });
             remaining -= releaseQty;
+            result.released++;
           } catch (releaseErr) {
+            const msg = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
             console.error(
               `[RESERVATION] Failed to release ${releaseQty} units for SKU "${item.sku}" ` +
-                `at location ${level.warehouseLocationId}:`,
-              releaseErr,
+                `at location ${level.warehouseLocationId}: ${msg}`,
             );
+            result.failed.push({
+              sku: item.sku,
+              orderItemId: item.id,
+              reason: `Release failed at location ${level.warehouseLocationId}: ${msg}`,
+            });
           }
         }
 
         if (remaining > 0) {
           console.warn(
             `[RESERVATION] Could not fully release reservation for SKU "${item.sku}": ` +
-              `${remaining} base units unaccounted for`,
+              `${remaining} units unaccounted for (order ${orderId})`,
           );
+          result.failed.push({
+            sku: item.sku,
+            orderItemId: item.id,
+            reason: `Partial release: ${remaining} of ${unitsNeeded} units could not be released`,
+          });
         }
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         console.error(
-          `[RESERVATION] Error releasing reservation for order item ${item.id}:`,
-          err,
+          `[RESERVATION] Error releasing reservation for order item ${item.id}: ${msg}`,
         );
+        result.failed.push({
+          sku: item.sku,
+          orderItemId: item.id,
+          reason: `Unexpected error: ${msg}`,
+        });
       }
     }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -419,10 +441,12 @@ class ReservationService {
       return null;
     }
 
-    // Quick check: look for any existing reserve transactions for this order
-    // by checking if any variant for these items has reserved stock.
-    // A more precise check would query inventory_transactions, but this
-    // heuristic avoids an extra table scan for the common case.
+    // Check if ALL items already have reservations (idempotency).
+    // Only skip if every resolvable SKU has at least one reserve transaction.
+    // This allows retries for partial reservations (e.g., after stock arrives).
+    const { inventoryTransactions } = await import("@shared/schema");
+    let allReserved = true;
+
     for (const item of items) {
       const [variant] = await this.db
         .select()
@@ -430,10 +454,11 @@ class ReservationService {
         .where(eq(productVariants.sku, item.sku))
         .limit(1);
 
-      if (!variant) continue;
+      if (!variant) {
+        allReserved = false;
+        continue;
+      }
 
-      // Check inventory_transactions for existing reserve entries for this order
-      const { inventoryTransactions } = await import("@shared/schema");
       const [existing] = await this.db
         .select()
         .from(inventoryTransactions)
@@ -446,10 +471,15 @@ class ReservationService {
         )
         .limit(1);
 
-      if (existing) {
-        // Already reserved
-        return null;
+      if (!existing) {
+        allReserved = false;
+        break;
       }
+    }
+
+    if (allReserved) {
+      // All items already reserved — skip
+      return null;
     }
 
     return this.reserveOrder(order.id, userId);
