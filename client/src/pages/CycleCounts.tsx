@@ -326,6 +326,32 @@ export default function CycleCounts() {
     },
   });
 
+  const createVariantMutation = useMutation({
+    mutationFn: async (itemId: number) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${itemId}/create-variant`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to create variant" }));
+        throw new Error(err.error || "Failed to create variant");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      if (selectedItem && data.item) {
+        setSelectedItem(data.item);
+      }
+      const verb = data.alreadyExisted ? "Linked existing" : "Created & linked";
+      const extra = data.siblingItemsLinked > 0 ? ` (also linked ${data.siblingItemsLinked} other item${data.siblingItemsLinked > 1 ? "s" : ""})` : "";
+      toast({ title: `${verb} variant`, description: `${data.variant.sku} (${data.variant.name})${extra}` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to create variant", description: error.message, variant: "destructive" });
+    },
+  });
+
   const completeMutation = useMutation({
     mutationFn: async (id: number) => {
       const res = await fetch(`/api/cycle-counts/${id}/complete`, {
@@ -413,6 +439,17 @@ export default function CycleCounts() {
       toast({ title: "Failed to investigate", description: error.message, variant: "destructive" });
     },
   });
+
+  const parseSku = (sku: string | null): { baseSku: string; typeName: string; units: number } | null => {
+    if (!sku) return null;
+    const match = sku.match(/^(.+)-(P|B|C)(\d+)$/i);
+    if (match) {
+      const type = match[2].toUpperCase();
+      const typeName = type === "P" ? "Pack" : type === "B" ? "Box" : "Case";
+      return { baseSku: match[1].toUpperCase(), typeName, units: parseInt(match[3], 10) };
+    }
+    return { baseSku: sku.toUpperCase(), typeName: "Each", units: 1 };
+  };
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -1921,8 +1958,38 @@ export default function CycleCounts() {
                         </span>
                       </div>
                     )}
-                    {!selectedItem.productVariantId && (
-                      <div className="text-xs text-amber-600">No matching product variant — manual investigation needed</div>
+                    {!selectedItem.productVariantId && selectedItem.countedSku && (() => {
+                      const parsed = parseSku(selectedItem.countedSku);
+                      return (
+                        <div className="space-y-2">
+                          <div className="text-xs text-amber-600 font-medium">No matching product variant</div>
+                          <div className="bg-muted/50 border rounded-lg p-3 space-y-2">
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                              <span className="text-muted-foreground">Product:</span>
+                              <span className="font-mono font-medium">{parsed?.baseSku}</span>
+                              <span className="text-muted-foreground">Variant:</span>
+                              <span className="font-medium">{parsed?.typeName} of {parsed?.units}</span>
+                              <span className="text-muted-foreground">SKU:</span>
+                              <span className="font-mono font-medium">{selectedItem.countedSku.toUpperCase()}</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              Creates the product (if needed) and variant, then links it so inventory can be adjusted.
+                            </p>
+                            <Button
+                              className="w-full min-h-[44px]"
+                              onClick={() => createVariantMutation.mutate(selectedItem.id)}
+                              disabled={createVariantMutation.isPending}
+                            >
+                              {createVariantMutation.isPending ? "Creating..." : (
+                                <><Plus className="h-4 w-4 mr-2" /> Create & Link SKU</>
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {!selectedItem.productVariantId && !selectedItem.countedSku && (
+                      <div className="text-xs text-amber-600">No SKU recorded — manual investigation needed</div>
                     )}
                   </div>
 

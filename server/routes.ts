@@ -8029,6 +8029,116 @@ export async function registerRoutes(
     }
   });
 
+  // Create & link a product variant from an unknown SKU found during cycle count
+  app.post("/api/cycle-counts/:id/items/:itemId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const cycleCountId = parseInt(req.params.id);
+      const itemId = parseInt(req.params.itemId);
+
+      const item = await storage.getCycleCountItemById(itemId);
+      if (!item) {
+        return res.status(404).json({ error: "Cycle count item not found" });
+      }
+      if (item.cycleCountId !== cycleCountId) {
+        return res.status(400).json({ error: "Item does not belong to this cycle count" });
+      }
+
+      const sku = item.countedSku;
+      if (!sku) {
+        return res.status(400).json({ error: "Item has no counted SKU to create a variant from" });
+      }
+      if (item.productVariantId) {
+        return res.status(400).json({ error: "Item already has a linked product variant" });
+      }
+
+      // Race condition check: variant may already exist
+      const existingVariant = await storage.getProductVariantBySku(sku.toUpperCase());
+      if (existingVariant) {
+        await storage.updateCycleCountItem(itemId, { productVariantId: existingVariant.id });
+        const product = await storage.getProductById(existingVariant.productId);
+        return res.json({
+          item: await storage.getCycleCountItemById(itemId),
+          product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
+          variant: { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant },
+          alreadyExisted: true,
+          siblingItemsLinked: 0,
+        });
+      }
+
+      // Parse SKU pattern (same as receiving flow)
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      const match = sku.match(variantPattern);
+
+      let baseSku: string;
+      let unitsPerVariant: number;
+      let hierarchyLevel: number;
+      let variantName: string;
+
+      if (match) {
+        baseSku = match[1].toUpperCase();
+        const variantType = match[2].toUpperCase();
+        unitsPerVariant = parseInt(match[3], 10);
+        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
+        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
+        variantName = `${typeName} of ${unitsPerVariant}`;
+      } else {
+        baseSku = sku.toUpperCase();
+        unitsPerVariant = 1;
+        hierarchyLevel = 1;
+        variantName = "Each";
+      }
+
+      // Find or create parent product
+      let product = await storage.getProductBySku(baseSku);
+      if (!product) {
+        product = await storage.createProduct({
+          sku: baseSku,
+          name: baseSku,
+          baseUnit: "EA",
+        });
+        console.log(`[CycleCount] Created product ${product.id} for base SKU ${baseSku}`);
+      }
+
+      // Create variant
+      const variant = await storage.createProductVariant({
+        productId: product.id,
+        sku: sku.toUpperCase(),
+        name: variantName,
+        unitsPerVariant,
+        hierarchyLevel,
+      });
+      console.log(`[CycleCount] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
+
+      // Link variant to this cycle count item
+      await storage.updateCycleCountItem(itemId, { productVariantId: variant.id });
+
+      // Auto-link siblings with same unknown SKU in this count
+      const allItems = await storage.getCycleCountItems(cycleCountId);
+      const siblings = allItems.filter(i =>
+        i.id !== itemId &&
+        i.countedSku?.toUpperCase() === sku.toUpperCase() &&
+        !i.productVariantId
+      );
+      for (const sibling of siblings) {
+        await storage.updateCycleCountItem(sibling.id, { productVariantId: variant.id });
+      }
+
+      res.json({
+        item: await storage.getCycleCountItemById(itemId),
+        product: { id: product.id, sku: product.sku, name: product.name },
+        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
+        alreadyExisted: false,
+        siblingItemsLinked: siblings.length,
+      });
+    } catch (error: any) {
+      console.error("Error creating variant from cycle count item:", error);
+      if (error.code === "23505" || error.message?.includes("unique")) {
+        return res.status(409).json({ error: "A variant with this SKU already exists. Try refreshing." });
+      }
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
   // Complete cycle count
   app.post("/api/cycle-counts/:id/complete", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
