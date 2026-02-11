@@ -13,6 +13,7 @@ import type {
   Product,
   Warehouse,
 } from "@shared/schema";
+import { getShopifyConfig } from "../shopify";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -453,15 +454,7 @@ class ChannelSyncService {
     feed: ChannelFeed,
     atpUnits: number,
   ): Promise<void> {
-    const shopifyDomain = process.env.SHOPIFY_SHOP_DOMAIN;
-    const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
-
-    if (!shopifyDomain || !accessToken) {
-      throw new Error(
-        "Missing SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN environment variables",
-      );
-    }
-
+    const { domain: shopifyDomain, accessToken } = getShopifyConfig();
     const shopifyInventoryItemId = feed.channelVariantId;
 
     // Look up warehouses with Shopify location IDs configured

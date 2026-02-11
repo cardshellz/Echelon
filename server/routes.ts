@@ -5,7 +5,7 @@ import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, getShopifyConfig, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -6496,18 +6496,18 @@ export async function registerRoutes(
         return res.status(400).json({ error: "This channel is not a Shopify channel" });
       }
       
-      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
-      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
-      
-      if (!shopDomain || !accessToken) {
-        return res.status(400).json({ 
+      let shopifyConfig;
+      try {
+        shopifyConfig = getShopifyConfig();
+      } catch {
+        return res.status(400).json({
           error: "Shopify credentials not configured",
-          message: "Please set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN in your environment" 
+          message: "Please set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN in your environment"
         });
       }
-      
+      const { store, domain: shopDomain, accessToken } = shopifyConfig;
+
       // Test the connection by fetching shop info
-      const store = shopDomain.replace(/\.myshopify\.com$/, "");
       const testResponse = await fetch(
         `https://${store}.myshopify.com/admin/api/2024-01/shop.json`,
         {
@@ -6517,20 +6517,20 @@ export async function registerRoutes(
           },
         }
       );
-      
+
       if (!testResponse.ok) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: "Failed to connect to Shopify",
-          message: `Shopify API returned ${testResponse.status}` 
+          message: `Shopify API returned ${testResponse.status}`
         });
       }
-      
+
       const shopData = await testResponse.json();
-      
+
       // Create/update the connection
       const connection = await storage.upsertChannelConnection({
         channelId,
-        shopDomain: shopDomain,
+        shopDomain,
         syncStatus: 'connected',
         lastSyncAt: new Date().toISOString(),
       });
@@ -6538,21 +6538,148 @@ export async function registerRoutes(
       // Update channel status to active
       await storage.updateChannel(channelId, { status: 'active' });
       
-      res.json({ 
-        success: true, 
+      // Fetch Shopify locations
+      let locations: any[] = [];
+      try {
+        const locResponse = await fetch(
+          `https://${store}.myshopify.com/admin/api/2024-01/locations.json`,
+          {
+            headers: {
+              "X-Shopify-Access-Token": accessToken,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        if (locResponse.ok) {
+          const locData = await locResponse.json();
+          locations = (locData.locations || []).map((loc: any) => ({
+            id: String(loc.id),
+            name: loc.name,
+            address1: loc.address1,
+            city: loc.city,
+            province: loc.province,
+            country: loc.country_name,
+            active: loc.active,
+          }));
+        }
+      } catch (locErr) {
+        console.warn("Could not fetch Shopify locations:", locErr);
+      }
+
+      // Fetch current warehouse mappings
+      const warehouses = await storage.getAllWarehouses();
+      const mappings = warehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      res.json({
+        success: true,
         connection,
         shop: {
           name: shopData.shop?.name,
           domain: shopData.shop?.domain,
           email: shopData.shop?.email,
-        }
+        },
+        locations,
+        mappings,
       });
     } catch (error) {
       console.error("Error setting up Shopify connection:", error);
       res.status(500).json({ error: "Failed to setup Shopify connection" });
     }
   });
-  
+
+  // Fetch Shopify locations for a connected channel
+  app.get("/api/channels/:id/shopify-locations", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+      if (channel.provider !== 'shopify') return res.status(400).json({ error: "Not a Shopify channel" });
+
+      let shopifyConfig;
+      try {
+        shopifyConfig = getShopifyConfig();
+      } catch {
+        return res.status(400).json({ error: "Shopify credentials not configured" });
+      }
+
+      const locResponse = await fetch(
+        `https://${shopifyConfig.store}.myshopify.com/admin/api/2024-01/locations.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": shopifyConfig.accessToken,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      if (!locResponse.ok) {
+        return res.status(502).json({ error: `Shopify API returned ${locResponse.status}` });
+      }
+      const locData = await locResponse.json();
+      const locations = (locData.locations || []).map((loc: any) => ({
+        id: String(loc.id),
+        name: loc.name,
+        address1: loc.address1,
+        city: loc.city,
+        province: loc.province,
+        country: loc.country_name,
+        active: loc.active,
+      }));
+
+      // Include current warehouse mappings
+      const warehouses = await storage.getAllWarehouses();
+      const mappings = warehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      res.json({ locations, mappings });
+    } catch (error) {
+      console.error("Error fetching Shopify locations:", error);
+      res.status(500).json({ error: "Failed to fetch Shopify locations" });
+    }
+  });
+
+  // Save Shopify location → warehouse mappings
+  app.post("/api/channels/:id/map-locations", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const channel = await storage.getChannelById(channelId);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+
+      const { mappings } = req.body as { mappings: Array<{ shopifyLocationId: string; warehouseId: number | null }> };
+      if (!Array.isArray(mappings)) {
+        return res.status(400).json({ error: "mappings must be an array" });
+      }
+
+      // Clear all existing Shopify location mappings first
+      const allWarehouses = await storage.getAllWarehouses();
+      for (const wh of allWarehouses) {
+        if ((wh as any).shopifyLocationId) {
+          await storage.updateWarehouse(wh.id, { shopifyLocationId: null } as any);
+        }
+      }
+
+      // Apply new mappings
+      for (const m of mappings) {
+        if (m.warehouseId) {
+          await storage.updateWarehouse(m.warehouseId, { shopifyLocationId: m.shopifyLocationId } as any);
+        }
+      }
+
+      // Return updated state
+      const updatedWarehouses = await storage.getAllWarehouses();
+      const updatedMappings = updatedWarehouses
+        .filter((w: any) => w.shopifyLocationId)
+        .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
+
+      res.json({ success: true, mappings: updatedMappings });
+    } catch (error) {
+      console.error("Error saving location mappings:", error);
+      res.status(500).json({ error: "Failed to save location mappings" });
+    }
+  });
+
   // Update partner profile
   app.put("/api/channels/:id/partner-profile", requirePermission("channels", "edit"), async (req, res) => {
     try {

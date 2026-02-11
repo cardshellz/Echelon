@@ -55,7 +55,7 @@ export interface ShopifyProductsResponse {
   products: ShopifyProduct[];
 }
 
-function getShopifyConfig() {
+export function getShopifyConfig() {
   if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ACCESS_TOKEN) {
     throw new Error("SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN environment variables are required");
   }
@@ -63,6 +63,7 @@ function getShopifyConfig() {
   const store = SHOPIFY_SHOP_DOMAIN.replace(/\.myshopify\.com$/, "");
   return {
     store,
+    domain: `${store}.myshopify.com`,
     accessToken: SHOPIFY_ACCESS_TOKEN,
   };
 }
