@@ -50,6 +50,48 @@ function requireInternalApiKey(req: Request, res: Response, next: NextFunction) 
   next();
 }
 
+/**
+ * Refresh pick queue locations for a specific SKU (fire-and-forget).
+ * Updates all pending order items for this SKU with current bin location.
+ */
+async function syncPickQueueForSku(sku: string) {
+  try {
+    const freshLocation = await storage.getBinLocationFromInventoryBySku(sku);
+    if (!freshLocation) return;
+
+    // Find all pending order items with this SKU in active orders
+    const result = await db.execute(sql`
+      SELECT oi.id, oi.location, oi.zone
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      WHERE UPPER(oi.sku) = ${sku.toUpperCase()}
+        AND oi.status = 'pending'
+        AND o.warehouse_status IN ('ready', 'in_progress')
+    `);
+
+    let updated = 0;
+    for (const row of result.rows as any[]) {
+      if (row.location !== freshLocation.location || row.zone !== freshLocation.zone) {
+        await storage.updateOrderItemLocation(
+          row.id,
+          freshLocation.location,
+          freshLocation.zone,
+          freshLocation.barcode || null,
+          freshLocation.imageUrl || null
+        );
+        updated++;
+      }
+    }
+
+    if (updated > 0) {
+      broadcastOrdersUpdated();
+      console.log(`[Queue Sync] Updated ${updated} pending items for SKU ${sku} → ${freshLocation.location}`);
+    }
+  } catch (err: any) {
+    console.warn(`[Queue Sync] Failed to sync SKU ${sku}:`, err?.message);
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -456,7 +498,12 @@ export async function registerRoutes(
       }
       
       const location = await storage.createProductLocation(dataWithRef);
-      
+
+      // Auto-sync pick queue for this SKU (fire-and-forget)
+      if (location.sku) {
+        syncPickQueueForSku(location.sku).catch(() => {});
+      }
+
       res.status(201).json(location);
     } catch (error: any) {
       console.error("Error creating location:", error);
@@ -493,11 +540,16 @@ export async function registerRoutes(
       }
       
       const location = await storage.updateProductLocation(id, dataWithRef);
-      
+
       if (!location) {
         return res.status(404).json({ error: "Location not found" });
       }
-      
+
+      // Auto-sync pick queue for this SKU (fire-and-forget)
+      if (location.sku) {
+        syncPickQueueForSku(location.sku).catch(() => {});
+      }
+
       res.json(location);
     } catch (error: any) {
       console.error("Error updating location:", error);
@@ -512,12 +564,19 @@ export async function registerRoutes(
   app.delete("/api/locations/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      // Get SKU before deleting for queue sync
+      const existing = await storage.getProductLocationById(id);
       const deleted = await storage.deleteProductLocation(id);
-      
+
       if (!deleted) {
         return res.status(404).json({ error: "Location not found" });
       }
-      
+
+      // Auto-sync pick queue for this SKU (fire-and-forget)
+      if (existing?.sku) {
+        syncPickQueueForSku(existing.sku).catch(() => {});
+      }
+
       res.status(204).send();
     } catch (error) {
       console.error("Error deleting location:", error);
@@ -950,20 +1009,18 @@ export async function registerRoutes(
         }
       }
       
-      // Collect all unique SKUs that need lookup (UNASSIGNED or missing imageUrl)
+      // Collect ALL unique SKUs for pending/shippable items to get fresh locations
+      // This ensures pick queue always shows current bin locations even after transfers
       const skusNeedingLookup = new Set<string>();
       for (const order of filteredOrders) {
         for (const item of order.items) {
-          if (item.sku && item.requiresShipping === 1) {
-            // Need lookup if UNASSIGNED or missing imageUrl
-            if (item.location === "UNASSIGNED" || !item.imageUrl) {
-              skusNeedingLookup.add(item.sku);
-            }
+          if (item.sku && item.requiresShipping === 1 && item.status === "pending") {
+            skusNeedingLookup.add(item.sku);
           }
         }
       }
-      
-      // Batch lookup locations for all SKUs needing data (single query instead of per-item)
+
+      // Batch lookup current locations for all pending SKUs (single query per unique SKU)
       const freshLocationMap = new Map<string, { location: string; zone: string; barcode: string | null; imageUrl: string | null }>();
       for (const sku of skusNeedingLookup) {
         const freshLocation = await storage.getBinLocationFromInventoryBySku(sku);
@@ -971,28 +1028,29 @@ export async function registerRoutes(
           freshLocationMap.set(sku, freshLocation);
         }
       }
-      
+
       // Add picker display name, channel info, and C2P (Click to Pick) time to orders
       // Also filter out non-shippable items from the pick list (donations, memberships, etc.)
-      // Re-lookup locations for UNASSIGNED items to catch newly available inventory
+      // Always use fresh locations for pending items to reflect transfers/bin changes
       const ordersWithMetadata = filteredOrders.map((order) => {
         // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
         let c2pMs: number | null = null;
         if (order.completedAt && order.shopifyCreatedAt) {
           c2pMs = new Date(order.completedAt).getTime() - new Date(order.shopifyCreatedAt).getTime();
         }
-        
+
         const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
-        
+
         // Only include items that require shipping in the pick list
         const shippableItems = order.items.filter(item => item.requiresShipping === 1);
-        
-        // Apply fresh locations to UNASSIGNED items using pre-fetched map
+
+        // Apply fresh locations to ALL pending items (not just UNASSIGNED)
+        // This keeps the pick queue current after transfers and bin reassignments
         const itemsWithFreshLocations = shippableItems.map((item) => {
           let updatedItem = { ...item };
-          
-          // Update location for UNASSIGNED items
-          if (item.location === "UNASSIGNED" && item.sku) {
+
+          // For pending items, always use the freshest location from inventory
+          if (item.status === "pending" && item.sku) {
             const freshLocation = freshLocationMap.get(item.sku);
             if (freshLocation) {
               updatedItem = {
@@ -1004,15 +1062,15 @@ export async function registerRoutes(
               };
             }
           }
-          
-          // If still no imageUrl, try to get from freshLocationMap even if location is assigned
+
+          // If still no imageUrl, try to get from freshLocationMap
           if (!updatedItem.imageUrl && item.sku) {
             const freshLocation = freshLocationMap.get(item.sku);
             if (freshLocation?.imageUrl) {
               updatedItem.imageUrl = freshLocation.imageUrl;
             }
           }
-          
+
           return updatedItem;
         });
         
@@ -4803,7 +4861,12 @@ export async function registerRoutes(
         imageUrl,
         barcode,
       });
-      
+
+      // Auto-sync pick queue for this SKU (fire-and-forget)
+      if (catalogProduct.sku) {
+        syncPickQueueForSku(catalogProduct.sku).catch(() => {});
+      }
+
       res.status(201).json(productLocation);
     } catch (error: any) {
       console.error("Error assigning product to location:", error);
@@ -5401,6 +5464,10 @@ export async function registerRoutes(
         xfrReplen.checkAndTriggerAfterPick(varId, fromLocId).catch((err: any) =>
           console.warn(`[Replen] Post-transfer check failed for variant ${varId}:`, err)
         );
+      }
+      // Auto-sync pick queue locations for this SKU (fire-and-forget)
+      if (variant.sku) {
+        syncPickQueueForSku(variant.sku).catch(() => {});
       }
 
       res.json({ success: true });
