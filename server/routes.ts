@@ -9645,6 +9645,7 @@ export async function registerRoutes(
         maxQty: data.maxQty || null,
         replenMethod: data.replenMethod || "case_break",
         priority: data.priority || 5,
+        autoReplen: data.autoReplen ?? 0,
         isActive: data.isActive ?? 1,
       });
       res.status(201).json(tierDefault);
@@ -9749,7 +9750,7 @@ export async function registerRoutes(
   
   app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority } = req.body;
+      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority, autoReplen } = req.body;
       
       if (!catalogProductId || !pickVariantId || !sourceVariantId) {
         return res.status(400).json({ error: "catalogProductId, pickVariantId, and sourceVariantId are required" });
@@ -9799,6 +9800,7 @@ export async function registerRoutes(
         maxQty: maxQty ?? null,
         replenMethod: replenMethod || "case_break",
         priority: priority ?? 5,
+        autoReplen: autoReplen ?? null,
         isActive: 1,
       });
       
@@ -10377,10 +10379,26 @@ export async function registerRoutes(
       };
       
       // Build reverse map: productVariantId -> catalogProductId
+      // Step 1: Map catalog product to its linked variant's productId
       const catalogProductByVariantId = new Map<number, number>();
+      const catalogProductByProductId = new Map<number, number>();
       for (const cp of catalogProducts) {
         if (cp.productVariantId) {
           catalogProductByVariantId.set(cp.productVariantId, cp.id);
+          // Find the linked variant to get its productId
+          const linkedVariant = variantMap.get(cp.productVariantId);
+          if (linkedVariant) {
+            catalogProductByProductId.set(linkedVariant.productId, cp.id);
+          }
+        }
+      }
+      // Step 2: Map ALL variants (siblings at different hierarchy levels) to their catalog product
+      for (const v of allProductVariants) {
+        if (!catalogProductByVariantId.has(v.id)) {
+          const cpId = catalogProductByProductId.get(v.productId);
+          if (cpId) {
+            catalogProductByVariantId.set(v.id, cpId);
+          }
         }
       }
 
@@ -10431,11 +10449,14 @@ export async function registerRoutes(
         currentQty: number;
         hierarchyLevel: number;
       }>>();
-      
+
+      // Track which location+variant combos we've already added (to avoid duplicates)
+      const seenPickLocVariant = new Set<string>();
+
       for (const level of inventoryLevels) {
         const location = locationMap.get(level.warehouseLocationId);
         if (!location || location.locationType !== "pick") continue;
-        
+
         const variant = variantMap.get(level.productVariantId);
         if (!variant) continue;
         const cpId = catalogProductByVariantId.get(variant.id);
@@ -10445,11 +10466,44 @@ export async function registerRoutes(
         if (!pickLocationsNeedingReplen.has(productId)) {
           pickLocationsNeedingReplen.set(productId, []);
         }
-        
+
+        seenPickLocVariant.add(`${level.warehouseLocationId}:${level.productVariantId}`);
+
         pickLocationsNeedingReplen.get(productId)!.push({
           locationId: level.warehouseLocationId,
           variantId: level.productVariantId,
           currentQty: level.variantQty || 0,
+          hierarchyLevel: variant.hierarchyLevel,
+        });
+      }
+
+      // Also check product_locations for assigned bins that have NO inventory level at all
+      // (e.g., bins emptied completely where the inventory_level row was never created or has qty=0)
+      const allProductLocations = await storage.getAllProductLocations();
+      for (const pl of allProductLocations) {
+        if (pl.locationType !== "pick" || pl.status !== "active") continue;
+        if (!pl.warehouseLocationId || !pl.catalogProductId) continue;
+
+        // Find the base variant for this catalog product
+        const cp = productMap.get(pl.catalogProductId);
+        if (!cp || !cp.productVariantId) continue;
+
+        const variant = variantMap.get(cp.productVariantId);
+        if (!variant) continue;
+
+        const key = `${pl.warehouseLocationId}:${variant.id}`;
+        if (seenPickLocVariant.has(key)) continue; // Already covered by inventory level scan
+        seenPickLocVariant.add(key);
+
+        const cpId = pl.catalogProductId;
+        if (!pickLocationsNeedingReplen.has(cpId)) {
+          pickLocationsNeedingReplen.set(cpId, []);
+        }
+
+        pickLocationsNeedingReplen.get(cpId)!.push({
+          locationId: pl.warehouseLocationId,
+          variantId: variant.id,
+          currentQty: 0, // No inventory level = 0 stock
           hierarchyLevel: variant.hierarchyLevel,
         });
       }
@@ -10506,6 +10560,7 @@ export async function registerRoutes(
           const effectivePriority = override?.priority ?? matchedDefault.priority;
           const effectivePickLocationType = override?.pickLocationType ?? matchedDefault.pickLocationType;
           const effectiveSourceLocationType = override?.sourceLocationType ?? matchedDefault.sourceLocationType;
+          const effectiveAutoReplen = override?.autoReplen ?? matchedDefault.autoReplen ?? 0;
           
           // Check if this location needs replen
           if (pickLoc.currentQty >= effectiveTriggerValue) {
@@ -10757,6 +10812,22 @@ export async function registerRoutes(
               notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} < trigger ${effectiveTriggerValue}`,
             });
             
+            // Auto-replen: immediately execute the task if autoReplen is enabled
+            // (e.g., pick-to-pick where the picker handles it automatically)
+            let autoCompleted = false;
+            if (effectiveAutoReplen === 1) {
+              try {
+                const { replenishment } = req.app.locals.services as any;
+                if (replenishment) {
+                  await replenishment.executeTask(task.id, "system:auto-replen");
+                  autoCompleted = true;
+                }
+              } catch (autoErr: any) {
+                console.warn(`[Replen] Auto-replen failed for task ${task.id}:`, autoErr?.message);
+                // Task stays pending for manual handling
+              }
+            }
+
             tasksCreated.push({
               taskId: task.id,
               tierDefaultId: matchedDefault.id,
@@ -10770,6 +10841,8 @@ export async function registerRoutes(
               qtyTargetUnits,
               executionMode,
               warehouseId,
+              autoReplen: effectiveAutoReplen === 1,
+              autoCompleted,
             });
           }
 
@@ -10836,6 +10909,36 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error generating replen tasks:", error);
       res.status(500).json({ error: "Failed to generate replen tasks" });
+    }
+  });
+
+  // Scan empty bins — uses ReplenishmentService.checkThresholds which also scans
+  // product_locations for bins assigned to products with zero stock
+  app.post("/api/replen/scan-empty-bins", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { replenishment } = req.app.locals.services as any;
+      if (!replenishment) {
+        return res.status(500).json({ error: "Replenishment service not available" });
+      }
+
+      const warehouseId = req.body.warehouseId ? parseInt(req.body.warehouseId) : undefined;
+      const tasks = await replenishment.checkThresholds(warehouseId);
+
+      res.json({
+        success: true,
+        tasksCreated: tasks.length,
+        tasks: tasks.map((t: any) => ({
+          id: t.id,
+          fromLocationId: t.fromLocationId,
+          toLocationId: t.toLocationId,
+          pickProductVariantId: t.pickProductVariantId,
+          qtyTargetUnits: t.qtyTargetUnits,
+          status: t.status,
+        })),
+      });
+    } catch (error) {
+      console.error("Error running replen sync:", error);
+      res.status(500).json({ error: "Failed to run replen sync" });
     }
   });
 

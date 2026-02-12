@@ -239,6 +239,7 @@ export default function Replenishment() {
     maxQty: "",
     replenMethod: "case_break",
     priority: "5",
+    autoReplen: "0",
   });
 
   const [overrideForm, setOverrideForm] = useState({
@@ -252,6 +253,7 @@ export default function Replenishment() {
     maxQty: "",
     replenMethod: "",
     priority: "",
+    autoReplen: "",
   });
 
   const [taskForm, setTaskForm] = useState({
@@ -613,6 +615,30 @@ export default function Replenishment() {
     },
   });
 
+  const replenEmptyBinsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/replen/scan-empty-bins", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error("Failed to scan empty bins");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
+      if (data.tasksCreated > 0) {
+        toast({ title: `Found ${data.tasksCreated} bins needing replen` });
+      } else {
+        toast({ title: "All bins OK", description: "No empty or low bins found" });
+      }
+    },
+    onError: () => {
+      toast({ title: "Scan failed", variant: "destructive" });
+    },
+  });
+
   const updateTaskMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenTask> }) => {
       const res = await fetch(`/api/replen/tasks/${id}`, {
@@ -762,6 +788,7 @@ export default function Replenishment() {
       maxQty: "",
       replenMethod: "case_break",
       priority: "5",
+      autoReplen: "0",
     });
   };
 
@@ -777,6 +804,7 @@ export default function Replenishment() {
       maxQty: "",
       replenMethod: "",
       priority: "",
+      autoReplen: "",
     });
   };
 
@@ -858,6 +886,7 @@ export default function Replenishment() {
       maxQty: tierDefault.maxQty?.toString() || "",
       replenMethod: tierDefault.replenMethod,
       priority: tierDefault.priority.toString(),
+      autoReplen: (tierDefault as any).autoReplen?.toString() || "0",
     });
     setShowTierDefaultDialog(true);
   };
@@ -875,6 +904,7 @@ export default function Replenishment() {
       maxQty: override.maxQty?.toString() || "",
       replenMethod: override.replenMethod || "",
       priority: override.priority?.toString() || "",
+      autoReplen: (override as any).autoReplen?.toString() || "",
     });
     setShowOverrideDialog(true);
   };
@@ -893,6 +923,7 @@ export default function Replenishment() {
           maxQty: tierDefaultForm.maxQty ? parseInt(tierDefaultForm.maxQty) : null,
           replenMethod: tierDefaultForm.replenMethod,
           priority: parseInt(tierDefaultForm.priority),
+          autoReplen: parseInt(tierDefaultForm.autoReplen) || 0,
         },
       });
     } else {
@@ -915,6 +946,7 @@ export default function Replenishment() {
           maxQty: overrideForm.maxQty ? parseInt(overrideForm.maxQty) : null,
           replenMethod: overrideForm.replenMethod || null,
           priority: overrideForm.priority ? parseInt(overrideForm.priority) : null,
+          autoReplen: overrideForm.autoReplen ? parseInt(overrideForm.autoReplen) : null,
         },
       });
     } else {
@@ -1088,8 +1120,23 @@ export default function Replenishment() {
               </Button>
             </div>
             <div className="flex gap-2 w-full sm:w-auto">
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
+                className="flex-1 sm:flex-none min-h-[44px]"
+                onClick={() => replenEmptyBinsMutation.mutate()}
+                disabled={replenEmptyBinsMutation.isPending}
+                data-testid="button-scan-empty-bins"
+              >
+                {replenEmptyBinsMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                )}
+                <span className="hidden sm:inline">Replen Empty Bins</span>
+                <span className="sm:hidden">Empty Bins</span>
+              </Button>
+              <Button
+                variant="outline"
                 className="flex-1 sm:flex-none min-h-[44px]"
                 onClick={() => generateTasksMutation.mutate()}
                 disabled={generateTasksMutation.isPending}
@@ -1289,11 +1336,16 @@ export default function Replenishment() {
                           <Badge variant="outline" className="text-xs">{tierDefault.replenMethod}</Badge>
                         </TableCell>
                         <TableCell className="py-2">
-                          {tierDefault.isActive ? (
-                            <Badge className="bg-green-500 text-xs">Active</Badge>
-                          ) : (
-                            <Badge variant="secondary" className="text-xs">Inactive</Badge>
-                          )}
+                          <div className="flex flex-wrap gap-1">
+                            {tierDefault.isActive ? (
+                              <Badge className="bg-green-500 text-xs">Active</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs">Inactive</Badge>
+                            )}
+                            {(tierDefault as any).autoReplen === 1 && (
+                              <Badge className="bg-orange-500 text-xs">Auto</Badge>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="flex gap-1">
@@ -1923,13 +1975,32 @@ export default function Replenishment() {
                   data-testid="input-tier-priority"
                 />
               </div>
+
+              <div>
+                <Label className="text-xs md:text-sm">Auto-Replen</Label>
+                <Select
+                  value={tierDefaultForm.autoReplen}
+                  onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, autoReplen: v })}
+                >
+                  <SelectTrigger className="h-10" data-testid="select-tier-auto-replen">
+                    <SelectValue placeholder="Select..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="0">No (Manual)</SelectItem>
+                    <SelectItem value="1">Yes (Auto-Complete)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Auto-complete creates and immediately executes the replen task (e.g., pick-to-pick where your picker handles it automatically)
+                </p>
+              </div>
             </div>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
               <Button variant="outline" className="min-h-[44px]" onClick={() => setShowTierDefaultDialog(false)}>
                 Cancel
               </Button>
-              <Button 
+              <Button
                 className="min-h-[44px]"
                 onClick={handleSaveTierDefault}
                 data-testid="button-save-tier-default"
@@ -2081,13 +2152,30 @@ export default function Replenishment() {
                   data-testid="input-override-max-qty"
                 />
               </div>
+
+              <div>
+                <Label className="text-xs md:text-sm">Auto-Replen</Label>
+                <Select
+                  value={overrideForm.autoReplen}
+                  onValueChange={(v) => setOverrideForm({ ...overrideForm, autoReplen: v })}
+                >
+                  <SelectTrigger className="h-10" data-testid="select-override-auto-replen">
+                    <SelectValue placeholder="Use default" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use Default</SelectItem>
+                    <SelectItem value="0">No (Manual)</SelectItem>
+                    <SelectItem value="1">Yes (Auto-Complete)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
               <Button variant="outline" className="min-h-[44px]" onClick={() => setShowOverrideDialog(false)}>
                 Cancel
               </Button>
-              <Button 
+              <Button
                 className="min-h-[44px]"
                 onClick={handleSaveOverride}
                 disabled={!overrideForm.catalogProductId}

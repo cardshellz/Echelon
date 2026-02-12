@@ -721,6 +721,7 @@ export const replenTierDefaults = pgTable("replen_tier_defaults", {
   maxQty: integer("max_qty"), // Fill up to this qty (null = use bin capacity or one source unit)
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("case_break"), // case_break, full_case, pallet_drop
   priority: integer("priority").notNull().default(5), // 1 = highest priority
+  autoReplen: integer("auto_replen").notNull().default(0), // 1 = system auto-completes replen (no worker needed, e.g. pick-to-pick)
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -749,6 +750,7 @@ export const replenRules = pgTable("replen_rules", {
   maxQty: integer("max_qty"), // Override: different fill target
   replenMethod: varchar("replen_method", { length: 30 }), // Override: different method (case_break, full_case, pallet_drop)
   priority: integer("priority"), // Override: different task priority
+  autoReplen: integer("auto_replen"), // Override: 1 = system auto-completes (null = use tier default)
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

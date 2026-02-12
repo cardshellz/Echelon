@@ -9,6 +9,7 @@ import {
   productVariants,
   catalogProducts,
   locationReplenConfig,
+  productLocations,
 } from "@shared/schema";
 import type {
   ReplenTask,
@@ -115,7 +116,18 @@ class ReplenishmentService {
       .from(inventoryLevels)
       .where(inArray(inventoryLevels.warehouseLocationId, pickLocationIds));
 
-    if (levels.length === 0) return [];
+    // Also load product_locations to find assigned bins with no inventory level
+    const assignedBins = await this.db
+      .select()
+      .from(productLocations)
+      .where(
+        and(
+          eq(productLocations.locationType, "pick"),
+          eq(productLocations.status, "active"),
+        ),
+      );
+
+    if (levels.length === 0 && assignedBins.length === 0) return [];
 
     // --- 3. Load replen rules, tier defaults, and location overrides ---
     const rules: ReplenRule[] = await this.db
@@ -159,6 +171,37 @@ class ReplenishmentService {
     }
 
     // --- 4. Load variant metadata for hierarchy levels ---
+    // Also add synthetic zero-qty levels for assigned bins with no inventory level
+    const existingLevelKeys = new Set(levels.map((l) => `${l.warehouseLocationId}:${l.productVariantId}`));
+
+    // Load catalog products to resolve variant IDs for assigned bins
+    const allCatalogProducts = await this.db.select().from(catalogProducts);
+    const catalogProductMap = new Map(allCatalogProducts.map((cp: any) => [cp.id, cp]));
+
+    for (const ab of assignedBins) {
+      if (!ab.warehouseLocationId || !ab.catalogProductId) continue;
+      if (!pickLocationMap.has(ab.warehouseLocationId)) continue; // Not a pick location we're scanning
+
+      const cp = catalogProductMap.get(ab.catalogProductId);
+      if (!cp?.productVariantId) continue;
+
+      const key = `${ab.warehouseLocationId}:${cp.productVariantId}`;
+      if (existingLevelKeys.has(key)) continue; // Already have a real inventory level
+      existingLevelKeys.add(key);
+
+      // Create synthetic zero-qty level so the threshold check finds it
+      levels.push({
+        id: -1, // synthetic
+        productVariantId: cp.productVariantId,
+        warehouseLocationId: ab.warehouseLocationId,
+        variantQty: 0,
+        reservedQty: 0,
+        allocatedQty: 0,
+        damagedQty: 0,
+        updatedAt: new Date(),
+      } as any);
+    }
+
     const variantIds = Array.from(new Set(levels.map((l) => l.productVariantId)));
     const variants: ProductVariant[] = variantIds.length > 0
       ? await this.db
@@ -171,14 +214,14 @@ class ReplenishmentService {
     // Pre-load all variants for the relevant products so resolveSourceVariant
     // can find case/pallet variants by product + hierarchy level without N+1 queries
     const productIds = Array.from(new Set(variants.map((v) => v.productId).filter(Boolean))) as number[];
-    const allProductVariants: ProductVariant[] = productIds.length > 0
+    const allProductVariantsArr: ProductVariant[] = productIds.length > 0
       ? await this.db
           .select()
           .from(productVariants)
           .where(inArray(productVariants.productId, productIds))
       : [];
     const productVariantsCache = new Map<number, ProductVariant[]>();
-    for (const v of allProductVariants) {
+    for (const v of allProductVariantsArr) {
       if (!v.productId) continue;
       const arr = productVariantsCache.get(v.productId) ?? [];
       arr.push(v);
@@ -224,6 +267,7 @@ class ReplenishmentService {
       const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
       const priority = rule?.priority ?? tierDefault?.priority ?? 5;
       const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+      const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
       const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault, productVariantsCache);
 
       // --- Threshold check: branching by replenMethod ---
@@ -287,6 +331,16 @@ class ReplenishmentService {
           notes: taskNotes,
         } satisfies InsertReplenTask)
         .returning();
+
+      // Auto-replen: immediately execute if configured (e.g., pick-to-pick)
+      if (autoReplen === 1) {
+        try {
+          await this.executeTask(task.id, "system:auto-replen");
+        } catch (autoErr: any) {
+          console.warn(`[Replen] Auto-replen failed for task ${task.id}:`, autoErr?.message);
+          // Task stays pending for manual handling
+        }
+      }
 
       newTasks.push(task as ReplenTask);
       activeTaskKeys.add(key); // Prevent duplicates within this run
@@ -663,6 +717,7 @@ class ReplenishmentService {
     const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
     const priority = rule?.priority ?? tierDefault?.priority ?? 5;
     const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+    const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
     const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
 
     // --- Threshold check: branching by replenMethod ---
@@ -742,6 +797,16 @@ class ReplenishmentService {
         notes: taskNotes,
       } satisfies InsertReplenTask)
       .returning();
+
+    // Auto-replen: immediately execute if configured (e.g., pick-to-pick)
+    if (autoReplen === 1) {
+      try {
+        await this.executeTask(task.id, "system:auto-replen");
+      } catch (autoErr: any) {
+        console.warn(`[Replen] Auto-replen after pick failed for task ${task.id}:`, autoErr?.message);
+        // Task stays pending for manual handling
+      }
+    }
 
     return task as ReplenTask;
   }
