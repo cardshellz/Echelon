@@ -195,7 +195,62 @@ export default function WarehouseLocations() {
       if (!res.ok) throw new Error("Failed to fetch products");
       return res.json();
     },
-    enabled: false,
+    enabled: !!assigningToLocation && isAssignProductsOpen,
+  });
+
+  const [assignSkuSearch, setAssignSkuSearch] = useState("");
+  const [assignSkuOpen, setAssignSkuOpen] = useState(false);
+
+  const filteredCatalogProducts = useMemo(() => {
+    if (!assignSkuSearch || assignSkuSearch.length < 2) return [];
+    const search = assignSkuSearch.toLowerCase();
+    const assignedIds = new Set(productsInBin.map(p => p.catalogProductId));
+    return catalogProducts
+      .filter(p => !assignedIds.has(p.id))
+      .filter(p =>
+        (p.sku && p.sku.toLowerCase().includes(search)) ||
+        p.title.toLowerCase().includes(search)
+      )
+      .slice(0, 20);
+  }, [assignSkuSearch, catalogProducts, productsInBin]);
+
+  const assignProductMutation = useMutation({
+    mutationFn: async ({ locationId, catalogProductId }: { locationId: number; catalogProductId: number }) => {
+      const res = await fetch(`/api/warehouse/locations/${locationId}/products`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ catalogProductId, locationType: "pick", isPrimary: 1 }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to assign product");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "SKU assigned to location" });
+      refetchProductsInBin();
+      refetchInventoryInBin();
+      setAssignSkuSearch("");
+      setAssignSkuOpen(false);
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to assign", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const unassignProductMutation = useMutation({
+    mutationFn: async (productLocationId: number) => {
+      const res = await fetch(`/api/locations/${productLocationId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to unassign product");
+    },
+    onSuccess: () => {
+      toast({ title: "SKU unassigned from location" });
+      refetchProductsInBin();
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to unassign", description: error.message, variant: "destructive" });
+    },
   });
 
 
@@ -1596,11 +1651,13 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
         </DialogContent>
       </Dialog>
 
-      {/* View Inventory Dialog */}
+      {/* View Inventory / Assign SKU Dialog */}
       <Dialog open={isAssignProductsOpen} onOpenChange={(open) => {
         setIsAssignProductsOpen(open);
         if (!open) {
           setAssigningToLocation(null);
+          setAssignSkuSearch("");
+          setAssignSkuOpen(false);
         }
       }}>
         <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
@@ -1610,10 +1667,105 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
               Location {assigningToLocation?.code}
             </DialogTitle>
           </DialogHeader>
-          
+
           <div className="space-y-4">
+            {/* Assigned SKUs Section */}
             <div>
-              <Label className="text-xs md:text-sm font-medium">Inventory in this location ({inventoryInBin.length} items)</Label>
+              <Label className="text-xs md:text-sm font-medium">Assigned SKUs ({productsInBin.length})</Label>
+              {productsInBin.length === 0 ? (
+                <p className="text-xs md:text-sm text-muted-foreground py-2">No SKUs assigned to this location.</p>
+              ) : (
+                <div className="mt-2 space-y-1">
+                  {productsInBin.map((p) => (
+                    <div key={p.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <Package className="h-4 w-4 text-muted-foreground" />
+                        <div>
+                          <div className="font-medium text-xs md:text-sm">{p.sku || "No SKU"}</div>
+                          <div className="text-xs text-muted-foreground truncate max-w-[250px]">{p.name}</div>
+                        </div>
+                        {p.isPrimary === 1 && (
+                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">Primary</Badge>
+                        )}
+                      </div>
+                      {canEdit && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
+                          onClick={() => unassignProductMutation.mutate(p.id)}
+                          disabled={unassignProductMutation.isPending}
+                          title="Unassign SKU"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Assign SKU Search */}
+              {canEdit && (
+                <div className="mt-3">
+                  <Popover open={assignSkuOpen} onOpenChange={setAssignSkuOpen}>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" size="sm" className="w-full justify-start gap-2 h-10">
+                        <Plus className="h-4 w-4" />
+                        Assign SKU to this location
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[350px] p-0" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput
+                          placeholder="Search by SKU or product name..."
+                          value={assignSkuSearch}
+                          onValueChange={setAssignSkuSearch}
+                        />
+                        <CommandList>
+                          {assignSkuSearch.length < 2 ? (
+                            <CommandEmpty>Type at least 2 characters to search...</CommandEmpty>
+                          ) : filteredCatalogProducts.length === 0 ? (
+                            <CommandEmpty>No matching products found.</CommandEmpty>
+                          ) : (
+                            <CommandGroup>
+                              {filteredCatalogProducts.map((product) => (
+                                <CommandItem
+                                  key={product.id}
+                                  onSelect={() => {
+                                    if (assigningToLocation) {
+                                      assignProductMutation.mutate({
+                                        locationId: assigningToLocation.id,
+                                        catalogProductId: product.id,
+                                      });
+                                    }
+                                  }}
+                                  className="cursor-pointer"
+                                >
+                                  <div className="flex items-center gap-2 w-full">
+                                    {product.imageUrl && (
+                                      <img src={product.imageUrl} alt="" className="w-8 h-8 object-cover rounded" />
+                                    )}
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-medium text-sm">{product.sku || "No SKU"}</div>
+                                      <div className="text-xs text-muted-foreground truncate">{product.title}</div>
+                                    </div>
+                                  </div>
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          )}
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              )}
+            </div>
+
+            {/* Current Inventory Section */}
+            <div>
+              <Label className="text-xs md:text-sm font-medium">Inventory on Hand ({inventoryInBin.length} items)</Label>
               {inventoryInBin.length === 0 ? (
                 <p className="text-xs md:text-sm text-muted-foreground py-2">No inventory at this location.</p>
               ) : (
@@ -1643,7 +1795,7 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
               )}
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsAssignProductsOpen(false)} className="min-h-[44px] w-full sm:w-auto">
               Close
