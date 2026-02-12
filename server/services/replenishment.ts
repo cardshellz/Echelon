@@ -168,6 +168,23 @@ class ReplenishmentService {
       : [];
     const variantMap = new Map(variants.map((v) => [v.id, v]));
 
+    // Pre-load all variants for the relevant products so resolveSourceVariant
+    // can find case/pallet variants by product + hierarchy level without N+1 queries
+    const productIds = Array.from(new Set(variants.map((v) => v.productId).filter(Boolean))) as number[];
+    const allProductVariants: ProductVariant[] = productIds.length > 0
+      ? await this.db
+          .select()
+          .from(productVariants)
+          .where(inArray(productVariants.productId, productIds))
+      : [];
+    const productVariantsCache = new Map<number, ProductVariant[]>();
+    for (const v of allProductVariants) {
+      if (!v.productId) continue;
+      const arr = productVariantsCache.get(v.productId) ?? [];
+      arr.push(v);
+      productVariantsCache.set(v.productId, arr);
+    }
+
     // --- 5. Load existing active tasks to avoid duplicates ---
     const activeTasks: ReplenTask[] = await this.db
       .select()
@@ -207,7 +224,7 @@ class ReplenishmentService {
       const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
       const priority = rule?.priority ?? tierDefault?.priority ?? 5;
       const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-      const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
+      const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault, productVariantsCache);
 
       // --- Threshold check: branching by replenMethod ---
       let taskNotes: string;
@@ -646,7 +663,7 @@ class ReplenishmentService {
     const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
     const priority = rule?.priority ?? tierDefault?.priority ?? 5;
     const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-    const sourceVariantId = rule?.sourceProductVariantId ?? this.resolveSourceVariant(variant, tierDefault);
+    const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
 
     // --- Threshold check: branching by replenMethod ---
     let taskNotes: string;
@@ -839,25 +856,50 @@ class ReplenishmentService {
 
   /**
    * Resolve the source variant ID from the tier default. If the tier default
-   * specifies a different sourceHierarchyLevel, find the parent variant in
-   * that tier. Otherwise fall back to the pick variant itself.
+   * specifies a different sourceHierarchyLevel, find the variant in the same
+   * product at that hierarchy level.
+   *
+   * Resolution order:
+   * 1. parentVariantId on the pick variant (if set and target level matches)
+   * 2. Query product_variants for same productId at sourceHierarchyLevel
+   * 3. Return null if no matching variant found
+   *
+   * @param productVariantsCache  Optional pre-loaded map of productId → variants
+   *                              (used by batch checkThresholds to avoid N+1 queries)
    */
-  private resolveSourceVariant(
+  private async resolveSourceVariant(
     pickVariant: ProductVariant,
     tierDefault: ReplenTierDefault | null,
-  ): number | null {
+    productVariantsCache?: Map<number, ProductVariant[]>,
+  ): Promise<number | null> {
     if (!tierDefault) return null;
+    if (tierDefault.sourceHierarchyLevel === pickVariant.hierarchyLevel) return null;
 
-    // If the tier default says to pull from a higher hierarchy level,
-    // the parent variant should be linked via parentVariantId
-    if (
-      tierDefault.sourceHierarchyLevel !== pickVariant.hierarchyLevel &&
-      pickVariant.parentVariantId != null
-    ) {
+    // 1. Try parentVariantId first (if set)
+    if (pickVariant.parentVariantId != null) {
       return pickVariant.parentVariantId;
     }
 
-    return null; // Same variant level -- no conversion needed
+    // 2. Look up by product + sourceHierarchyLevel
+    let siblings: ProductVariant[];
+    if (productVariantsCache && pickVariant.productId) {
+      siblings = productVariantsCache.get(pickVariant.productId) ?? [];
+    } else {
+      siblings = await this.db
+        .select()
+        .from(productVariants)
+        .where(
+          and(
+            eq(productVariants.productId, pickVariant.productId),
+            eq(productVariants.hierarchyLevel, tierDefault.sourceHierarchyLevel),
+          ),
+        );
+    }
+
+    const sourceVariant = siblings.find(
+      (v) => v.hierarchyLevel === tierDefault.sourceHierarchyLevel,
+    );
+    return sourceVariant?.id ?? null;
   }
 
   /**
