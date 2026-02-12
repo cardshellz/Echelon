@@ -1730,8 +1730,16 @@ export async function registerRoutes(
           return res.status(400).json({ error: `Order ${order.orderNumber} is on hold` });
         }
       }
-      
-      // Use the first order as the parent
+
+      // Sort by order date ascending so the earliest order becomes the parent
+      // This ensures the combined group appears at the correct position in the pick queue
+      ordersToGroup.sort((a, b) => {
+        const dateA = new Date(a.orderPlacedAt || a.shopifyCreatedAt || a.createdAt || 0).getTime();
+        const dateB = new Date(b.orderPlacedAt || b.shopifyCreatedAt || b.createdAt || 0).getTime();
+        return dateA - dateB;
+      });
+
+      // Use the earliest order as the parent
       const parentOrder = ordersToGroup[0];
       const groupCode = `G-${parentOrder.orderNumber.replace("#", "")}`;
       
@@ -1789,7 +1797,8 @@ export async function registerRoutes(
           SELECT id, order_number, customer_name, customer_email,
                  shipping_address, shipping_city, shipping_state,
                  shipping_postal_code, shipping_country, item_count,
-                 unit_count, total_amount, source, created_at
+                 unit_count, total_amount, source, created_at,
+                 order_placed_at, shopify_created_at
           FROM orders
           WHERE warehouse_status = 'ready'
             AND on_hold = 0
@@ -1822,6 +1831,13 @@ export async function registerRoutes(
       let totalOrdersCombined = 0;
 
       for (const [_, groupOrders] of combinableGroups) {
+        // Sort by order date ascending so the earliest order becomes the parent
+        // This ensures the combined group appears at the correct position in the pick queue
+        groupOrders.sort((a: any, b: any) => {
+          const dateA = new Date(a.order_placed_at || a.shopify_created_at || a.created_at || 0).getTime();
+          const dateB = new Date(b.order_placed_at || b.shopify_created_at || b.created_at || 0).getTime();
+          return dateA - dateB;
+        });
         const parentOrder = groupOrders[0];
         const groupCode = `G-${(parentOrder.order_number || '').replace("#", "")}`;
 
