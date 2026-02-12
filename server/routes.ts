@@ -11779,7 +11779,7 @@ export async function registerRoutes(
                   AND lrc.is_active = 1
                 ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
                (SELECT rr.trigger_value::numeric FROM replen_rules rr
-                WHERE rr.pick_variant_id = il.product_variant_id
+                WHERE rr.pick_product_variant_id = il.product_variant_id
                   AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
                (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
                 WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
@@ -11885,7 +11885,7 @@ export async function registerRoutes(
                  AND lrc.is_active = 1
                ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
               (SELECT rr.trigger_value::numeric FROM replen_rules rr
-               WHERE rr.pick_variant_id = il.product_variant_id
+               WHERE rr.pick_product_variant_id = il.product_variant_id
                  AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
               (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
                WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
