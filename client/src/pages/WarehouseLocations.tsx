@@ -46,6 +46,7 @@ interface WarehouseLocation {
   heightMm: number | null;
   depthMm: number | null;
   warehouseId: number | null;
+  primarySku?: string | null;
 }
 
 interface Warehouse {
@@ -231,6 +232,7 @@ export default function WarehouseLocations() {
       toast({ title: "SKU assigned to location" });
       refetchProductsInBin();
       refetchInventoryInBin();
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
       setAssignSkuSearch("");
       setAssignSkuOpen(false);
     },
@@ -247,6 +249,7 @@ export default function WarehouseLocations() {
     onSuccess: () => {
       toast({ title: "SKU unassigned from location" });
       refetchProductsInBin();
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to unassign", description: error.message, variant: "destructive" });
@@ -862,8 +865,8 @@ export default function WarehouseLocations() {
                       )}
                       <TableCell>{getWarehouseName(loc.warehouseId)}</TableCell>
                       <TableCell className="font-mono font-medium">{loc.code}</TableCell>
-                      <TableCell className="font-mono text-sm text-muted-foreground">
-                        -
+                      <TableCell className="font-mono text-sm">
+                        {loc.primarySku || <span className="text-muted-foreground">-</span>}
                       </TableCell>
                       <TableCell>{loc.zone || '-'}</TableCell>
                       <TableCell>{loc.aisle || '-'}</TableCell>

@@ -4367,7 +4367,26 @@ export async function registerRoutes(
   app.get("/api/warehouse/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const locations = await storage.getAllWarehouseLocations();
-      res.json(locations);
+
+      // Enrich with primary SKU from product_locations
+      const primarySkuResult = await db.execute(sql`
+        SELECT warehouse_location_id, sku
+        FROM product_locations
+        WHERE is_primary = 1
+      `);
+      const primarySkuMap = new Map<number, string>();
+      for (const row of primarySkuResult.rows as any[]) {
+        if (row.warehouse_location_id && row.sku) {
+          primarySkuMap.set(row.warehouse_location_id, row.sku);
+        }
+      }
+
+      const enriched = locations.map(loc => ({
+        ...loc,
+        primarySku: primarySkuMap.get(loc.id) || null,
+      }));
+
+      res.json(enriched);
     } catch (error) {
       console.error("Error fetching warehouse locations:", error);
       res.status(500).json({ error: "Failed to fetch locations" });
