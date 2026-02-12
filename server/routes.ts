@@ -10454,11 +10454,12 @@ export async function registerRoutes(
       const locations = await storage.getAllWarehouseLocations();
       const catalogProducts = await storage.getAllCatalogProducts();
       const allProductVariants = await storage.getAllProductVariants();
+      const allProducts = await storage.getAllProducts();
       const warehouses = await storage.getAllWarehouses();
       const allWarehouseSettings = await storage.getAllWarehouseSettings();
-      
+
       const locationMap = new Map(locations.map(l => [l.id, l]));
-      const productMap = new Map(catalogProducts.map(p => [p.id, p]));
+      const productMap = new Map(allProducts.map(p => [p.id, p]));
       const variantMap = new Map(allProductVariants.map(v => [v.id, v]));
       const warehouseMap = new Map(warehouses.map(w => [w.id, w]));
       
@@ -10504,22 +10505,22 @@ export async function registerRoutes(
         }
       }
 
-      // Group variants by catalog product and hierarchy level
+      // Group variants by product_id (not catalog_product_id!) and hierarchy level
+      // so pack, box, and case variants for the same product are grouped together
       const variantsByProduct = new Map<number, Map<number, typeof allProductVariants[0]>>();
       for (const v of allProductVariants) {
-        const cpId = catalogProductByVariantId.get(v.id);
-        if (!cpId) continue;
-        if (!variantsByProduct.has(cpId)) {
-          variantsByProduct.set(cpId, new Map());
+        if (!v.productId) continue;
+        if (!variantsByProduct.has(v.productId)) {
+          variantsByProduct.set(v.productId, new Map());
         }
-        variantsByProduct.get(cpId)!.set(v.hierarchyLevel, v);
+        variantsByProduct.get(v.productId)!.set(v.hierarchyLevel, v);
       }
       
-      // Index SKU overrides by product ID
-      const overridesByProduct = new Map<number, typeof skuOverrides[0]>();
+      // Index SKU overrides by catalog product ID
+      const overridesByCatalogProduct = new Map<number, typeof skuOverrides[0]>();
       for (const override of skuOverrides) {
         if (override.catalogProductId) {
-          overridesByProduct.set(override.catalogProductId, override);
+          overridesByCatalogProduct.set(override.catalogProductId, override);
         }
       }
       
@@ -10560,11 +10561,9 @@ export async function registerRoutes(
         if (!location || location.locationType !== "pick") continue;
 
         const variant = variantMap.get(level.productVariantId);
-        if (!variant) continue;
-        const cpId = catalogProductByVariantId.get(variant.id);
-        if (!cpId) continue;
+        if (!variant || !variant.productId) continue;
 
-        const productId = cpId;
+        const productId = variant.productId;
         if (!pickLocationsNeedingReplen.has(productId)) {
           pickLocationsNeedingReplen.set(productId, []);
         }
@@ -10624,8 +10623,8 @@ export async function registerRoutes(
         const productVariants = variantsByProduct.get(productId);
         if (!productVariants) continue;
         
-        // Check for SKU override first
-        const override = overridesByProduct.get(productId);
+        // Check for SKU override (keyed by catalog product ID, looked up per-variant below)
+        let override: typeof skuOverrides[0] | undefined;
         
         // For each pick location of this product
         for (const pickLoc of pickLocs) {
@@ -10635,7 +10634,11 @@ export async function registerRoutes(
           let pickVariant = variantMap.get(pickLoc.variantId);
           
           if (!pickVariant) continue;
-          
+
+          // Look up SKU override via catalog product mapping
+          const pickCpId = catalogProductByVariantId.get(pickLoc.variantId);
+          override = pickCpId ? overridesByCatalogProduct.get(pickCpId) : undefined;
+
           for (const tierDefault of sortedTierDefaults) {
             // Check if this tier default applies to this pick location's hierarchy level
             if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
@@ -10675,7 +10678,7 @@ export async function registerRoutes(
           
           if (sourceLocations.length === 0) {
             skipped.push({
-              product: product.sku || product.title,
+              product: product.sku || product.name,
               reason: "no_source_stock",
               sourceVariant: sourceVariant.sku || sourceVariant.name,
               sourceLocationType: effectiveSourceLocationType,
@@ -10708,7 +10711,7 @@ export async function registerRoutes(
           if (existingTask) {
             skipped.push({
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
-              product: product.sku || product.title,
+              product: product.sku || product.name,
               reason: "pending_task_exists",
               currentQty: pickLoc.currentQty,
               triggerValue: effectiveTriggerValue,
@@ -10728,7 +10731,7 @@ export async function registerRoutes(
           if (!selectedSource) {
             skipped.push({
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
-              product: product.sku || product.title,
+              product: product.sku || product.name,
               reason: "no_source_available",
               currentQty: pickLoc.currentQty,
             });
@@ -10840,7 +10843,7 @@ export async function registerRoutes(
                   skipped.push({
                     tierDefaultId: matchedDefault.id,
                     pickLocation: locationMap.get(pickLoc.locationId)?.code,
-                    product: product.sku || product.title,
+                    product: product.sku || product.name,
                     reason: "overflow_capacity_partial",
                     overflowQty: actualOverflowQty,
                     excessQty: overflowQtyTargetUnits - actualOverflowQty,
@@ -10852,7 +10855,7 @@ export async function registerRoutes(
               skipped.push({
                 tierDefaultId: matchedDefault.id,
                 pickLocation: locationMap.get(pickLoc.locationId)?.code,
-                product: product.sku || product.title,
+                product: product.sku || product.name,
                 reason: isFullCaseMethod ? "no_overflow_for_full_unit" : "no_overflow_capacity",
                 overflowQty: overflowQtyTargetUnits,
                 replenMethod: effectiveReplenMethod,
@@ -10899,7 +10902,7 @@ export async function registerRoutes(
               replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
               toLocationId: pickLoc.locationId,
-              catalogProductId: productId,
+              catalogProductId: pickCpId || null,
               sourceProductVariantId: sourceVariant.id,
               pickProductVariantId: pickLoc.variantId,
               qtySourceUnits,
@@ -10936,7 +10939,7 @@ export async function registerRoutes(
               overrideId: override?.id,
               pickLocation: locationMap.get(pickLoc.locationId)?.code,
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
-              product: product.sku || product.title,
+              product: product.sku || product.name,
               currentQty: pickLoc.currentQty,
               triggerValue: effectiveTriggerValue,
               qtySourceUnits,
@@ -10966,7 +10969,7 @@ export async function registerRoutes(
               replenRuleId: override?.id || null,
               fromLocationId: selectedSource.locationId,
               toLocationId: overflowBinId,
-              catalogProductId: productId,
+              catalogProductId: pickCpId || null,
               sourceProductVariantId: sourceVariant.id,
               pickProductVariantId: pickLoc.variantId,
               qtySourceUnits: actualOverflowSourceUnits,
@@ -10987,7 +10990,7 @@ export async function registerRoutes(
               overrideId: override?.id,
               pickLocation: locationMap.get(overflowBinId)?.code,
               sourceLocation: locationMap.get(selectedSource.locationId)?.code,
-              product: product.sku || product.title,
+              product: product.sku || product.name,
               currentQty: 0,
               triggerValue: 0,
               qtySourceUnits: actualOverflowSourceUnits,
