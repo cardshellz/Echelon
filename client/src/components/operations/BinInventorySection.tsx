@@ -72,7 +72,7 @@ interface BinInventorySectionProps {
   canEdit: boolean;
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) => void;
   onAdjust: (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) => void;
-  onViewActivity: (locationId: number) => void;
+  onViewActivity: (locationId: number, locationCode: string) => void;
 }
 
 interface FlatRow {
@@ -331,7 +331,7 @@ export default function BinInventorySection({
                                   <ArrowLeftRight className="h-4 w-4 mr-2" />
                                   Transfer From Bin
                                 </DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => onViewActivity(row.bin.locationId)}>
+                                <DropdownMenuItem onClick={() => onViewActivity(row.bin.locationId, row.bin.locationCode)}>
                                   <History className="h-4 w-4 mr-2" />
                                   View History
                                 </DropdownMenuItem>
@@ -399,7 +399,7 @@ export default function BinInventorySection({
                   variant="ghost"
                   size="sm"
                   className="h-7 text-xs"
-                  onClick={() => onViewActivity(bin.locationId)}
+                  onClick={() => onViewActivity(bin.locationId, bin.locationCode)}
                 >
                   <History className="h-3 w-3 mr-1" />
                   History

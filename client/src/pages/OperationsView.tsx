@@ -4,7 +4,7 @@ import { useAuth } from "@/lib/auth";
 import OpsKpiCards from "@/components/operations/OpsKpiCards";
 import ActionQueueSection from "@/components/operations/ActionQueueSection";
 import BinInventorySection from "@/components/operations/BinInventorySection";
-import RecentActivitySection from "@/components/operations/RecentActivitySection";
+import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import InlineAdjustDialog from "@/components/operations/InlineAdjustDialog";
 import type { ActionFilter, ActionQueueCounts } from "@/components/operations/types";
@@ -44,9 +44,12 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
   const [activeFilter, setActiveFilter] = useState<ActionFilter>("all");
   const [queueCounts, setQueueCounts] = useState<ActionQueueCounts | undefined>();
 
-  // Activity panel state
-  const [activityLocationId, setActivityLocationId] = useState<number | null>(null);
-  const [activityVariantId, setActivityVariantId] = useState<number | null>(null);
+  // Bin history sheet state
+  const [historySheet, setHistorySheet] = useState<{ open: boolean; locationId: number | null; locationCode: string }>({
+    open: false,
+    locationId: null,
+    locationCode: "",
+  });
 
   const healthQuery = useQuery({
     queryKey: ["/api/operations/location-health", warehouseId],
@@ -99,14 +102,16 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         canEdit={canEdit}
         onTransfer={openTransferFrom}
         onAdjust={openAdjust}
-        onViewActivity={(locationId) => setActivityLocationId(locationId)}
+        onViewActivity={(locationId, locationCode) =>
+          setHistorySheet({ open: true, locationId, locationCode })
+        }
       />
 
-      <RecentActivitySection
-        locationId={activityLocationId}
-        variantId={activityVariantId}
-        onClearLocation={() => setActivityLocationId(null)}
-        onClearVariant={() => setActivityVariantId(null)}
+      <BinHistorySheet
+        open={historySheet.open}
+        onOpenChange={(open) => setHistorySheet((prev) => ({ ...prev, open }))}
+        locationId={historySheet.locationId}
+        locationCode={historySheet.locationCode}
       />
 
       <InlineTransferDialog

@@ -5104,10 +5104,16 @@ export async function registerRoutes(
       });
 
       // Sync to sales channels after adjustment (fire-and-forget)
-      const { channelSync: adjSync } = req.app.locals.services as any;
+      const { channelSync: adjSync, replenishment: adjReplen } = req.app.locals.services as any;
       if (adjSync) {
         adjSync.queueSyncAfterInventoryChange(adjustVariantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, err)
+        );
+      }
+      // Auto-trigger replenishment check (fire-and-forget)
+      if (adjReplen) {
+        adjReplen.checkAndTriggerAfterPick(adjustVariantId, warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-adjust check failed for variant ${adjustVariantId}:`, err)
         );
       }
 
@@ -5349,10 +5355,16 @@ export async function registerRoutes(
       });
 
       // Sync to sales channels after transfer (fire-and-forget)
-      const { channelSync: xfrSync } = req.app.locals.services as any;
+      const { channelSync: xfrSync, replenishment: xfrReplen } = req.app.locals.services as any;
       if (xfrSync) {
         xfrSync.queueSyncAfterInventoryChange(varId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-transfer sync failed for variant ${varId}:`, err)
+        );
+      }
+      // Auto-trigger replenishment check on source location (fire-and-forget)
+      if (xfrReplen) {
+        xfrReplen.checkAndTriggerAfterPick(varId, fromLocId).catch((err: any) =>
+          console.warn(`[Replen] Post-transfer check failed for variant ${varId}:`, err)
         );
       }
 
