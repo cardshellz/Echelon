@@ -850,7 +850,7 @@ export default function Picking() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("age");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions">("all");
+  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions" | "combined">("all");
   
   // UI state
   const [scanInput, setScanInput] = useState("");
@@ -2286,8 +2286,11 @@ export default function Picking() {
     const holdItems = pickingMode === "single"
       ? singleQueue.filter(o => o.onHold)
       : [];
+    const combinedItems = pickingMode === "single"
+      ? singleQueue.filter(o => o.isCombinedGroup && o.status !== "completed")
+      : [];
     const totalItemsToPick = readyItems.reduce((acc, item) => acc + item.items.length, 0);
-    
+
     // Filtered and sorted queue
     const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(item => {
       // By default, hide completed items unless filtering for "done"
@@ -2303,6 +2306,7 @@ export default function Picking() {
       if (activeFilter === "done" && item.status !== "completed") return false;
       if (activeFilter === "rush" && item.priority !== "rush") return false;
       if (activeFilter === "hold" && !itemOnHold) return false;
+      if (activeFilter === "combined" && !("isCombinedGroup" in item && (item as any).isCombinedGroup)) return false;
       
       // Apply search filter
       if (searchQuery.trim()) {
@@ -2496,11 +2500,11 @@ export default function Picking() {
               <span className="font-bold">{readyItems.filter(item => item.priority === "rush").length}</span> Rush
             </button>
             {holdItems.length > 0 && (
-              <button 
+              <button
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
-                  activeFilter === "hold" 
-                    ? "bg-slate-500 text-white" 
+                  activeFilter === "hold"
+                    ? "bg-slate-500 text-white"
                     : "bg-muted/60 text-muted-foreground hover:bg-muted"
                 )}
                 onClick={() => setActiveFilter(activeFilter === "hold" ? "all" : "hold")}
@@ -2509,11 +2513,25 @@ export default function Picking() {
                 <span className="font-bold">{holdItems.length}</span> Hold
               </button>
             )}
-            <button 
+            {combinedItems.length > 0 && (
+              <button
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
+                  activeFilter === "combined"
+                    ? "bg-indigo-500 text-white"
+                    : "bg-muted/60 text-muted-foreground hover:bg-muted"
+                )}
+                onClick={() => setActiveFilter(activeFilter === "combined" ? "all" : "combined")}
+                data-testid="filter-combined"
+              >
+                <span className="font-bold">{combinedItems.length}</span> Combined
+              </button>
+            )}
+            <button
               className={cn(
                 "flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full text-sm font-medium whitespace-nowrap transition-colors",
-                activeFilter === "done" 
-                  ? "bg-emerald-500 text-white" 
+                activeFilter === "done"
+                  ? "bg-emerald-500 text-white"
                   : "bg-muted/60 text-muted-foreground hover:bg-muted"
               )}
               onClick={() => setActiveFilter(activeFilter === "done" ? "all" : "done")}

@@ -189,7 +189,7 @@ export default function Orders() {
     queryFn: async () => {
       const params = new URLSearchParams();
       if (channelFilter !== "all") params.append("channelId", channelFilter);
-      if (statusFilter === "active") {
+      if (statusFilter === "active" || statusFilter === "combined") {
         params.append("status", "ready");
         params.append("status", "in_progress");
       } else if (statusFilter !== "all") {
@@ -414,6 +414,12 @@ export default function Orders() {
   const activeCount = orders.filter(o => o.status === "ready" || o.status === "in_progress").length;
   const exceptionCount = orders.filter(o => o.status === "exception").length;
   const completedCount = orders.filter(o => o.status === "completed" || o.status === "shipped").length;
+  const combinedCount = groupedOrders.filter(o => o.isCombinedGroup).length;
+
+  // Apply combined filter if active
+  const displayOrders = statusFilter === "combined"
+    ? groupedOrders.filter(o => o.isCombinedGroup)
+    : groupedOrders;
 
   return (
     <div className="flex flex-col h-full bg-muted/20">
@@ -544,15 +550,24 @@ export default function Orders() {
               >
                 Exceptions ({exceptionCount})
               </TabsTrigger>
-              <TabsTrigger 
-                value="completed" 
+              <TabsTrigger
+                value="completed"
                 className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
                 data-testid="tab-completed"
               >
                 Completed ({completedCount})
               </TabsTrigger>
-              <TabsTrigger 
-                value="all" 
+              {combinedCount > 0 && (
+                <TabsTrigger
+                  value="combined"
+                  className="rounded-none border-b-2 border-transparent data-[state=active]:border-indigo-500 data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm text-indigo-600"
+                  data-testid="tab-combined"
+                >
+                  Combined ({combinedCount})
+                </TabsTrigger>
+              )}
+              <TabsTrigger
+                value="all"
                 className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-3 md:px-4 py-2 text-sm"
                 data-testid="tab-all"
               >
@@ -603,17 +618,17 @@ export default function Orders() {
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
-          ) : filteredOrders.length === 0 ? (
+          ) : displayOrders.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center text-muted-foreground">
                 <ShoppingCart className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p className="text-lg font-medium">No orders found</p>
-                <p className="text-sm">Orders from your connected channels will appear here.</p>
+                <p className="text-lg font-medium">{statusFilter === "combined" ? "No combined orders" : "No orders found"}</p>
+                <p className="text-sm">{statusFilter === "combined" ? "Combined order groups will appear here when orders are grouped." : "Orders from your connected channels will appear here."}</p>
               </CardContent>
             </Card>
           ) : (
             <div className="space-y-3">
-              {groupedOrders.map((order) => (
+              {displayOrders.map((order) => (
                 <Card 
                   key={order.isCombinedGroup ? `combined-${order.combinedGroupId}` : order.id} 
                   className={cn(
