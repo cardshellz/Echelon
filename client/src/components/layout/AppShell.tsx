@@ -67,6 +67,16 @@ function isNavGroup(entry: NavEntry): entry is NavGroup {
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
   {
+    label: "Inbound",
+    icon: Truck,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing" },
+      { label: "Receiving", icon: Truck, href: "/receiving" },
+      { label: "Supplier Catalog", icon: Layers, href: "/purchasing/catalog" },
+    ],
+  },
+  {
     label: "Inventory",
     icon: Box,
     roles: ["admin", "lead"],
@@ -77,16 +87,6 @@ const navStructure: NavEntry[] = [
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },
       { label: "History", icon: History, href: "/inventory/history", roles: ["admin"] },
-    ],
-  },
-  {
-    label: "Inbound",
-    icon: Truck,
-    roles: ["admin", "lead"],
-    children: [
-      { label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing" },
-      { label: "Receiving", icon: Truck, href: "/receiving" },
-      { label: "Supplier Catalog", icon: Layers, href: "/purchasing/catalog" },
     ],
   },
   {

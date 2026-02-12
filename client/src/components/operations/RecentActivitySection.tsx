@@ -63,11 +63,15 @@ export default function RecentActivitySection({ locationId, variantId, onClearLo
   const [isOpen, setIsOpen] = useState(false);
   const [typeFilter, setTypeFilter] = useState("all");
   const prevLocationId = useRef(locationId);
+  const sectionRef = useRef<HTMLDivElement>(null);
 
-  // Auto-open when locationId is set (user clicked "View History")
+  // Auto-open and scroll into view when locationId is set (user clicked "View History")
   useEffect(() => {
     if (locationId && locationId !== prevLocationId.current) {
       setIsOpen(true);
+      setTimeout(() => {
+        sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 100);
     }
     prevLocationId.current = locationId;
   }, [locationId]);
@@ -104,7 +108,7 @@ export default function RecentActivitySection({ locationId, variantId, onClearLo
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-      <div className="rounded-lg border bg-card">
+      <div ref={sectionRef} className="rounded-lg border bg-card">
         <CollapsibleTrigger className="flex items-center justify-between w-full p-4 hover:bg-muted/30">
           <div className="flex items-center gap-2">
             <History className="h-4 w-4 text-muted-foreground" />

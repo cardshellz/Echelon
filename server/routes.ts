@@ -9678,11 +9678,11 @@ export async function registerRoutes(
       const productIds = new Set<number>();
       const variantIds = new Set<number>();
       for (const rule of rules) {
-        productIds.add(rule.catalogProductId);
-        variantIds.add(rule.pickVariantId);
-        variantIds.add(rule.sourceVariantId);
+        if (rule.catalogProductId) productIds.add(rule.catalogProductId);
+        if (rule.pickProductVariantId) variantIds.add(rule.pickProductVariantId);
+        if (rule.sourceProductVariantId) variantIds.add(rule.sourceProductVariantId);
       }
-      
+
       const [allProducts, allVariants] = await Promise.all([
         storage.getAllCatalogProducts(),
         storage.getAllProductVariants(),
@@ -9693,9 +9693,9 @@ export async function registerRoutes(
 
       const enriched = rules.map(rule => ({
         ...rule,
-        catalogProduct: productMap.get(rule.catalogProductId),
-        pickVariant: variantMap.get(rule.pickVariantId),
-        sourceVariant: variantMap.get(rule.sourceVariantId),
+        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        pickVariant: rule.pickProductVariantId ? variantMap.get(rule.pickProductVariantId) : null,
+        sourceVariant: rule.sourceProductVariantId ? variantMap.get(rule.sourceProductVariantId) : null,
       }));
 
       res.json(enriched);
@@ -9723,9 +9723,9 @@ export async function registerRoutes(
 
       const enriched = {
         ...rule,
-        catalogProduct: productMap.get(rule.catalogProductId),
-        pickVariant: variantMap.get(rule.pickVariantId),
-        sourceVariant: variantMap.get(rule.sourceVariantId),
+        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        pickVariant: rule.pickProductVariantId ? variantMap.get(rule.pickProductVariantId) : null,
+        sourceVariant: rule.sourceProductVariantId ? variantMap.get(rule.sourceProductVariantId) : null,
       };
       
       res.json(enriched);
@@ -9778,8 +9778,8 @@ export async function registerRoutes(
       
       const rule = await storage.createReplenRule({
         catalogProductId,
-        pickVariantId,
-        sourceVariantId,
+        pickProductVariantId: pickVariantId,
+        sourceProductVariantId: sourceVariantId,
         pickLocationType: pickLocationType || "pick",
         sourceLocationType: sourceLocationType || "reserve",
         sourcePriority: sourcePriority || "fifo",
@@ -9961,8 +9961,8 @@ export async function registerRoutes(
           try {
             await storage.createReplenRule({
               catalogProductId: product.id,
-              pickVariantId: pickVariant.id,
-              sourceVariantId: sourceVariant.id,
+              pickProductVariantId: pickVariant.id,
+              sourceProductVariantId: sourceVariant.id,
               pickLocationType: (row.pick_location_type || "pick").trim(),
               sourceLocationType: (row.source_location_type || "reserve").trim(),
               sourcePriority: (row.source_priority || "fifo").trim(),
@@ -10263,8 +10263,8 @@ export async function registerRoutes(
         fromLocationId,
         toLocationId,
         catalogProductId: catalogProductId || null,
-        sourceVariantId: sourceVariantId || null,
-        pickVariantId: pickVariantId || null,
+        sourceProductVariantId: sourceVariantId || null,
+        pickProductVariantId: pickVariantId || null,
         qtySourceUnits: qtySourceUnits || 1,
         qtyTargetUnits,
         qtyCompleted: 0,
@@ -10731,8 +10731,8 @@ export async function registerRoutes(
               fromLocationId: selectedSource.locationId,
               toLocationId: pickLoc.locationId,
               catalogProductId: productId,
-              sourceVariantId: sourceVariant.id,
-              pickVariantId: pickLoc.variantId,
+              sourceProductVariantId: sourceVariant.id,
+              pickProductVariantId: pickLoc.variantId,
               qtySourceUnits,
               qtyTargetUnits,
               qtyCompleted: 0,
@@ -10780,8 +10780,8 @@ export async function registerRoutes(
               fromLocationId: selectedSource.locationId,
               toLocationId: overflowBinId,
               catalogProductId: productId,
-              sourceVariantId: sourceVariant.id,
-              pickVariantId: pickLoc.variantId,
+              sourceProductVariantId: sourceVariant.id,
+              pickProductVariantId: pickLoc.variantId,
               qtySourceUnits: actualOverflowSourceUnits,
               qtyTargetUnits: actualOverflowQty,
               qtyCompleted: 0,
