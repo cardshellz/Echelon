@@ -1718,8 +1718,44 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createProductVariant(variant: InsertProductVariant): Promise<ProductVariant> {
+    // Auto-resolve parentVariantId if not provided: find the next-higher
+    // hierarchy variant in the same product (e.g., pack→case)
+    if (variant.parentVariantId == null && variant.productId) {
+      const [parent] = await db
+        .select()
+        .from(productVariants)
+        .where(
+          and(
+            eq(productVariants.productId, variant.productId),
+            sql`${productVariants.hierarchyLevel} > ${variant.hierarchyLevel ?? 1}`,
+          ),
+        )
+        .orderBy(productVariants.hierarchyLevel)
+        .limit(1);
+      if (parent) {
+        variant = { ...variant, parentVariantId: parent.id };
+      }
+    }
+
     const result = await db.insert(productVariants).values(variant).returning();
-    return result[0];
+    const created = result[0];
+
+    // If this is a higher-level variant, backfill parentVariantId on existing
+    // lower-level siblings that don't have a parent yet
+    if (created.productId && created.hierarchyLevel > 1) {
+      await db
+        .update(productVariants)
+        .set({ parentVariantId: created.id })
+        .where(
+          and(
+            eq(productVariants.productId, created.productId),
+            sql`${productVariants.hierarchyLevel} < ${created.hierarchyLevel}`,
+            isNull(productVariants.parentVariantId),
+          ),
+        );
+    }
+
+    return created;
   }
 
   async updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null> {
