@@ -8194,7 +8194,33 @@ export async function registerRoutes(
       if (!item) {
         return res.status(404).json({ error: "Item not found" });
       }
-      
+
+      // Clean up existing mismatch pairs when re-counting (edit without reset)
+      if (item.status !== "pending" && (item.relatedItemId || item.mismatchType)) {
+        // Delete the linked item if this item points to one
+        if (item.relatedItemId) {
+          const linkedItem = await storage.getCycleCountItemById(item.relatedItemId);
+          if (linkedItem && linkedItem.status !== "approved") {
+            await storage.deleteCycleCountItem(item.relatedItemId);
+          }
+        }
+        // Delete any item that points TO this one (reverse relationship)
+        const reverseResult = await db.execute<{ id: number; status: string }>(sql`
+          SELECT id, status FROM cycle_count_items
+          WHERE related_item_id = ${itemId} AND status != 'approved'
+        `);
+        for (const rev of reverseResult.rows) {
+          await storage.deleteCycleCountItem(rev.id);
+        }
+        // Clear mismatch fields on this item so the count logic starts fresh
+        await storage.updateCycleCountItem(itemId, {
+          mismatchType: null,
+          relatedItemId: null,
+        });
+        // Re-fetch to get clean state
+        Object.assign(item, { mismatchType: null, relatedItemId: null });
+      }
+
       // Calculate variance
       const varianceQty = (countedQty ?? 0) - (item.expectedQty ?? 0);
       let varianceType: string | null = null;

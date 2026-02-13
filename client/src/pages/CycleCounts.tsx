@@ -874,8 +874,7 @@ export default function CycleCounts() {
                             variant="ghost"
                             size="sm"
                             className="h-7 text-xs"
-                            onClick={() => resetMutation.mutate(binItem.id)}
-                            disabled={resetMutation.isPending}
+                            onClick={() => handleCountClick(binItem)}
                           >
                             <Pencil className="h-3 w-3 mr-1" /> Edit
                           </Button>
@@ -889,8 +888,7 @@ export default function CycleCounts() {
                             variant="ghost"
                             size="sm"
                             className="h-7 text-xs"
-                            onClick={() => resetMutation.mutate(binItem.id)}
-                            disabled={resetMutation.isPending}
+                            onClick={() => handleCountClick(binItem)}
                           >
                             <Pencil className="h-3 w-3 mr-1" /> Edit
                           </Button>
@@ -909,8 +907,7 @@ export default function CycleCounts() {
                             variant="ghost"
                             size="sm"
                             className="h-7 text-xs"
-                            onClick={() => resetMutation.mutate(binItem.id)}
-                            disabled={resetMutation.isPending}
+                            onClick={() => handleCountClick(binItem)}
                           >
                             <Pencil className="h-3 w-3 mr-1" /> Edit
                           </Button>
@@ -1551,11 +1548,7 @@ export default function CycleCounts() {
                       </Button>
                     )}
                     {(item.status === "counted" || item.status === "variance") && (
-                      <Button size="sm" variant="ghost" onClick={() => {
-                        resetMutation.mutate(item.id, {
-                          onSuccess: () => handleCountClick(item),
-                        });
-                      }} disabled={resetMutation.isPending}>
+                      <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
                         <Pencil className="h-3 w-3 mr-1" /> Edit
                       </Button>
                     )}
@@ -1643,11 +1636,7 @@ export default function CycleCounts() {
                         </Button>
                       )}
                       {(item.status === "counted" || item.status === "variance") && (
-                        <Button size="sm" variant="ghost" onClick={() => {
-                          resetMutation.mutate(item.id, {
-                            onSuccess: () => handleCountClick(item),
-                          });
-                        }} disabled={resetMutation.isPending}>
+                        <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
                           <Pencil className="h-3 w-3 mr-1" /> Edit
                         </Button>
                       )}
