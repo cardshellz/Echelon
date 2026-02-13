@@ -812,6 +812,8 @@ export const replenTasks = pgTable("replen_tasks", {
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),
   notes: text("notes"),
+  exceptionReason: varchar("exception_reason", { length: 30 }),
+  linkedCycleCountId: integer("linked_cycle_count_id").references(() => cycleCounts.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

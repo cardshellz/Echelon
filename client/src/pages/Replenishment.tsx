@@ -85,6 +85,21 @@ interface Product {
   baseSku: string | null;
 }
 
+interface LocationInventoryItem {
+  id: number;
+  variantId: number;
+  qty: number;
+  reservedQty: number;
+  pickedQty: number;
+  sku: string | null;
+  variantName: string | null;
+  unitsPerVariant: number;
+  productTitle: string | null;
+  catalogProductId: number | null;
+  imageUrl: string | null;
+  barcode: string | null;
+}
+
 interface ReplenTierDefault {
   id: number;
   hierarchyLevel: number;
@@ -143,6 +158,8 @@ interface ReplenTask {
   startedAt: string | null;
   completedAt: string | null;
   notes: string | null;
+  exceptionReason: string | null;
+  linkedCycleCountId: number | null;
   createdAt: string;
   fromLocation?: WarehouseLocation;
   toLocation?: WarehouseLocation;
@@ -227,6 +244,9 @@ export default function Replenishment() {
   const [showLocConfigDialog, setShowLocConfigDialog] = useState(false);
   const [showLocCsvDialog, setShowLocCsvDialog] = useState(false);
   const [editingLocConfig, setEditingLocConfig] = useState<LocationReplenConfig | null>(null);
+  const [showExceptionDialog, setShowExceptionDialog] = useState(false);
+  const [exceptionTaskId, setExceptionTaskId] = useState<number | null>(null);
+  const [exceptionForm, setExceptionForm] = useState({ reason: "", notes: "" });
   const [locConfigSearch, setLocConfigSearch] = useState("");
   const [taskFilter, setTaskFilter] = useState("pending");
   const [warehouseFilter, setWarehouseFilter] = useState("all");
@@ -264,6 +284,7 @@ export default function Replenishment() {
   const [taskForm, setTaskForm] = useState({
     fromLocationId: "",
     toLocationId: "",
+    sourceVariantId: "",
     catalogProductId: "",
     qtyTargetUnits: "",
     priority: "5",
@@ -273,8 +294,6 @@ export default function Replenishment() {
   const [taskFromSearch, setTaskFromSearch] = useState("");
   const [taskToOpen, setTaskToOpen] = useState(false);
   const [taskToSearch, setTaskToSearch] = useState("");
-  const [taskProductOpen, setTaskProductOpen] = useState(false);
-  const [taskProductSearch, setTaskProductSearch] = useState("");
 
   const [locConfigForm, setLocConfigForm] = useState({
     warehouseLocationId: "",
@@ -324,6 +343,17 @@ export default function Replenishment() {
 
   const { data: variants = [] } = useQuery<ProductVariant[]>({
     queryKey: ["/api/product-variants"],
+  });
+
+  // Fetch inventory at the selected FROM location for task creation
+  const { data: fromLocationInventory = [], isLoading: fromInventoryLoading } = useQuery<LocationInventoryItem[]>({
+    queryKey: ["/api/warehouse/locations", taskForm.fromLocationId, "inventory"],
+    queryFn: async () => {
+      const res = await fetch(`/api/warehouse/locations/${taskForm.fromLocationId}/inventory`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch inventory");
+      return res.json();
+    },
+    enabled: !!taskForm.fromLocationId,
   });
 
   interface WarehouseType {
@@ -576,6 +606,17 @@ export default function Replenishment() {
 
   const createTaskMutation = useMutation({
     mutationFn: async (data: typeof taskForm) => {
+      // Resolve pick variant: find lowest hierarchy level variant for the same product
+      const sourceVariantId = data.sourceVariantId ? parseInt(data.sourceVariantId) : null;
+      const sourceVariant = sourceVariantId ? variants.find(v => v.id === sourceVariantId) : null;
+      let pickVariantId: number | null = sourceVariantId;
+      if (sourceVariant && sourceVariant.hierarchyLevel > 1) {
+        const lowestSibling = variants
+          .filter(v => v.productId === sourceVariant.productId)
+          .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)[0];
+        if (lowestSibling) pickVariantId = lowestSibling.id;
+      }
+
       const res = await fetch("/api/replen/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -583,7 +624,9 @@ export default function Replenishment() {
         body: JSON.stringify({
           fromLocationId: parseInt(data.fromLocationId),
           toLocationId: parseInt(data.toLocationId),
-          catalogProductId: data.catalogProductId && data.catalogProductId !== "none" ? parseInt(data.catalogProductId) : null,
+          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          sourceVariantId: sourceVariantId,
+          pickVariantId: pickVariantId,
           qtyTargetUnits: parseInt(data.qtyTargetUnits),
           priority: parseInt(data.priority),
           triggeredBy: "manual",
@@ -623,6 +666,32 @@ export default function Replenishment() {
     },
     onError: () => {
       toast({ title: "Failed to generate tasks", variant: "destructive" });
+    },
+  });
+
+  const reportExceptionMutation = useMutation({
+    mutationFn: async ({ taskId, reason, notes }: { taskId: number; reason: string; notes: string }) => {
+      const res = await fetch(`/api/replen/tasks/${taskId}/exception`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ reason, notes: notes || null }),
+      });
+      if (!res.ok) throw new Error("Failed to report exception");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
+      setShowExceptionDialog(false);
+      setExceptionTaskId(null);
+      setExceptionForm({ reason: "", notes: "" });
+      toast({
+        title: "Exception reported",
+        description: `Task blocked. Cycle count #${data.cycleCountId} created.`,
+      });
+    },
+    onError: () => {
+      toast({ title: "Failed to report exception", variant: "destructive" });
     },
   });
 
@@ -823,12 +892,35 @@ export default function Replenishment() {
     setTaskForm({
       fromLocationId: "",
       toLocationId: "",
+      sourceVariantId: "",
       catalogProductId: "",
       qtyTargetUnits: "",
       priority: "5",
       notes: "",
     });
   };
+
+  // Auto-select product when FROM location has exactly one item
+  useEffect(() => {
+    if (fromLocationInventory.length === 1 && taskForm.fromLocationId) {
+      const item = fromLocationInventory[0];
+      const available = item.qty - item.reservedQty;
+      setTaskForm(prev => ({
+        ...prev,
+        sourceVariantId: item.variantId.toString(),
+        catalogProductId: item.catalogProductId?.toString() || "",
+        qtyTargetUnits: available > 0 ? available.toString() : "",
+      }));
+    } else if (fromLocationInventory.length !== 1) {
+      // Reset product selection when location changes to multi/empty
+      setTaskForm(prev => ({
+        ...prev,
+        sourceVariantId: "",
+        catalogProductId: "",
+        qtyTargetUnits: "",
+      }));
+    }
+  }, [fromLocationInventory, taskForm.fromLocationId]);
 
   const resetLocConfigForm = () => {
     setLocConfigForm({
@@ -987,6 +1079,8 @@ export default function Replenishment() {
         return <Badge className="bg-blue-500"><Play className="w-3 h-3 mr-1" />In Progress</Badge>;
       case "completed":
         return <Badge className="bg-green-500"><CheckCircle className="w-3 h-3 mr-1" />Completed</Badge>;
+      case "blocked":
+        return <Badge variant="destructive"><AlertCircle className="w-3 h-3 mr-1" />Blocked</Badge>;
       case "cancelled":
         return <Badge variant="destructive">Cancelled</Badge>;
       default:
@@ -1249,21 +1343,32 @@ export default function Replenishment() {
                               </Button>
                             )}
                             {task.status === "in_progress" && (
-                              <Button
-                                size="sm"
-                                className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
-                                onClick={() => updateTaskMutation.mutate({
-                                  id: task.id,
-                                  data: { 
-                                    status: "completed",
-                                    qtyCompleted: task.qtyTargetUnits
-                                  }
-                                })}
-                                data-testid={`button-complete-task-${task.id}`}
-                              >
-                                <CheckCircle className="w-3 h-3 sm:mr-1" />
-                                <span className="hidden sm:inline">Complete</span>
-                              </Button>
+                              <>
+                                <Button
+                                  size="sm"
+                                  className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
+                                  onClick={() => updateTaskMutation.mutate({
+                                    id: task.id,
+                                    data: {
+                                      status: "completed",
+                                      qtyCompleted: task.qtyTargetUnits
+                                    }
+                                  })}
+                                  data-testid={`button-complete-task-${task.id}`}
+                                >
+                                  <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                  <span className="hidden sm:inline">Complete</span>
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  className="min-h-[36px] text-xs"
+                                  onClick={() => { setExceptionTaskId(task.id); setExceptionForm({ reason: "", notes: "" }); setShowExceptionDialog(true); }}
+                                >
+                                  <AlertCircle className="w-3 h-3 sm:mr-1" />
+                                  <span className="hidden sm:inline">Exception</span>
+                                </Button>
+                              </>
                             )}
                           </div>
                         </TableCell>
@@ -2550,7 +2655,7 @@ export default function Replenishment() {
                           .filter(loc => !taskFromSearch || loc.code.toLowerCase().includes(taskFromSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskFromSearch.toLowerCase())))
                           .slice(0, 50)
                           .map(loc => (
-                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString() }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", catalogProductId: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
                               <Check className={`mr-2 h-4 w-4 ${taskForm.fromLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
                               <span className="font-medium">{loc.code}</span>
                               {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
@@ -2596,58 +2701,88 @@ export default function Replenishment() {
               </Popover>
             </div>
             <div>
-              <Label className="text-xs md:text-sm">Product (Optional)</Label>
-              <Popover open={taskProductOpen} onOpenChange={setTaskProductOpen}>
-                <PopoverTrigger asChild>
-                  <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-task-product">
-                    {taskForm.catalogProductId && taskForm.catalogProductId !== "none"
-                      ? (() => { const p = products.find(pr => pr.id.toString() === taskForm.catalogProductId); return p ? (p.sku || p.title || `Product ${p.id}`) : "Any product..."; })()
-                      : "Any product..."}
-                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                  <Command shouldFilter={false}>
-                    <CommandInput placeholder="Search by SKU or name..." value={taskProductSearch} onValueChange={setTaskProductSearch} />
-                    <CommandList>
-                      <CommandEmpty>No products found.</CommandEmpty>
-                      <CommandGroup>
-                        <CommandItem value="none" onSelect={() => { setTaskForm({ ...taskForm, catalogProductId: "" }); setTaskProductOpen(false); setTaskProductSearch(""); }}>
-                          <Check className={`mr-2 h-4 w-4 ${!taskForm.catalogProductId || taskForm.catalogProductId === "none" ? "opacity-100" : "opacity-0"}`} />
-                          Any Product
-                        </CommandItem>
-                        {products
-                          .filter(p => !taskProductSearch || (p.sku && p.sku.toLowerCase().includes(taskProductSearch.toLowerCase())) || (p.title && p.title.toLowerCase().includes(taskProductSearch.toLowerCase())))
-                          .slice(0, 50)
-                          .map(p => (
-                            <CommandItem key={p.id} value={p.sku || p.title || `product-${p.id}`} onSelect={() => { setTaskForm({ ...taskForm, catalogProductId: p.id.toString() }); setTaskProductOpen(false); setTaskProductSearch(""); }}>
-                              <Check className={`mr-2 h-4 w-4 ${taskForm.catalogProductId === p.id.toString() ? "opacity-100" : "opacity-0"}`} />
-                              <div className="flex-1 min-w-0">
-                                <span className="font-medium">{p.sku || "No SKU"}</span>
-                                {p.title && <span className="ml-2 text-muted-foreground text-xs truncate">{p.title}</span>}
-                              </div>
-                            </CommandItem>
-                          ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
+              <Label className="text-xs md:text-sm">Product (from source bin)</Label>
+              {!taskForm.fromLocationId ? (
+                <p className="text-xs text-muted-foreground py-2">Select a source location first</p>
+              ) : fromInventoryLoading ? (
+                <div className="flex items-center gap-2 py-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span className="text-xs text-muted-foreground">Loading inventory...</span>
+                </div>
+              ) : fromLocationInventory.length === 0 ? (
+                <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
+                  <p className="text-xs text-destructive font-medium">No inventory at this location</p>
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
+                  {fromLocationInventory.map(item => {
+                    const available = item.qty - item.reservedQty;
+                    const isSelected = taskForm.sourceVariantId === item.variantId.toString();
+                    return (
+                      <button
+                        key={item.variantId}
+                        type="button"
+                        onClick={() => {
+                          setTaskForm(prev => ({
+                            ...prev,
+                            sourceVariantId: item.variantId.toString(),
+                            catalogProductId: item.catalogProductId?.toString() || "",
+                            qtyTargetUnits: available > 0 ? available.toString() : "",
+                          }));
+                        }}
+                        className={`w-full flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}
+                      >
+                        {item.imageUrl && (
+                          <img src={item.imageUrl} alt="" className="w-8 h-8 object-cover rounded flex-shrink-0" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium text-sm">{item.sku || "No SKU"}</div>
+                          <div className="text-xs text-muted-foreground truncate">{item.productTitle || item.variantName}</div>
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <div className="text-sm font-medium">{available}</div>
+                          <div className="text-xs text-muted-foreground">avail</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             <div>
-              <Label className="text-xs md:text-sm">Quantity (Units)</Label>
-              <Input
-                type="number"
-                className="h-10"
-                value={taskForm.qtyTargetUnits}
-                onChange={(e) => setTaskForm({ ...taskForm, qtyTargetUnits: e.target.value })}
-                placeholder="Enter quantity..."
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                data-testid="input-qty"
-              />
+              {(() => {
+                const selectedItem = fromLocationInventory.find(i => i.variantId.toString() === taskForm.sourceVariantId);
+                const maxAvailable = selectedItem ? selectedItem.qty - selectedItem.reservedQty : 0;
+                return (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs md:text-sm">Quantity (Units)</Label>
+                      {selectedItem && <span className="text-xs text-muted-foreground">{maxAvailable} available</span>}
+                    </div>
+                    <Input
+                      type="number"
+                      className="h-10"
+                      value={taskForm.qtyTargetUnits}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        if (!isNaN(val) && val > maxAvailable && maxAvailable > 0) {
+                          setTaskForm({ ...taskForm, qtyTargetUnits: maxAvailable.toString() });
+                        } else {
+                          setTaskForm({ ...taskForm, qtyTargetUnits: e.target.value });
+                        }
+                      }}
+                      min={1}
+                      max={maxAvailable || undefined}
+                      placeholder="Enter quantity..."
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-testid="input-qty"
+                    />
+                  </>
+                );
+              })()}
             </div>
             <div>
               <Label className="text-xs md:text-sm">Notes (Optional)</Label>
@@ -2670,10 +2805,70 @@ export default function Replenishment() {
               <Button 
                 className="min-h-[44px]"
                 onClick={() => createTaskMutation.mutate(taskForm)}
-                disabled={!taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.qtyTargetUnits}
+                disabled={!taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.sourceVariantId || !taskForm.qtyTargetUnits}
                 data-testid="button-save-task"
               >
                 Create Task
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Exception Dialog */}
+      <Dialog open={showExceptionDialog} onOpenChange={setShowExceptionDialog}>
+        <DialogContent className="max-w-sm p-4">
+          <DialogHeader>
+            <DialogTitle className="text-base">Report Exception</DialogTitle>
+            <DialogDescription className="text-xs">
+              Flag a discrepancy at the source bin. This will block the task and create a cycle count.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label className="text-xs md:text-sm">Reason</Label>
+              <Select value={exceptionForm.reason} onValueChange={(v) => setExceptionForm({ ...exceptionForm, reason: v })}>
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Select reason..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="short">Short — less qty than expected</SelectItem>
+                  <SelectItem value="empty">Empty — nothing in the bin</SelectItem>
+                  <SelectItem value="wrong_product">Wrong Product — different SKU</SelectItem>
+                  <SelectItem value="other">Other</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-xs md:text-sm">Notes (Optional)</Label>
+              <Input
+                className="h-10"
+                value={exceptionForm.notes}
+                onChange={(e) => setExceptionForm({ ...exceptionForm, notes: e.target.value })}
+                placeholder="What did you find?"
+                autoComplete="off"
+              />
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowExceptionDialog(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                className="min-h-[44px]"
+                disabled={!exceptionForm.reason || reportExceptionMutation.isPending}
+                onClick={() => exceptionTaskId && reportExceptionMutation.mutate({
+                  taskId: exceptionTaskId,
+                  reason: exceptionForm.reason,
+                  notes: exceptionForm.notes,
+                })}
+              >
+                {reportExceptionMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 mr-2" />
+                )}
+                Report Exception
               </Button>
             </div>
           </div>

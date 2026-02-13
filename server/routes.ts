@@ -10428,6 +10428,85 @@ export async function registerRoutes(
     }
   });
 
+  // Report an exception during replen task execution → blocks task + auto-creates cycle count
+  app.post("/api/replen/tasks/:id/exception", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { reason, actualQty, actualSku, notes } = req.body;
+
+      if (!reason || !["short", "wrong_product", "empty", "other"].includes(reason)) {
+        return res.status(400).json({ error: "Invalid exception reason. Must be: short, wrong_product, empty, or other" });
+      }
+
+      const task = await storage.getReplenTaskById(id);
+      if (!task) return res.status(404).json({ error: "Replen task not found" });
+      if (!["pending", "assigned", "in_progress"].includes(task.status)) {
+        return res.status(400).json({ error: `Cannot report exception on task with status '${task.status}'` });
+      }
+
+      // Get source variant info for the cycle count item
+      const sourceVariant = task.sourceProductVariantId
+        ? (await db.select().from(productVariants).where(eq(productVariants.id, task.sourceProductVariantId)))[0]
+        : null;
+
+      // Get current inventory at the source location for expected qty
+      const inventoryLevel = sourceVariant
+        ? (await db.select().from(inventoryLevels)
+            .where(and(
+              eq(inventoryLevels.warehouseLocationId, task.fromLocationId),
+              eq(inventoryLevels.productVariantId, sourceVariant.id),
+            )))[0]
+        : null;
+
+      // Create a spot cycle count for the source location
+      const cycleCount = await storage.createCycleCount({
+        name: `Replen Exception - Task #${id}`,
+        description: `Auto-created from replen task #${id} exception: ${reason}${notes ? ` - ${notes}` : ""}`,
+        status: "in_progress",
+        warehouseId: task.warehouseId,
+        totalBins: 1,
+        countedBins: 0,
+        varianceCount: 0,
+        approvedVariances: 0,
+        createdBy: req.session.user?.id || "system",
+      });
+
+      // Create cycle count item for the expected product at the source location
+      await storage.createCycleCountItem({
+        cycleCountId: cycleCount.id,
+        warehouseLocationId: task.fromLocationId,
+        productVariantId: sourceVariant?.id || null,
+        catalogProductId: task.catalogProductId,
+        expectedSku: sourceVariant?.sku || null,
+        expectedQty: inventoryLevel?.variantQty ?? 0,
+        countedSku: reason === "wrong_product" ? (actualSku || null) : (sourceVariant?.sku || null),
+        countedQty: reason === "empty" ? 0 : (actualQty ?? null),
+        status: "pending",
+        countedBy: req.session.user?.id || "system",
+      });
+
+      // Block the replen task and link the cycle count
+      await storage.updateReplenTask(id, {
+        status: "blocked",
+        exceptionReason: reason,
+        linkedCycleCountId: cycleCount.id,
+        notes: task.notes
+          ? `${task.notes}\n[Exception: ${reason}${notes ? ` - ${notes}` : ""}]`
+          : `[Exception: ${reason}${notes ? ` - ${notes}` : ""}]`,
+      });
+
+      res.json({
+        taskId: id,
+        cycleCountId: cycleCount.id,
+        status: "blocked",
+        exceptionReason: reason,
+      });
+    } catch (error: any) {
+      console.error("Error reporting replen exception:", error);
+      res.status(500).json({ error: error.message || "Failed to report exception" });
+    }
+  });
+
   app.delete("/api/replen/tasks/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
