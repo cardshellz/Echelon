@@ -805,6 +805,8 @@ export const replenTasks = pgTable("replen_tasks", {
   priority: integer("priority").notNull().default(5),
   triggeredBy: varchar("triggered_by", { length: 20 }).notNull().default("min_max"), // min_max, wave, manual, stockout
   executionMode: varchar("execution_mode", { length: 20 }).notNull().default("queue"), // queue, inline - based on warehouse settings
+  replenMethod: varchar("replen_method", { length: 30 }).notNull().default("full_case"), // case_break, full_case, pallet_drop — persisted so executeTask knows how to run
+  autoReplen: integer("auto_replen").notNull().default(0), // 1 = picker handles inline (auto-complete), 0 = worker queue
   warehouseId: integer("warehouse_id").references(() => warehouses.id), // Which warehouse this task belongs to
   createdBy: varchar("created_by", { length: 100 }),
   assignedTo: varchar("assigned_to", { length: 100 }),

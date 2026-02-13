@@ -250,7 +250,7 @@ class ReplenishmentService {
     const activeTasks: ReplenTask[] = await this.db
       .select()
       .from(replenTasks)
-      .where(inArray(replenTasks.status, ["pending", "assigned", "in_progress"]));
+      .where(inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]));
 
     const activeTaskKeys = new Set(
       activeTasks.map((t) => `${t.pickProductVariantId}:${t.toLocationId}`),
@@ -277,8 +277,8 @@ class ReplenishmentService {
       );
 
       const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
-        ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? 0;
-      if (triggerValue <= 0) continue; // No threshold configured
+        ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
+      if (triggerValue == null || triggerValue < 0) continue; // No threshold configured
 
       // Determine replen parameters (resolved early for threshold branching)
       const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
@@ -302,7 +302,9 @@ class ReplenishmentService {
         taskNotes = `Auto-generated (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
       } else {
         // case_break / full_case: triggerValue = min units threshold
-        if (level.variantQty >= triggerValue) continue;
+        // Use <= so that currentQty == triggerValue still triggers replen
+        // (e.g., triggerValue=0 and bin is empty → 0 <= 0 → replen fires)
+        if (level.variantQty > triggerValue) continue;
 
         taskNotes = `Auto-generated: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
       }
@@ -318,7 +320,33 @@ class ReplenishmentService {
         sourceLocationType,
         location.parentLocationId,
       );
-      if (!sourceLocation) continue; // No stock to replenish from
+      if (!sourceLocation) {
+        // No source stock — create a blocked task so it's visible
+        const [blockedTask] = await this.db
+          .insert(replenTasks)
+          .values({
+            replenRuleId: rule?.id ?? null,
+            fromLocationId: location.id, // placeholder — no actual source
+            toLocationId: level.warehouseLocationId,
+            catalogProductId: rule?.catalogProductId ?? null,
+            sourceProductVariantId: sourceVariantId ?? level.productVariantId,
+            pickProductVariantId: level.productVariantId,
+            qtySourceUnits: 0,
+            qtyTargetUnits: 0,
+            qtyCompleted: 0,
+            status: "blocked",
+            priority,
+            triggeredBy: "min_max",
+            executionMode: "queue",
+            replenMethod,
+            autoReplen,
+            warehouseId: location.warehouseId ?? undefined,
+            notes: `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
+          } satisfies InsertReplenTask)
+          .returning();
+        newTasks.push(blockedTask as ReplenTask);
+        continue;
+      }
 
       // Calculate target quantity (how many base units to move)
       const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
@@ -328,7 +356,8 @@ class ReplenishmentService {
       const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
       const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
-      // Create the task
+      // Create the task — persist replenMethod and autoReplen on the task itself
+      // so executeTask and workflow routing don't need to re-derive from rules/defaults
       const [task] = await this.db
         .insert(replenTasks)
         .values({
@@ -345,18 +374,28 @@ class ReplenishmentService {
           priority,
           triggeredBy: "min_max",
           executionMode: "queue",
+          replenMethod,
+          autoReplen,
           warehouseId: location.warehouseId ?? undefined,
           notes: taskNotes,
         } satisfies InsertReplenTask)
         .returning();
 
-      // Auto-replen: immediately execute if configured (e.g., pick-to-pick)
+      // Auto-replen (picker inline): immediately execute the inventory transfer
       if (autoReplen === 1) {
         try {
           await this.executeTask(task.id, "system:auto-replen");
         } catch (autoErr: any) {
           console.warn(`[Replen] Auto-replen failed for task ${task.id}:`, autoErr?.message);
-          // Task stays pending for manual handling
+          // Mark as blocked so it doesn't prevent future task creation (dedup skips blocked)
+          // but remains visible for investigation
+          await this.db
+            .update(replenTasks)
+            .set({
+              status: "blocked",
+              notes: `${taskNotes}\nAuto-replen failed: ${autoErr?.message || "unknown error"}`,
+            })
+            .where(eq(replenTasks.id, task.id));
         }
       }
 
@@ -428,15 +467,17 @@ class ReplenishmentService {
           .limit(1)
       : [null];
 
-    // Determine replen method from the rule (if linked)
-    let replenMethod = "full_case";
-    if (task.replenRuleId) {
+    // Read replen method from the task itself (persisted at creation).
+    // Fall back to rule lookup for legacy tasks that predate the column.
+    let replenMethod = (task as any).replenMethod || "full_case";
+    if (replenMethod === "full_case" && task.replenRuleId) {
+      // Legacy fallback: task didn't have replenMethod, try the linked rule
       const [rule] = await this.db
         .select()
         .from(replenRules)
         .where(eq(replenRules.id, task.replenRuleId))
         .limit(1);
-      replenMethod = rule?.replenMethod ?? "full_case";
+      if (rule?.replenMethod) replenMethod = rule.replenMethod;
     }
 
     let movedBaseUnits = 0;
@@ -727,8 +768,8 @@ class ReplenishmentService {
     );
 
     const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
-      ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? 0;
-    if (triggerValue <= 0) return null;
+      ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
+    if (triggerValue == null || triggerValue < 0) return null;
 
     // Determine replen parameters (resolved early for threshold branching)
     const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
@@ -751,13 +792,13 @@ class ReplenishmentService {
 
       taskNotes = `Auto-triggered after pick (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
     } else {
-      // case_break / full_case: triggerValue = min units threshold
-      if (level.variantQty >= triggerValue) return null;
+      // case_break / full_case: use <= so triggerValue=0 with empty bin fires
+      if (level.variantQty > triggerValue) return null;
 
       taskNotes = `Auto-triggered after pick: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
     }
 
-    // Check for existing active task
+    // Check for existing active or blocked task (avoid duplicates)
     const [existingTask] = await this.db
       .select()
       .from(replenTasks)
@@ -765,12 +806,12 @@ class ReplenishmentService {
         and(
           eq(replenTasks.pickProductVariantId, productVariantId),
           eq(replenTasks.toLocationId, warehouseLocationId),
-          inArray(replenTasks.status, ["pending", "assigned", "in_progress"]),
+          inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
         ),
       )
       .limit(1);
 
-    if (existingTask) return null; // Already queued
+    if (existingTask) return null; // Already queued or blocked
 
     // Find source location with stock (try dedicated parent first)
     const sourceLocation = await this.findSourceLocation(
@@ -779,7 +820,32 @@ class ReplenishmentService {
       sourceLocationType,
       location.parentLocationId,
     );
-    if (!sourceLocation) return null;
+    if (!sourceLocation) {
+      // No source stock — create a blocked task so it's visible
+      const [blockedTask] = await this.db
+        .insert(replenTasks)
+        .values({
+          replenRuleId: rule?.id ?? null,
+          fromLocationId: warehouseLocationId, // placeholder — no actual source
+          toLocationId: warehouseLocationId,
+          catalogProductId: rule?.catalogProductId ?? null,
+          sourceProductVariantId: sourceVariantId ?? productVariantId,
+          pickProductVariantId: productVariantId,
+          qtySourceUnits: 0,
+          qtyTargetUnits: 0,
+          qtyCompleted: 0,
+          status: "blocked",
+          priority,
+          triggeredBy: "inline_pick",
+          executionMode: "queue",
+          replenMethod,
+          autoReplen,
+          warehouseId: location.warehouseId ?? undefined,
+          notes: `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
+        } satisfies InsertReplenTask)
+        .returning();
+      return blockedTask as ReplenTask;
+    }
 
     // Calculate quantities
     const sourceVariant = sourceVariantId != null
@@ -794,7 +860,7 @@ class ReplenishmentService {
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
-    // Create the task
+    // Create the task — persist replenMethod and autoReplen on the task itself
     const [task] = await this.db
       .insert(replenTasks)
       .values({
@@ -811,18 +877,27 @@ class ReplenishmentService {
         priority,
         triggeredBy: "inline_pick",
         executionMode: "queue",
+        replenMethod,
+        autoReplen,
         warehouseId: location.warehouseId ?? undefined,
         notes: taskNotes,
       } satisfies InsertReplenTask)
       .returning();
 
-    // Auto-replen: immediately execute if configured (e.g., pick-to-pick)
+    // Auto-replen (picker inline): immediately execute the inventory transfer
     if (autoReplen === 1) {
       try {
         await this.executeTask(task.id, "system:auto-replen");
       } catch (autoErr: any) {
         console.warn(`[Replen] Auto-replen after pick failed for task ${task.id}:`, autoErr?.message);
-        // Task stays pending for manual handling
+        // Mark as blocked so it doesn't prevent future task creation (dedup skips blocked)
+        await this.db
+          .update(replenTasks)
+          .set({
+            status: "blocked",
+            notes: `${taskNotes}\nAuto-replen failed: ${autoErr?.message || "unknown error"}`,
+          })
+          .where(eq(replenTasks.id, task.id));
       }
     }
 

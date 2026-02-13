@@ -3430,11 +3430,7 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(replenTasks)
       .where(and(
         eq(replenTasks.toLocationId, toLocationId),
-        or(
-          eq(replenTasks.status, "pending"),
-          eq(replenTasks.status, "assigned"),
-          eq(replenTasks.status, "in_progress")
-        )
+        inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])
       ));
   }
   
