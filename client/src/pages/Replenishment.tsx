@@ -100,6 +100,8 @@ interface LocationInventoryItem {
   barcode: string | null;
 }
 
+const EMPTY_INVENTORY: LocationInventoryItem[] = [];
+
 interface ReplenTierDefault {
   id: number;
   hierarchyLevel: number;
@@ -346,7 +348,7 @@ export default function Replenishment() {
   });
 
   // Fetch inventory at the selected FROM location for task creation
-  const { data: fromLocationInventory = [], isLoading: fromInventoryLoading } = useQuery<LocationInventoryItem[]>({
+  const { data: fromLocationInventory = EMPTY_INVENTORY, isLoading: fromInventoryLoading } = useQuery<LocationInventoryItem[]>({
     queryKey: ["/api/warehouse/locations", taskForm.fromLocationId, "inventory"],
     queryFn: async () => {
       const res = await fetch(`/api/warehouse/locations/${taskForm.fromLocationId}/inventory`, { credentials: "include" });
@@ -902,25 +904,22 @@ export default function Replenishment() {
 
   // Auto-select product when FROM location has exactly one item
   useEffect(() => {
-    if (fromLocationInventory.length === 1 && taskForm.fromLocationId) {
+    if (!taskForm.fromLocationId) return;
+    if (fromLocationInventory.length === 1) {
       const item = fromLocationInventory[0];
-      const available = item.qty - item.reservedQty;
-      setTaskForm(prev => ({
-        ...prev,
-        sourceVariantId: item.variantId.toString(),
-        catalogProductId: item.catalogProductId?.toString() || "",
-        qtyTargetUnits: available > 0 ? available.toString() : "",
-      }));
-    } else if (fromLocationInventory.length !== 1) {
-      // Reset product selection when location changes to multi/empty
-      setTaskForm(prev => ({
-        ...prev,
-        sourceVariantId: "",
-        catalogProductId: "",
-        qtyTargetUnits: "",
-      }));
+      const newVariantId = item.variantId.toString();
+      // Only update if not already selected (avoid re-render loop)
+      if (taskForm.sourceVariantId !== newVariantId) {
+        const available = item.qty - item.reservedQty;
+        setTaskForm(prev => ({
+          ...prev,
+          sourceVariantId: newVariantId,
+          catalogProductId: item.catalogProductId?.toString() || "",
+          qtyTargetUnits: available > 0 ? available.toString() : "",
+        }));
+      }
     }
-  }, [fromLocationInventory, taskForm.fromLocationId]);
+  }, [fromLocationInventory]);
 
   const resetLocConfigForm = () => {
     setLocConfigForm({
