@@ -626,15 +626,12 @@ export default function Replenishment() {
       let pickVariantId: number | null = null;
       let qtySource = 1;
       let qtyTarget = parseInt(data.qtyTargetUnits);
+      const isCaseBreak = data.mode === "case_break";
 
-      if (data.mode === "case_break") {
-        // Case break: source is higher hierarchy, pick is lower
+      if (isCaseBreak) {
         pickVariantId = data.pickVariantId ? parseInt(data.pickVariantId) : null;
         qtySource = parseInt(data.qtySourceUnits) || 1;
-        // qtyTarget = cases * (sourceUnitsPerVariant / pickUnitsPerVariant)
-        // Already computed in the form
       } else {
-        // Transfer: same variant at both ends
         pickVariantId = sourceVariantId;
       }
 
@@ -653,19 +650,30 @@ export default function Replenishment() {
           priority: parseInt(data.priority),
           triggeredBy: "manual",
           notes: data.notes || null,
+          replenMethod: isCaseBreak ? "case_break" : "full_case",
+          autoExecute: isCaseBreak, // Case breaks execute immediately, transfers go to queue
         }),
       });
-      if (!res.ok) throw new Error("Failed to create task");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to create task" }));
+        throw new Error(err.error || "Failed to create task");
+      }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
       setShowTaskDialog(false);
       resetTaskForm();
-      toast({ title: "Replen task created" });
+      if (data.autoExecuted) {
+        toast({ title: "Case break completed", description: `Moved ${data.moved} units` });
+      } else if (data.autoExecuteError) {
+        toast({ title: "Task created but execution failed", description: data.autoExecuteError, variant: "destructive" });
+      } else {
+        toast({ title: "Replen task created" });
+      }
     },
-    onError: () => {
-      toast({ title: "Failed to create task", variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: "Failed to create task", description: err.message, variant: "destructive" });
     },
   });
 
@@ -755,6 +763,27 @@ export default function Replenishment() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
       toast({ title: "Task updated" });
+    },
+  });
+
+  const executeTaskMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/replen/tasks/${id}/execute`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to execute task" }));
+        throw new Error(err.error || "Failed to execute task");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
+      toast({ title: "Task completed", description: `Moved ${data.moved} units` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Execute failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1397,16 +1426,15 @@ export default function Replenishment() {
                                 <Button
                                   size="sm"
                                   className="bg-green-500 hover:bg-green-600 min-h-[36px] text-xs"
-                                  onClick={() => updateTaskMutation.mutate({
-                                    id: task.id,
-                                    data: {
-                                      status: "completed",
-                                      qtyCompleted: task.qtyTargetUnits
-                                    }
-                                  })}
+                                  disabled={executeTaskMutation.isPending}
+                                  onClick={() => executeTaskMutation.mutate(task.id)}
                                   data-testid={`button-complete-task-${task.id}`}
                                 >
-                                  <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                  {executeTaskMutation.isPending ? (
+                                    <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
+                                  ) : (
+                                    <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                  )}
                                   <span className="hidden sm:inline">Complete</span>
                                 </Button>
                                 <Button

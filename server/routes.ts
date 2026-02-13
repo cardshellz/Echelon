@@ -10720,12 +10720,12 @@ export async function registerRoutes(
   
   app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes } = req.body;
-      
+      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes, replenMethod, autoExecute } = req.body;
+
       if (!fromLocationId || !toLocationId || !qtyTargetUnits) {
         return res.status(400).json({ error: "fromLocationId, toLocationId, and qtyTargetUnits are required" });
       }
-      
+
       const task = await storage.createReplenTask({
         replenRuleId: replenRuleId || null,
         fromLocationId,
@@ -10741,8 +10741,21 @@ export async function registerRoutes(
         triggeredBy: triggeredBy || "manual",
         assignedTo: assignedTo || null,
         notes: notes || null,
+        replenMethod: replenMethod || "full_case",
       });
-      
+
+      // Auto-execute immediately (e.g. case breaks don't need a queue)
+      if (autoExecute) {
+        try {
+          const { replenishment } = req.app.locals.services;
+          const result = await replenishment.executeTask(task.id, req.session.user?.id);
+          return res.status(201).json({ ...task, ...result, autoExecuted: true });
+        } catch (execErr: any) {
+          console.error("Auto-execute failed for task", task.id, execErr);
+          return res.status(201).json({ ...task, autoExecuteError: execErr.message });
+        }
+      }
+
       res.status(201).json(task);
     } catch (error) {
       console.error("Error creating replen task:", error);
