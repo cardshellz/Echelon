@@ -1181,7 +1181,7 @@ export default function Replenishment() {
   const inProgressCount = tasks.filter(t => t.status === "in_progress").length;
 
   return (
-    <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+    <div className="p-2 md:p-6 space-y-4 md:space-y-6 min-w-0 max-w-full overflow-hidden">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
         <div>
           <h1 className="text-xl md:text-2xl font-bold">Replenishment</h1>
@@ -1202,24 +1202,29 @@ export default function Replenishment() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <div className="overflow-x-auto">
         <TabsList>
           <TabsTrigger value="tasks" className="gap-2">
             <ListTodo className="w-4 h-4" />
-            Task Queue
+            <span className="hidden sm:inline">Task Queue</span>
+            <span className="sm:hidden">Tasks</span>
           </TabsTrigger>
           <TabsTrigger value="rules" className="gap-2">
             <Settings className="w-4 h-4" />
-            Replen Rules
+            Rules
           </TabsTrigger>
           <TabsTrigger value="location-overrides" className="gap-2">
             <MapPin className="w-4 h-4" />
-            Location Overrides
+            <span className="hidden sm:inline">Location Overrides</span>
+            <span className="sm:hidden">Overrides</span>
           </TabsTrigger>
           <TabsTrigger value="settings" className="gap-2">
             <Warehouse className="w-4 h-4" />
-            Warehouse Settings
+            <span className="hidden sm:inline">Warehouse Settings</span>
+            <span className="sm:hidden">Settings</span>
           </TabsTrigger>
         </TabsList>
+        </div>
 
         <TabsContent value="tasks" className="space-y-4">
           <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3">
@@ -1269,7 +1274,7 @@ export default function Replenishment() {
                 <RefreshCw className="w-4 h-4" />
               </Button>
             </div>
-            <div className="flex gap-2 w-full sm:w-auto">
+            <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               <Button
                 variant="outline"
                 className="flex-1 sm:flex-none min-h-[44px]"
@@ -1553,7 +1558,7 @@ export default function Replenishment() {
                     Product-specific exceptions that override the default tier rules
                   </CardDescription>
                 </div>
-                <div className="flex gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap gap-2 w-full sm:w-auto">
                   <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowCsvDialog(true)} data-testid="button-upload-csv">
                     <Upload className="w-4 h-4 sm:mr-2" />
                     <span className="hidden sm:inline">Upload CSV</span>
@@ -1660,7 +1665,7 @@ export default function Replenishment() {
                     Per-location replenishment thresholds. Overrides SKU rules and tier defaults.
                   </CardDescription>
                 </div>
-                <div className="flex gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap gap-2 w-full sm:w-auto">
                   <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowLocCsvDialog(true)}>
                     <Upload className="w-4 h-4 sm:mr-2" />
                     <span className="hidden sm:inline">Import CSV</span>
