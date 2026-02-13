@@ -8667,6 +8667,7 @@ export async function registerRoutes(
               reason: `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`,
               cycleCountId: reverseItem.cycleCountId,
               userId,
+              allowNegative: true,
             });
             adjustmentsMade.push({
               sku: reverseItem.expectedSku || reverseItem.countedSku,
@@ -8708,6 +8709,21 @@ export async function registerRoutes(
             ccSync.queueSyncAfterInventoryChange(adjVariant.id).catch((err: any) =>
               console.warn(`[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, err)
             );
+          }
+        }
+      }
+
+      // Check replen thresholds for adjusted locations (fire-and-forget)
+      const { replenishment: ccReplen } = req.app.locals.services as any;
+      if (ccReplen && adjustmentsMade.length > 0) {
+        for (const adj of adjustmentsMade) {
+          if (adj.qtyChange < 0) {
+            const adjVariant = await storage.getProductVariantBySku(adj.sku);
+            if (adjVariant) {
+              ccReplen.checkAndTriggerAfterPick(adjVariant.id, adj.locationId).catch((err: any) =>
+                console.warn(`[Replen] Post-cycle-count threshold check failed for ${adj.sku}:`, err)
+              );
+            }
           }
         }
       }
@@ -8836,6 +8852,20 @@ export async function registerRoutes(
       const allItems = await storage.getCycleCountItems(cycleCountId);
       const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
       await storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
+
+      // Check replen thresholds for any bins that had negative adjustments (fire-and-forget)
+      const { replenishment: bulkReplen } = req.app.locals.services as any;
+      if (bulkReplen) {
+        // Collect variant+location pairs that had negative adjustments
+        const adjustedItems = allItems.filter(i =>
+          processedIds.has(i.id) && i.productVariantId && i.varianceQty != null && i.varianceQty < 0
+        );
+        for (const ai of adjustedItems) {
+          bulkReplen.checkAndTriggerAfterPick(ai.productVariantId!, ai.warehouseLocationId).catch((err: any) =>
+            console.warn(`[Replen] Post-bulk-approve threshold check failed:`, err?.message)
+          );
+        }
+      }
 
       res.json({
         success: true,
