@@ -283,11 +283,14 @@ export default function Replenishment() {
     autoReplen: "",
   });
 
+  const [taskMode, setTaskMode] = useState<"transfer" | "case_break">("transfer");
   const [taskForm, setTaskForm] = useState({
     fromLocationId: "",
     toLocationId: "",
     sourceVariantId: "",
+    pickVariantId: "",
     catalogProductId: "",
+    qtySourceUnits: "",
     qtyTargetUnits: "",
     priority: "5",
     notes: "",
@@ -356,6 +359,17 @@ export default function Replenishment() {
       return res.json();
     },
     enabled: !!taskForm.fromLocationId,
+  });
+
+  // Fetch inventory at the TO location for case break validation
+  const { data: toLocationInventory = EMPTY_INVENTORY } = useQuery<LocationInventoryItem[]>({
+    queryKey: ["/api/warehouse/locations", taskForm.toLocationId, "inventory"],
+    queryFn: async () => {
+      const res = await fetch(`/api/warehouse/locations/${taskForm.toLocationId}/inventory`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch inventory");
+      return res.json();
+    },
+    enabled: !!taskForm.toLocationId && taskMode === "case_break",
   });
 
   interface WarehouseType {
@@ -607,16 +621,21 @@ export default function Replenishment() {
   });
 
   const createTaskMutation = useMutation({
-    mutationFn: async (data: typeof taskForm) => {
-      // Resolve pick variant: find lowest hierarchy level variant for the same product
+    mutationFn: async (data: typeof taskForm & { mode: typeof taskMode }) => {
       const sourceVariantId = data.sourceVariantId ? parseInt(data.sourceVariantId) : null;
-      const sourceVariant = sourceVariantId ? variants.find(v => v.id === sourceVariantId) : null;
-      let pickVariantId: number | null = sourceVariantId;
-      if (sourceVariant && sourceVariant.hierarchyLevel > 1) {
-        const lowestSibling = variants
-          .filter(v => v.productId === sourceVariant.productId)
-          .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)[0];
-        if (lowestSibling) pickVariantId = lowestSibling.id;
+      let pickVariantId: number | null = null;
+      let qtySource = 1;
+      let qtyTarget = parseInt(data.qtyTargetUnits);
+
+      if (data.mode === "case_break") {
+        // Case break: source is higher hierarchy, pick is lower
+        pickVariantId = data.pickVariantId ? parseInt(data.pickVariantId) : null;
+        qtySource = parseInt(data.qtySourceUnits) || 1;
+        // qtyTarget = cases * (sourceUnitsPerVariant / pickUnitsPerVariant)
+        // Already computed in the form
+      } else {
+        // Transfer: same variant at both ends
+        pickVariantId = sourceVariantId;
       }
 
       const res = await fetch("/api/replen/tasks", {
@@ -629,7 +648,8 @@ export default function Replenishment() {
           catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
           sourceVariantId: sourceVariantId,
           pickVariantId: pickVariantId,
-          qtyTargetUnits: parseInt(data.qtyTargetUnits),
+          qtySourceUnits: qtySource,
+          qtyTargetUnits: qtyTarget,
           priority: parseInt(data.priority),
           triggeredBy: "manual",
           notes: data.notes || null,
@@ -891,11 +911,14 @@ export default function Replenishment() {
   };
 
   const resetTaskForm = () => {
+    setTaskMode("transfer");
     setTaskForm({
       fromLocationId: "",
       toLocationId: "",
       sourceVariantId: "",
+      pickVariantId: "",
       catalogProductId: "",
+      qtySourceUnits: "",
       qtyTargetUnits: "",
       priority: "5",
       notes: "",
@@ -2625,14 +2648,37 @@ export default function Replenishment() {
 
       {/* Task Dialog */}
       <Dialog open={showTaskDialog} onOpenChange={setShowTaskDialog}>
-        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+        <DialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="text-base md:text-lg">Create Manual Replen Task</DialogTitle>
             <DialogDescription className="text-xs md:text-sm">
-              Create a task to move inventory between locations
+              Move inventory between locations or break cases into smaller units
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {/* Mode selector */}
+            <div className="flex gap-2">
+              <Button
+                variant={taskMode === "transfer" ? "default" : "outline"}
+                size="sm"
+                className="flex-1 min-h-[36px]"
+                onClick={() => { setTaskMode("transfer"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
+              >
+                <ArrowRight className="w-3 h-3 mr-1.5" />
+                Transfer
+              </Button>
+              <Button
+                variant={taskMode === "case_break" ? "default" : "outline"}
+                size="sm"
+                className="flex-1 min-h-[36px]"
+                onClick={() => { setTaskMode("case_break"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
+              >
+                <Package className="w-3 h-3 mr-1.5" />
+                Case Break
+              </Button>
+            </div>
+
+            {/* FROM location */}
             <div>
               <Label className="text-xs md:text-sm">From Location (Source)</Label>
               <Popover open={taskFromOpen} onOpenChange={setTaskFromOpen}>
@@ -2654,7 +2700,7 @@ export default function Replenishment() {
                           .filter(loc => !taskFromSearch || loc.code.toLowerCase().includes(taskFromSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskFromSearch.toLowerCase())))
                           .slice(0, 50)
                           .map(loc => (
-                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", catalogProductId: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
                               <Check className={`mr-2 h-4 w-4 ${taskForm.fromLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
                               <span className="font-medium">{loc.code}</span>
                               {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
@@ -2666,6 +2712,70 @@ export default function Replenishment() {
                 </PopoverContent>
               </Popover>
             </div>
+
+            {/* Source product from bin */}
+            <div>
+              <Label className="text-xs md:text-sm">{taskMode === "case_break" ? "Source (case/box to break)" : "Product (from source bin)"}</Label>
+              {!taskForm.fromLocationId ? (
+                <p className="text-xs text-muted-foreground py-2">Select a source location first</p>
+              ) : fromInventoryLoading ? (
+                <div className="flex items-center gap-2 py-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span className="text-xs text-muted-foreground">Loading inventory...</span>
+                </div>
+              ) : fromLocationInventory.length === 0 ? (
+                <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
+                  <p className="text-xs text-destructive font-medium">No inventory at this location</p>
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-[160px] overflow-y-auto">
+                  {fromLocationInventory
+                    .filter(item => {
+                      if (taskMode !== "case_break") return true;
+                      // For case break, only show variants with hierarchy > 1 (cases, boxes, skids)
+                      const v = variants.find(vr => vr.id === item.variantId);
+                      return v && v.hierarchyLevel > 1;
+                    })
+                    .map(item => {
+                      const available = item.qty - item.reservedQty;
+                      const isSelected = taskForm.sourceVariantId === item.variantId.toString();
+                      const v = variants.find(vr => vr.id === item.variantId);
+                      return (
+                        <button
+                          key={item.variantId}
+                          type="button"
+                          onClick={() => {
+                            setTaskForm(prev => ({
+                              ...prev,
+                              sourceVariantId: item.variantId.toString(),
+                              catalogProductId: item.catalogProductId?.toString() || "",
+                              pickVariantId: "",
+                              qtySourceUnits: taskMode === "case_break" ? "1" : "",
+                              qtyTargetUnits: taskMode === "transfer" ? (available > 0 ? available.toString() : "") : "",
+                            }));
+                          }}
+                          className={`w-full flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}
+                        >
+                          {item.imageUrl && (
+                            <img src={item.imageUrl} alt="" className="w-8 h-8 object-cover rounded flex-shrink-0" />
+                          )}
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-sm truncate">{item.sku || "No SKU"}</div>
+                            <div className="text-xs text-muted-foreground truncate">{item.productTitle || item.variantName}</div>
+                            {v && <div className="text-xs text-muted-foreground">L{v.hierarchyLevel} · {v.unitsPerVariant} base units</div>}
+                          </div>
+                          <div className="text-right flex-shrink-0">
+                            <div className="text-sm font-medium">{available}</div>
+                            <div className="text-xs text-muted-foreground">avail</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+
+            {/* TO location */}
             <div>
               <Label className="text-xs md:text-sm">To Location (Destination)</Label>
               <Popover open={taskToOpen} onOpenChange={setTaskToOpen}>
@@ -2687,7 +2797,7 @@ export default function Replenishment() {
                           .filter(loc => !taskToSearch || loc.code.toLowerCase().includes(taskToSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskToSearch.toLowerCase())))
                           .slice(0, 50)
                           .map(loc => (
-                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, toLocationId: loc.id.toString() }); setTaskToOpen(false); setTaskToSearch(""); }}>
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm(prev => ({ ...prev, toLocationId: loc.id.toString(), pickVariantId: "" })); setTaskToOpen(false); setTaskToSearch(""); }}>
                               <Check className={`mr-2 h-4 w-4 ${taskForm.toLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
                               <span className="font-medium">{loc.code}</span>
                               {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
@@ -2699,59 +2809,113 @@ export default function Replenishment() {
                 </PopoverContent>
               </Popover>
             </div>
-            <div>
-              <Label className="text-xs md:text-sm">Product (from source bin)</Label>
-              {!taskForm.fromLocationId ? (
-                <p className="text-xs text-muted-foreground py-2">Select a source location first</p>
-              ) : fromInventoryLoading ? (
-                <div className="flex items-center gap-2 py-2">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span className="text-xs text-muted-foreground">Loading inventory...</span>
+
+            {/* Case break: pick variant at destination */}
+            {taskMode === "case_break" && taskForm.sourceVariantId && taskForm.toLocationId && (() => {
+              const sourceV = variants.find(v => v.id === parseInt(taskForm.sourceVariantId));
+              if (!sourceV) return null;
+              // Find child variants: same product, lower hierarchy
+              const childVariants = variants
+                .filter(v => v.productId === sourceV.productId && v.hierarchyLevel < sourceV.hierarchyLevel)
+                .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel);
+              // Check what's at the TO location (if anything) for validation
+              const toItems = toLocationInventory.filter(i => {
+                const v = variants.find(vr => vr.id === i.variantId);
+                return v && v.productId === sourceV.productId;
+              });
+
+              if (childVariants.length === 0) {
+                return (
+                  <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
+                    <p className="text-xs text-destructive font-medium">No child variants found for this product. Cannot case break.</p>
+                  </div>
+                );
+              }
+
+              return (
+                <div>
+                  <Label className="text-xs md:text-sm">Break into (child variant)</Label>
+                  <div className="space-y-1.5 mt-1">
+                    {childVariants.map(cv => {
+                      const isSelected = taskForm.pickVariantId === cv.id.toString();
+                      const conversionRatio = sourceV.unitsPerVariant / cv.unitsPerVariant;
+                      const toItem = toItems.find(i => i.variantId === cv.id);
+                      return (
+                        <button
+                          key={cv.id}
+                          type="button"
+                          onClick={() => {
+                            const casesQty = parseInt(taskForm.qtySourceUnits) || 1;
+                            setTaskForm(prev => ({
+                              ...prev,
+                              pickVariantId: cv.id.toString(),
+                              qtyTargetUnits: Math.floor(casesQty * conversionRatio).toString(),
+                            }));
+                          }}
+                          className={`w-full flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-sm truncate">{cv.sku || cv.name}</div>
+                            <div className="text-xs text-muted-foreground">L{cv.hierarchyLevel} · 1 source = {conversionRatio} of these</div>
+                          </div>
+                          {toItem && (
+                            <div className="text-right flex-shrink-0">
+                              <div className="text-xs text-muted-foreground">{toItem.qty - toItem.reservedQty} at dest</div>
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              ) : fromLocationInventory.length === 0 ? (
-                <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
-                  <p className="text-xs text-destructive font-medium">No inventory at this location</p>
-                </div>
-              ) : (
-                <div className="space-y-1.5 max-h-[200px] overflow-y-auto">
-                  {fromLocationInventory.map(item => {
-                    const available = item.qty - item.reservedQty;
-                    const isSelected = taskForm.sourceVariantId === item.variantId.toString();
-                    return (
-                      <button
-                        key={item.variantId}
-                        type="button"
-                        onClick={() => {
-                          setTaskForm(prev => ({
-                            ...prev,
-                            sourceVariantId: item.variantId.toString(),
-                            catalogProductId: item.catalogProductId?.toString() || "",
-                            qtyTargetUnits: available > 0 ? available.toString() : "",
-                          }));
-                        }}
-                        className={`w-full flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}
-                      >
-                        {item.imageUrl && (
-                          <img src={item.imageUrl} alt="" className="w-8 h-8 object-cover rounded flex-shrink-0" />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <div className="font-medium text-sm">{item.sku || "No SKU"}</div>
-                          <div className="text-xs text-muted-foreground truncate">{item.productTitle || item.variantName}</div>
-                        </div>
-                        <div className="text-right flex-shrink-0">
-                          <div className="text-sm font-medium">{available}</div>
-                          <div className="text-xs text-muted-foreground">avail</div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+              );
+            })()}
+
+            {/* Quantity section */}
             <div>
               {(() => {
                 const selectedItem = fromLocationInventory.find(i => i.variantId.toString() === taskForm.sourceVariantId);
                 const maxAvailable = selectedItem ? selectedItem.qty - selectedItem.reservedQty : 0;
+
+                if (taskMode === "case_break") {
+                  const sourceV = taskForm.sourceVariantId ? variants.find(v => v.id === parseInt(taskForm.sourceVariantId)) : null;
+                  const pickV = taskForm.pickVariantId ? variants.find(v => v.id === parseInt(taskForm.pickVariantId)) : null;
+                  const conversionRatio = sourceV && pickV ? sourceV.unitsPerVariant / pickV.unitsPerVariant : 0;
+                  const casesQty = parseInt(taskForm.qtySourceUnits) || 0;
+
+                  return (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs md:text-sm">Cases to break</Label>
+                        {selectedItem && <span className="text-xs text-muted-foreground">{maxAvailable} available</span>}
+                      </div>
+                      <Input
+                        type="number"
+                        className="h-10"
+                        value={taskForm.qtySourceUnits}
+                        onChange={(e) => {
+                          let val = parseInt(e.target.value);
+                          if (!isNaN(val) && val > maxAvailable && maxAvailable > 0) val = maxAvailable;
+                          const newQtySource = isNaN(val) ? e.target.value : val.toString();
+                          const targetQty = !isNaN(val) && conversionRatio > 0 ? Math.floor(val * conversionRatio).toString() : "";
+                          setTaskForm(prev => ({ ...prev, qtySourceUnits: newQtySource, qtyTargetUnits: targetQty }));
+                        }}
+                        min={1}
+                        max={maxAvailable || undefined}
+                        placeholder="How many to break..."
+                        autoComplete="off"
+                        data-testid="input-qty-source"
+                      />
+                      {casesQty > 0 && conversionRatio > 0 && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {casesQty} {sourceV?.sku?.match(/^(B|C|SK)/)?.[0] === "C" ? "case" : "source"}{casesQty > 1 ? "s" : ""} = <span className="font-medium text-foreground">{Math.floor(casesQty * conversionRatio)} {pickV?.sku?.match(/^P/)?.[0] === "P" ? "packs" : "units"}</span>
+                        </p>
+                      )}
+                    </>
+                  );
+                }
+
+                // Transfer mode
                 return (
                   <>
                     <div className="flex items-center justify-between">
@@ -2774,15 +2938,14 @@ export default function Replenishment() {
                       max={maxAvailable || undefined}
                       placeholder="Enter quantity..."
                       autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="off"
-                      spellCheck={false}
                       data-testid="input-qty"
                     />
                   </>
                 );
               })()}
             </div>
+
+            {/* Notes */}
             <div>
               <Label className="text-xs md:text-sm">Notes (Optional)</Label>
               <Input
@@ -2791,23 +2954,25 @@ export default function Replenishment() {
                 onChange={(e) => setTaskForm({ ...taskForm, notes: e.target.value })}
                 placeholder="Optional notes..."
                 autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
                 data-testid="input-notes"
               />
             </div>
+
+            {/* Actions */}
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
               <Button variant="outline" className="min-h-[44px]" onClick={() => setShowTaskDialog(false)}>
                 Cancel
               </Button>
-              <Button 
+              <Button
                 className="min-h-[44px]"
-                onClick={() => createTaskMutation.mutate(taskForm)}
-                disabled={!taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.sourceVariantId || !taskForm.qtyTargetUnits}
+                onClick={() => createTaskMutation.mutate({ ...taskForm, mode: taskMode })}
+                disabled={
+                  !taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.sourceVariantId || !taskForm.qtyTargetUnits ||
+                  (taskMode === "case_break" && (!taskForm.pickVariantId || !taskForm.qtySourceUnits))
+                }
                 data-testid="button-save-task"
               >
-                Create Task
+                {taskMode === "case_break" ? "Create Case Break" : "Create Transfer"}
               </Button>
             </div>
           </div>
