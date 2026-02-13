@@ -2179,12 +2179,10 @@ export default function CycleCounts() {
               );
 
               const varianceTypeLabels: Record<string, string> = {
-                quantity_diff: "Quantity Difference",
+                quantity_under: "Quantity Under",
+                quantity_over: "Quantity Over",
                 missing_item: "Missing Item",
                 unexpected_item: "Unexpected Item",
-                sku_mismatch: "SKU Mismatch",
-                over_count: "Over Count",
-                under_count: "Under Count",
                 other: "Other",
               };
 
