@@ -611,11 +611,10 @@ export class DatabaseStorage implements IStorage {
         pl.location as location_code,
         pl.zone,
         pl.barcode,
-        COALESCE(pl.image_url, pv.image_url, p.image_url) as image_url
+        COALESCE(pl.image_url, p.image_url) as image_url
       FROM product_locations pl
       LEFT JOIN catalog_products cp ON pl.catalog_product_id = cp.id
-      LEFT JOIN product_variants pv ON cp.product_variant_id = pv.id
-      LEFT JOIN products p ON pv.product_id = p.id
+      LEFT JOIN products p ON cp.product_id = p.id
       WHERE UPPER(pl.sku) = ${sku.toUpperCase()}
         AND pl.is_primary = 1
         AND pl.status = 'active'
