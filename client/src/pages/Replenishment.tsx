@@ -2820,7 +2820,7 @@ export default function Replenishment() {
                           .filter(loc => !taskToSearch || loc.code.toLowerCase().includes(taskToSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskToSearch.toLowerCase())))
                           .slice(0, 50)
                           .map(loc => (
-                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm(prev => ({ ...prev, toLocationId: loc.id.toString(), pickVariantId: "" })); setTaskToOpen(false); setTaskToSearch(""); }}>
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm(prev => ({ ...prev, toLocationId: loc.id.toString() })); setTaskToOpen(false); setTaskToSearch(""); }}>
                               <Check className={`mr-2 h-4 w-4 ${taskForm.toLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
                               <span className="font-medium">{loc.code}</span>
                               {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
