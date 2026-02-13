@@ -27,6 +27,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
@@ -49,7 +51,10 @@ import {
   Upload,
   Download,
   Warehouse,
-  Save
+  Save,
+  Search,
+  ChevronsUpDown,
+  Check
 } from "lucide-react";
 
 interface WarehouseLocation {
@@ -264,6 +269,12 @@ export default function Replenishment() {
     priority: "5",
     notes: "",
   });
+  const [taskFromOpen, setTaskFromOpen] = useState(false);
+  const [taskFromSearch, setTaskFromSearch] = useState("");
+  const [taskToOpen, setTaskToOpen] = useState(false);
+  const [taskToSearch, setTaskToSearch] = useState("");
+  const [taskProductOpen, setTaskProductOpen] = useState(false);
+  const [taskProductSearch, setTaskProductSearch] = useState("");
 
   const [locConfigForm, setLocConfigForm] = useState({
     warehouseLocationId: "",
@@ -2520,58 +2531,108 @@ export default function Replenishment() {
           <div className="space-y-4">
             <div>
               <Label className="text-xs md:text-sm">From Location (Source)</Label>
-              <Select 
-                value={taskForm.fromLocationId} 
-                onValueChange={(v) => setTaskForm({ ...taskForm, fromLocationId: v })}
-              >
-                <SelectTrigger className="h-10" data-testid="select-from-location">
-                  <SelectValue placeholder="Select source..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Popover open={taskFromOpen} onOpenChange={setTaskFromOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-from-location">
+                    {taskForm.fromLocationId
+                      ? (() => { const loc = locations.find(l => l.id.toString() === taskForm.fromLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select source..."; })()
+                      : "Select source..."}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command shouldFilter={false}>
+                    <CommandInput placeholder="Search locations..." value={taskFromSearch} onValueChange={setTaskFromSearch} />
+                    <CommandList>
+                      <CommandEmpty>No locations found.</CommandEmpty>
+                      <CommandGroup>
+                        {locations
+                          .filter(loc => !taskFromSearch || loc.code.toLowerCase().includes(taskFromSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskFromSearch.toLowerCase())))
+                          .slice(0, 50)
+                          .map(loc => (
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString() }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
+                              <Check className={`mr-2 h-4 w-4 ${taskForm.fromLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
+                              <span className="font-medium">{loc.code}</span>
+                              {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
+                            </CommandItem>
+                          ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
             <div>
               <Label className="text-xs md:text-sm">To Location (Destination)</Label>
-              <Select 
-                value={taskForm.toLocationId} 
-                onValueChange={(v) => setTaskForm({ ...taskForm, toLocationId: v })}
-              >
-                <SelectTrigger className="h-10" data-testid="select-to-location">
-                  <SelectValue placeholder="Select destination..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {locations.map((loc) => (
-                    <SelectItem key={loc.id} value={loc.id.toString()}>
-                      {loc.code} {loc.name ? `- ${loc.name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Popover open={taskToOpen} onOpenChange={setTaskToOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-to-location">
+                    {taskForm.toLocationId
+                      ? (() => { const loc = locations.find(l => l.id.toString() === taskForm.toLocationId); return loc ? `${loc.code}${loc.name ? ` - ${loc.name}` : ""}` : "Select destination..."; })()
+                      : "Select destination..."}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command shouldFilter={false}>
+                    <CommandInput placeholder="Search locations..." value={taskToSearch} onValueChange={setTaskToSearch} />
+                    <CommandList>
+                      <CommandEmpty>No locations found.</CommandEmpty>
+                      <CommandGroup>
+                        {locations
+                          .filter(loc => !taskToSearch || loc.code.toLowerCase().includes(taskToSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskToSearch.toLowerCase())))
+                          .slice(0, 50)
+                          .map(loc => (
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, toLocationId: loc.id.toString() }); setTaskToOpen(false); setTaskToSearch(""); }}>
+                              <Check className={`mr-2 h-4 w-4 ${taskForm.toLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
+                              <span className="font-medium">{loc.code}</span>
+                              {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
+                            </CommandItem>
+                          ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
             <div>
               <Label className="text-xs md:text-sm">Product (Optional)</Label>
-              <Select 
-                value={taskForm.catalogProductId} 
-                onValueChange={(v) => setTaskForm({ ...taskForm, catalogProductId: v })}
-              >
-                <SelectTrigger className="h-10" data-testid="select-task-product">
-                  <SelectValue placeholder="Any product..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">Any Product</SelectItem>
-                  {products.map((p) => (
-                    <SelectItem key={p.id} value={p.id.toString()}>
-                      {p.sku || p.title || `Product ${p.id}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Popover open={taskProductOpen} onOpenChange={setTaskProductOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="w-full justify-between h-10 font-normal" data-testid="select-task-product">
+                    {taskForm.catalogProductId && taskForm.catalogProductId !== "none"
+                      ? (() => { const p = products.find(pr => pr.id.toString() === taskForm.catalogProductId); return p ? (p.sku || p.title || `Product ${p.id}`) : "Any product..."; })()
+                      : "Any product..."}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command shouldFilter={false}>
+                    <CommandInput placeholder="Search by SKU or name..." value={taskProductSearch} onValueChange={setTaskProductSearch} />
+                    <CommandList>
+                      <CommandEmpty>No products found.</CommandEmpty>
+                      <CommandGroup>
+                        <CommandItem value="none" onSelect={() => { setTaskForm({ ...taskForm, catalogProductId: "" }); setTaskProductOpen(false); setTaskProductSearch(""); }}>
+                          <Check className={`mr-2 h-4 w-4 ${!taskForm.catalogProductId || taskForm.catalogProductId === "none" ? "opacity-100" : "opacity-0"}`} />
+                          Any Product
+                        </CommandItem>
+                        {products
+                          .filter(p => !taskProductSearch || (p.sku && p.sku.toLowerCase().includes(taskProductSearch.toLowerCase())) || (p.title && p.title.toLowerCase().includes(taskProductSearch.toLowerCase())))
+                          .slice(0, 50)
+                          .map(p => (
+                            <CommandItem key={p.id} value={p.sku || p.title || `product-${p.id}`} onSelect={() => { setTaskForm({ ...taskForm, catalogProductId: p.id.toString() }); setTaskProductOpen(false); setTaskProductSearch(""); }}>
+                              <Check className={`mr-2 h-4 w-4 ${taskForm.catalogProductId === p.id.toString() ? "opacity-100" : "opacity-0"}`} />
+                              <div className="flex-1 min-w-0">
+                                <span className="font-medium">{p.sku || "No SKU"}</span>
+                                {p.title && <span className="ml-2 text-muted-foreground text-xs truncate">{p.title}</span>}
+                              </div>
+                            </CommandItem>
+                          ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
             <div>
               <Label className="text-xs md:text-sm">Quantity (Units)</Label>
