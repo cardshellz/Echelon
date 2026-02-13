@@ -928,21 +928,44 @@ export default function Replenishment() {
   // Auto-select product when FROM location has exactly one item
   useEffect(() => {
     if (!taskForm.fromLocationId) return;
-    if (fromLocationInventory.length === 1) {
-      const item = fromLocationInventory[0];
+    // For case_break, filter to hierarchy > 1
+    const eligible = taskMode === "case_break"
+      ? fromLocationInventory.filter(i => { const v = variants.find(vr => vr.id === i.variantId); return v && v.hierarchyLevel > 1; })
+      : fromLocationInventory;
+    if (eligible.length === 1) {
+      const item = eligible[0];
       const newVariantId = item.variantId.toString();
-      // Only update if not already selected (avoid re-render loop)
       if (taskForm.sourceVariantId !== newVariantId) {
         const available = item.qty - item.reservedQty;
         setTaskForm(prev => ({
           ...prev,
           sourceVariantId: newVariantId,
           catalogProductId: item.catalogProductId?.toString() || "",
-          qtyTargetUnits: available > 0 ? available.toString() : "",
+          pickVariantId: "",
+          qtySourceUnits: taskMode === "case_break" ? "1" : "",
+          qtyTargetUnits: taskMode === "transfer" ? (available > 0 ? available.toString() : "") : "",
         }));
       }
     }
-  }, [fromLocationInventory]);
+  }, [fromLocationInventory, taskMode]);
+
+  // Auto-select child variant when there's exactly one option (case break)
+  useEffect(() => {
+    if (taskMode !== "case_break" || !taskForm.sourceVariantId) return;
+    const sourceV = variants.find(v => v.id === parseInt(taskForm.sourceVariantId));
+    if (!sourceV) return;
+    const childVariants = variants.filter(v => v.productId === sourceV.productId && v.hierarchyLevel < sourceV.hierarchyLevel);
+    if (childVariants.length === 1 && taskForm.pickVariantId !== childVariants[0].id.toString()) {
+      const cv = childVariants[0];
+      const conversionRatio = sourceV.unitsPerVariant / cv.unitsPerVariant;
+      const casesQty = parseInt(taskForm.qtySourceUnits) || 1;
+      setTaskForm(prev => ({
+        ...prev,
+        pickVariantId: cv.id.toString(),
+        qtyTargetUnits: Math.floor(casesQty * conversionRatio).toString(),
+      }));
+    }
+  }, [taskMode, taskForm.sourceVariantId, variants]);
 
   const resetLocConfigForm = () => {
     setLocConfigForm({
