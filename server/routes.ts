@@ -7,7 +7,7 @@ import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, productVariants, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
-import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
+import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation, CycleCountItem } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import { calculateRemainingCapacity, findOverflowBin } from "./inventory-utils";
@@ -7955,6 +7955,51 @@ export async function registerRoutes(
   // CYCLE COUNTS (Inventory Reconciliation)
   // ============================================
 
+  // After cycle count approval, reconcile product_locations (bin assignments)
+  // to match physical reality. inventory_levels is adjusted by adjustInventory();
+  // this function handles the complementary bin assignment table.
+  async function reconcileBinAssignment(item: CycleCountItem): Promise<void> {
+    if (!item.varianceType) return;
+
+    // Only manage bin assignments for pick-type locations
+    const loc = await storage.getWarehouseLocationById(item.warehouseLocationId);
+    if (!loc || loc.locationType !== "pick") return;
+
+    // EXPECTED_MISSING: old SKU no longer in this bin → remove its assignment
+    if (item.mismatchType === "expected_missing") {
+      if (!item.catalogProductId) return;
+      const existing = await storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
+      if (existing) await storage.deleteProductLocation(existing.id);
+      return;
+    }
+
+    // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here now → create assignment
+    if (item.mismatchType === "unexpected_found" ||
+        (item.varianceType === "unexpected_item" && !item.mismatchType)) {
+      if (!item.catalogProductId) return;
+      // Idempotent: skip if already assigned
+      const existing = await storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
+      if (existing) return;
+
+      const cp = await storage.getCatalogProductById(item.catalogProductId);
+      if (!cp) return;
+
+      await storage.createProductLocation({
+        catalogProductId: item.catalogProductId,
+        sku: item.countedSku?.toUpperCase() || cp.sku || null,
+        name: cp.title || item.countedSku || "Unknown",
+        location: loc.code,
+        zone: loc.zone || "U",
+        warehouseLocationId: item.warehouseLocationId,
+        locationType: loc.locationType,
+        isPrimary: 1,
+        status: "active",
+      });
+      return;
+    }
+    // missing_item (standalone), quantity_over, quantity_under: no action
+  }
+
   // Get all cycle counts
   app.get("/api/cycle-counts", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -8368,6 +8413,8 @@ export async function registerRoutes(
             countedBy: userId,
             countedAt: new Date(),
           });
+          // Reconcile bin assignment (no-op for same-SKU qty variances, but future-proof)
+          await reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
         } else {
           await storage.updateCycleCountItem(itemId, {
             countedSku: countedSku || null,
@@ -8636,7 +8683,8 @@ export async function registerRoutes(
         approvedAt: new Date(),
         varianceReason: reasonCode,
       });
-      
+      await reconcileBinAssignment(item);
+
       // MISMATCH WORKFLOW: If this item has a related item, approve it too
       if (item.relatedItemId) {
         const relatedItem = await storage.getCycleCountItemById(item.relatedItemId);
@@ -8668,6 +8716,7 @@ export async function registerRoutes(
             approvedAt: new Date(),
             varianceReason: reasonCode,
           });
+          await reconcileBinAssignment(relatedItem);
         }
       }
       
@@ -8709,6 +8758,7 @@ export async function registerRoutes(
             approvedAt: new Date(),
             varianceReason: reasonCode,
           });
+          await reconcileBinAssignment(reverseItem);
         }
       }
       
@@ -8829,6 +8879,7 @@ export async function registerRoutes(
             approvedAt: new Date(),
             varianceReason: reasonCode,
           });
+          await reconcileBinAssignment(item);
           approved++;
 
           // Handle linked items (mismatch pairs)
@@ -8867,6 +8918,7 @@ export async function registerRoutes(
               approvedAt: new Date(),
               varianceReason: reasonCode,
             });
+            await reconcileBinAssignment(linked);
             approved++;
           }
         } catch (e: any) {

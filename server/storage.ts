@@ -113,6 +113,7 @@ export interface IStorage {
   getAllProductLocations(): Promise<ProductLocation[]>;
   getProductLocationById(id: number): Promise<ProductLocation | undefined>;
   getProductLocationBySku(sku: string): Promise<ProductLocation | undefined>;
+  getProductLocationByComposite(catalogProductId: number, warehouseLocationId: number): Promise<ProductLocation | undefined>;
   getBinLocationFromInventoryBySku(sku: string): Promise<{ location: string; zone: string; barcode: string | null; imageUrl: string | null } | undefined>;
   createProductLocation(location: InsertProductLocation): Promise<ProductLocation>;
   updateProductLocation(id: number, location: UpdateProductLocation): Promise<ProductLocation | undefined>;
@@ -648,6 +649,15 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(productLocations)
       .where(eq(productLocations.warehouseLocationId, warehouseLocationId))
       .orderBy(productLocations.name);
+  }
+
+  async getProductLocationByComposite(catalogProductId: number, warehouseLocationId: number): Promise<ProductLocation | undefined> {
+    const result = await db.select().from(productLocations)
+      .where(and(
+        eq(productLocations.catalogProductId, catalogProductId),
+        eq(productLocations.warehouseLocationId, warehouseLocationId)
+      ));
+    return result[0];
   }
 
   async addProductToLocation(data: {
