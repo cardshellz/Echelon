@@ -185,7 +185,7 @@ export interface IStorage {
   // Catalog Products
   getAllCatalogProducts(): Promise<CatalogProduct[]>;
   getCatalogProductById(id: number): Promise<CatalogProduct | undefined>;
-  getCatalogProductByProductVariantId(productVariantId: number): Promise<CatalogProduct | undefined>;
+  getCatalogProductByProductId(productId: number): Promise<CatalogProduct | undefined>;
   createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct>;
   updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null>;
   deleteCatalogProduct(id: number): Promise<boolean>;
@@ -214,10 +214,11 @@ export interface IStorage {
   
   // Catalog Products - additional methods
   getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
-  getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined>;
+  getCatalogProductByShopifyProductId(shopifyProductId: number): Promise<CatalogProduct | undefined>;
   upsertCatalogProductBySku(sku: string, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
-  upsertCatalogProductByVariantId(variantId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
+  upsertCatalogProductByShopifyProductId(shopifyProductId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
   deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
+  getCatalogAssetsByVariantId(productVariantId: number): Promise<CatalogAsset[]>;
   
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
@@ -1617,8 +1618,8 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getCatalogProductByProductVariantId(productVariantId: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.productVariantId, productVariantId));
+  async getCatalogProductByProductId(productId: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.productId, productId));
     return result[0];
   }
 
@@ -1776,7 +1777,7 @@ export class DatabaseStorage implements IStorage {
     id: number;
     catalogProductId: number;
     productLocationId: number | null;
-    shopifyVariantId: number | null;
+    shopifyProductId: number | null;
     sku: string | null;
     name: string;
     location: string | null;
@@ -1789,13 +1790,13 @@ export class DatabaseStorage implements IStorage {
   }[]> {
     // Get ALL catalog products with their locations (if assigned)
     // Join to warehouse_locations to get warehouseId for filtering
-    // Join to product_variants/products for imageUrl
+    // Join to products for imageUrl
     const result = await db
       .select({
         id: catalogProducts.id,
         catalogProductId: catalogProducts.id,
         productLocationId: productLocations.id,
-        shopifyVariantId: catalogProducts.shopifyVariantId,
+        shopifyProductId: catalogProducts.shopifyProductId,
         sku: catalogProducts.sku,
         name: catalogProducts.title,
         location: productLocations.location,
@@ -1803,12 +1804,11 @@ export class DatabaseStorage implements IStorage {
         warehouseLocationId: productLocations.warehouseLocationId,
         warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
-        imageUrl: sql<string | null>`COALESCE(${productVariants.imageUrl}, ${products.imageUrl})`.as('image_url'),
+        imageUrl: products.imageUrl,
         updatedAt: productLocations.updatedAt,
       })
       .from(catalogProducts)
-      .leftJoin(productVariants, eq(catalogProducts.productVariantId, productVariants.id))
-      .leftJoin(products, eq(productVariants.productId, products.id))
+      .leftJoin(products, eq(catalogProducts.productId, products.id))
       .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
       .leftJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
       .orderBy(asc(catalogProducts.title));
@@ -1817,23 +1817,22 @@ export class DatabaseStorage implements IStorage {
 
   async getCatalogProductsWithoutLocations(): Promise<{
     id: number;
-    shopifyVariantId: number | null;
+    shopifyProductId: number | null;
     sku: string | null;
     title: string;
     imageUrl: string | null;
   }[]> {
-    // Get all catalog products that don't have a product_locations entry (join by catalogProductId - internal ID is source of truth)
+    // Get all catalog products that don't have a product_locations entry
     const result = await db
       .select({
         id: catalogProducts.id,
-        shopifyVariantId: catalogProducts.shopifyVariantId,
+        shopifyProductId: catalogProducts.shopifyProductId,
         sku: catalogProducts.sku,
         title: catalogProducts.title,
-        imageUrl: sql<string | null>`COALESCE(${productVariants.imageUrl}, ${products.imageUrl})`.as('image_url'),
+        imageUrl: products.imageUrl,
       })
       .from(catalogProducts)
-      .leftJoin(productVariants, eq(catalogProducts.productVariantId, productVariants.id))
-      .leftJoin(products, eq(productVariants.productId, products.id))
+      .leftJoin(products, eq(catalogProducts.productId, products.id))
       .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
       .where(isNull(productLocations.id))
       .orderBy(asc(catalogProducts.title));
@@ -1845,8 +1844,8 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getCatalogProductByVariantId(variantId: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.shopifyVariantId, variantId));
+  async getCatalogProductByShopifyProductId(shopifyProductId: number): Promise<CatalogProduct | undefined> {
+    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.shopifyProductId, shopifyProductId));
     return result[0];
   }
 
@@ -1866,7 +1865,7 @@ export class DatabaseStorage implements IStorage {
     }
 
     const result = await db.insert(catalogProducts).values({
-      productVariantId: data.productVariantId,
+      productId: data.productId,
       sku: normalizedSku,
       title: data.title || normalizedSku,
       description: data.description,
@@ -1879,15 +1878,15 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async upsertCatalogProductByVariantId(variantId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
-    const existing = await this.getCatalogProductByVariantId(variantId);
+  async upsertCatalogProductByShopifyProductId(shopifyProductId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
+    const existing = await this.getCatalogProductByShopifyProductId(shopifyProductId);
 
     if (existing) {
       const result = await db.update(catalogProducts)
         .set({
           ...data,
           sku: data.sku?.toUpperCase() || existing.sku,
-          shopifyVariantId: variantId,
+          shopifyProductId: shopifyProductId,
           updatedAt: new Date(),
         })
         .where(eq(catalogProducts.id, existing.id))
@@ -1896,8 +1895,8 @@ export class DatabaseStorage implements IStorage {
     }
 
     const result = await db.insert(catalogProducts).values({
-      productVariantId: data.productVariantId,
-      shopifyVariantId: variantId,
+      productId: data.productId,
+      shopifyProductId: shopifyProductId,
       sku: data.sku?.toUpperCase() || null,
       title: data.title || "Untitled Product",
       description: data.description,
@@ -1913,6 +1912,12 @@ export class DatabaseStorage implements IStorage {
   async deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number> {
     const result = await db.delete(catalogAssets).where(eq(catalogAssets.catalogProductId, catalogProductId)).returning();
     return result.length;
+  }
+
+  async getCatalogAssetsByVariantId(productVariantId: number): Promise<CatalogAsset[]> {
+    return await db.select().from(catalogAssets)
+      .where(eq(catalogAssets.productVariantId, productVariantId))
+      .orderBy(asc(catalogAssets.position));
   }
 
   // Inventory Levels

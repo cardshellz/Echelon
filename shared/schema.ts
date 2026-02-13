@@ -972,11 +972,13 @@ export type ChannelReservation = typeof channelReservations.$inferSelect;
 // ============================================
 
 // Catalog products - master listing content (source of truth)
+// 1:1 with products table — represents the unsellable parent product (Shopify product card)
+// Individual sellable SKUs (pack, box, case) live in product_variants
 export const catalogProducts = pgTable("catalog_products", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
-  shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }).unique(), // Primary key for Shopify sync
-  sku: varchar("sku", { length: 100 }), // Optional - products may not have SKU yet
+  productId: integer("product_id").references(() => products.id), // FK to products (1:1)
+  shopifyProductId: bigint("shopify_product_id", { mode: "number" }).unique(), // Shopify product ID for sync
+  sku: varchar("sku", { length: 100 }), // Base SKU for the product family
   title: varchar("title", { length: 500 }).notNull(),
   description: text("description"), // HTML/markdown
   bulletPoints: jsonb("bullet_points"), // Array of feature bullet points
@@ -1002,9 +1004,11 @@ export type InsertCatalogProduct = z.infer<typeof insertCatalogProductSchema>;
 export type CatalogProduct = typeof catalogProducts.$inferSelect;
 
 // Catalog assets - master media library
+// productVariantId NULL = product-level asset, non-NULL = variant-specific asset
 export const catalogAssets = pgTable("catalog_assets", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   catalogProductId: integer("catalog_product_id").notNull().references(() => catalogProducts.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // NULL = product-level, set = variant-specific
   assetType: varchar("asset_type", { length: 20 }).notNull().default("image"), // image, video, document
   url: text("url").notNull(),
   altText: varchar("alt_text", { length: 500 }),

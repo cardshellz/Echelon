@@ -2789,7 +2789,8 @@ export async function registerRoutes(
   // Uses Shopify's natural hierarchy: Product -> Variants
   // - products: ONE per Shopify Product (parent container)
   // - product_variants: ONE per Shopify Variant (sellable SKUs)
-  // - catalog_products: ONE per Shopify Variant (storefront display)
+  // - catalog_products: ONE per Shopify Product (the unsellable parent / storefront card)
+  // - catalog_assets: product-level + variant-level images
   app.post("/api/shopify/sync", async (req, res) => {
     try {
       console.log("Starting Shopify catalog sync...");
@@ -2817,15 +2818,16 @@ export async function registerRoutes(
       for (const [shopifyProductId, variants] of productGroups) {
         // Echelon owns inventory - Shopify sync only creates catalog_products
         // and links to existing product_variants by SKU match
+        const firstVariant = variants[0];
 
+        // Resolve the Echelon product_id by matching any variant SKU
+        let echelonProductId: number | null = null;
         for (const variant of variants) {
-          // Try to find existing product_variant by SKU (Echelon is source of truth)
-          let productVariant = null;
-
           if (variant.sku) {
-            productVariant = await storage.getProductVariantBySku(variant.sku);
-            if (productVariant) {
-              variantsUpdated++; // Found existing match
+            const pv = await storage.getProductVariantBySku(variant.sku);
+            if (pv) {
+              echelonProductId = pv.productId;
+              variantsUpdated++;
             } else {
               skuNotFound++;
               unmatchedSkus.push(variant.sku);
@@ -2834,43 +2836,58 @@ export async function registerRoutes(
             skuNotFound++;
             unmatchedSkus.push(`(no SKU) ${variant.title}`);
           }
+        }
 
-          // Create/update catalog_product (channel data) - always happens
-          // Links to product_variant only if SKU match found
-          const existingCatalog = await storage.getCatalogProductByVariantId(variant.variantId);
-          const catalogProduct = await storage.upsertCatalogProductByVariantId(variant.variantId, {
-            sku: variant.sku,
-            title: variant.title,
-            description: variant.description,
-            brand: variant.vendor,
-            category: variant.productType,
-            tags: variant.tags,
-            status: variant.status,
-            productVariantId: productVariant?.id || null, // Only link if match found
-          });
+        // Create/update ONE catalog_product per Shopify product (the parent)
+        const existingCatalog = await storage.getCatalogProductByShopifyProductId(shopifyProductId);
+        const catalogProduct = await storage.upsertCatalogProductByShopifyProductId(shopifyProductId, {
+          productId: echelonProductId,
+          sku: firstVariant.sku?.toUpperCase() || null,
+          title: firstVariant.productTitle || firstVariant.title,
+          description: firstVariant.description,
+          brand: firstVariant.vendor,
+          category: firstVariant.productType,
+          tags: firstVariant.tags,
+          status: firstVariant.status,
+        });
 
-          if (existingCatalog) {
-            catalogUpdated++;
-          } else {
-            catalogCreated++;
-          }
+        if (existingCatalog) {
+          catalogUpdated++;
+        } else {
+          catalogCreated++;
+        }
 
-          // 4. Sync catalog_assets (images)
-          await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
+        // Sync catalog_assets — clear existing and recreate
+        await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
 
+        // Collect all unique product-level images (shared across variants)
+        const seenUrls = new Set<string>();
+        for (const variant of variants) {
           for (let i = 0; i < variant.allImages.length; i++) {
             const img = variant.allImages[i];
-            await storage.createCatalogAsset({
-              catalogProductId: catalogProduct.id,
-              assetType: "image",
-              url: img.url,
-              position: img.position,
-              isPrimary: i === 0 ? 1 : 0,
-            });
-            assetsCreated++;
+            if (!seenUrls.has(img.url)) {
+              seenUrls.add(img.url);
+
+              // Try to find which variant this image belongs to
+              let variantId: number | null = null;
+              if (variant.sku) {
+                const pv = await storage.getProductVariantBySku(variant.sku);
+                if (pv) variantId = pv.id;
+              }
+
+              await storage.createCatalogAsset({
+                catalogProductId: catalogProduct.id,
+                productVariantId: variantId,
+                assetType: "image",
+                url: img.url,
+                position: img.position,
+                isPrimary: seenUrls.size === 1 ? 1 : 0,
+              });
+              assetsCreated++;
+            }
           }
 
-          // 5. Also sync to product_locations for warehouse assignment (only if has SKU)
+          // Also sync to product_locations for warehouse assignment (only if has SKU)
           if (variant.sku) {
             await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, variant.imageUrl || undefined, variant.barcode || undefined);
           }
@@ -4278,17 +4295,9 @@ export async function registerRoutes(
       }
       const variants = await storage.getProductVariantsByProductId(id);
 
-      // Look up linked catalog product via any variant's productVariantId
-      let catalogProduct = null;
-      let assets: any[] = [];
-      for (const v of variants) {
-        const cp = await storage.getCatalogProductByProductVariantId(v.id);
-        if (cp) {
-          catalogProduct = cp;
-          assets = await storage.getCatalogAssetsByProductId(cp.id);
-          break;
-        }
-      }
+      // Look up linked catalog product via productId
+      const catalogProduct = await storage.getCatalogProductByProductId(id);
+      const assets = catalogProduct ? await storage.getCatalogAssetsByProductId(catalogProduct.id) : [];
 
       res.json({ ...product, productId: product.id, variants, catalogProduct, assets });
     } catch (error) {
@@ -4767,7 +4776,7 @@ export async function registerRoutes(
         FROM inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN catalog_products cp ON cp.product_variant_id = pv.id
+        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE il.warehouse_location_id = ${warehouseLocationId}
           AND il.variant_qty > 0
         ORDER BY pv.sku
@@ -4837,14 +4846,13 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
       
-      // Get image/barcode from product variant if linked
+      // Get image/barcode from product if linked
       let imageUrl: string | null = null;
       let barcode: string | null = null;
-      if (catalogProduct.productVariantId) {
-        const pv = await storage.getProductVariantById(catalogProduct.productVariantId);
-        if (pv) {
-          imageUrl = pv.imageUrl || null;
-          barcode = pv.barcode || null;
+      if (catalogProduct.productId) {
+        const product = await storage.getProductById(catalogProduct.productId);
+        if (product) {
+          imageUrl = product.imageUrl || null;
         }
       }
 
@@ -4852,7 +4860,7 @@ export async function registerRoutes(
         catalogProductId,
         warehouseLocationId,
         sku: catalogProduct.sku || null,
-        shopifyVariantId: catalogProduct.shopifyVariantId || null,
+        shopifyVariantId: catalogProduct.shopifyProductId || null,
         name: catalogProduct.title,
         location: warehouseLocation.code,
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
@@ -4952,11 +4960,8 @@ export async function registerRoutes(
       }
       
       // Also get linked product and variants
-      const linkedProduct = product.productVariantId
-        ? await storage.getProductVariantById(product.productVariantId)
-        : null;
-      const parentProduct = linkedProduct
-        ? await storage.getProductById(linkedProduct.productId)
+      const parentProduct = product.productId
+        ? await storage.getProductById(product.productId)
         : null;
       const variants = parentProduct
         ? await storage.getProductVariantsByProductId(parentProduct.id)
@@ -5039,8 +5044,7 @@ export async function registerRoutes(
 
       // Combine into product view
       const products = catalogProductsList.map(catalog => {
-        const linkedVariant = catalog.productVariantId ? variantById.get(catalog.productVariantId) : null;
-        const parentProduct = linkedVariant ? productById.get(linkedVariant.productId) : null;
+        const parentProduct = catalog.productId ? productById.get(catalog.productId) : null;
         const productId = parentProduct?.id;
         return {
           id: catalog.id,
@@ -5266,7 +5270,7 @@ export async function registerRoutes(
           pv.id as "productVariantId",
           pv.units_per_variant as "unitsPerVariant"
         FROM product_variants pv
-        LEFT JOIN catalog_products cp ON cp.sku = pv.sku
+        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE pv.is_active = true
           AND pv.sku IS NOT NULL
           AND (
@@ -7816,7 +7820,7 @@ export async function registerRoutes(
           FROM inventory_levels il
           LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
           LEFT JOIN products p ON pv.product_id = p.id
-          LEFT JOIN catalog_products cp ON cp.product_variant_id = pv.id
+          LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
           WHERE il.warehouse_location_id = ${location.id}
             AND il.variant_qty > 0
         `);
@@ -9458,14 +9462,10 @@ export async function registerRoutes(
           }
           console.log(`[CSV Import] SKU "${sku}" -> productVariantId=${productVariantId}, catalogProductId=${catalogProductId}`);
         } else if (catalog) {
-          // Fallback to catalog_products
+          // Fallback to catalog_products (product-level)
           catalogProductId = catalog.id;
-          productVariantId = catalog.productVariantId || null;
           productName = catalog.title;
-          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId}, productVariantId=${productVariantId} (fallback path, no product_variant)`);
-          if (!productBarcode && (catalog as any).barcode) {
-            productBarcode = (catalog as any).barcode;
-          }
+          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId} (fallback path, no product_variant)`);
           warnings.push(`SKU ${sku} found in catalog but not in product_variants - please set up variant hierarchy`);
         } else {
           // SKU not found anywhere - add warning but continue
@@ -9876,18 +9876,15 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Source variant not found" });
       }
 
-      // Build product lookup by productVariantId
-      const productByVariantId = new Map(allCatalogProducts.filter(p => p.productVariantId).map(p => [p.productVariantId!, p]));
-
-      // Validate pick variant belongs to product
-      const pickVariantProduct = productByVariantId.get(pickVariant.id);
-      if (!pickVariantProduct || pickVariantProduct.id !== catalogProductId) {
+      // Validate pick and source variants belong to the catalog product's product
+      const catalogProduct = allCatalogProducts.find(cp => cp.id === catalogProductId);
+      if (!catalogProduct?.productId) {
+        return res.status(400).json({ error: "Catalog product has no linked product" });
+      }
+      if (pickVariant.productId !== catalogProduct.productId) {
         return res.status(400).json({ error: "Pick variant does not belong to the specified product" });
       }
-
-      // Validate source variant belongs to product
-      const sourceVariantProduct = productByVariantId.get(sourceVariant.id);
-      if (!sourceVariantProduct || sourceVariantProduct.id !== catalogProductId) {
+      if (sourceVariant.productId !== catalogProduct.productId) {
         return res.status(400).json({ error: "Source variant does not belong to the specified product" });
       }
       
@@ -9999,11 +9996,11 @@ export async function registerRoutes(
         const productBySku = new Map(products.filter(p => p.sku).map(p => [p.sku!.toLowerCase(), p]));
         const variantBySku = new Map(variants.filter(v => v.sku).map(v => [v.sku!.toLowerCase(), v]));
 
-        // Build variant-to-product mapping via productVariantId
-        const productByVariantId = new Map(products.filter(p => p.productVariantId).map(p => [p.productVariantId!, p]));
+        // Build variant-to-catalog-product mapping via productId
+        const catalogByProductId = new Map(products.filter(p => p.productId).map(p => [p.productId!, p]));
 
         const getProductForVariant = (variant: typeof variants[0]) => {
-          return productByVariantId.get(variant.id);
+          return catalogByProductId.get(variant.productId);
         };
         
         const results = { created: 0, skipped: 0, errors: [] as string[] };
@@ -10481,27 +10478,19 @@ export async function registerRoutes(
         return settingsByWarehouseCode.get(warehouse.code) || defaultSettings;
       };
       
-      // Build reverse map: productVariantId -> catalogProductId
-      // Step 1: Map catalog product to its linked variant's productId
-      const catalogProductByVariantId = new Map<number, number>();
+      // Build reverse map: productId -> catalogProductId (direct via catalog_products.product_id)
       const catalogProductByProductId = new Map<number, number>();
       for (const cp of catalogProducts) {
-        if (cp.productVariantId) {
-          catalogProductByVariantId.set(cp.productVariantId, cp.id);
-          // Find the linked variant to get its productId
-          const linkedVariant = variantMap.get(cp.productVariantId);
-          if (linkedVariant) {
-            catalogProductByProductId.set(linkedVariant.productId, cp.id);
-          }
+        if (cp.productId) {
+          catalogProductByProductId.set(cp.productId, cp.id);
         }
       }
-      // Step 2: Map ALL variants (siblings at different hierarchy levels) to their catalog product
+      // Map any variant to its catalog product via productId
+      const catalogProductByVariantId = new Map<number, number>();
       for (const v of allProductVariants) {
-        if (!catalogProductByVariantId.has(v.id)) {
-          const cpId = catalogProductByProductId.get(v.productId);
-          if (cpId) {
-            catalogProductByVariantId.set(v.id, cpId);
-          }
+        const cpId = catalogProductByProductId.get(v.productId);
+        if (cpId) {
+          catalogProductByVariantId.set(v.id, cpId);
         }
       }
 
@@ -10580,28 +10569,37 @@ export async function registerRoutes(
 
       // Also check product_locations for assigned bins that have NO inventory level at all
       // (e.g., bins emptied completely where the inventory_level row was never created or has qty=0)
+      // Build catalog product -> product_id lookup
+      const catalogProductToProductId = new Map<number, number>();
+      for (const cp of catalogProducts) {
+        if (cp.productId) catalogProductToProductId.set(cp.id, cp.productId);
+      }
+
       const allProductLocations = await storage.getAllProductLocations();
       for (const pl of allProductLocations) {
         if (pl.locationType !== "pick" || pl.status !== "active") continue;
         if (!pl.warehouseLocationId || !pl.catalogProductId) continue;
 
-        // Find the base variant for this catalog product
-        const cp = productMap.get(pl.catalogProductId);
-        if (!cp || !cp.productVariantId) continue;
+        // Resolve product_id via catalog product
+        const productId = catalogProductToProductId.get(pl.catalogProductId);
+        if (!productId) continue;
 
-        const variant = variantMap.get(cp.productVariantId);
+        // Find the lowest-hierarchy variant for this product (the pick variant)
+        const productVars = variantsByProduct.get(productId);
+        if (!productVars) continue;
+        const lowestLevel = Math.min(...Array.from(productVars.keys()));
+        const variant = productVars.get(lowestLevel);
         if (!variant) continue;
 
         const key = `${pl.warehouseLocationId}:${variant.id}`;
         if (seenPickLocVariant.has(key)) continue; // Already covered by inventory level scan
         seenPickLocVariant.add(key);
 
-        const cpId = pl.catalogProductId;
-        if (!pickLocationsNeedingReplen.has(cpId)) {
-          pickLocationsNeedingReplen.set(cpId, []);
+        if (!pickLocationsNeedingReplen.has(productId)) {
+          pickLocationsNeedingReplen.set(productId, []);
         }
 
-        pickLocationsNeedingReplen.get(cpId)!.push({
+        pickLocationsNeedingReplen.get(productId)!.push({
           locationId: pl.warehouseLocationId,
           variantId: variant.id,
           currentQty: 0, // No inventory level = 0 stock

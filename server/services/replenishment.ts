@@ -171,37 +171,9 @@ class ReplenishmentService {
     }
 
     // --- 4. Load variant metadata for hierarchy levels ---
-    // Also add synthetic zero-qty levels for assigned bins with no inventory level
     const existingLevelKeys = new Set(levels.map((l) => `${l.warehouseLocationId}:${l.productVariantId}`));
 
-    // Load catalog products to resolve variant IDs for assigned bins
-    const allCatalogProducts = await this.db.select().from(catalogProducts);
-    const catalogProductMap = new Map(allCatalogProducts.map((cp: any) => [cp.id, cp]));
-
-    for (const ab of assignedBins) {
-      if (!ab.warehouseLocationId || !ab.catalogProductId) continue;
-      if (!pickLocationMap.has(ab.warehouseLocationId)) continue; // Not a pick location we're scanning
-
-      const cp = catalogProductMap.get(ab.catalogProductId);
-      if (!cp?.productVariantId) continue;
-
-      const key = `${ab.warehouseLocationId}:${cp.productVariantId}`;
-      if (existingLevelKeys.has(key)) continue; // Already have a real inventory level
-      existingLevelKeys.add(key);
-
-      // Create synthetic zero-qty level so the threshold check finds it
-      levels.push({
-        id: -1, // synthetic
-        productVariantId: cp.productVariantId,
-        warehouseLocationId: ab.warehouseLocationId,
-        variantQty: 0,
-        reservedQty: 0,
-        allocatedQty: 0,
-        damagedQty: 0,
-        updatedAt: new Date(),
-      } as any);
-    }
-
+    // Load initial variants from existing inventory levels
     const variantIds = Array.from(new Set(levels.map((l) => l.productVariantId)));
     const variants: ProductVariant[] = variantIds.length > 0
       ? await this.db
@@ -226,6 +198,52 @@ class ReplenishmentService {
       const arr = productVariantsCache.get(v.productId) ?? [];
       arr.push(v);
       productVariantsCache.set(v.productId, arr);
+    }
+
+    // Add synthetic zero-qty levels for assigned bins with no inventory level
+    // Load catalog products to resolve product IDs for assigned bins
+    const allCatalogProducts = await this.db.select().from(catalogProducts);
+    const catalogProductMap = new Map(allCatalogProducts.map((cp: any) => [cp.id, cp]));
+
+    // Build lowest-level variant per product for assigned bin resolution
+    const lowestVariantByProduct = new Map<number, ProductVariant>();
+    for (const v of allProductVariantsArr) {
+      if (!v.productId) continue;
+      const existing = lowestVariantByProduct.get(v.productId);
+      if (!existing || v.hierarchyLevel < existing.hierarchyLevel) {
+        lowestVariantByProduct.set(v.productId, v);
+      }
+    }
+
+    for (const ab of assignedBins) {
+      if (!ab.warehouseLocationId || !ab.catalogProductId) continue;
+      if (!pickLocationMap.has(ab.warehouseLocationId)) continue; // Not a pick location we're scanning
+
+      const cp = catalogProductMap.get(ab.catalogProductId) as any;
+      if (!cp?.productId) continue;
+
+      // Find the pick variant (lowest hierarchy level) for this product
+      const pickVariant = lowestVariantByProduct.get(cp.productId);
+      if (!pickVariant) continue;
+
+      const key = `${ab.warehouseLocationId}:${pickVariant.id}`;
+      if (existingLevelKeys.has(key)) continue; // Already have a real inventory level
+      existingLevelKeys.add(key);
+
+      // Ensure variantMap has the pick variant for threshold check
+      if (!variantMap.has(pickVariant.id)) variantMap.set(pickVariant.id, pickVariant);
+
+      // Create synthetic zero-qty level so the threshold check finds it
+      levels.push({
+        id: -1, // synthetic
+        productVariantId: pickVariant.id,
+        warehouseLocationId: ab.warehouseLocationId,
+        variantQty: 0,
+        reservedQty: 0,
+        allocatedQty: 0,
+        damagedQty: 0,
+        updatedAt: new Date(),
+      } as any);
     }
 
     // --- 5. Load existing active tasks to avoid duplicates ---
@@ -924,10 +942,10 @@ class ReplenishmentService {
    * specifies a different sourceHierarchyLevel, find the variant in the same
    * product at that hierarchy level.
    *
-   * Resolution order:
-   * 1. parentVariantId on the pick variant (if set and target level matches)
-   * 2. Query product_variants for same productId at sourceHierarchyLevel
-   * 3. Return null if no matching variant found
+   * Always resolves by product_id + sourceHierarchyLevel (NOT parentVariantId).
+   * parentVariantId is the packaging chain pointer (L1→L2→L3) which may point
+   * to the wrong hierarchy level for replen (e.g., L1's parent is L2, but tier
+   * default says source from L3).
    *
    * @param productVariantsCache  Optional pre-loaded map of productId → variants
    *                              (used by batch checkThresholds to avoid N+1 queries)
@@ -940,12 +958,7 @@ class ReplenishmentService {
     if (!tierDefault) return null;
     if (tierDefault.sourceHierarchyLevel === pickVariant.hierarchyLevel) return null;
 
-    // 1. Try parentVariantId first (if set)
-    if (pickVariant.parentVariantId != null) {
-      return pickVariant.parentVariantId;
-    }
-
-    // 2. Look up by product + sourceHierarchyLevel
+    // Always resolve by product + target hierarchy level
     let siblings: ProductVariant[];
     if (productVariantsCache && pickVariant.productId) {
       siblings = productVariantsCache.get(pickVariant.productId) ?? [];
