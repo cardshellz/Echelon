@@ -8325,6 +8325,7 @@ export async function registerRoutes(
             reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}`,
             cycleCountId: item.cycleCountId,
             userId,
+            allowNegative: true,
           });
 
           await storage.updateCycleCountItem(itemId, {
@@ -8583,6 +8584,7 @@ export async function registerRoutes(
       const { inventoryCore: ccCore } = req.app.locals.services as any;
 
       // Apply inventory adjustment if we have a product variant
+      // allowNegative: cycle count is source of truth for physical reality
       if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
         await ccCore.adjustInventory({
           productVariantId: item.productVariantId,
@@ -8591,6 +8593,7 @@ export async function registerRoutes(
           reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`,
           cycleCountId: item.cycleCountId,
           userId,
+          allowNegative: true,
         });
         adjustmentsMade.push({
           sku: item.expectedSku || item.countedSku,
@@ -8622,6 +8625,7 @@ export async function registerRoutes(
               reason: `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`,
               cycleCountId: relatedItem.cycleCountId,
               userId,
+              allowNegative: true,
             });
             adjustmentsMade.push({
               sku: relatedItem.expectedSku || relatedItem.countedSku,
@@ -8761,6 +8765,8 @@ export async function registerRoutes(
           }
 
           // Apply inventory adjustment if we have a product variant
+          // allowNegative: cycle count is source of truth — if we counted fewer
+          // than system and picks already reduced stock further, we still adjust
           if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
             await ccCore.adjustInventory({
               productVariantId: item.productVariantId,
@@ -8769,6 +8775,7 @@ export async function registerRoutes(
               reason: `Cycle count bulk adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`.trim(),
               cycleCountId: item.cycleCountId,
               userId,
+              allowNegative: true,
             });
             adjustmentsMade++;
           }
@@ -8808,6 +8815,7 @@ export async function registerRoutes(
                 reason: `Cycle count bulk adjustment (linked): ${linked.expectedSku || linked.countedSku}. ${notes || ''}`.trim(),
                 cycleCountId: linked.cycleCountId,
                 userId,
+                allowNegative: true,
               });
               adjustmentsMade++;
             }
