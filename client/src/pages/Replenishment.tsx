@@ -2648,7 +2648,7 @@ export default function Replenishment() {
 
       {/* Task Dialog */}
       <Dialog open={showTaskDialog} onOpenChange={setShowTaskDialog}>
-        <DialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md max-h-[90vh] overflow-y-auto p-4">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle className="text-base md:text-lg">Create Manual Replen Task</DialogTitle>
             <DialogDescription className="text-xs md:text-sm">
