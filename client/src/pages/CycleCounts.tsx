@@ -150,7 +150,7 @@ export default function CycleCounts() {
   const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "variance" | "investigate" | "ok">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "needs_review" | "done">("all");
   const [varianceSummaryOpen, setVarianceSummaryOpen] = useState(false);
   const [expandedSummarySkus, setExpandedSummarySkus] = useState<Set<number>>(new Set());
   
@@ -529,23 +529,47 @@ export default function CycleCounts() {
     }
   };
 
+  // Build bin-level location sets for filtering (show ALL items in matching bins)
+  const binFilterSets = (() => {
+    if (!cycleCountDetail) return { pending: new Set<number>(), needsReview: new Set<number>(), done: new Set<number>() };
+    const groups = cycleCountDetail.items.reduce((acc, item) => {
+      const locId = item.warehouseLocationId;
+      if (!acc[locId]) acc[locId] = [];
+      acc[locId].push(item);
+      return acc;
+    }, {} as Record<number, typeof cycleCountDetail.items>);
+
+    const pending = new Set<number>();
+    const needsReview = new Set<number>();
+    const done = new Set<number>();
+    for (const [locId, items] of Object.entries(groups)) {
+      const id = Number(locId);
+      if (items.every(i => i.status === "pending")) {
+        pending.add(id);
+      } else if (items.some(i => (i.varianceType && i.status !== "approved") || i.status === "investigate")) {
+        needsReview.add(id);
+      } else {
+        done.add(id);
+      }
+    }
+    return { pending, needsReview, done };
+  })();
+
   const filteredItems = cycleCountDetail?.items.filter(item => {
     const matchesSearch = !searchQuery ||
       item.locationCode?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.expectedSku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.countedSku?.toLowerCase().includes(searchQuery.toLowerCase());
-    
+
     if (!matchesSearch) return false;
-    
+
     switch (statusFilter) {
       case "pending":
-        return item.status === "pending";
-      case "variance":
-        return item.varianceType && item.status !== "approved" && item.status !== "investigate";
-      case "investigate":
-        return item.status === "investigate";
-      case "ok":
-        return item.status !== "pending" && !item.varianceType;
+        return binFilterSets.pending.has(item.warehouseLocationId);
+      case "needs_review":
+        return binFilterSets.needsReview.has(item.warehouseLocationId);
+      case "done":
+        return binFilterSets.done.has(item.warehouseLocationId);
       default:
         return true;
     }
@@ -741,12 +765,20 @@ export default function CycleCounts() {
       (a.locationCode || "").localeCompare(b.locationCode || "")
     );
 
-    // Bin-level stats: a bin's status is determined by its items
+    // Bin-level stats based on disposition (does this bin need action?)
     const totalBins = binGroups.length;
+    // Pending: not yet counted (all items still pending)
     const pendingCount = binGroups.filter(b => b.items.every(i => i.status === "pending")).length;
-    const varianceCount = binGroups.filter(b => b.items.some(i => i.varianceType && i.status !== "approved" && i.status !== "investigate")).length;
-    const investigatingCount = binGroups.filter(b => !b.items.every(i => i.status === "pending") && b.items.some(i => i.status === "investigate") && !b.items.some(i => i.varianceType && i.status !== "approved" && i.status !== "investigate")).length;
-    const okCount = totalBins - pendingCount - varianceCount - investigatingCount;
+    // Needs Review: counted but has unapproved variances or items under investigation
+    const needsReviewCount = binGroups.filter(b =>
+      !b.items.every(i => i.status === "pending") &&
+      b.items.some(i =>
+        (i.varianceType && i.status !== "approved") ||
+        i.status === "investigate"
+      )
+    ).length;
+    // Done: counted, no issues OR all variances approved/resolved
+    const doneCount = totalBins - pendingCount - needsReviewCount;
     
     // Get current bin group and items
     const currentBinGroup = binGroups[currentBinIndex];
@@ -1284,8 +1316,8 @@ export default function CycleCounts() {
           <CheckCircle className="h-20 w-20 text-emerald-500" />
           <h2 className="text-2xl font-bold text-center">All Bins Counted!</h2>
           <p className="text-muted-foreground text-center">
-            {varianceCount > 0 
-              ? `${varianceCount} variance(s) need review`
+            {needsReviewCount > 0
+              ? `${needsReviewCount} bin(s) need review`
               : "No variances found - ready to complete"}
           </p>
           <Button size="lg" onClick={() => setMobileCountMode(false)}>
@@ -1351,14 +1383,14 @@ export default function CycleCounts() {
             <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
           </Button>
         )}
-        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && varianceCount === 0 && investigatingCount === 0 && (
+        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && needsReviewCount === 0 && (
           <Button className="w-full" onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
             <CheckCircle className="h-4 w-4 mr-2" /> Complete
           </Button>
         )}
 
         {/* Compact stat row */}
-        <div className={`grid gap-1 md:gap-4 ${investigatingCount > 0 ? "grid-cols-5" : "grid-cols-4"}`}>
+        <div className="grid grid-cols-4 gap-1 md:gap-4">
           <button
             className={`p-2 rounded-lg text-center transition-all ${statusFilter === "all" ? "bg-primary/10 ring-1 ring-primary" : "bg-slate-100"}`}
             onClick={() => setStatusFilter("all")}
@@ -1376,29 +1408,20 @@ export default function CycleCounts() {
             <div className="text-[10px] text-muted-foreground">Pending</div>
           </button>
           <button
-            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "variance" ? "bg-amber-100 ring-1 ring-amber-500" : "bg-slate-100"}`}
-            onClick={() => setStatusFilter("variance")}
-            data-testid="card-filter-variance"
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "needs_review" ? "bg-amber-100 ring-1 ring-amber-500" : "bg-slate-100"}`}
+            onClick={() => setStatusFilter("needs_review")}
+            data-testid="card-filter-needs-review"
           >
-            <div className="text-lg font-bold text-amber-600">{varianceCount}</div>
-            <div className="text-[10px] text-muted-foreground">Variance</div>
+            <div className="text-lg font-bold text-amber-600">{needsReviewCount}</div>
+            <div className="text-[10px] text-muted-foreground">Needs Review</div>
           </button>
-          {investigatingCount > 0 && (
-            <button
-              className={`p-2 rounded-lg text-center transition-all ${statusFilter === "investigate" ? "bg-yellow-100 ring-1 ring-yellow-500" : "bg-yellow-50"}`}
-              onClick={() => setStatusFilter("investigate")}
-            >
-              <div className="text-lg font-bold text-yellow-700">{investigatingCount}</div>
-              <div className="text-[10px] text-muted-foreground">Investigating</div>
-            </button>
-          )}
           <button
-            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "ok" ? "bg-emerald-100 ring-1 ring-emerald-500" : "bg-slate-100"}`}
-            onClick={() => setStatusFilter("ok")}
-            data-testid="card-filter-ok"
+            className={`p-2 rounded-lg text-center transition-all ${statusFilter === "done" ? "bg-emerald-100 ring-1 ring-emerald-500" : "bg-slate-100"}`}
+            onClick={() => setStatusFilter("done")}
+            data-testid="card-filter-done"
           >
-            <div className="text-lg font-bold text-emerald-600">{okCount}</div>
-            <div className="text-[10px] text-muted-foreground">OK</div>
+            <div className="text-lg font-bold text-emerald-600">{doneCount}</div>
+            <div className="text-[10px] text-muted-foreground">Done</div>
           </button>
         </div>
 
@@ -1482,7 +1505,7 @@ export default function CycleCounts() {
               data-testid="input-search"
             />
           </div>
-          {varianceCount > 0 && (
+          {needsReviewCount > 0 && (
             <Button
               variant="outline"
               size="default"
