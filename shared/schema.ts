@@ -1283,11 +1283,11 @@ export type CycleCountStatus = typeof cycleCountStatusEnum[number];
 
 // Variance types for reconciliation
 export const varianceTypeEnum = [
-  "quantity_over",     // Found more than expected
-  "quantity_under",    // Found less than expected (shrinkage/damage)
+  "quantity_over",     // Found more than expected (overage)
+  "quantity_under",    // Found less than expected, including zero (shortage)
   "sku_mismatch",      // Different SKU in bin than expected
   "unexpected_item",   // Item found but not expected in this bin
-  "missing_item",      // Item expected but not found
+  "missing_item",      // DEPRECATED: legacy records only — now merged into quantity_under
 ] as const;
 export type VarianceType = typeof varianceTypeEnum[number];
 

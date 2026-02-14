@@ -509,10 +509,9 @@ export default function CycleCounts() {
     if (!type) return null;
     switch (type) {
       case "quantity_over": return <Badge className="bg-emerald-100 text-emerald-700">+Over</Badge>;
-      case "quantity_under": return <Badge className="bg-rose-100 text-rose-700">-Under</Badge>;
+      case "quantity_under": return <Badge className="bg-rose-100 text-rose-700">-Shortage</Badge>;
       case "sku_mismatch": return <Badge variant="destructive">Wrong SKU</Badge>;
       case "unexpected_item": return <Badge className="bg-amber-100 text-amber-700">Unexpected</Badge>;
-      case "missing_item": return <Badge className="bg-rose-100 text-rose-700">Missing</Badge>;
       default: return <Badge variant="outline">{type}</Badge>;
     }
   };
@@ -629,7 +628,7 @@ export default function CycleCounts() {
       );
       const netVar = offsetting.reduce((s, i) => s + (i.varianceQty ?? 0), linkedItem.varianceQty ?? 0);
       if (offsetting.length > 0 && netVar === 0) {
-        setApproveForm({ reasonCode: "misplaced", notes: "" });
+        setApproveForm({ reasonCode: "MISPLACED", notes: "" });
       }
     }
   };
@@ -2194,9 +2193,8 @@ export default function CycleCounts() {
               );
 
               const varianceTypeLabels: Record<string, string> = {
-                quantity_under: "Quantity Under",
-                quantity_over: "Quantity Over",
-                missing_item: "Missing Item",
+                quantity_under: "Shortage",
+                quantity_over: "Overage",
                 unexpected_item: "Unexpected Item",
                 other: "Other",
               };

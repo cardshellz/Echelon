@@ -5684,12 +5684,13 @@ export async function registerRoutes(
         { code: "EXPIRED", name: "Expired", description: "Items removed due to expiration", transactionType: "adjustment", sortOrder: 5 },
         { code: "RETURN", name: "Customer Return", description: "Items returned by customer", transactionType: "return", sortOrder: 6 },
         { code: "TRANSFER", name: "Location Transfer", description: "Items moved between locations", transactionType: "transfer", sortOrder: 7 },
-        { code: "SHRINKAGE", name: "Shrinkage/Loss", description: "Unexplained inventory loss", transactionType: "adjustment", requiresNote: 1, sortOrder: 8 },
-        { code: "FOUND", name: "Found Inventory", description: "Previously unaccounted inventory found", transactionType: "adjustment", sortOrder: 9 },
-        { code: "SHOPIFY_SYNC", name: "Shopify Sync", description: "Adjustment from Shopify inventory sync", transactionType: "adjustment", sortOrder: 10 },
-        { code: "MANUAL_ADJ", name: "Manual Adjustment", description: "Manual inventory correction", transactionType: "adjustment", requiresNote: 1, sortOrder: 11 },
-        { code: "PICKING", name: "Order Picking", description: "Items picked for customer order", transactionType: "pick", sortOrder: 12 },
-        { code: "SHORT_PICK", name: "Short Pick", description: "Unable to pick full quantity", transactionType: "pick", requiresNote: 1, sortOrder: 13 },
+        { code: "MISPLACED", name: "Misplaced", description: "Item found in wrong location (offsetting variances)", transactionType: "adjustment", sortOrder: 8 },
+        { code: "SHRINKAGE", name: "Shrinkage/Loss", description: "Unexplained inventory loss", transactionType: "adjustment", requiresNote: 1, sortOrder: 9 },
+        { code: "FOUND", name: "Found Inventory", description: "Previously unaccounted inventory found", transactionType: "adjustment", sortOrder: 10 },
+        { code: "SHOPIFY_SYNC", name: "Shopify Sync", description: "Adjustment from Shopify inventory sync", transactionType: "adjustment", sortOrder: 11 },
+        { code: "MANUAL_ADJ", name: "Manual Adjustment", description: "Manual inventory correction", transactionType: "adjustment", requiresNote: 1, sortOrder: 12 },
+        { code: "PICKING", name: "Order Picking", description: "Items picked for customer order", transactionType: "pick", sortOrder: 13 },
+        { code: "SHORT_PICK", name: "Short Pick", description: "Unable to pick full quantity", transactionType: "pick", requiresNote: 1, sortOrder: 14 },
       ];
 
       const created = [];
@@ -8042,7 +8043,7 @@ export async function registerRoutes(
       });
       return;
     }
-    // missing_item (standalone), quantity_over, quantity_under: no action
+    // quantity_over, quantity_under: no bin assignment changes needed
   }
 
   // Helper: compute bin-level stats from cycle count items
@@ -8344,12 +8345,12 @@ export async function registerRoutes(
         
         varianceType = "sku_mismatch";
         
-        // Update original item as MISSING (expected SKU not found, qty = 0)
+        // Update original item as shortage (expected SKU not found in this bin, qty = 0)
         await storage.updateCycleCountItem(itemId, {
           countedSku: null, // Not found
           countedQty: 0, // Zero - it's not there
           varianceQty: -(item.expectedQty ?? 0), // Full negative variance
-          varianceType: "missing_item",
+          varianceType: "quantity_under",
           varianceNotes: `Expected ${item.expectedSku} not found. Different SKU (${countedSku}) was in bin. ${notes || ''}`.trim(),
           status: "variance",
           requiresApproval: 1,
@@ -8431,9 +8432,7 @@ export async function registerRoutes(
         });
       } else {
         // Normal count (same SKU or empty bin)
-        if (countedQty === 0 && item.expectedQty > 0) {
-          varianceType = "missing_item";
-        } else if (varianceQty > 0) {
+        if (varianceQty > 0) {
           varianceType = "quantity_over";
         } else if (varianceQty < 0) {
           varianceType = "quantity_under";
