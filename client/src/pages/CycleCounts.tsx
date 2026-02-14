@@ -722,9 +722,11 @@ export default function CycleCounts() {
   }, [mobileCountMode, currentBinIndex, currentItemForHook?.id, cycleCountDetail?.id]);
 
   if (selectedCount && cycleCountDetail) {
+    const totalItems = cycleCountDetail.items.length;
     const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
     const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "investigate").length;
     const investigatingCount = cycleCountDetail.items.filter(i => i.status === "investigate").length;
+    const okCount = totalItems - pendingCount - varianceCount - investigatingCount;
     
     // Group items by location (bin) for multi-SKU support
     const itemsByLocation = cycleCountDetail.items.reduce((acc, item) => {
@@ -809,7 +811,7 @@ export default function CycleCounts() {
           <div className="h-1 bg-slate-200">
             <div 
               className="h-full bg-emerald-500 transition-all" 
-              style={{ width: `${((cycleCountDetail.countedBins) / cycleCountDetail.totalBins) * 100}%` }}
+              style={{ width: `${totalItems > 0 ? ((totalItems - pendingCount) / totalItems) * 100 : 0}%` }}
             />
           </div>
           
@@ -1304,7 +1306,7 @@ export default function CycleCounts() {
               <h1 className="text-lg md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
               {getStatusBadge(cycleCountDetail.status)}
             </div>
-            <p className="text-muted-foreground text-xs">{cycleCountDetail.countedBins}/{cycleCountDetail.totalBins} counted</p>
+            <p className="text-muted-foreground text-xs">{totalItems - pendingCount}/{totalItems} counted</p>
           </div>
           {cycleCountDetail.status !== "completed" && (
             <Button 
@@ -1361,7 +1363,7 @@ export default function CycleCounts() {
             onClick={() => setStatusFilter("all")}
             data-testid="card-filter-all"
           >
-            <div className="text-lg font-bold">{cycleCountDetail.totalBins}</div>
+            <div className="text-lg font-bold">{totalItems}</div>
             <div className="text-[10px] text-muted-foreground">Total</div>
           </button>
           <button
@@ -1394,7 +1396,7 @@ export default function CycleCounts() {
             onClick={() => setStatusFilter("ok")}
             data-testid="card-filter-ok"
           >
-            <div className="text-lg font-bold text-emerald-600">{cycleCountDetail.countedBins - varianceCount - investigatingCount}</div>
+            <div className="text-lg font-bold text-emerald-600">{okCount}</div>
             <div className="text-[10px] text-muted-foreground">OK</div>
           </button>
         </div>
