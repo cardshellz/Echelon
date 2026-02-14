@@ -8045,6 +8045,24 @@ export async function registerRoutes(
     // missing_item (standalone), quantity_over, quantity_under: no action
   }
 
+  // Helper: compute bin-level stats from cycle count items
+  function computeBinStats(items: { warehouseLocationId: number; status: string; varianceType: string | null }[]) {
+    const bins = new Map<number, typeof items>();
+    for (const item of items) {
+      const arr = bins.get(item.warehouseLocationId);
+      if (arr) arr.push(item);
+      else bins.set(item.warehouseLocationId, [item]);
+    }
+    let countedBins = 0;
+    let varianceBins = 0;
+    for (const binItems of bins.values()) {
+      const allPending = binItems.every(i => i.status === "pending");
+      if (!allPending) countedBins++;
+      if (!allPending && binItems.some(i => i.varianceType)) varianceBins++;
+    }
+    return { countedBins, varianceCount: varianceBins };
+  }
+
   // Get all cycle counts
   app.get("/api/cycle-counts", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -8475,23 +8493,18 @@ export async function registerRoutes(
         }
       }
       
-      // Update cycle count progress
+      // Update cycle count progress (bin-level stats)
       const cycleCount = await storage.getCycleCountById(item.cycleCountId);
       if (cycleCount) {
         const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const countedCount = allItems.filter(i => i.status !== "pending").length;
-        const varianceCount = allItems.filter(i => i.varianceType).length;
-        
-        await storage.updateCycleCount(item.cycleCountId, {
-          countedBins: countedCount,
-          varianceCount,
-        });
+        const binStats = computeBinStats(allItems);
+        await storage.updateCycleCount(item.cycleCountId, binStats);
       }
-      
-      res.json({ 
-        success: true, 
-        varianceType, 
-        varianceQty, 
+
+      res.json({
+        success: true,
+        varianceType,
+        varianceQty,
         requiresApproval: true,
         skuMismatch: isSkuMismatch,
         createdFoundItem
@@ -8552,16 +8565,12 @@ export async function registerRoutes(
       });
 
       // Recompute cycle count progress
+      // Recompute bin-level stats
       const cycleCount = await storage.getCycleCountById(item.cycleCountId);
       if (cycleCount) {
         const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const countedCount = allItems.filter(i => i.status !== "pending").length;
-        const varianceCount = allItems.filter(i => i.varianceType).length;
-
-        await storage.updateCycleCount(item.cycleCountId, {
-          countedBins: countedCount,
-          varianceCount,
-        });
+        const binStats = computeBinStats(allItems);
+        await storage.updateCycleCount(item.cycleCountId, binStats);
       }
 
       res.json({ success: true });
@@ -8593,16 +8602,12 @@ export async function registerRoutes(
       });
 
       // Recompute cycle count progress
+      // Recompute bin-level stats
       const cycleCount = await storage.getCycleCountById(item.cycleCountId);
       if (cycleCount) {
         const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const countedCount = allItems.filter(i => i.status !== "pending").length;
-        const varianceCount = allItems.filter(i => i.varianceType).length;
-
-        await storage.updateCycleCount(item.cycleCountId, {
-          countedBins: countedCount,
-          varianceCount,
-        });
+        const binStats = computeBinStats(allItems);
+        await storage.updateCycleCount(item.cycleCountId, binStats);
       }
 
       res.json({ success: true });
@@ -8662,13 +8667,10 @@ export async function registerRoutes(
         ) RETURNING id
       `);
       
-      // Update cycle count variance count - recompute from fresh data after insert
+      // Recompute bin-level stats after adding found item
       const allItemsAfterInsert = await storage.getCycleCountItems(id);
-      const varianceCount = allItemsAfterInsert.filter(i => i.varianceType).length;
-      
-      await storage.updateCycleCount(id, {
-        varianceCount,
-      });
+      const binStats = computeBinStats(allItemsAfterInsert);
+      await storage.updateCycleCount(id, binStats);
       
       res.json({ 
         success: true, 
