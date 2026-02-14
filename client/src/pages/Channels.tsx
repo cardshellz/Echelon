@@ -247,11 +247,11 @@ export default function Channels() {
       }
       return res.json();
     },
-    onSuccess: (data) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
       toast({
-        title: "Inventory sync complete",
-        description: `${data.synced} feeds synced across ${data.total} products${data.errors?.length ? `, ${data.errors.length} errors` : ""}`,
+        title: "Inventory sync started",
+        description: "Pushing inventory to Shopify in background. Check server logs for progress.",
       });
     },
     onError: (err: Error) => {

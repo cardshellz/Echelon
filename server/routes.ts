@@ -11934,11 +11934,20 @@ export async function registerRoutes(
       const { channelSync } = req.app.locals.services;
       const channelId = req.body.channelId ? parseInt(req.body.channelId) : undefined;
 
-      const result = await channelSync.syncAllProducts(channelId);
-      res.json(result);
+      // Fire-and-forget: respond immediately to avoid Heroku 30s timeout
+      res.json({ status: "started", message: "Inventory sync started in background" });
+
+      // Run sync in background
+      channelSync.syncAllProducts(channelId)
+        .then((result: any) => {
+          console.log(`[ChannelSync] Background sync complete: ${result.synced}/${result.total} synced, ${result.errors.length} errors`);
+        })
+        .catch((err: any) => {
+          console.error("[ChannelSync] Background sync failed:", err);
+        });
     } catch (error: any) {
-      console.error("Error syncing all products:", error);
-      res.status(500).json({ error: error.message || "Failed to sync products" });
+      console.error("Error starting channel sync:", error);
+      res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
 
