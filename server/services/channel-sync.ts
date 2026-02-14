@@ -471,7 +471,25 @@ class ChannelSyncService {
     }
     const shopifyDomain = conn.shopDomain;
     const accessToken = conn.accessToken;
-    const shopifyInventoryItemId = feed.channelVariantId;
+
+    // Resolve the Shopify inventory_item_id and product_id from product_variants
+    // (channelVariantId stores the Shopify variant ID, NOT the inventory item ID)
+    const [variantRow] = await this.db
+      .select({
+        productId: productVariants.productId,
+        shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+      })
+      .from(productVariants)
+      .where(eq(productVariants.id, feed.productVariantId))
+      .limit(1);
+
+    if (!variantRow?.shopifyInventoryItemId) {
+      throw new Error(
+        `Variant ${feed.productVariantId} has no shopifyInventoryItemId — ` +
+        `run Shopify product sync first to populate it`,
+      );
+    }
+    const shopifyInventoryItemId = variantRow.shopifyInventoryItemId;
 
     // Look up warehouses with Shopify location IDs configured
     const warehouseRows: Warehouse[] = await this.db
@@ -487,17 +505,8 @@ class ChannelSyncService {
     if (warehouseRows.length > 0) {
       // Multi-warehouse mode: push per-warehouse ATP to each Shopify location
       for (const wh of warehouseRows) {
-        // Resolve the product that owns this variant for ATP calculation
-        const [variant] = await this.db
-          .select({ productId: productVariants.productId })
-          .from(productVariants)
-          .where(eq(productVariants.id, feed.productVariantId))
-          .limit(1);
-
-        if (!variant) continue;
-
         const warehouseAtp = await this.atpService.getAtpPerVariantByWarehouse(
-          variant.productId,
+          variantRow.productId,
           wh.id,
         );
         const variantAtp = warehouseAtp.find(

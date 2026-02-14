@@ -3256,6 +3256,7 @@ export async function registerRoutes(
           type: string;
           unitsPerVariant: number;
           shopifyVariantId: number;
+          shopifyInventoryItemId: number | null;
           barcode: string | null;
           imageUrl: string | null;
         }>;
@@ -3267,6 +3268,7 @@ export async function registerRoutes(
         name: string;
         shopifyProductId: number;
         shopifyVariantId: number;
+        shopifyInventoryItemId: number | null;
         vendor: string | null;
         productType: string | null;
         description: string | null;
@@ -3310,6 +3312,7 @@ export async function registerRoutes(
             type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
             unitsPerVariant,
             shopifyVariantId: variant.variantId,
+            shopifyInventoryItemId: variant.inventoryItemId,
             barcode: variant.barcode,
             imageUrl: variant.imageUrl
           });
@@ -3320,6 +3323,7 @@ export async function registerRoutes(
             name: variant.title,
             shopifyProductId: variant.shopifyProductId,
             shopifyVariantId: variant.variantId,
+            shopifyInventoryItemId: variant.inventoryItemId,
             vendor: variant.vendor,
             productType: variant.productType,
             description: variant.description,
@@ -3383,6 +3387,7 @@ export async function registerRoutes(
               hierarchyLevel,
               barcode: v.barcode,
               shopifyVariantId: String(v.shopifyVariantId),
+              shopifyInventoryItemId: v.shopifyInventoryItemId ? String(v.shopifyInventoryItemId) : undefined,
               imageUrl: v.imageUrl,
             });
             variantsUpdated++;
@@ -3396,6 +3401,7 @@ export async function registerRoutes(
               hierarchyLevel,
               barcode: v.barcode,
               shopifyVariantId: String(v.shopifyVariantId),
+              shopifyInventoryItemId: v.shopifyInventoryItemId ? String(v.shopifyInventoryItemId) : null,
               imageUrl: v.imageUrl,
               active: 1,
             });
@@ -3444,6 +3450,7 @@ export async function registerRoutes(
             hierarchyLevel: 1,
             barcode: sv.barcode,
             shopifyVariantId: String(sv.shopifyVariantId),
+            shopifyInventoryItemId: sv.shopifyInventoryItemId ? String(sv.shopifyInventoryItemId) : undefined,
             imageUrl: sv.imageUrl,
           });
           variantsUpdated++;
@@ -3456,6 +3463,7 @@ export async function registerRoutes(
             hierarchyLevel: 1,
             barcode: sv.barcode,
             shopifyVariantId: String(sv.shopifyVariantId),
+            shopifyInventoryItemId: sv.shopifyInventoryItemId ? String(sv.shopifyInventoryItemId) : null,
             imageUrl: sv.imageUrl,
             active: 1,
           });
@@ -6392,7 +6400,7 @@ export async function registerRoutes(
 
         // Get channel feeds to find Shopify variant IDs
         for (const variant of variants) {
-          const feeds = await storage.getChannelFeedsByVariantId(variant.id);
+          const feeds = await storage.getChannelFeedsByProductVariantId(variant.id);
           const shopifyFeed = feeds.find(f => f.channelType === "shopify");
 
           if (shopifyFeed) {
@@ -7002,6 +7010,42 @@ export async function registerRoutes(
         .filter((w: any) => w.shopifyLocationId)
         .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
 
+      // Auto-create channel feeds for all product variants with Shopify variant IDs
+      let feedsCreated = 0;
+      let feedsUpdated = 0;
+      try {
+        const allVariants = await storage.getAllProductVariants();
+        const shopifyVariants = allVariants.filter((v: any) => v.shopifyVariantId);
+
+        // Build product ID → Shopify product ID map
+        const productIds = [...new Set(shopifyVariants.map((v: any) => v.productId))];
+        const productMap = new Map<number, string>();
+        for (const pid of productIds) {
+          const prod = await storage.getProductById(pid);
+          if (prod?.shopifyProductId) {
+            productMap.set(pid, prod.shopifyProductId);
+          }
+        }
+
+        for (const pv of shopifyVariants) {
+          const existing = await storage.getChannelFeedByVariantAndChannel(pv.id, 'shopify');
+          await storage.upsertChannelFeed({
+            channelId: channelId,
+            productVariantId: pv.id,
+            channelType: 'shopify',
+            channelVariantId: pv.shopifyVariantId!,
+            channelProductId: productMap.get(pv.productId) || null,
+            channelSku: pv.sku || null,
+            isActive: 1,
+          });
+          if (existing) feedsUpdated++;
+          else feedsCreated++;
+        }
+        console.log(`[Setup Shopify] Channel feeds: ${feedsCreated} created, ${feedsUpdated} updated`);
+      } catch (feedErr) {
+        console.warn("Could not auto-create channel feeds:", feedErr);
+      }
+
       res.json({
         success: true,
         connection,
@@ -7012,6 +7056,7 @@ export async function registerRoutes(
         },
         locations,
         mappings,
+        feeds: { created: feedsCreated, updated: feedsUpdated },
       });
     } catch (error) {
       console.error("Error setting up Shopify connection:", error);

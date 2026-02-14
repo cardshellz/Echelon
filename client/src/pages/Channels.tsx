@@ -14,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle,
-  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save
+  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload
 } from "lucide-react";
 
 interface ChannelConnection {
@@ -230,6 +230,32 @@ export default function Channels() {
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const syncInventoryMutation = useMutation({
+    mutationFn: async (channelId: number) => {
+      const res = await fetch("/api/channel-sync/all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ channelId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Sync failed" }));
+        throw new Error(err.error || "Sync failed");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+      toast({
+        title: "Inventory sync complete",
+        description: `${data.synced} feeds synced across ${data.total} products${data.errors?.length ? `, ${data.errors.length} errors` : ""}`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Sync failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -535,6 +561,16 @@ export default function Channels() {
                           </Button>
                         )}
                       </div>
+
+                      <Button
+                        variant="outline"
+                        className="w-full min-h-[44px]"
+                        onClick={() => syncInventoryMutation.mutate(selectedChannel.id)}
+                        disabled={syncInventoryMutation.isPending}
+                      >
+                        <Upload className={`h-4 w-4 mr-2 ${syncInventoryMutation.isPending ? 'animate-spin' : ''}`} />
+                        {syncInventoryMutation.isPending ? "Pushing inventory..." : "Push Inventory to Shopify"}
+                      </Button>
 
                       {selectedChannel.connection.syncError && (
                         <div className="p-3 bg-destructive/10 text-destructive rounded-lg">

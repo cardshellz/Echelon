@@ -12,6 +12,7 @@ export interface ShopifyVariant {
   product_id: number;
   image_id?: number;
   barcode?: string;
+  inventory_item_id?: number;
 }
 
 export interface ShopifyImage {
@@ -48,6 +49,7 @@ export interface ShopifyCatalogProduct {
   status: string;
   imageUrl: string | null;
   barcode: string | null;
+  inventoryItemId: number | null;
   allImages: { url: string; position: number }[];
 }
 
@@ -128,6 +130,7 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
           status: product.status,
           imageUrl,
           barcode: variant.barcode?.trim() || null,
+          inventoryItemId: variant.inventory_item_id ?? null,
           allImages,
         });
       }
