@@ -722,12 +722,6 @@ export default function CycleCounts() {
   }, [mobileCountMode, currentBinIndex, currentItemForHook?.id, cycleCountDetail?.id]);
 
   if (selectedCount && cycleCountDetail) {
-    const totalItems = cycleCountDetail.items.length;
-    const pendingCount = cycleCountDetail.items.filter(i => i.status === "pending").length;
-    const varianceCount = cycleCountDetail.items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "investigate").length;
-    const investigatingCount = cycleCountDetail.items.filter(i => i.status === "investigate").length;
-    const okCount = totalItems - pendingCount - varianceCount - investigatingCount;
-    
     // Group items by location (bin) for multi-SKU support
     const itemsByLocation = cycleCountDetail.items.reduce((acc, item) => {
       const locId = item.warehouseLocationId;
@@ -741,11 +735,18 @@ export default function CycleCounts() {
       acc[locId].items.push(item);
       return acc;
     }, {} as Record<number, { locationCode: string | undefined; warehouseLocationId: number; items: typeof cycleCountDetail.items }>);
-    
+
     // Convert to array sorted by location code for navigation
-    const binGroups = Object.values(itemsByLocation).sort((a, b) => 
+    const binGroups = Object.values(itemsByLocation).sort((a, b) =>
       (a.locationCode || "").localeCompare(b.locationCode || "")
     );
+
+    // Bin-level stats: a bin's status is determined by its items
+    const totalBins = binGroups.length;
+    const pendingCount = binGroups.filter(b => b.items.every(i => i.status === "pending")).length;
+    const varianceCount = binGroups.filter(b => b.items.some(i => i.varianceType && i.status !== "approved" && i.status !== "investigate")).length;
+    const investigatingCount = binGroups.filter(b => !b.items.every(i => i.status === "pending") && b.items.some(i => i.status === "investigate") && !b.items.some(i => i.varianceType && i.status !== "approved" && i.status !== "investigate")).length;
+    const okCount = totalBins - pendingCount - varianceCount - investigatingCount;
     
     // Get current bin group and items
     const currentBinGroup = binGroups[currentBinIndex];
@@ -811,7 +812,7 @@ export default function CycleCounts() {
           <div className="h-1 bg-slate-200">
             <div 
               className="h-full bg-emerald-500 transition-all" 
-              style={{ width: `${totalItems > 0 ? ((totalItems - pendingCount) / totalItems) * 100 : 0}%` }}
+              style={{ width: `${totalBins > 0 ? ((totalBins - pendingCount) / totalBins) * 100 : 0}%` }}
             />
           </div>
           
@@ -1306,7 +1307,7 @@ export default function CycleCounts() {
               <h1 className="text-lg md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
               {getStatusBadge(cycleCountDetail.status)}
             </div>
-            <p className="text-muted-foreground text-xs">{totalItems - pendingCount}/{totalItems} counted</p>
+            <p className="text-muted-foreground text-xs">{totalBins - pendingCount}/{totalBins} counted</p>
           </div>
           {cycleCountDetail.status !== "completed" && (
             <Button 
@@ -1363,7 +1364,7 @@ export default function CycleCounts() {
             onClick={() => setStatusFilter("all")}
             data-testid="card-filter-all"
           >
-            <div className="text-lg font-bold">{totalItems}</div>
+            <div className="text-lg font-bold">{totalBins}</div>
             <div className="text-[10px] text-muted-foreground">Total</div>
           </button>
           <button
