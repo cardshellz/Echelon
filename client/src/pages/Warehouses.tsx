@@ -696,18 +696,27 @@ export default function Warehouses() {
                   </div>
                   <div className="space-y-1">
                     <Label htmlFor="timezone" className="text-xs md:text-sm">Timezone</Label>
-                    <Input
-                      id="timezone"
-                      placeholder="America/New_York"
-                      value={formData.timezone}
-                      onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
-                      className="h-11"
-                      autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="off"
-                      spellCheck={false}
-                      data-testid="input-warehouse-timezone"
-                    />
+                    <Select value={formData.timezone} onValueChange={(v) => setFormData({ ...formData, timezone: v })}>
+                      <SelectTrigger className="h-11" data-testid="input-warehouse-timezone">
+                        <SelectValue placeholder="Select timezone" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="America/New_York">Eastern (New York)</SelectItem>
+                        <SelectItem value="America/Chicago">Central (Chicago)</SelectItem>
+                        <SelectItem value="America/Denver">Mountain (Denver)</SelectItem>
+                        <SelectItem value="America/Los_Angeles">Pacific (Los Angeles)</SelectItem>
+                        <SelectItem value="America/Anchorage">Alaska</SelectItem>
+                        <SelectItem value="Pacific/Honolulu">Hawaii</SelectItem>
+                        <SelectItem value="America/Toronto">Eastern (Toronto)</SelectItem>
+                        <SelectItem value="America/Vancouver">Pacific (Vancouver)</SelectItem>
+                        <SelectItem value="America/Edmonton">Mountain (Edmonton)</SelectItem>
+                        <SelectItem value="America/Winnipeg">Central (Winnipeg)</SelectItem>
+                        <SelectItem value="Europe/London">UK (London)</SelectItem>
+                        <SelectItem value="Europe/Berlin">Central Europe (Berlin)</SelectItem>
+                        <SelectItem value="Asia/Tokyo">Japan (Tokyo)</SelectItem>
+                        <SelectItem value="Australia/Sydney">Australia (Sydney)</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               </div>
