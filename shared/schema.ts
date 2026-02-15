@@ -50,8 +50,20 @@ export type InsertUserAudit = z.infer<typeof insertUserAuditSchema>;
 export type UserAudit = typeof userAudit.$inferSelect;
 
 // Location types for multi-location WMS support
-export const locationTypeEnum = ["pick", "reserve", "receiving", "staging"] as const;
+export const locationTypeEnum = ["pick", "reserve", "receiving", "staging", "3pl_virtual"] as const;
 export type LocationType = typeof locationTypeEnum[number];
+
+// Warehouse types
+export const warehouseTypeEnum = ["operations", "bulk_storage", "3pl"] as const;
+export type WarehouseType = typeof warehouseTypeEnum[number];
+
+// Inventory source types — determines sync direction
+export const inventorySourceTypeEnum = ["internal", "channel", "integration", "manual"] as const;
+export type InventorySourceType = typeof inventorySourceTypeEnum[number];
+
+// Fulfillment routing rule match types
+export const routingMatchTypeEnum = ["location_id", "sku_prefix", "tag", "country", "default"] as const;
+export type RoutingMatchType = typeof routingMatchTypeEnum[number];
 
 export const productLocations = pgTable("product_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -137,8 +149,9 @@ export const orders = pgTable("orders", {
   cancelledAt: timestamp("cancelled_at"), // When order was cancelled in Shopify
   
   // ===== WAREHOUSE OPERATIONS =====
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Which warehouse fulfills this order
   priority: varchar("priority", { length: 20 }).notNull().default("normal"), // rush, high, normal
-  warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled
+  warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"), // ready, picking, picked, packing, packed, shipped, exception, cancelled, awaiting_3pl
   onHold: integer("on_hold").notNull().default(0), // 1 = on hold, 0 = available
   heldAt: timestamp("held_at"),
   assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
@@ -170,6 +183,10 @@ export const orders = pgTable("orders", {
   startedAt: timestamp("started_at"), // Picking started
   completedAt: timestamp("completed_at"), // Picking completed
   
+  // ===== SLA TRACKING (3PL orders) =====
+  slaDueAt: timestamp("sla_due_at"), // When 3PL must fulfill by (orderPlacedAt + partner slaDays)
+  slaStatus: varchar("sla_status", { length: 20 }), // on_time, at_risk, overdue, met
+
   // ===== EXCEPTION TRACKING =====
   exceptionAt: timestamp("exception_at"),
   exceptionResolution: varchar("exception_resolution", { length: 20 }),
@@ -381,7 +398,7 @@ export const warehouses = pgTable("warehouses", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 20 }).notNull().unique(), // Short code: "EAST", "WEST", "HQ"
   name: varchar("name", { length: 200 }).notNull(), // Full name: "East Coast Distribution Center"
-  warehouseType: varchar("warehouse_type", { length: 30 }).notNull().default("fulfillment_center"), // fulfillment_center, bulk_storage, distribution_center
+  warehouseType: varchar("warehouse_type", { length: 30 }).notNull().default("operations"), // operations, bulk_storage, 3pl
   address: text("address"),
   city: varchar("city", { length: 100 }),
   state: varchar("state", { length: 50 }),
@@ -391,6 +408,10 @@ export const warehouses = pgTable("warehouses", {
   isActive: integer("is_active").notNull().default(1),
   isDefault: integer("is_default").notNull().default(0), // Default warehouse for new orders
   shopifyLocationId: varchar("shopify_location_id", { length: 50 }), // Maps to Shopify location_id for inventory sync
+  inventorySourceType: varchar("inventory_source_type", { length: 20 }).notNull().default("internal"), // internal, channel, integration, manual
+  inventorySourceConfig: jsonb("inventory_source_config"), // Source-specific settings: { channelId }, { integrationId, apiType }, etc.
+  lastInventorySyncAt: timestamp("last_inventory_sync_at"), // Last time external inventory was pulled
+  inventorySyncStatus: varchar("inventory_sync_status", { length: 20 }).default("never"), // never, syncing, ok, error
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -946,6 +967,29 @@ export const insertPartnerProfileSchema = createInsertSchema(partnerProfiles).om
 
 export type InsertPartnerProfile = z.infer<typeof insertPartnerProfileSchema>;
 export type PartnerProfile = typeof partnerProfiles.$inferSelect;
+
+// Fulfillment routing rules — determines which warehouse fulfills an order
+// Evaluated by priority (highest first), first match wins
+export const fulfillmentRoutingRules = pgTable("fulfillment_routing_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "cascade" }), // NULL = applies to all channels
+  matchType: varchar("match_type", { length: 20 }).notNull(), // location_id, sku_prefix, tag, country, default
+  matchValue: varchar("match_value", { length: 255 }), // The value to match against (NULL for 'default' type)
+  warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "cascade" }),
+  priority: integer("priority").notNull().default(0), // Higher = evaluated first
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertFulfillmentRoutingRuleSchema = createInsertSchema(fulfillmentRoutingRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertFulfillmentRoutingRule = z.infer<typeof insertFulfillmentRoutingRuleSchema>;
+export type FulfillmentRoutingRule = typeof fulfillmentRoutingRules.$inferSelect;
 
 // Channel reservations - priority stock allocation per channel
 export const channelReservations = pgTable("channel_reservations", {

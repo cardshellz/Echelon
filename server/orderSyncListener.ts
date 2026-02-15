@@ -5,10 +5,40 @@ import { storage } from "./storage";
 import type { InsertOrderItem } from "@shared/schema";
 import { createInventoryCoreService } from "./services/inventory-core";
 import { createReservationService } from "./services/reservation";
+import { createFulfillmentRouterService } from "./services/fulfillment-router";
+import { createSLAMonitorService } from "./services/sla-monitor";
 
-// Reservation service for auto-reserving inventory on order creation
+// Services for order processing
 const inventoryCore = createInventoryCoreService(db);
 const reservation = createReservationService(db, inventoryCore);
+const fulfillmentRouter = createFulfillmentRouterService(db);
+const slaMonitor = createSLAMonitorService(db);
+
+/**
+ * Resolve the channel ID for an order based on shop_domain.
+ * 1. If shop_domain is set, match against channel_connections.shopDomain
+ * 2. Fall back to the default Shopify channel
+ * 3. Returns null if no channel found
+ */
+async function resolveChannelId(shopDomain: string | null): Promise<number | null> {
+  if (shopDomain) {
+    // Try to match shop_domain → channel_connections → channel
+    const result = await db.execute<{ channel_id: number }>(sql`
+      SELECT cc.channel_id FROM channel_connections cc
+      INNER JOIN channels c ON cc.channel_id = c.id
+      WHERE LOWER(cc.shop_domain) = LOWER(${shopDomain})
+      LIMIT 1
+    `);
+    if (result.rows.length > 0) {
+      return result.rows[0].channel_id;
+    }
+  }
+
+  // Fall back to default Shopify channel
+  const allChannels = await storage.getAllChannels();
+  const defaultChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
+  return defaultChannel?.id || null;
+}
 
 // Sync health tracking
 let lastSuccessfulSync: Date | null = null;
@@ -52,10 +82,6 @@ let queueProcessorRunning = false;
  * Returns true if order was created, false if skipped/already exists.
  */
 async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
-  const allChannels = await storage.getAllChannels();
-  const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
-  const shopifyChannelId = shopifyChannel?.id || null;
-
   // Check if already synced
   const alreadySynced = await db.execute<{ id: number }>(sql`
     SELECT id FROM orders WHERE source_table_id = ${shopifyOrderId} LIMIT 1
@@ -82,6 +108,7 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
     financial_status: string | null;
     fulfillment_status: string | null;
     cancelled_at: Date | null;
+    shop_domain: string | null;
   }>(sql`
     SELECT * FROM shopify_orders WHERE id = ${shopifyOrderId}
   `);
@@ -92,6 +119,10 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
   }
 
   const rawOrder = rawOrderResult.rows[0];
+
+  // Resolve channel from shop_domain → channel_connections → channel
+  // Falls back to default Shopify channel if shop_domain is not set (legacy orders)
+  const channelId = await resolveChannelId(rawOrder.shop_domain);
 
   // Retry item fetch up to 3 times (items may be inserted slightly after the order)
   let rawItems: { rows: any[] } = { rows: [] };
@@ -193,7 +224,7 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
     shopifyOrderId: rawOrder.id,
     externalOrderId: rawOrder.id,
     sourceTableId: rawOrder.id,
-    channelId: shopifyChannelId,
+    channelId: channelId,
     source: "shopify",
     orderNumber: rawOrder.order_number,
     customerName: rawOrder.customer_name || rawOrder.shipping_name || rawOrder.order_number,
@@ -218,16 +249,64 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
     orderPlacedAt: rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : undefined,
   }, enrichedItems);
 
-  // Auto-reserve inventory at bin level for orders that need fulfillment
-  if (warehouseStatus === "ready") {
-    try {
-      const reserveResult = await reservation.reserveOrder(newOrder.id);
-      if (reserveResult.failed.length > 0) {
-        console.log(`[ORDER SYNC] Reservation partial for ${rawOrder.order_number}: ${reserveResult.failed.length} items could not be reserved`);
+  // Route order to the correct warehouse via fulfillment routing rules
+  try {
+    const routingCtx = {
+      channelId: channelId,
+      skus: enrichedItems.map((i: any) => i.sku).filter((s: string) => s !== "UNKNOWN"),
+      country: rawOrder.shipping_country,
+    };
+    const routing = await fulfillmentRouter.routeOrder(routingCtx);
+    if (routing) {
+      await fulfillmentRouter.assignWarehouseToOrder(newOrder.id, routing);
+      console.log(`[ORDER SYNC] Routed ${rawOrder.order_number} → warehouse ${routing.warehouseCode} (${routing.warehouseType})${routing.matchedRule ? ` via rule ${routing.matchedRule.matchType}=${routing.matchedRule.matchValue}` : " (default)"}`);
+
+      // Set SLA due date based on channel's partner profile
+      try {
+        await slaMonitor.setSLAForOrder(newOrder.id);
+      } catch (slaErr) {
+        console.error(`[ORDER SYNC] SLA setup failed for ${rawOrder.order_number}:`, slaErr);
       }
-    } catch (e) {
-      console.error(`[ORDER SYNC] Reservation failed for ${rawOrder.order_number}:`, e);
-      // Non-blocking — order still created, just not reserved
+
+      // 3PL orders: skip bin-level reservation, they don't enter pick/pack workflow
+      if (routing.warehouseType === "3pl") {
+        console.log(`[ORDER SYNC] 3PL order ${rawOrder.order_number} — skipping reservation (external fulfillment)`);
+      } else if (warehouseStatus === "ready") {
+        // Auto-reserve inventory at bin level for managed warehouse orders
+        try {
+          const reserveResult = await reservation.reserveOrder(newOrder.id);
+          if (reserveResult.failed.length > 0) {
+            console.log(`[ORDER SYNC] Reservation partial for ${rawOrder.order_number}: ${reserveResult.failed.length} items could not be reserved`);
+          }
+        } catch (e) {
+          console.error(`[ORDER SYNC] Reservation failed for ${rawOrder.order_number}:`, e);
+        }
+      }
+    } else {
+      // No routing result (no default warehouse configured) — reserve as before
+      if (warehouseStatus === "ready") {
+        try {
+          const reserveResult = await reservation.reserveOrder(newOrder.id);
+          if (reserveResult.failed.length > 0) {
+            console.log(`[ORDER SYNC] Reservation partial for ${rawOrder.order_number}: ${reserveResult.failed.length} items could not be reserved`);
+          }
+        } catch (e) {
+          console.error(`[ORDER SYNC] Reservation failed for ${rawOrder.order_number}:`, e);
+        }
+      }
+    }
+  } catch (routingError) {
+    console.error(`[ORDER SYNC] Routing failed for ${rawOrder.order_number}, falling back to default reservation:`, routingError);
+    // Fallback: reserve as before if routing fails
+    if (warehouseStatus === "ready") {
+      try {
+        const reserveResult = await reservation.reserveOrder(newOrder.id);
+        if (reserveResult.failed.length > 0) {
+          console.log(`[ORDER SYNC] Reservation partial for ${rawOrder.order_number}: ${reserveResult.failed.length} items could not be reserved`);
+        }
+      } catch (e) {
+        console.error(`[ORDER SYNC] Reservation failed for ${rawOrder.order_number}:`, e);
+      }
     }
   }
 
@@ -431,6 +510,15 @@ export async function setupOrderSyncListener() {
     syncInterval = setInterval(() => {
       syncNewOrders();
     }, 60 * 1000);
+
+    // Periodic SLA status update every 15 minutes
+    setInterval(async () => {
+      try {
+        await slaMonitor.updateSLAStatuses();
+      } catch (e) {
+        console.error("[ORDER SYNC] SLA status update failed:", e);
+      }
+    }, 15 * 60 * 1000);
 
     // INSERT trigger for new orders
     await listenerClient.query(`

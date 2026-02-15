@@ -5,6 +5,7 @@ import {
   inventoryLevels,
   productVariants,
   warehouseLocations,
+  warehouses,
 } from "@shared/schema";
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -79,6 +80,10 @@ class ReservationService {
       totalBaseUnits: 0,
     };
 
+    // Get the order to determine warehouse scope
+    const [order] = await this.db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+    const warehouseId = order?.warehouseId ?? null;
+
     // Fetch all line items for this order
     const items = await this.db
       .select()
@@ -109,6 +114,15 @@ class ReservationService {
         // 3. Find the best location to reserve from
         //    Prefer pick locations with sufficient available stock,
         //    ordered by pick_sequence for walk-path efficiency.
+        //    Scoped to the order's assigned warehouse if set.
+        const locationFilters = [
+          eq(inventoryLevels.productVariantId, variant.id),
+          // Available = onHand - reserved - picked > 0
+          sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
+        ];
+        if (warehouseId) {
+          locationFilters.push(eq(warehouseLocations.warehouseId, warehouseId));
+        }
         const levels = await this.db
           .select()
           .from(inventoryLevels)
@@ -116,13 +130,7 @@ class ReservationService {
             warehouseLocations,
             eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
           )
-          .where(
-            and(
-              eq(inventoryLevels.productVariantId, variant.id),
-              // Available = onHand - reserved - picked > 0
-              sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
-            ),
-          )
+          .where(and(...locationFilters))
           .orderBy(warehouseLocations.pickSequence);
 
         if (levels.length === 0) {

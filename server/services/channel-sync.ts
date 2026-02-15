@@ -491,7 +491,9 @@ class ChannelSyncService {
     }
     const shopifyInventoryItemId = variantRow.shopifyInventoryItemId;
 
-    // Look up warehouses with Shopify location IDs configured
+    // Look up managed warehouses with Shopify location IDs configured
+    // Only push for internal-source warehouses (Echelon is truth).
+    // External warehouses (3PL/channel/integration) manage their own Shopify inventory.
     const warehouseRows: Warehouse[] = await this.db
       .select()
       .from(warehouses)
@@ -499,6 +501,7 @@ class ChannelSyncService {
         and(
           eq(warehouses.isActive, 1),
           sql`${warehouses.shopifyLocationId} IS NOT NULL`,
+          sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
         ),
       );
 

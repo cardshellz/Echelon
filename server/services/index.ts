@@ -34,6 +34,9 @@ import { createReplenishmentService } from "./replenishment";
 import { createChannelSyncService } from "./channel-sync";
 import { createReturnsService } from "./returns";
 import { createInventoryAlertService } from "./inventory-alerts";
+import { createFulfillmentRouterService } from "./fulfillment-router";
+import { createInventorySourceService } from "./inventory-source";
+import { createSLAMonitorService } from "./sla-monitor";
 
 export function createServices(db: any) {
   // Foundation
@@ -52,6 +55,9 @@ export function createServices(db: any) {
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
+  const fulfillmentRouter = createFulfillmentRouterService(db);
+  const inventorySource = createInventorySourceService(db, inventoryCore);
+  const slaMonitor = createSLAMonitorService(db);
 
   return {
     inventoryCore,
@@ -63,6 +69,9 @@ export function createServices(db: any) {
     channelSync,
     returns,
     inventoryAlerts,
+    fulfillmentRouter,
+    inventorySource,
+    slaMonitor,
   };
 }
 
@@ -76,6 +85,9 @@ export { createReplenishmentService } from "./replenishment";
 export { createChannelSyncService } from "./channel-sync";
 export { createReturnsService } from "./returns";
 export { createInventoryAlertService } from "./inventory-alerts";
+export { createFulfillmentRouterService } from "./fulfillment-router";
+export { createInventorySourceService } from "./inventory-source";
+export { createSLAMonitorService } from "./sla-monitor";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";
@@ -84,3 +96,6 @@ export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary }
 export type { SyncResult } from "./channel-sync";
 export type { ReservationResult } from "./reservation";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./returns";
+export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router";
+export type { SyncResult as InventorySourceSyncResult } from "./inventory-source";
+export type { SLAAlert, SLASummary } from "./sla-monitor";

@@ -4,8 +4,8 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, generateLocationCode, productLocations, productVariants, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments } from "@shared/schema";
-import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, inventoryLevels, inventoryTransactions, orders, combinedOrderGroups, appSettings, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
+import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation, CycleCountItem } from "@shared/schema";
 import Papa from "papaparse";
@@ -4111,22 +4111,68 @@ export async function registerRoutes(
     }
   });
 
+  // ===== MULTI-CHANNEL WEBHOOK HELPERS =====
+
+  /**
+   * Verify a webhook from any connected Shopify store.
+   * 1. Check X-Shopify-Shop-Domain header → look up channel by shop domain
+   * 2. If channel has a webhookSecret, verify using that
+   * 3. Fall back to default SHOPIFY_API_SECRET (primary store)
+   * Returns { verified, channelId, shopDomain }
+   */
+  async function verifyChannelWebhook(req: Request): Promise<{
+    verified: boolean;
+    channelId: number | null;
+    shopDomain: string | null;
+  }> {
+    const hmac = req.headers["x-shopify-hmac-sha256"] as string;
+    const rawBody = (req as any).rawBody as Buffer | undefined;
+    const shopDomain = (req.headers["x-shopify-shop-domain"] as string) || null;
+
+    if (!rawBody || !hmac) {
+      return { verified: false, channelId: null, shopDomain };
+    }
+
+    // Try to find channel by shop domain
+    if (shopDomain) {
+      const connResult = await db.execute<{ channel_id: number; webhook_secret: string | null }>(sql`
+        SELECT cc.channel_id, cc.webhook_secret
+        FROM channel_connections cc
+        WHERE LOWER(cc.shop_domain) = LOWER(${shopDomain})
+        LIMIT 1
+      `);
+
+      if (connResult.rows.length > 0) {
+        const conn = connResult.rows[0];
+        // If the channel has its own webhook secret, use it
+        if (conn.webhook_secret) {
+          const verified = verifyWebhookWithSecret(rawBody, hmac, conn.webhook_secret);
+          return { verified, channelId: conn.channel_id, shopDomain };
+        }
+        // Channel exists but no webhook secret — fall through to default
+        const verified = verifyShopifyWebhook(rawBody, hmac);
+        return { verified, channelId: conn.channel_id, shopDomain };
+      }
+    }
+
+    // Fall back to default verification (primary store)
+    const verified = verifyShopifyWebhook(rawBody, hmac);
+    // Resolve default channel
+    const allChannels = await storage.getAllChannels();
+    const defaultChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
+    return { verified, channelId: defaultChannel?.id || null, shopDomain };
+  }
+
   // Shopify Webhooks - raw body captured by express.json verify callback
   app.post("/api/shopify/webhooks/products/create", async (req: Request, res: Response) => {
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+      const { verified, shopDomain } = await verifyChannelWebhook(req);
+
+      if (!verified) {
+        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
-      
+
       const payload = req.body;
       const skus = extractSkusFromWebhookPayload(payload);
       
@@ -4144,19 +4190,13 @@ export async function registerRoutes(
 
   app.post("/api/shopify/webhooks/products/update", async (req: Request, res: Response) => {
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+      const { verified, shopDomain } = await verifyChannelWebhook(req);
+
+      if (!verified) {
+        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
-      
+
       // Respond immediately to prevent webhook timeout and memory pileup
       res.status(200).json({ received: true });
       
@@ -4185,19 +4225,13 @@ export async function registerRoutes(
 
   app.post("/api/shopify/webhooks/products/delete", async (req: Request, res: Response) => {
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+      const { verified, shopDomain } = await verifyChannelWebhook(req);
+
+      if (!verified) {
+        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
-      
+
       const payload = req.body;
       const skus = extractSkusFromWebhookPayload(payload);
       const skuList = skus.map(s => s.sku);
@@ -4284,19 +4318,13 @@ export async function registerRoutes(
   // Fulfillment created - track line items and check if all fulfilled
   app.post("/api/shopify/webhooks/fulfillments/create", async (req: Request, res: Response) => {
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+      const { verified, channelId: webhookChannelId, shopDomain } = await verifyChannelWebhook(req);
+
+      if (!verified) {
+        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
-      
+
       const payload = req.body;
       const shopifyOrderId = String(payload.order_id);
       const fulfillmentStatus = payload.status; // pending, open, success, cancelled, error, failure
@@ -4344,23 +4372,17 @@ export async function registerRoutes(
   // The create webhook handles initial shipment; update is just for metadata changes.
   app.post("/api/shopify/webhooks/fulfillments/update", async (req: Request, res: Response) => {
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        console.error("Missing raw body for webhook verification");
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        console.error("Invalid Shopify webhook signature");
+      const { verified, shopDomain } = await verifyChannelWebhook(req);
+
+      if (!verified) {
+        console.error(`Invalid webhook signature${shopDomain ? ` from ${shopDomain}` : ""}`);
         return res.status(401).json({ error: "Invalid signature" });
       }
-      
+
       const payload = req.body;
       const shopifyOrderId = String(payload.order_id);
       const fulfillmentStatus = payload.status;
-      
+
       console.log(`Fulfillment update webhook: order ${shopifyOrderId}, status: ${fulfillmentStatus} (metadata update only, not processing line items)`);
       
       // We don't process line items on update to avoid double-counting.
@@ -4381,17 +4403,9 @@ export async function registerRoutes(
   app.post("/api/shopify/webhooks/orders/create", async (req: Request, res: Response) => {
     console.log("[ORDER WEBHOOK] Received orders/create webhook - DISABLED, use sync-from-raw-tables instead");
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        return res.status(401).json({ error: "Invalid signature" });
-      }
-      
+      const { verified } = await verifyChannelWebhook(req);
+      if (!verified) return res.status(401).json({ error: "Invalid signature" });
+
       // Webhook disabled - orders come from shopify_orders table via sync-from-raw-tables
       res.status(200).json({ received: true, note: "Webhook disabled, use sync-from-raw-tables" });
     } catch (error) {
@@ -4404,17 +4418,9 @@ export async function registerRoutes(
   app.post("/api/shopify/webhooks/orders/fulfilled", async (req: Request, res: Response) => {
     console.log("[ORDER WEBHOOK] Received orders/fulfilled webhook - DISABLED");
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        return res.status(401).json({ error: "Invalid signature" });
-      }
-      
+      const { verified } = await verifyChannelWebhook(req);
+      if (!verified) return res.status(401).json({ error: "Invalid signature" });
+
       res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
       console.error("Order fulfilled webhook error:", error);
@@ -4426,17 +4432,9 @@ export async function registerRoutes(
   app.post("/api/shopify/webhooks/orders/cancelled", async (req: Request, res: Response) => {
     console.log("[ORDER WEBHOOK] Received orders/cancelled webhook - DISABLED");
     try {
-      const hmac = req.headers["x-shopify-hmac-sha256"] as string;
-      const rawBody = (req as any).rawBody as Buffer | undefined;
-      
-      if (!rawBody) {
-        return res.status(400).json({ error: "Missing request body" });
-      }
-      
-      if (!verifyShopifyWebhook(rawBody, hmac)) {
-        return res.status(401).json({ error: "Invalid signature" });
-      }
-      
+      const { verified } = await verifyChannelWebhook(req);
+      if (!verified) return res.status(401).json({ error: "Invalid signature" });
+
       res.status(200).json({ received: true, note: "Webhook disabled" });
     } catch (error) {
       console.error("Order cancelled webhook error:", error);
@@ -4525,6 +4523,78 @@ export async function registerRoutes(
         return res.status(409).json({ error: "Cannot delete warehouse - locations are assigned to it" });
       }
       res.status(500).json({ error: "Failed to delete warehouse" });
+    }
+  });
+
+  // ===== FULFILLMENT ROUTING RULES =====
+
+  app.get("/api/fulfillment-routing-rules", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const rules = await db.select().from(fulfillmentRoutingRules).orderBy(sql`priority DESC, id`);
+      res.json(rules);
+    } catch (error) {
+      console.error("Error fetching routing rules:", error);
+      res.status(500).json({ error: "Failed to fetch routing rules" });
+    }
+  });
+
+  app.post("/api/fulfillment-routing-rules", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const parsed = insertFulfillmentRoutingRuleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid rule data", details: parsed.error });
+      }
+      const data = parsed.data;
+      // Validate matchType
+      if (!routingMatchTypeEnum.includes(data.matchType as any)) {
+        return res.status(400).json({ error: `Invalid matchType. Must be one of: ${routingMatchTypeEnum.join(", ")}` });
+      }
+      // 'default' type doesn't need a matchValue
+      if (data.matchType !== "default" && !data.matchValue) {
+        return res.status(400).json({ error: "matchValue is required for non-default rules" });
+      }
+      const [rule] = await db.insert(fulfillmentRoutingRules).values(data as any).returning();
+      res.status(201).json(rule);
+    } catch (error) {
+      console.error("Error creating routing rule:", error);
+      res.status(500).json({ error: "Failed to create routing rule" });
+    }
+  });
+
+  app.patch("/api/fulfillment-routing-rules/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const parsed = insertFulfillmentRoutingRuleSchema.partial().safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid rule data", details: parsed.error });
+      }
+      const [rule] = await db.update(fulfillmentRoutingRules)
+        .set({ ...parsed.data as any, updatedAt: new Date() })
+        .where(eq(fulfillmentRoutingRules.id, id))
+        .returning();
+      if (!rule) {
+        return res.status(404).json({ error: "Routing rule not found" });
+      }
+      res.json(rule);
+    } catch (error) {
+      console.error("Error updating routing rule:", error);
+      res.status(500).json({ error: "Failed to update routing rule" });
+    }
+  });
+
+  app.delete("/api/fulfillment-routing-rules/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [deleted] = await db.delete(fulfillmentRoutingRules)
+        .where(eq(fulfillmentRoutingRules.id, id))
+        .returning();
+      if (!deleted) {
+        return res.status(404).json({ error: "Routing rule not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting routing rule:", error);
+      res.status(500).json({ error: "Failed to delete routing rule" });
     }
   });
 
@@ -11949,6 +12019,88 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Error starting channel sync:", error);
       res.status(500).json({ error: error.message || "Failed to start sync" });
+    }
+  });
+
+  // --- External Inventory Sync (3PL / Channel pull) ---
+
+  app.post("/api/warehouses/:id/sync-inventory", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { inventorySource } = req.app.locals.services;
+      const warehouseId = parseInt(req.params.id);
+      if (isNaN(warehouseId)) {
+        return res.status(400).json({ error: "Invalid warehouse ID" });
+      }
+      // Fire-and-forget to avoid timeout
+      res.json({ status: "started", message: "Inventory sync started" });
+      inventorySource.syncWarehouse(warehouseId)
+        .then((result: any) => {
+          console.log(`[InventorySource] Sync complete for warehouse ${result.warehouseCode}: ${result.synced} synced, ${result.skipped} skipped, ${result.errors.length} errors`);
+        })
+        .catch((err: any) => {
+          console.error("[InventorySource] Sync failed:", err);
+        });
+    } catch (error: any) {
+      console.error("Error starting inventory source sync:", error);
+      res.status(500).json({ error: error.message || "Failed to start sync" });
+    }
+  });
+
+  app.post("/api/sync/external-inventory", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { inventorySource } = req.app.locals.services;
+      // Fire-and-forget
+      res.json({ status: "started", message: "External inventory sync started for all warehouses" });
+      inventorySource.syncAll()
+        .then((results: any[]) => {
+          for (const r of results) {
+            console.log(`[InventorySource] ${r.warehouseCode}: ${r.synced} synced, ${r.skipped} skipped, ${r.errors.length} errors`);
+          }
+        })
+        .catch((err: any) => {
+          console.error("[InventorySource] Bulk sync failed:", err);
+        });
+    } catch (error: any) {
+      console.error("Error starting bulk inventory source sync:", error);
+      res.status(500).json({ error: error.message || "Failed to start sync" });
+    }
+  });
+
+  // --- SLA Monitoring ---
+
+  // Get SLA alerts (at_risk + overdue orders)
+  app.get("/api/sla/alerts", requirePermission("orders", "view"), async (req, res) => {
+    try {
+      const { slaMonitor } = req.app.locals.services;
+      const alerts = await slaMonitor.getSLAAlerts();
+      res.json(alerts);
+    } catch (error: any) {
+      console.error("Error fetching SLA alerts:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch SLA alerts" });
+    }
+  });
+
+  // Get SLA summary counts
+  app.get("/api/sla/summary", requirePermission("orders", "view"), async (req, res) => {
+    try {
+      const { slaMonitor } = req.app.locals.services;
+      const summary = await slaMonitor.getSLASummary();
+      res.json(summary);
+    } catch (error: any) {
+      console.error("Error fetching SLA summary:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch SLA summary" });
+    }
+  });
+
+  // Manually trigger SLA status update
+  app.post("/api/sla/update-statuses", requirePermission("orders", "manage"), async (req, res) => {
+    try {
+      const { slaMonitor } = req.app.locals.services;
+      const result = await slaMonitor.updateSLAStatuses();
+      res.json({ message: "SLA statuses updated", ...result });
+    } catch (error: any) {
+      console.error("Error updating SLA statuses:", error);
+      res.status(500).json({ error: error.message || "Failed to update SLA statuses" });
     }
   });
 

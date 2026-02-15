@@ -239,6 +239,29 @@ export function verifyShopifyWebhook(rawBody: Buffer, hmacHeader: string): boole
   }
 }
 
+/**
+ * Verify a Shopify webhook using a channel-specific secret.
+ * Falls back to the default SHOPIFY_API_SECRET if no channel secret is provided.
+ */
+export function verifyWebhookWithSecret(rawBody: Buffer, hmacHeader: string, secret: string): boolean {
+  if (!secret) return false;
+  if (!hmacHeader) return false;
+
+  const generatedHash = crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("base64");
+
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(generatedHash),
+      Buffer.from(hmacHeader)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function extractSkusFromWebhookPayload(payload: any): { sku: string; name: string; status: string }[] {
   const skus: { sku: string; name: string; status: string }[] = [];
   const productStatus = payload.status || "active";

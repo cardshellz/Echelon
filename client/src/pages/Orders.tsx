@@ -17,7 +17,8 @@ import {
   Merge,
   MapPin,
   User2,
-  Check
+  Check,
+  Building2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -83,6 +84,7 @@ interface Order {
   source: string;
   channelId: number | null;
   channel: Channel | null;
+  warehouseId: number | null;
   warehouseStatus: string;
   priority: string;
   itemCount: number;
@@ -94,6 +96,8 @@ interface Order {
   items: OrderItem[];
   combinedGroupId: number | null;
   combinedRole: string | null;
+  slaDueAt: string | null;
+  slaStatus: string | null;
 }
 
 interface OrdersResponse {
@@ -141,6 +145,8 @@ const statusColors: Record<string, string> = {
   completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
   exception: "bg-red-50 text-red-700 border-red-200",
   shipped: "bg-purple-50 text-purple-700 border-purple-200",
+  awaiting_3pl: "bg-violet-50 text-violet-700 border-violet-200",
+  cancelled: "bg-gray-50 text-gray-700 border-gray-200",
 };
 
 const priorityColors: Record<string, string> = {
@@ -163,6 +169,7 @@ export default function Orders() {
 
   const [searchTerm, setSearchTerm] = useState("");
   const [channelFilter, setChannelFilter] = useState<string>("all");
+  const [warehouseFilter, setWarehouseFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCombineOpen, setIsCombineOpen] = useState(false);
@@ -204,6 +211,10 @@ export default function Orders() {
 
   const { data: channels } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
+  });
+
+  const { data: allWarehouses = [] } = useQuery<{ id: number; code: string; name: string; warehouseType: string }[]>({
+    queryKey: ["/api/warehouses"],
   });
 
   const { data: combinableGroups = [], isError: combinableError } = useQuery<CombinableGroup[]>({
@@ -347,6 +358,9 @@ export default function Orders() {
 
   const orders = ordersData?.orders || [];
   const filteredOrders = orders.filter(order => {
+    // Warehouse filter
+    if (warehouseFilter !== "all" && String(order.warehouseId || "") !== warehouseFilter) return false;
+    // Search filter
     if (!searchTerm) return true;
     const search = searchTerm.toLowerCase();
     return (
@@ -608,6 +622,20 @@ export default function Orders() {
                   ))}
                 </SelectContent>
               </Select>
+              {allWarehouses.length > 1 && (
+                <Select value={warehouseFilter} onValueChange={setWarehouseFilter}>
+                  <SelectTrigger className="w-full sm:w-[180px] h-11">
+                    <Building2 className="h-4 w-4 mr-2" />
+                    <SelectValue placeholder="All Warehouses" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Warehouses</SelectItem>
+                    {allWarehouses.map((wh) => (
+                      <SelectItem key={wh.id} value={String(wh.id)}>{wh.code} - {wh.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               <Button variant="outline" size="icon" onClick={() => refetchOrders()} className="min-h-[44px] min-w-[44px]" data-testid="button-refresh-orders">
                 <RefreshCw className="h-4 w-4" />
               </Button>
@@ -700,8 +728,25 @@ export default function Orders() {
                                   </Badge>
                                 )}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
-                                  {order.warehouseStatus.replace("_", " ")}
+                                  {order.warehouseStatus === "awaiting_3pl" ? "3PL" : order.warehouseStatus.replace("_", " ")}
                                 </Badge>
+                                {order.warehouseId && allWarehouses.length > 1 && (() => {
+                                  const wh = allWarehouses.find(w => w.id === order.warehouseId);
+                                  if (!wh) return null;
+                                  return (
+                                    <Badge variant="outline" className={cn("text-xs", wh.warehouseType === "3pl" ? "bg-purple-50 text-purple-700 border-purple-200" : "bg-slate-50 text-slate-600 border-slate-200")}>
+                                      {wh.code}
+                                    </Badge>
+                                  );
+                                })()}
+                                {order.slaStatus && order.slaStatus !== "on_time" && order.slaStatus !== "met" && (
+                                  <Badge variant="outline" className={cn("text-xs",
+                                    order.slaStatus === "overdue" ? "bg-red-50 text-red-700 border-red-200" :
+                                    order.slaStatus === "at_risk" ? "bg-amber-50 text-amber-700 border-amber-200" : ""
+                                  )}>
+                                    {order.slaStatus === "overdue" ? "SLA Overdue" : "SLA At Risk"}
+                                  </Badge>
+                                )}
                                 {order.onHold === 1 && (
                                   <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
                                 )}
