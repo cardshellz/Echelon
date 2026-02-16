@@ -543,7 +543,7 @@ export default function CycleCounts() {
     const done = new Set<number>();
     for (const [locId, items] of Object.entries(groups)) {
       const id = Number(locId);
-      if (items.every(i => i.status === "pending")) {
+      if (items.some(i => i.status === "pending")) {
         pending.add(id);
       } else if (items.some(i => (i.varianceType && i.status !== "approved") || i.status === "investigate")) {
         needsReview.add(id);
@@ -766,17 +766,17 @@ export default function CycleCounts() {
 
     // Bin-level stats based on disposition (does this bin need action?)
     const totalBins = binGroups.length;
-    // Pending: not yet counted (all items still pending)
-    const pendingCount = binGroups.filter(b => b.items.every(i => i.status === "pending")).length;
-    // Needs Review: counted but has unapproved variances or items under investigation
+    // Pending: has ANY items still pending (not fully counted)
+    const pendingCount = binGroups.filter(b => b.items.some(i => i.status === "pending")).length;
+    // Needs Review: fully counted but has unapproved variances or items under investigation
     const needsReviewCount = binGroups.filter(b =>
-      !b.items.every(i => i.status === "pending") &&
+      !b.items.some(i => i.status === "pending") &&
       b.items.some(i =>
         (i.varianceType && i.status !== "approved") ||
         i.status === "investigate"
       )
     ).length;
-    // Done: counted, no issues OR all variances approved/resolved
+    // Done: fully counted, no issues OR all variances approved/resolved
     const doneCount = totalBins - pendingCount - needsReviewCount;
     
     // Get current bin group and items
