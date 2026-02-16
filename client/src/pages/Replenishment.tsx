@@ -1432,7 +1432,7 @@ export default function Replenishment() {
                               <span>
                                 {task.qtySourceUnits} {uomLabel(task.sourceVariant.hierarchyLevel)}
                                 <span className="text-muted-foreground mx-0.5">→</span>
-                                {task.qtyCompleted}/{task.qtyTargetUnits} {uomLabel(task.pickVariant.hierarchyLevel)}
+                                {Math.floor(task.qtyCompleted / (task.pickVariant.unitsPerVariant || 1))}/{Math.floor(task.qtyTargetUnits / (task.pickVariant.unitsPerVariant || 1))} {uomLabel(task.pickVariant.hierarchyLevel)}
                               </span>
                             ) : (
                               <span>{task.qtyCompleted}/{task.qtyTargetUnits}</span>
