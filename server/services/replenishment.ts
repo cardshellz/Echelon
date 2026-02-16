@@ -350,7 +350,30 @@ class ReplenishmentService {
         sourcePriority,
       );
       if (!sourceLocation) {
-        // No source stock — create a blocked task so it's visible
+        // No stock at immediate parent — try cascade (walk up one more level)
+        if (sourceVariantId) {
+          const cascadeResult = await this.tryCascadeReplen({
+            sourceVariantId,
+            pickVariantId: level.productVariantId,
+            pickLocationId: level.warehouseLocationId,
+            warehouseId: location.warehouseId ?? undefined,
+            sourceLocationType,
+            sourcePriority,
+            rule,
+            tierDefault,
+            whSettings,
+            taskNotes,
+            triggeredBy: "min_max",
+            priority,
+            autoReplen,
+          });
+          if (cascadeResult) {
+            newTasks.push(cascadeResult);
+            continue;
+          }
+        }
+
+        // No cascade possible — create a blocked task so it's visible
         const [blockedTask] = await this.db
           .insert(replenTasks)
           .values({
@@ -645,7 +668,46 @@ class ReplenishmentService {
       })
       .where(eq(replenTasks.id, taskId));
 
+    // Unblock dependent cascade tasks
+    await this.unblockDependentTasks(taskId, userId);
+
     return { moved: movedBaseUnits };
+  }
+
+  /**
+   * After a task completes, check for blocked tasks that depend on it.
+   * Unblock them and auto-execute if configured.
+   */
+  private async unblockDependentTasks(completedTaskId: number, userId?: string): Promise<void> {
+    const dependents = await this.db
+      .select()
+      .from(replenTasks)
+      .where(
+        and(
+          eq(replenTasks.dependsOnTaskId, completedTaskId),
+          eq(replenTasks.status, "blocked"),
+        ),
+      );
+
+    for (const dep of dependents) {
+      await this.db
+        .update(replenTasks)
+        .set({
+          status: "pending",
+          dependsOnTaskId: null,
+          notes: `${dep.notes || ""}\nUnblocked by completed task #${completedTaskId}`,
+        })
+        .where(eq(replenTasks.id, dep.id));
+
+      // Auto-execute if the dependent task has autoReplen=1
+      if (dep.autoReplen === 1) {
+        try {
+          await this.executeTask(dep.id, userId ?? "system:auto-replen");
+        } catch (err: any) {
+          console.warn(`[Replen] Auto-execute of unblocked task ${dep.id} failed:`, err?.message);
+        }
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -868,7 +930,27 @@ class ReplenishmentService {
       sourcePriority,
     );
     if (!sourceLocation) {
-      // No source stock — create a blocked task so it's visible
+      // No stock at immediate parent — try cascade (walk up one more level)
+      if (sourceVariantId) {
+        const cascadeResult = await this.tryCascadeReplen({
+          sourceVariantId,
+          pickVariantId: productVariantId,
+          pickLocationId: warehouseLocationId,
+          warehouseId: location.warehouseId ?? undefined,
+          sourceLocationType,
+          sourcePriority,
+          rule,
+          tierDefault,
+          whSettings,
+          taskNotes,
+          triggeredBy: "inline_pick",
+          priority,
+          autoReplen,
+        });
+        if (cascadeResult) return cascadeResult;
+      }
+
+      // No cascade possible — create a blocked task so it's visible
       const [blockedTask] = await this.db
         .insert(replenTasks)
         .values({
@@ -1128,7 +1210,10 @@ class ReplenishmentService {
 
         for (const tierDefault of sortedTierDefaults) {
           if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
-          const sourceVar = prodVariants.get(tierDefault.sourceHierarchyLevel);
+          // Walk parentVariantId first, fall back to tier default sourceHierarchyLevel
+          const parentId = pickVariant.parentVariantId;
+          const parentVar = parentId ? variantMap.get(parentId) : null;
+          const sourceVar = parentVar ?? prodVariants.get(tierDefault.sourceHierarchyLevel);
           if (sourceVar) {
             matchedDefault = tierDefault;
             sourceVariant = sourceVar;
@@ -1746,14 +1831,154 @@ class ReplenishmentService {
   }
 
   /**
-   * Resolve the source variant ID from the tier default. If the tier default
-   * specifies a different sourceHierarchyLevel, find the variant in the same
-   * product at that hierarchy level.
+   * Try to create a cascade chain of replen tasks when the immediate source
+   * variant has no stock. Walks up the parentVariantId chain to find an
+   * ancestor with stock, then creates an upstream task (ancestor→intermediate)
+   * and a blocked downstream task (intermediate→pick) linked by dependsOnTaskId.
    *
-   * Always resolves by product_id + sourceHierarchyLevel (NOT parentVariantId).
-   * parentVariantId is the packaging chain pointer (L1→L2→L3) which may point
-   * to the wrong hierarchy level for replen (e.g., L1's parent is L2, but tier
-   * default says source from L3).
+   * Returns the blocked downstream task if cascade was created, null otherwise.
+   */
+  private async tryCascadeReplen(opts: {
+    sourceVariantId: number;
+    pickVariantId: number;
+    pickLocationId: number;
+    warehouseId: number | undefined;
+    sourceLocationType: string;
+    sourcePriority: string;
+    rule: any;
+    tierDefault: ReplenTierDefault | null;
+    whSettings: any;
+    taskNotes: string;
+    triggeredBy: string;
+    priority: number;
+    autoReplen: number;
+  }): Promise<ReplenTask | null> {
+    // Load the intermediate variant (immediate parent of pick variant)
+    const [intermediateVariant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, opts.sourceVariantId))
+      .limit(1);
+    if (!intermediateVariant?.parentVariantId) return null; // No further parent to cascade from
+
+    const grandparentVariantId = intermediateVariant.parentVariantId;
+
+    // Find stock at the grandparent level
+    const cascadeSourceLocation = await this.findSourceLocation(
+      grandparentVariantId,
+      opts.warehouseId,
+      opts.sourceLocationType,
+      null, // no parent location hint for cascade
+      opts.sourcePriority,
+    );
+    if (!cascadeSourceLocation) return null; // No stock at grandparent either
+
+    // Load the grandparent variant for qty calculations
+    const [grandparentVariant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.id, grandparentVariantId))
+      .limit(1);
+    if (!grandparentVariant) return null;
+
+    // Look up tier default for the intermediate level (for its own replenMethod/autoReplen)
+    const cascadeTierDefault = await this.findTierDefaultForVariant(
+      intermediateVariant.hierarchyLevel,
+      opts.warehouseId,
+    );
+    const cascadeReplenMethod = cascadeTierDefault?.replenMethod ?? "case_break";
+    const cascadeAutoReplen = cascadeTierDefault?.autoReplen ?? 0;
+    const cascadePriority = cascadeTierDefault?.priority ?? opts.priority;
+
+    // Calculate upstream qty: 1 grandparent unit → N intermediate units
+    const cascadeQtySource = 1;
+    const cascadeQtyTarget = grandparentVariant.unitsPerVariant;
+
+    // Resolve auto-execute for the upstream cascade task
+    const cascadeExec = this.resolveAutoExecute(
+      null,
+      cascadeAutoReplen,
+      opts.whSettings,
+      cascadeQtyTarget,
+    );
+
+    // --- Create Task A: upstream (grandparent → intermediate) at source location (in-place break) ---
+    const [upstreamTask] = await this.db
+      .insert(replenTasks)
+      .values({
+        replenRuleId: null,
+        fromLocationId: cascadeSourceLocation.id,
+        toLocationId: cascadeSourceLocation.id, // in-place break at reserve
+        catalogProductId: opts.rule?.catalogProductId ?? null,
+        sourceProductVariantId: grandparentVariantId,
+        pickProductVariantId: opts.sourceVariantId, // intermediate variant
+        qtySourceUnits: cascadeQtySource,
+        qtyTargetUnits: cascadeQtyTarget,
+        qtyCompleted: 0,
+        status: "pending",
+        priority: cascadePriority,
+        triggeredBy: "cascade",
+        executionMode: cascadeExec.executionMode,
+        replenMethod: cascadeReplenMethod,
+        autoReplen: cascadeAutoReplen,
+        warehouseId: opts.warehouseId,
+        notes: `Cascade: break ${grandparentVariant.sku || grandparentVariant.name} into ${intermediateVariant.sku || intermediateVariant.name}`,
+      } satisfies InsertReplenTask)
+      .returning();
+
+    // --- Create Task B: downstream (intermediate → pick) blocked until Task A completes ---
+    // Qty for the downstream task: 1 intermediate unit → N pick units
+    const downstreamQtySource = 1;
+    const downstreamQtyTarget = intermediateVariant.unitsPerVariant;
+    const downstreamReplenMethod = opts.tierDefault?.replenMethod ?? "case_break";
+
+    const downstreamExec = this.resolveAutoExecute(
+      opts.rule?.autoReplen ?? null,
+      opts.tierDefault?.autoReplen ?? null,
+      opts.whSettings,
+      downstreamQtyTarget,
+    );
+
+    const [downstreamTask] = await this.db
+      .insert(replenTasks)
+      .values({
+        replenRuleId: opts.rule?.id ?? null,
+        fromLocationId: cascadeSourceLocation.id, // boxes will appear here after Task A
+        toLocationId: opts.pickLocationId,
+        catalogProductId: opts.rule?.catalogProductId ?? null,
+        sourceProductVariantId: opts.sourceVariantId, // intermediate variant
+        pickProductVariantId: opts.pickVariantId,
+        qtySourceUnits: downstreamQtySource,
+        qtyTargetUnits: downstreamQtyTarget,
+        qtyCompleted: 0,
+        status: "blocked",
+        priority: opts.priority,
+        triggeredBy: opts.triggeredBy,
+        executionMode: downstreamExec.executionMode,
+        replenMethod: downstreamReplenMethod,
+        autoReplen: opts.autoReplen,
+        warehouseId: opts.warehouseId,
+        dependsOnTaskId: upstreamTask.id,
+        notes: `${opts.taskNotes}\nBlocked: waiting on cascade task #${upstreamTask.id} (${grandparentVariant.sku} → ${intermediateVariant.sku})`,
+      } satisfies InsertReplenTask)
+      .returning();
+
+    // Auto-execute Task A if configured
+    if (cascadeExec.shouldAutoExecute) {
+      try {
+        await this.executeTask(upstreamTask.id, "system:auto-replen");
+      } catch (autoErr: any) {
+        console.warn(`[Replen] Cascade auto-execute failed for task ${upstreamTask.id}:`, autoErr?.message);
+      }
+    }
+
+    return downstreamTask as ReplenTask;
+  }
+
+  /**
+   * Resolve the source variant for a pick variant.
+   * Strategy 1: Walk parentVariantId (per-product packaging hierarchy).
+   * Strategy 2: Fall back to tier default sourceHierarchyLevel (legacy).
    *
    * @param productVariantsCache  Optional pre-loaded map of productId → variants
    *                              (used by batch checkThresholds to avoid N+1 queries)
@@ -1763,10 +1988,16 @@ class ReplenishmentService {
     tierDefault: ReplenTierDefault | null,
     productVariantsCache?: Map<number, ProductVariant[]>,
   ): Promise<number | null> {
+    // Strategy 1: Walk parentVariantId (per-product packaging hierarchy)
+    // This respects the actual product structure: Pack→Box→Case→Pallet
+    if (pickVariant.parentVariantId) {
+      return pickVariant.parentVariantId;
+    }
+
+    // Strategy 2: Fall back to tier default sourceHierarchyLevel (legacy/products without parentVariantId)
     if (!tierDefault) return null;
     if (tierDefault.sourceHierarchyLevel === pickVariant.hierarchyLevel) return null;
 
-    // Always resolve by product + target hierarchy level
     let siblings: ProductVariant[];
     if (productVariantsCache && pickVariant.productId) {
       siblings = productVariantsCache.get(pickVariant.productId) ?? [];

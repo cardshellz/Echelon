@@ -163,6 +163,7 @@ interface ReplenTask {
   notes: string | null;
   exceptionReason: string | null;
   linkedCycleCountId: number | null;
+  dependsOnTaskId: number | null;
   createdAt: string;
   fromLocation?: WarehouseLocation;
   toLocation?: WarehouseLocation;
@@ -1201,6 +1202,8 @@ export default function Replenishment() {
         return <Badge variant="destructive">Stockout</Badge>;
       case "wave":
         return <Badge className="bg-purple-500">Wave</Badge>;
+      case "cascade":
+        return <Badge className="bg-amber-500">Cascade</Badge>;
       default:
         return <Badge>{trigger}</Badge>;
     }
@@ -1439,7 +1442,14 @@ export default function Replenishment() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="py-2">{getStatusBadge(task.status)}</TableCell>
+                        <TableCell className="py-2">
+                          {getStatusBadge(task.status)}
+                          {task.status === "blocked" && task.dependsOnTaskId && (
+                            <div className="text-[10px] text-muted-foreground mt-0.5">
+                              Waiting on #{task.dependsOnTaskId}
+                            </div>
+                          )}
+                        </TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getModeBadge(task.executionMode)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getTriggerBadge(task.triggeredBy)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">

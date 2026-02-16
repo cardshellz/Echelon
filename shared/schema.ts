@@ -844,6 +844,7 @@ export const replenTasks = pgTable("replen_tasks", {
   notes: text("notes"),
   exceptionReason: varchar("exception_reason", { length: 30 }),
   linkedCycleCountId: integer("linked_cycle_count_id").references(() => cycleCounts.id),
+  dependsOnTaskId: integer("depends_on_task_id"), // Blocked until this upstream task completes
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
