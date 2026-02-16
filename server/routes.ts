@@ -7620,17 +7620,19 @@ export async function registerRoutes(
   app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const userId = req.session.user?.id;
-      const { name, description, warehouseId, zoneFilter } = req.body;
-      
+      const { name, description, warehouseId, zoneFilter, locationTypeFilter, binTypeFilter } = req.body;
+
       if (!name) {
         return res.status(400).json({ error: "Name is required" });
       }
-      
+
       const cycleCount = await storage.createCycleCount({
         name,
         description,
         warehouseId: warehouseId || null,
         zoneFilter: zoneFilter || null,
+        locationTypeFilter: locationTypeFilter || null,
+        binTypeFilter: binTypeFilter || null,
         status: "draft",
         createdBy: userId,
       });
