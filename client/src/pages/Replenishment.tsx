@@ -396,6 +396,16 @@ export default function Replenishment() {
     },
   });
 
+  // Derive the effective warehouse replen mode label for display in rule forms
+  // Uses the first warehouse's settings (or DEFAULT) since tier defaults are currently global
+  const effectiveWarehouseReplenMode = (() => {
+    const settings = allWarehouseSettings.find(s => s.warehouseId != null) || allWarehouseSettings[0];
+    if (!settings) return "Manual";
+    if (settings.replenMode === "inline") return "Auto-Complete";
+    if (settings.replenMode === "hybrid") return "Hybrid";
+    return "Manual";
+  })();
+
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("");
 
   // Find the warehouse from the warehouses table
@@ -1063,13 +1073,14 @@ export default function Replenishment() {
       maxQty: tierDefault.maxQty?.toString() || "",
       replenMethod: tierDefault.replenMethod,
       priority: tierDefault.priority.toString(),
-      autoReplen: (tierDefault as any).autoReplen?.toString() || "0",
+      autoReplen: ((tierDefault as any).autoReplen ?? 0).toString(),
     });
     setShowTierDefaultDialog(true);
   };
 
   const handleEditOverride = (override: ReplenRule) => {
     setEditingOverride(override);
+    const ar = (override as any).autoReplen;
     setOverrideForm({
       catalogProductId: override.catalogProductId?.toString() || "",
       pickVariantId: override.pickVariantId?.toString() || "",
@@ -1081,7 +1092,7 @@ export default function Replenishment() {
       maxQty: override.maxQty?.toString() || "",
       replenMethod: override.replenMethod || "",
       priority: override.priority?.toString() || "",
-      autoReplen: (override as any).autoReplen?.toString() || "",
+      autoReplen: ar != null && ar !== 0 ? ar.toString() : "",
     });
     setShowOverrideDialog(true);
   };
@@ -1180,9 +1191,9 @@ export default function Replenishment() {
   const getModeBadge = (mode: string | null | undefined) => {
     switch (mode) {
       case "inline":
-        return <Badge className="bg-orange-500">Inline</Badge>;
+        return <Badge className="bg-orange-500">Auto-Complete</Badge>;
       case "queue":
-        return <Badge variant="outline">Queue</Badge>;
+        return <Badge variant="outline">Manual</Badge>;
       default:
         return <Badge variant="secondary">-</Badge>;
     }
@@ -1276,8 +1287,8 @@ export default function Replenishment() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Modes</SelectItem>
-                  <SelectItem value="queue">Queue</SelectItem>
-                  <SelectItem value="inline">Inline</SelectItem>
+                  <SelectItem value="queue">Manual</SelectItem>
+                  <SelectItem value="inline">Auto-Complete</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={warehouseFilter} onValueChange={setWarehouseFilter}>
@@ -1536,9 +1547,11 @@ export default function Replenishment() {
                             ) : (
                               <Badge variant="secondary" className="text-xs">Inactive</Badge>
                             )}
-                            {(tierDefault as any).autoReplen === 1 && (
-                              <Badge className="bg-orange-500 text-xs">Auto</Badge>
-                            )}
+                            {(tierDefault as any).autoReplen === 1 ? (
+                              <Badge className="bg-orange-500 text-xs">Auto-Complete</Badge>
+                            ) : (tierDefault as any).autoReplen === 2 ? (
+                              <Badge variant="secondary" className="text-xs">Manual</Badge>
+                            ) : null}
                           </div>
                         </TableCell>
                         <TableCell className="py-2">
@@ -2171,7 +2184,7 @@ export default function Replenishment() {
               </div>
 
               <div>
-                <Label className="text-xs md:text-sm">Auto-Replen</Label>
+                <Label className="text-xs md:text-sm">Execution</Label>
                 <Select
                   value={tierDefaultForm.autoReplen}
                   onValueChange={(v) => setTierDefaultForm({ ...tierDefaultForm, autoReplen: v })}
@@ -2180,12 +2193,13 @@ export default function Replenishment() {
                     <SelectValue placeholder="Select..." />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="0">No (Manual)</SelectItem>
-                    <SelectItem value="1">Yes (Auto-Complete)</SelectItem>
+                    <SelectItem value="0">Warehouse Default ({effectiveWarehouseReplenMode})</SelectItem>
+                    <SelectItem value="2">Manual — Worker picks up from queue</SelectItem>
+                    <SelectItem value="1">Auto-Complete — System executes immediately</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  Auto-complete creates and immediately executes the replen task (e.g., pick-to-pick where your picker handles it automatically)
+                  Controls whether replen tasks auto-complete or go to the worker queue. "Warehouse Default" inherits from Warehouse Settings.
                 </p>
               </div>
             </div>
@@ -2348,7 +2362,7 @@ export default function Replenishment() {
               </div>
 
               <div>
-                <Label className="text-xs md:text-sm">Auto-Replen</Label>
+                <Label className="text-xs md:text-sm">Execution</Label>
                 <Select
                   value={overrideForm.autoReplen}
                   onValueChange={(v) => setOverrideForm({ ...overrideForm, autoReplen: v })}
@@ -2357,11 +2371,14 @@ export default function Replenishment() {
                     <SelectValue placeholder="Use default" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use Default</SelectItem>
-                    <SelectItem value="0">No (Manual)</SelectItem>
-                    <SelectItem value="1">Yes (Auto-Complete)</SelectItem>
+                    <SelectItem value="">Tier Default ({effectiveWarehouseReplenMode})</SelectItem>
+                    <SelectItem value="2">Manual — Worker picks up from queue</SelectItem>
+                    <SelectItem value="1">Auto-Complete — System executes immediately</SelectItem>
                   </SelectContent>
                 </Select>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Override the tier default execution for this specific product.
+                </p>
               </div>
             </div>
 

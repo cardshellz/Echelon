@@ -10,7 +10,13 @@ import {
   catalogProducts,
   locationReplenConfig,
   productLocations,
+  warehouseSettings,
+  warehouses,
+  products,
+  cycleCounts,
+  cycleCountItems,
 } from "@shared/schema";
+import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
 import type {
   ReplenTask,
   InsertReplenTask,
@@ -18,6 +24,7 @@ import type {
   ReplenTierDefault,
   InventoryLevel,
   WarehouseLocation,
+  WarehouseSettings,
   ProductVariant,
 } from "@shared/schema";
 
@@ -28,6 +35,15 @@ type DrizzleDb = {
   delete: (...args: any[]) => any;
   execute: (query: any) => Promise<any>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+};
+
+type GenerateTasksResult = {
+  success: boolean;
+  tierDefaultsEvaluated: number;
+  productsScanned: number;
+  tasksCreated: number;
+  skipped: number;
+  details: { tasksCreated: any[]; skipped: any[] };
 };
 
 type InventoryCore = {
@@ -109,6 +125,9 @@ class ReplenishmentService {
 
     const pickLocationIds = pickLocations.map((l) => l.id);
     const pickLocationMap = new Map(pickLocations.map((l) => [l.id, l]));
+
+    // --- 1b. Load warehouse settings for unified execution decision ---
+    const whSettings = await this.getSettingsForWarehouse(warehouseId);
 
     // --- 2. Get inventory levels at those locations ---
     const levels: InventoryLevel[] = await this.db
@@ -313,12 +332,22 @@ class ReplenishmentService {
       const key = `${level.productVariantId}:${level.warehouseLocationId}`;
       if (activeTaskKeys.has(key)) continue;
 
+      // Resolve unified execution decision
+      const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+      const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
+        rule?.autoReplen ?? null,
+        tierDefault?.autoReplen ?? null,
+        whSettings,
+        0, // qtyTargetUnits not known yet for blocked tasks — recalculated below
+      );
+
       // Find a source location with stock (try dedicated parent first)
       const sourceLocation = await this.findSourceLocation(
         sourceVariantId ?? level.productVariantId,
         location.warehouseId ?? undefined,
         sourceLocationType,
         location.parentLocationId,
+        sourcePriority,
       );
       if (!sourceLocation) {
         // No source stock — create a blocked task so it's visible
@@ -337,7 +366,7 @@ class ReplenishmentService {
             status: "blocked",
             priority,
             triggeredBy: "min_max",
-            executionMode: "queue",
+            executionMode,
             replenMethod,
             autoReplen,
             warehouseId: location.warehouseId ?? undefined,
@@ -356,8 +385,15 @@ class ReplenishmentService {
       const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
       const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
-      // Create the task — persist replenMethod and autoReplen on the task itself
-      // so executeTask and workflow routing don't need to re-derive from rules/defaults
+      // Re-resolve with actual qtyTargetUnits (matters for hybrid mode)
+      const execDecision = this.resolveAutoExecute(
+        rule?.autoReplen ?? null,
+        tierDefault?.autoReplen ?? null,
+        whSettings,
+        qtyTargetUnits,
+      );
+
+      // Create the task — persist replenMethod and resolved execution mode
       const [task] = await this.db
         .insert(replenTasks)
         .values({
@@ -373,7 +409,7 @@ class ReplenishmentService {
           status: "pending",
           priority,
           triggeredBy: "min_max",
-          executionMode: "queue",
+          executionMode: execDecision.executionMode,
           replenMethod,
           autoReplen,
           warehouseId: location.warehouseId ?? undefined,
@@ -381,14 +417,12 @@ class ReplenishmentService {
         } satisfies InsertReplenTask)
         .returning();
 
-      // Auto-replen (picker inline): immediately execute the inventory transfer
-      if (autoReplen === 1) {
+      // Unified auto-execute: immediately execute if resolved decision says so
+      if (execDecision.shouldAutoExecute) {
         try {
           await this.executeTask(task.id, "system:auto-replen");
         } catch (autoErr: any) {
           console.warn(`[Replen] Auto-replen failed for task ${task.id}:`, autoErr?.message);
-          // Mark as blocked so it doesn't prevent future task creation (dedup skips blocked)
-          // but remains visible for investigation
           await this.db
             .update(replenTasks)
             .set({
@@ -743,6 +777,9 @@ class ReplenishmentService {
 
     if (!variant) return null;
 
+    // Load warehouse settings for unified execution decision
+    const whSettings = await this.getSettingsForWarehouse(location.warehouseId ?? undefined);
+
     // Resolve triggerValue threshold -- location config > SKU rule > tier default
     // Check location-specific override first (most specific wins)
     const locConfigVariant = await this.db
@@ -813,12 +850,22 @@ class ReplenishmentService {
 
     if (existingTask) return null; // Already queued or blocked
 
+    // Resolve unified execution decision + source priority
+    const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+    const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
+      rule?.autoReplen ?? null,
+      tierDefault?.autoReplen ?? null,
+      whSettings,
+      0, // qtyTargetUnits not known yet — recalculated below
+    );
+
     // Find source location with stock (try dedicated parent first)
     const sourceLocation = await this.findSourceLocation(
       sourceVariantId ?? productVariantId,
       location.warehouseId ?? undefined,
       sourceLocationType,
       location.parentLocationId,
+      sourcePriority,
     );
     if (!sourceLocation) {
       // No source stock — create a blocked task so it's visible
@@ -837,7 +884,7 @@ class ReplenishmentService {
           status: "blocked",
           priority,
           triggeredBy: "inline_pick",
-          executionMode: "queue",
+          executionMode,
           replenMethod,
           autoReplen,
           warehouseId: location.warehouseId ?? undefined,
@@ -860,7 +907,15 @@ class ReplenishmentService {
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
-    // Create the task — persist replenMethod and autoReplen on the task itself
+    // Re-resolve with actual qtyTargetUnits (matters for hybrid mode)
+    const execDecision = this.resolveAutoExecute(
+      rule?.autoReplen ?? null,
+      tierDefault?.autoReplen ?? null,
+      whSettings,
+      qtyTargetUnits,
+    );
+
+    // Create the task — persist replenMethod and resolved execution mode
     const [task] = await this.db
       .insert(replenTasks)
       .values({
@@ -876,7 +931,7 @@ class ReplenishmentService {
         status: "pending",
         priority,
         triggeredBy: "inline_pick",
-        executionMode: "queue",
+        executionMode: execDecision.executionMode,
         replenMethod,
         autoReplen,
         warehouseId: location.warehouseId ?? undefined,
@@ -884,8 +939,8 @@ class ReplenishmentService {
       } satisfies InsertReplenTask)
       .returning();
 
-    // Auto-replen (picker inline): immediately execute the inventory transfer
-    if (autoReplen === 1) {
+    // Unified auto-execute: immediately execute if resolved decision says so
+    if (execDecision.shouldAutoExecute) {
       try {
         await this.executeTask(task.id, "system:auto-replen");
       } catch (autoErr: any) {
@@ -905,8 +960,686 @@ class ReplenishmentService {
   }
 
   // ---------------------------------------------------------------------------
+  // 6. GENERATE TASKS -- auto-generate replen tasks for all pick locations
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Auto-generate replen tasks by scanning all pick locations that are below
+   * their configured trigger threshold. Handles cube capacity limits and
+   * overflow bin routing.
+   *
+   * This is the main "Auto-Generate" algorithm invoked from the UI or
+   * scheduler. It batch-loads all needed data upfront for efficiency, then
+   * iterates through every pick-location inventory level to find locations
+   * below threshold.
+   *
+   * @param warehouseId  Optional -- limit the scan to a single warehouse.
+   * @returns Diagnostic result with counts and details of created/skipped tasks.
+   */
+  async generateTasks(warehouseId?: number): Promise<GenerateTasksResult> {
+    // --- 1. Batch-load all needed data ---
+    const allTierDefaults: ReplenTierDefault[] = await this.db
+      .select().from(replenTierDefaults).where(eq(replenTierDefaults.isActive, 1));
+    const allRules: ReplenRule[] = await this.db
+      .select().from(replenRules).where(eq(replenRules.isActive, 1));
+    const allLevels: InventoryLevel[] = await this.db.select().from(inventoryLevels);
+    const allLocations: WarehouseLocation[] = await this.db.select().from(warehouseLocations);
+    const allCatalogProducts = await this.db.select().from(catalogProducts);
+    const allVariants: ProductVariant[] = await this.db.select().from(productVariants);
+    const allProducts = await this.db.select().from(products);
+    const allWarehouses = await this.db.select().from(warehouses);
+    const allSettings = await this.db.select().from(warehouseSettings);
+    const allProductLocs = await this.db.select().from(productLocations);
+
+    // --- 2. Build lookup maps ---
+    const locationMap = new Map(allLocations.map((l) => [l.id, l]));
+    const productMap = new Map(allProducts.map((p: any) => [p.id, p]));
+    const variantMap = new Map(allVariants.map((v) => [v.id, v]));
+    const warehouseMap = new Map(allWarehouses.map((w: any) => [w.id, w]));
+
+    // Warehouse settings: warehouseCode -> settings, with DEFAULT fallback
+    const settingsByWarehouseCode = new Map(allSettings.map((s: any) => [s.warehouseCode, s]));
+    const defaultSettings = allSettings.find((s: any) => s.warehouseCode === "DEFAULT") || {
+      replenMode: "queue",
+      inlineReplenMaxUnits: 50,
+    } as any;
+    const getLocationSettings = (loc: WarehouseLocation) => {
+      if (!loc.warehouseId) return defaultSettings;
+      const wh = warehouseMap.get(loc.warehouseId);
+      if (!wh) return defaultSettings;
+      return settingsByWarehouseCode.get((wh as any).code) || defaultSettings;
+    };
+
+    // Catalog product -> product_id mapping
+    const catalogProductByProductId = new Map<number, number>();
+    for (const cp of allCatalogProducts) {
+      if ((cp as any).productId) catalogProductByProductId.set((cp as any).productId, cp.id);
+    }
+    const catalogProductByVariantId = new Map<number, number>();
+    for (const v of allVariants) {
+      const cpId = catalogProductByProductId.get(v.productId);
+      if (cpId) catalogProductByVariantId.set(v.id, cpId);
+    }
+
+    // Group variants by product + hierarchy level
+    const variantsByProduct = new Map<number, Map<number, ProductVariant>>();
+    for (const v of allVariants) {
+      if (!v.productId) continue;
+      if (!variantsByProduct.has(v.productId)) variantsByProduct.set(v.productId, new Map());
+      variantsByProduct.get(v.productId)!.set(v.hierarchyLevel, v);
+    }
+
+    // Index SKU overrides by catalog product ID
+    const overridesByCatalogProduct = new Map<number, ReplenRule>();
+    for (const rule of allRules) {
+      if (rule.catalogProductId) overridesByCatalogProduct.set(rule.catalogProductId, rule);
+    }
+
+    // --- 3. Build inventory index: variantId-locationType -> locations with stock ---
+    const inventoryByVariantAndType = this.buildInventoryIndex(allLevels, locationMap);
+
+    // --- 4. Find all pick locations below threshold ---
+    const pickLocationsNeedingReplen = new Map<number, Array<{
+      locationId: number;
+      variantId: number;
+      currentQty: number;
+      hierarchyLevel: number;
+    }>>();
+    const seenPickLocVariant = new Set<string>();
+
+    for (const level of allLevels) {
+      const location = locationMap.get(level.warehouseLocationId);
+      if (!location || location.locationType !== "pick") continue;
+      if (warehouseId != null && location.warehouseId !== warehouseId) continue;
+
+      const variant = variantMap.get(level.productVariantId);
+      if (!variant || !variant.productId) continue;
+
+      seenPickLocVariant.add(`${level.warehouseLocationId}:${level.productVariantId}`);
+      const arr = pickLocationsNeedingReplen.get(variant.productId) ?? [];
+      arr.push({
+        locationId: level.warehouseLocationId,
+        variantId: level.productVariantId,
+        currentQty: level.variantQty || 0,
+        hierarchyLevel: variant.hierarchyLevel,
+      });
+      pickLocationsNeedingReplen.set(variant.productId, arr);
+    }
+
+    // Also check product_locations for assigned bins with no inventory level
+    const catalogProductToProductId = new Map<number, number>();
+    for (const cp of allCatalogProducts) {
+      if ((cp as any).productId) catalogProductToProductId.set(cp.id, (cp as any).productId);
+    }
+
+    for (const pl of allProductLocs) {
+      if ((pl as any).locationType !== "pick" || (pl as any).status !== "active") continue;
+      if (!(pl as any).warehouseLocationId || !(pl as any).catalogProductId) continue;
+      if (warehouseId != null) {
+        const loc = locationMap.get((pl as any).warehouseLocationId);
+        if (!loc || loc.warehouseId !== warehouseId) continue;
+      }
+
+      const productId = catalogProductToProductId.get((pl as any).catalogProductId);
+      if (!productId) continue;
+
+      const productVars = variantsByProduct.get(productId);
+      if (!productVars) continue;
+      const lowestLevel = Math.min(...Array.from(productVars.keys()));
+      const variant = productVars.get(lowestLevel);
+      if (!variant) continue;
+
+      const key = `${(pl as any).warehouseLocationId}:${variant.id}`;
+      if (seenPickLocVariant.has(key)) continue;
+      seenPickLocVariant.add(key);
+
+      const arr = pickLocationsNeedingReplen.get(productId) ?? [];
+      arr.push({
+        locationId: (pl as any).warehouseLocationId,
+        variantId: variant.id,
+        currentQty: 0,
+        hierarchyLevel: variant.hierarchyLevel,
+      });
+      pickLocationsNeedingReplen.set(productId, arr);
+    }
+
+    // --- 5. Process each product with pick-location inventory ---
+    const tasksCreated: any[] = [];
+    const skipped: any[] = [];
+    const sortedTierDefaults = [...allTierDefaults].sort((a, b) => a.priority - b.priority);
+
+    for (const [productId, pickLocs] of Array.from(pickLocationsNeedingReplen.entries())) {
+      const product = productMap.get(productId) as any;
+      if (!product) continue;
+
+      const prodVariants = variantsByProduct.get(productId);
+      if (!prodVariants) continue;
+
+      for (const pickLoc of pickLocs) {
+        // Find the matching tier default
+        let matchedDefault: ReplenTierDefault | null = null;
+        let sourceVariant: ProductVariant | null = null;
+        const pickVariant = variantMap.get(pickLoc.variantId);
+        if (!pickVariant) continue;
+
+        // Look up SKU override via catalog product mapping
+        const pickCpId = catalogProductByVariantId.get(pickLoc.variantId);
+        const override = pickCpId ? overridesByCatalogProduct.get(pickCpId) : undefined;
+
+        for (const tierDefault of sortedTierDefaults) {
+          if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
+          const sourceVar = prodVariants.get(tierDefault.sourceHierarchyLevel);
+          if (sourceVar) {
+            matchedDefault = tierDefault;
+            sourceVariant = sourceVar;
+            break;
+          }
+        }
+
+        if (!matchedDefault || !sourceVariant) continue;
+
+        // Resolve effective settings (SKU override > tier default)
+        const effectiveTriggerValue = override?.triggerValue ?? matchedDefault.triggerValue;
+        const effectiveMaxQty = override?.maxQty ?? matchedDefault.maxQty;
+        const effectiveSourcePriority = override?.sourcePriority ?? matchedDefault.sourcePriority;
+        const effectiveReplenMethod = override?.replenMethod ?? matchedDefault.replenMethod;
+        const effectivePriority = override?.priority ?? matchedDefault.priority;
+        const effectiveSourceLocationType = override?.sourceLocationType ?? matchedDefault.sourceLocationType;
+
+        // Threshold check
+        if (pickLoc.currentQty > effectiveTriggerValue) continue;
+
+        // Get destination location for warehouse context
+        const destLocation = locationMap.get(pickLoc.locationId);
+        const locWarehouseId = destLocation?.warehouseId ?? null;
+
+        // Resolve unified execution decision (for blocked tasks, use qty=0)
+        const whSettings = getLocationSettings(destLocation ?? {} as any);
+        const { executionMode } = this.resolveAutoExecute(
+          override?.autoReplen ?? null,
+          matchedDefault.autoReplen ?? null,
+          whSettings as WarehouseSettings,
+          0,
+        );
+
+        // Find source locations with the source variant
+        const sourceKey = `${sourceVariant.id}-${effectiveSourceLocationType}`;
+        let sourceLocations = inventoryByVariantAndType.get(sourceKey) || [];
+
+        if (sourceLocations.length === 0) {
+          // Blocked: no source stock available
+          const [blockedTask] = await this.db.insert(replenTasks).values({
+            replenRuleId: override?.id ?? null,
+            fromLocationId: pickLoc.locationId,
+            toLocationId: pickLoc.locationId,
+            catalogProductId: pickCpId ?? null,
+            sourceProductVariantId: sourceVariant.id,
+            pickProductVariantId: pickLoc.variantId,
+            qtySourceUnits: 0,
+            qtyTargetUnits: 0,
+            qtyCompleted: 0,
+            status: "blocked",
+            priority: effectivePriority,
+            triggeredBy: "min_max",
+            executionMode,
+            replenMethod: effectiveReplenMethod,
+            autoReplen: override?.autoReplen ?? matchedDefault.autoReplen ?? 0,
+            warehouseId: locWarehouseId,
+            notes: `Blocked: no ${effectiveSourceLocationType} stock for ${sourceVariant.sku || sourceVariant.name}`,
+          } satisfies InsertReplenTask).returning();
+          skipped.push({
+            product: product.sku || product.name,
+            reason: "no_source_stock",
+            sourceVariant: sourceVariant.sku || sourceVariant.name,
+            sourceLocationType: effectiveSourceLocationType,
+            tierDefaultId: matchedDefault.id,
+            blockedTaskId: blockedTask.id,
+          });
+          continue;
+        }
+
+        // Sort source locations by priority
+        if (effectiveSourcePriority === "smallest_first") {
+          sourceLocations = [...sourceLocations].sort((a, b) => a.qty - b.qty);
+        } else {
+          sourceLocations = [...sourceLocations].sort((a, b) => {
+            const aTime = a.updatedAt?.getTime() || 0;
+            const bTime = b.updatedAt?.getTime() || 0;
+            return aTime - bTime;
+          });
+        }
+
+        const unitsPerSource = sourceVariant.unitsPerVariant || 1;
+
+        // Check for existing pending task (dedup)
+        const [existingTask] = await this.db.select().from(replenTasks)
+          .where(and(
+            eq(replenTasks.toLocationId, pickLoc.locationId),
+            eq(replenTasks.pickProductVariantId, pickLoc.variantId),
+            inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
+          )).limit(1);
+
+        if (existingTask) {
+          skipped.push({
+            pickLocation: destLocation?.code,
+            product: product.sku || product.name,
+            reason: "pending_task_exists",
+            currentQty: pickLoc.currentQty,
+            triggerValue: effectiveTriggerValue,
+          });
+          continue;
+        }
+
+        // Find best source with available stock
+        let selectedSource: { locationId: number; availableQty: number } | null = null;
+        for (const src of sourceLocations) {
+          if (src.qty > 0) {
+            selectedSource = { locationId: src.locationId, availableQty: src.qty };
+            break;
+          }
+        }
+
+        if (!selectedSource) {
+          // All source locations empty
+          const [blockedTask] = await this.db.insert(replenTasks).values({
+            replenRuleId: override?.id ?? null,
+            fromLocationId: pickLoc.locationId,
+            toLocationId: pickLoc.locationId,
+            catalogProductId: pickCpId ?? null,
+            sourceProductVariantId: sourceVariant.id,
+            pickProductVariantId: pickLoc.variantId,
+            qtySourceUnits: 0,
+            qtyTargetUnits: 0,
+            qtyCompleted: 0,
+            status: "blocked",
+            priority: effectivePriority,
+            triggeredBy: "min_max",
+            executionMode,
+            replenMethod: effectiveReplenMethod,
+            autoReplen: override?.autoReplen ?? matchedDefault.autoReplen ?? 0,
+            warehouseId: locWarehouseId,
+            notes: `Blocked: source locations found but all empty (${effectiveSourceLocationType})`,
+          } satisfies InsertReplenTask).returning();
+          skipped.push({
+            pickLocation: destLocation?.code,
+            product: product.sku || product.name,
+            reason: "no_source_available",
+            currentQty: pickLoc.currentQty,
+            blockedTaskId: blockedTask.id,
+          });
+          continue;
+        }
+
+        // Calculate qty to replen
+        let qtySourceUnits: number;
+        let qtyTargetUnits: number;
+
+        if (effectiveMaxQty === null) {
+          qtySourceUnits = 1;
+          qtyTargetUnits = unitsPerSource;
+        } else {
+          const qtyNeeded = Math.max(0, effectiveMaxQty - pickLoc.currentQty);
+          if (qtyNeeded <= 0) continue;
+          qtySourceUnits = Math.ceil(qtyNeeded / unitsPerSource);
+          qtyTargetUnits = qtySourceUnits * unitsPerSource;
+        }
+
+        // Cap at source available
+        if (qtySourceUnits > selectedSource.availableQty) {
+          qtySourceUnits = selectedSource.availableQty;
+          qtyTargetUnits = qtySourceUnits * unitsPerSource;
+        }
+        if (qtySourceUnits <= 0) continue;
+
+        // Check destination cube capacity
+        let capacityNote = "";
+        let overflowQtyTargetUnits = 0;
+        let overflowQtySourceUnits = 0;
+        const isFullCaseMethod = effectiveReplenMethod === "full_case" || effectiveReplenMethod === "pallet_drop";
+
+        if (destLocation && pickVariant) {
+          const capacity = calculateRemainingCapacity(
+            destLocation as any,
+            pickVariant as any,
+            allLevels,
+            variantMap,
+          );
+
+          if (capacity !== null) {
+            if (capacity.maxUnits <= 0) {
+              overflowQtyTargetUnits = qtyTargetUnits;
+              overflowQtySourceUnits = qtySourceUnits;
+              qtyTargetUnits = 0;
+              qtySourceUnits = 0;
+              capacityNote = "Destination full, routed to overflow";
+            } else if (capacity.maxUnits < qtyTargetUnits) {
+              if (isFullCaseMethod) {
+                overflowQtyTargetUnits = qtyTargetUnits;
+                overflowQtySourceUnits = qtySourceUnits;
+                qtyTargetUnits = 0;
+                qtySourceUnits = 0;
+                capacityNote = `${effectiveReplenMethod}: full unit doesn't fit, routed to overflow`;
+              } else {
+                overflowQtyTargetUnits = qtyTargetUnits - capacity.maxUnits;
+                overflowQtySourceUnits = Math.ceil(overflowQtyTargetUnits / unitsPerSource);
+                qtyTargetUnits = capacity.maxUnits;
+                qtySourceUnits = Math.ceil(qtyTargetUnits / unitsPerSource);
+                capacityNote = `Split due to capacity: ${qtyTargetUnits} to bin, ${overflowQtyTargetUnits} to overflow`;
+              }
+            }
+          }
+        }
+
+        // Handle overflow bin
+        let actualOverflowQty = 0;
+        let actualOverflowSourceUnits = 0;
+        let overflowBinId: number | null = null;
+
+        if (overflowQtyTargetUnits > 0) {
+          const minUnitsRequired = isFullCaseMethod ? overflowQtyTargetUnits : undefined;
+          const overflowBin = findOverflowBin(
+            locWarehouseId,
+            pickVariant! as any,
+            overflowQtyTargetUnits,
+            allLevels,
+            variantMap,
+            allLocations as any,
+            minUnitsRequired,
+          );
+
+          if (overflowBin) {
+            if (isFullCaseMethod) {
+              actualOverflowQty = overflowQtyTargetUnits;
+              actualOverflowSourceUnits = overflowQtySourceUnits;
+              overflowBinId = overflowBin.locationId;
+            } else {
+              actualOverflowQty = Math.min(overflowQtyTargetUnits, overflowBin.maxUnits);
+              actualOverflowSourceUnits = Math.ceil(actualOverflowQty / unitsPerSource);
+              overflowBinId = overflowBin.locationId;
+              if (actualOverflowQty < overflowQtyTargetUnits) {
+                skipped.push({
+                  tierDefaultId: matchedDefault.id,
+                  pickLocation: destLocation?.code,
+                  product: product.sku || product.name,
+                  reason: "overflow_capacity_partial",
+                  overflowQty: actualOverflowQty,
+                  excessQty: overflowQtyTargetUnits - actualOverflowQty,
+                });
+              }
+            }
+          } else {
+            skipped.push({
+              tierDefaultId: matchedDefault.id,
+              pickLocation: destLocation?.code,
+              product: product.sku || product.name,
+              reason: isFullCaseMethod ? "no_overflow_for_full_unit" : "no_overflow_capacity",
+              overflowQty: overflowQtyTargetUnits,
+              replenMethod: effectiveReplenMethod,
+            });
+          }
+        }
+
+        // Validate total source usage with actual overflow
+        let totalSourceUsed = qtySourceUnits + actualOverflowSourceUnits;
+        if (totalSourceUsed > selectedSource.availableQty) {
+          const excess = totalSourceUsed - selectedSource.availableQty;
+          if (actualOverflowSourceUnits >= excess) {
+            actualOverflowSourceUnits -= excess;
+            actualOverflowQty = actualOverflowSourceUnits * unitsPerSource;
+          } else {
+            const remainingExcess = excess - actualOverflowSourceUnits;
+            actualOverflowSourceUnits = 0;
+            actualOverflowQty = 0;
+            overflowBinId = null;
+            qtySourceUnits = Math.max(0, qtySourceUnits - remainingExcess);
+            qtyTargetUnits = qtySourceUnits * unitsPerSource;
+          }
+        }
+
+        // Create main task if any units fit
+        if (qtySourceUnits > 0 && qtyTargetUnits > 0) {
+          // Re-resolve with actual qtyTargetUnits (matters for hybrid mode)
+          const execDecision = this.resolveAutoExecute(
+            override?.autoReplen ?? null,
+            matchedDefault.autoReplen ?? null,
+            whSettings as WarehouseSettings,
+            qtyTargetUnits,
+          );
+
+          const [task] = await this.db.insert(replenTasks).values({
+            replenRuleId: override?.id ?? null,
+            fromLocationId: selectedSource.locationId,
+            toLocationId: pickLoc.locationId,
+            catalogProductId: pickCpId ?? null,
+            sourceProductVariantId: sourceVariant.id,
+            pickProductVariantId: pickLoc.variantId,
+            qtySourceUnits,
+            qtyTargetUnits,
+            qtyCompleted: 0,
+            status: "pending",
+            priority: effectivePriority,
+            triggeredBy: "min_max",
+            executionMode: execDecision.executionMode,
+            replenMethod: effectiveReplenMethod,
+            autoReplen: override?.autoReplen ?? matchedDefault.autoReplen ?? 0,
+            warehouseId: locWarehouseId,
+            notes: capacityNote || `Auto-generated: current qty ${pickLoc.currentQty} <= trigger ${effectiveTriggerValue}`,
+          } satisfies InsertReplenTask).returning();
+
+          // Unified auto-execute
+          let autoCompleted = false;
+          if (execDecision.shouldAutoExecute) {
+            try {
+              await this.executeTask(task.id, "system:auto-replen");
+              autoCompleted = true;
+            } catch (autoErr: any) {
+              console.warn(`[Replen] Auto-replen failed for task ${task.id}:`, autoErr?.message);
+              await this.db.update(replenTasks).set({
+                status: "blocked",
+                notes: `Auto-replen failed: ${autoErr?.message || "unknown error"}`,
+              }).where(eq(replenTasks.id, task.id));
+            }
+          }
+
+          tasksCreated.push({
+            taskId: task.id,
+            tierDefaultId: matchedDefault.id,
+            overrideId: override?.id,
+            pickLocation: destLocation?.code,
+            sourceLocation: locationMap.get(selectedSource.locationId)?.code,
+            product: product.sku || product.name,
+            currentQty: pickLoc.currentQty,
+            triggerValue: effectiveTriggerValue,
+            qtySourceUnits,
+            qtyTargetUnits,
+            executionMode: execDecision.executionMode,
+            warehouseId: locWarehouseId,
+            autoReplen: execDecision.shouldAutoExecute,
+            autoCompleted,
+          });
+        }
+
+        // Create overflow task if needed
+        if (actualOverflowQty > 0 && overflowBinId) {
+          const overflowExec = this.resolveAutoExecute(
+            null, null, // overflow tasks don't inherit SKU/tier autoReplen
+            whSettings as WarehouseSettings,
+            actualOverflowQty,
+          );
+
+          const [overflowTask] = await this.db.insert(replenTasks).values({
+            replenRuleId: override?.id ?? null,
+            fromLocationId: selectedSource.locationId,
+            toLocationId: overflowBinId,
+            catalogProductId: pickCpId ?? null,
+            sourceProductVariantId: sourceVariant.id,
+            pickProductVariantId: pickLoc.variantId,
+            qtySourceUnits: actualOverflowSourceUnits,
+            qtyTargetUnits: actualOverflowQty,
+            qtyCompleted: 0,
+            status: "pending",
+            priority: effectivePriority + 1,
+            triggeredBy: "min_max",
+            executionMode: overflowExec.executionMode,
+            replenMethod: effectiveReplenMethod,
+            autoReplen: 0, // Overflow tasks always go to worker queue
+            warehouseId: locWarehouseId,
+            notes: `Overflow from ${destLocation?.code}: capacity exceeded`,
+          } satisfies InsertReplenTask).returning();
+
+          tasksCreated.push({
+            taskId: overflowTask.id,
+            tierDefaultId: matchedDefault.id,
+            overrideId: override?.id,
+            pickLocation: locationMap.get(overflowBinId)?.code,
+            sourceLocation: locationMap.get(selectedSource.locationId)?.code,
+            product: product.sku || product.name,
+            currentQty: 0,
+            triggerValue: 0,
+            qtySourceUnits: actualOverflowSourceUnits,
+            qtyTargetUnits: actualOverflowQty,
+            isOverflow: true,
+            executionMode: overflowExec.executionMode,
+            warehouseId: locWarehouseId,
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      tierDefaultsEvaluated: allTierDefaults.length,
+      productsScanned: pickLocationsNeedingReplen.size,
+      tasksCreated: tasksCreated.length,
+      skipped: skipped.length,
+      details: { tasksCreated, skipped },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. REPORT EXCEPTION -- create cycle count and block task
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Report an exception on a replen task (e.g., short pick, wrong product,
+   * empty source). Creates a spot cycle count for the source location and
+   * blocks the task.
+   *
+   * @param taskId   Primary key of the replen task.
+   * @param reason   Exception reason: "short" | "wrong_product" | "empty" | "other"
+   * @param userId   Who reported the exception (for audit).
+   * @param actualQty  Optional actual counted qty at source.
+   * @param actualSku  Optional actual SKU found (for wrong_product).
+   * @param notes      Optional freeform notes.
+   * @returns Object with taskId, cycleCountId, status, and reason.
+   */
+  async reportException(params: {
+    taskId: number;
+    reason: string;
+    userId?: string;
+    actualQty?: number;
+    actualSku?: string;
+    notes?: string;
+  }): Promise<{ taskId: number; cycleCountId: number; status: string; exceptionReason: string }> {
+    const { taskId, reason, userId, actualQty, actualSku, notes } = params;
+
+    if (!["short", "wrong_product", "empty", "other"].includes(reason)) {
+      throw new Error("Invalid exception reason. Must be: short, wrong_product, empty, or other");
+    }
+
+    // Get task
+    const [task] = await this.db.select().from(replenTasks)
+      .where(eq(replenTasks.id, taskId)).limit(1);
+    if (!task) throw new Error(`Replen task ${taskId} not found`);
+    if (!["pending", "assigned", "in_progress"].includes(task.status)) {
+      throw new Error(`Cannot report exception on task with status '${task.status}'`);
+    }
+
+    // Get source variant info
+    const sourceVariant = task.sourceProductVariantId
+      ? (await this.db.select().from(productVariants)
+          .where(eq(productVariants.id, task.sourceProductVariantId)).limit(1))[0]
+      : null;
+
+    // Get current inventory at source location
+    const inventoryLevel = sourceVariant
+      ? (await this.db.select().from(inventoryLevels)
+          .where(and(
+            eq(inventoryLevels.warehouseLocationId, task.fromLocationId),
+            eq(inventoryLevels.productVariantId, sourceVariant.id),
+          )).limit(1))[0]
+      : null;
+
+    // Create spot cycle count for the source location
+    const [cycleCount] = await this.db.insert(cycleCounts).values({
+      name: `Replen Exception - Task #${taskId}`,
+      description: `Auto-created from replen task #${taskId} exception: ${reason}${notes ? ` - ${notes}` : ""}`,
+      status: "in_progress",
+      warehouseId: task.warehouseId,
+      totalBins: 1,
+      countedBins: 0,
+      varianceCount: 0,
+      approvedVariances: 0,
+      createdBy: userId || "system",
+    }).returning();
+
+    // Create cycle count item for the expected product at source location
+    await this.db.insert(cycleCountItems).values({
+      cycleCountId: cycleCount.id,
+      warehouseLocationId: task.fromLocationId,
+      productVariantId: sourceVariant?.id || null,
+      catalogProductId: task.catalogProductId,
+      expectedSku: sourceVariant?.sku || null,
+      expectedQty: inventoryLevel?.variantQty ?? 0,
+      countedSku: reason === "wrong_product" ? (actualSku || null) : (sourceVariant?.sku || null),
+      countedQty: reason === "empty" ? 0 : (actualQty ?? null),
+      status: "pending",
+      countedBy: userId || "system",
+    });
+
+    // Block the task and link the cycle count
+    const exceptionNote = `[Exception: ${reason}${notes ? ` - ${notes}` : ""}]`;
+    await this.db.update(replenTasks).set({
+      status: "blocked",
+      exceptionReason: reason,
+      linkedCycleCountId: cycleCount.id,
+      notes: task.notes ? `${task.notes}\n${exceptionNote}` : exceptionNote,
+    }).where(eq(replenTasks.id, taskId));
+
+    return {
+      taskId,
+      cycleCountId: cycleCount.id,
+      status: "blocked",
+      exceptionReason: reason,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // PRIVATE HELPERS
   // ---------------------------------------------------------------------------
+
+  /**
+   * Build an index of variant+locationType -> list of {locationId, qty, updatedAt}
+   * for all inventory levels with positive stock. Used by generateTasks for
+   * efficient source location lookup.
+   */
+  private buildInventoryIndex(
+    levels: InventoryLevel[],
+    locationMap: Map<number, WarehouseLocation>,
+  ): Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>> {
+    const index = new Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>>();
+    for (const level of levels) {
+      const qty = level.variantQty || 0;
+      if (qty <= 0) continue;
+      const location = locationMap.get(level.warehouseLocationId);
+      if (!location) continue;
+      const key = `${level.productVariantId}-${location.locationType}`;
+      const arr = index.get(key) || [];
+      arr.push({ locationId: level.warehouseLocationId, qty, updatedAt: level.updatedAt });
+      index.set(key, arr);
+    }
+    return index;
+  }
 
   /**
    * Compute the average daily pick velocity for a variant over the last N days.
@@ -1055,6 +1788,87 @@ class ReplenishmentService {
     return sourceVariant?.id ?? null;
   }
 
+  // ---------------------------------------------------------------------------
+  // WAREHOUSE SETTINGS + UNIFIED EXECUTION DECISION
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get warehouse settings for a given warehouse ID.
+   * Falls back to the DEFAULT row if no warehouse-specific settings exist.
+   */
+  async getSettingsForWarehouse(warehouseId?: number): Promise<WarehouseSettings | null> {
+    if (warehouseId != null) {
+      // Try warehouse-specific settings first
+      const [specific] = await this.db
+        .select()
+        .from(warehouseSettings)
+        .where(eq(warehouseSettings.warehouseId, warehouseId))
+        .limit(1);
+      if (specific) return specific as WarehouseSettings;
+    }
+
+    // Fall back to DEFAULT row
+    const [defaultRow] = await this.db
+      .select()
+      .from(warehouseSettings)
+      .where(eq(warehouseSettings.warehouseCode, "DEFAULT"))
+      .limit(1);
+    return (defaultRow as WarehouseSettings) ?? null;
+  }
+
+  /**
+   * Unified execution decision. Replaces scattered autoReplen/replenMode checks.
+   *
+   * autoReplen values:
+   *   - null / 0 = defer to next layer (no opinion)
+   *   - 1 = force auto-complete
+   *   - 2 = force manual (queue)
+   *
+   * Resolution hierarchy (most specific wins):
+   *   1. SKU rule autoReplen (if 1 or 2)
+   *   2. Tier default autoReplen (if 1 or 2)
+   *   3. Warehouse settings replenMode (fallback):
+   *      - "inline"  → auto-execute
+   *      - "queue"   → don't auto-execute
+   *      - "hybrid"  → auto-execute if qty <= inlineReplenMaxUnits
+   */
+  resolveAutoExecute(
+    autoReplenFromRule: number | null | undefined,
+    autoReplenFromTierDefault: number | null | undefined,
+    settings: WarehouseSettings | null,
+    qtyTargetUnits: number,
+  ): { shouldAutoExecute: boolean; executionMode: "inline" | "queue" } {
+    // Layer 1: SKU rule override (only 1=force-auto or 2=force-manual are overrides; 0/null = defer)
+    if (autoReplenFromRule === 1) {
+      return { shouldAutoExecute: true, executionMode: "inline" };
+    }
+    if (autoReplenFromRule === 2) {
+      return { shouldAutoExecute: false, executionMode: "queue" };
+    }
+
+    // Layer 2: Tier default override (only 1=force-auto or 2=force-manual are overrides; 0/null = defer)
+    if (autoReplenFromTierDefault === 1) {
+      return { shouldAutoExecute: true, executionMode: "inline" };
+    }
+    if (autoReplenFromTierDefault === 2) {
+      return { shouldAutoExecute: false, executionMode: "queue" };
+    }
+
+    // Layer 3: Warehouse settings fallback
+    const mode = settings?.replenMode || "queue";
+    if (mode === "inline") {
+      return { shouldAutoExecute: true, executionMode: "inline" };
+    }
+    if (mode === "hybrid") {
+      const threshold = settings?.inlineReplenMaxUnits || 50;
+      const auto = qtyTargetUnits <= threshold;
+      return { shouldAutoExecute: auto, executionMode: auto ? "inline" : "queue" };
+    }
+
+    // "queue" or anything else
+    return { shouldAutoExecute: false, executionMode: "queue" };
+  }
+
   /**
    * Find a source (bulk) location that has on-hand stock for the given variant.
    *
@@ -1062,13 +1876,14 @@ class ReplenishmentService {
    * 1. Dedicated parent -- if the pick location has `parentLocationId` set and
    *    the parent has stock for the source variant, use it immediately.
    * 2. General search -- scan all locations of `sourceLocationType` in the
-   *    same warehouse, ordered FIFO (earliest updatedAt first).
+   *    same warehouse, ordered by sourcePriority (FIFO or smallest_first).
    */
   private async findSourceLocation(
     productVariantId: number,
     warehouseId: number | undefined,
     sourceLocationType: string,
     parentLocationId?: number | null,
+    sourcePriority?: string,
   ): Promise<WarehouseLocation | null> {
     // --- 1. Try dedicated parent location first ---
     if (parentLocationId) {
@@ -1108,11 +1923,15 @@ class ReplenishmentService {
               : []),
           ),
         )
-        .orderBy(inventoryLevels.updatedAt);
+        .orderBy(
+          sourcePriority === "smallest_first"
+            ? inventoryLevels.variantQty       // ascending = smallest first
+            : inventoryLevels.updatedAt        // ascending = FIFO (oldest first)
+        );
 
     if (levelsWithStock.length === 0) return null;
 
-    // Return the first matching location (FIFO)
+    // Return the first matching location
     const first = levelsWithStock[0] as any;
     return first.location as WarehouseLocation;
   }
