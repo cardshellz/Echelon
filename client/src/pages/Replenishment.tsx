@@ -144,8 +144,8 @@ interface ReplenTask {
   fromLocationId: number;
   toLocationId: number;
   catalogProductId: number | null;
-  sourceVariantId: number | null;
-  pickVariantId: number | null;
+  sourceProductVariantId: number | null;
+  pickProductVariantId: number | null;
   qtySourceUnits: number;
   qtyTargetUnits: number;
   qtyCompleted: number;
@@ -153,6 +153,7 @@ interface ReplenTask {
   priority: number;
   triggeredBy: string;
   executionMode: string;
+  replenMethod: string | null;
   warehouseId: number | null;
   createdBy: string | null;
   assignedTo: string | null;
@@ -166,6 +167,8 @@ interface ReplenTask {
   fromLocation?: WarehouseLocation;
   toLocation?: WarehouseLocation;
   catalogProduct?: CatalogProduct;
+  sourceVariant?: ProductVariant;
+  pickVariant?: ProductVariant;
 }
 
 interface WarehouseSettings {
@@ -232,6 +235,21 @@ const HIERARCHY_LEVELS = [
   { value: 3, label: "Level 3 (Case/Outer)" },
   { value: 4, label: "Level 4 (Pallet/Master)" },
 ];
+
+function uomLabel(hierarchyLevel: number): string {
+  switch (hierarchyLevel) {
+    case 1: return "pk";
+    case 2: return "box";
+    case 3: return "cs";
+    case 4: return "sk";
+    default: return "ea";
+  }
+}
+
+function methodLabel(method: string | null): string | null {
+  const m = REPLEN_METHODS.find(r => r.value === method);
+  return m ? m.label : method;
+}
 
 export default function Replenishment() {
   const { toast } = useToast();
@@ -1377,6 +1395,7 @@ export default function Replenishment() {
                       <TableHead className="text-xs">Status</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Mode</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Trigger</TableHead>
+                      <TableHead className="text-xs hidden lg:table-cell">Method</TableHead>
                       <TableHead className="text-xs hidden xl:table-cell">Assigned</TableHead>
                       <TableHead className="text-xs">Actions</TableHead>
                     </TableRow>
@@ -1399,17 +1418,35 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="hidden md:table-cell py-2">
                           <div className="text-xs sm:text-sm">
-                            {task.catalogProduct?.sku || task.catalogProduct?.title || "-"}
+                            {task.pickVariant?.sku || task.sourceVariant?.sku || task.catalogProduct?.sku || task.catalogProduct?.title || "-"}
+                            {task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId && (
+                              <div className="text-[10px] text-muted-foreground">
+                                from {task.sourceVariant.sku} ({uomLabel(task.sourceVariant.hierarchyLevel)})
+                              </div>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="font-medium text-xs sm:text-sm">
-                            {task.qtyCompleted}/{task.qtyTargetUnits}
+                            {task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId ? (
+                              <span>
+                                {task.qtySourceUnits} {uomLabel(task.sourceVariant.hierarchyLevel)}
+                                <span className="text-muted-foreground mx-0.5">→</span>
+                                {task.qtyCompleted}/{task.qtyTargetUnits} {uomLabel(task.pickVariant.hierarchyLevel)}
+                              </span>
+                            ) : (
+                              <span>{task.qtyCompleted}/{task.qtyTargetUnits}</span>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="py-2">{getStatusBadge(task.status)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getModeBadge(task.executionMode)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getTriggerBadge(task.triggeredBy)}</TableCell>
+                        <TableCell className="hidden lg:table-cell py-2">
+                          {task.replenMethod && (
+                            <Badge variant="outline" className="text-xs">{methodLabel(task.replenMethod)}</Badge>
+                          )}
+                        </TableCell>
                         <TableCell className="hidden xl:table-cell py-2">
                           <span className="text-xs sm:text-sm text-muted-foreground">
                             {task.assignedTo || "-"}

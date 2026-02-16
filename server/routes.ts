@@ -10245,25 +10245,32 @@ export async function registerRoutes(
       
       const locationIds = new Set<number>();
       const productIds = new Set<number>();
+      const variantIds = new Set<number>();
       for (const task of tasks) {
         locationIds.add(task.fromLocationId);
         locationIds.add(task.toLocationId);
         if (task.catalogProductId) productIds.add(task.catalogProductId);
+        if (task.sourceProductVariantId) variantIds.add(task.sourceProductVariantId);
+        if (task.pickProductVariantId) variantIds.add(task.pickProductVariantId);
       }
-      
-      const [allLocations, allProducts] = await Promise.all([
+
+      const [allLocations, allProducts, allVariants] = await Promise.all([
         storage.getAllWarehouseLocations(),
         storage.getAllCatalogProducts(),
+        storage.getAllProductVariants(),
       ]);
-      
+
       const locationMap = new Map(allLocations.filter(l => locationIds.has(l.id)).map(l => [l.id, l]));
       const productMap = new Map(allProducts.filter(p => productIds.has(p.id)).map(p => [p.id, p]));
-      
+      const variantMap = new Map(allVariants.filter(v => variantIds.has(v.id)).map(v => [v.id, v]));
+
       const enriched = tasks.map(task => ({
         ...task,
         fromLocation: locationMap.get(task.fromLocationId),
         toLocation: locationMap.get(task.toLocationId),
         catalogProduct: task.catalogProductId ? productMap.get(task.catalogProductId) : null,
+        sourceVariant: task.sourceProductVariantId ? variantMap.get(task.sourceProductVariantId) : null,
+        pickVariant: task.pickProductVariantId ? variantMap.get(task.pickProductVariantId) : null,
       }));
       
       res.json(enriched);
