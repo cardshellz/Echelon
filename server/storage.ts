@@ -1312,17 +1312,17 @@ export class DatabaseStorage implements IStorage {
     return result[0] || null;
   }
 
-  async updateOrderProgress(orderId: number): Promise<Order | null> {
+  async updateOrderProgress(orderId: number, postPickStatus: string = "ready_to_ship"): Promise<Order | null> {
     const items = await this.getOrderItems(orderId);
     const shippableItems = items.filter(item => item.requiresShipping === 1);
     const pickedCount = shippableItems.reduce((sum, item) => sum + item.pickedQuantity, 0);
     const itemCount = items.length;
     const unitCount = items.reduce((sum, item) => sum + item.quantity, 0);
-    
-    const allShippableDone = shippableItems.length > 0 && 
+
+    const allShippableDone = shippableItems.length > 0 &&
       shippableItems.every(item => item.status === "completed" || item.status === "short");
     const hasShortItems = shippableItems.some(item => item.status === "short");
-    
+
     const updates: any = { pickedCount, itemCount, unitCount };
     if (allShippableDone) {
       if (hasShortItems) {
@@ -1330,9 +1330,9 @@ export class DatabaseStorage implements IStorage {
         updates.exceptionAt = new Date();
         updates.completedAt = new Date();
       } else {
-        // Auto-pack: skip manual "completed" step, go straight to ready_to_ship.
-        // No pack station — ShipStation handles packing/shipping externally.
-        updates.warehouseStatus = "ready_to_ship" as OrderStatus;
+        // Transition to the configured post-pick status (default: ready_to_ship).
+        // When a pack station is enabled, this will be "picked" instead.
+        updates.warehouseStatus = postPickStatus as OrderStatus;
         updates.completedAt = new Date();
       }
       

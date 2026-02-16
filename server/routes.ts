@@ -969,260 +969,25 @@ export async function registerRoutes(
     }
   });
 
+  // ===== PICKING ROUTES (thin adapters → PickingService) =====
+
   app.get("/api/picking/queue", async (req, res) => {
     try {
-      // Only fetch orders that need to be in pick queue (ready/in_progress, plus recent completed)
-      const orders = await storage.getPickQueueOrders();
-      const user = req.session.user;
-      const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
-      
-      const filteredOrders = orders.filter(order => {
-        // Only show orders that have at least one item requiring shipping
-        const hasShippableItems = order.items.some(item => item.requiresShipping === 1);
-        if (!hasShippableItems) {
-          return false;
-        }
-        
-        return true;
-      });
-      
-      // Get all unique picker IDs and lookup their display names
-      const pickerIds = Array.from(new Set(filteredOrders.map(o => o.assignedPickerId).filter(Boolean))) as string[];
-      const pickerMap = new Map<string, string>();
-      
-      for (const pickerId of pickerIds) {
-        const picker = await storage.getUser(pickerId);
-        if (picker) {
-          pickerMap.set(pickerId, picker.displayName || picker.username);
-        }
-      }
-      
-      // Get all unique channel IDs and lookup their names
-      const channelIds = Array.from(new Set(filteredOrders.map(o => o.channelId).filter(Boolean))) as number[];
-      const channelMap = new Map<number, { name: string; provider: string }>();
-      
-      for (const channelId of channelIds) {
-        const channel = await storage.getChannelById(channelId);
-        if (channel) {
-          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
-        }
-      }
-      
-      // Collect ALL unique SKUs for pending/shippable items to get fresh locations
-      // This ensures pick queue always shows current bin locations even after transfers
-      const skusNeedingLookup = new Set<string>();
-      for (const order of filteredOrders) {
-        for (const item of order.items) {
-          if (item.sku && item.requiresShipping === 1 && item.status === "pending") {
-            skusNeedingLookup.add(item.sku);
-          }
-        }
-      }
-
-      // Batch lookup current locations for all pending SKUs (single query per unique SKU)
-      const freshLocationMap = new Map<string, { location: string; zone: string; barcode: string | null; imageUrl: string | null }>();
-      for (const sku of skusNeedingLookup) {
-        const freshLocation = await storage.getBinLocationFromInventoryBySku(sku);
-        if (freshLocation) {
-          freshLocationMap.set(sku, freshLocation);
-        }
-      }
-
-      // --- Replen prediction: for each pending item, predict if a case break will be needed ---
-      // Build a map: SKU → { systemQty, threshold, replenMethod, sourceLocation, sourceQty }
-      const replenPredictionMap = new Map<string, {
-        systemQty: number;
-        triggerValue: number;
-        replenMethod: string;
-        autoReplen: number;
-        sourceLocationCode: string | null;
-        sourceQty: number;
-        sourceVariantName: string | null;
-      }>();
-
-      try {
-        const { replenishment } = req.app.locals.services as any;
-        if (replenishment) {
-          // Load tier defaults and rules for prediction
-          const tierDefaults = await storage.getActiveReplenTierDefaults();
-          const allRules = await storage.getActiveReplenRules();
-          const ruleByPickVariant = new Map<number, any>();
-          for (const r of allRules) {
-            if (r.pickProductVariantId) ruleByPickVariant.set(r.pickProductVariantId, r);
-          }
-
-          for (const sku of skusNeedingLookup) {
-            const variant = await storage.getProductVariantBySku(sku);
-            if (!variant) continue;
-
-            // Get inventory level at the pick location for this SKU
-            const levels = await storage.getInventoryLevelsByProductVariantId(variant.id);
-            const allLocs = await storage.getAllWarehouseLocations();
-            const pickLevel = levels.find((l: any) => {
-              const loc = allLocs.find(wl => wl.id === l.warehouseLocationId);
-              return loc && loc.locationType === "pick" && loc.isPickable === 1;
-            });
-
-            const systemQty = pickLevel?.variantQty ?? 0;
-
-            // Resolve threshold: rule > tier default
-            const rule = ruleByPickVariant.get(variant.id);
-            const tierDefault = tierDefaults.find(td =>
-              td.hierarchyLevel === variant.hierarchyLevel && td.isActive === 1
-            );
-
-            const triggerValue = rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
-            if (triggerValue == null) continue;
-
-            const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
-            const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
-            const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
-
-            // Find source location info for the card
-            let sourceLocationCode: string | null = null;
-            let sourceQty = 0;
-            let sourceVariantName: string | null = null;
-
-            const sourceHierarchyLevel = tierDefault?.sourceHierarchyLevel ?? variant.hierarchyLevel;
-            // Find the source variant (e.g., case for eaches)
-            let sourceVariantId = rule?.sourceProductVariantId;
-            if (!sourceVariantId && sourceHierarchyLevel !== variant.hierarchyLevel) {
-              const siblings = await db.select().from(productVariants)
-                .where(and(
-                  eq(productVariants.productId, variant.productId),
-                  eq(productVariants.hierarchyLevel, sourceHierarchyLevel),
-                ));
-              if (siblings.length > 0) sourceVariantId = siblings[0].id;
-            }
-
-            const lookupVariantId = sourceVariantId ?? variant.id;
-
-            // Find source with stock
-            const sourceLevels = await storage.getInventoryLevelsByProductVariantId(lookupVariantId);
-            for (const sl of sourceLevels) {
-              if (sl.variantQty <= 0) continue;
-              const loc = allLocs.find(wl => wl.id === sl.warehouseLocationId);
-              if (!loc || loc.locationType !== sourceLocationType) continue;
-              sourceLocationCode = loc.code;
-              sourceQty = sl.variantQty;
-              break;
-            }
-
-            // Get source variant name for display
-            if (sourceVariantId && sourceVariantId !== variant.id) {
-              const sv = await storage.getProductVariantById(sourceVariantId);
-              sourceVariantName = sv ? `${sv.name || sv.sku} (${sv.unitsPerVariant} units)` : null;
-            }
-
-            replenPredictionMap.set(sku, {
-              systemQty,
-              triggerValue,
-              replenMethod,
-              autoReplen,
-              sourceLocationCode,
-              sourceQty,
-              sourceVariantName,
-            });
-          }
-        }
-      } catch (replenErr: any) {
-        console.warn("[PickQueue] Replen prediction failed (non-fatal):", replenErr?.message);
-      }
-
-      // Add picker display name, channel info, and C2P (Click to Pick) time to orders
-      // Also filter out non-shippable items from the pick list (donations, memberships, etc.)
-      // Always use fresh locations for pending items to reflect transfers/bin changes
-      const ordersWithMetadata = filteredOrders.map((order) => {
-        // Calculate C2P time: completedAt - shopifyCreatedAt (in milliseconds)
-        let c2pMs: number | null = null;
-        if (order.completedAt && order.shopifyCreatedAt) {
-          c2pMs = new Date(order.completedAt).getTime() - new Date(order.shopifyCreatedAt).getTime();
-        }
-
-        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
-
-        // Only include items that require shipping in the pick list
-        const shippableItems = order.items.filter(item => item.requiresShipping === 1);
-
-        // Apply fresh locations to ALL pending items (not just UNASSIGNED)
-        // This keeps the pick queue current after transfers and bin reassignments
-        const itemsWithFreshLocations = shippableItems.map((item) => {
-          let updatedItem = { ...item };
-
-          // For pending items, always use the freshest location from inventory
-          if (item.status === "pending" && item.sku) {
-            const freshLocation = freshLocationMap.get(item.sku);
-            if (freshLocation) {
-              updatedItem = {
-                ...updatedItem,
-                location: freshLocation.location,
-                zone: freshLocation.zone,
-                barcode: freshLocation.barcode || item.barcode,
-                imageUrl: freshLocation.imageUrl || item.imageUrl,
-              };
-            }
-          }
-
-          // If still no imageUrl, try to get from freshLocationMap
-          if (!updatedItem.imageUrl && item.sku) {
-            const freshLocation = freshLocationMap.get(item.sku);
-            if (freshLocation?.imageUrl) {
-              updatedItem.imageUrl = freshLocation.imageUrl;
-            }
-          }
-
-          // Attach replen prediction: will this pick trigger a case break?
-          if (item.status === "pending" && item.sku) {
-            const prediction = replenPredictionMap.get(item.sku);
-            if (prediction) {
-              const postPickQty = prediction.systemQty - item.quantity;
-              const replenNeeded = postPickQty <= prediction.triggerValue;
-              (updatedItem as any).replenPrediction = {
-                systemQty: prediction.systemQty,
-                postPickQty: Math.max(0, postPickQty),
-                triggerValue: prediction.triggerValue,
-                replenNeeded,
-                replenMethod: prediction.replenMethod,
-                autoReplen: prediction.autoReplen,
-                sourceLocationCode: replenNeeded ? prediction.sourceLocationCode : null,
-                sourceQty: replenNeeded ? prediction.sourceQty : 0,
-                sourceVariantName: replenNeeded ? prediction.sourceVariantName : null,
-              };
-            }
-          }
-
-          return updatedItem;
-        });
-        
-        return {
-          ...order,
-          items: itemsWithFreshLocations,
-          pickerName: order.assignedPickerId ? pickerMap.get(order.assignedPickerId) || null : null,
-          c2pMs, // Click to Pick time in milliseconds
-          channelName: channelInfo?.name || null,
-          channelProvider: channelInfo?.provider || order.source || null,
-        };
-      });
-      
-      res.json(ordersWithMetadata);
+      const { picking } = req.app.locals.services as any;
+      const orders = await picking.getPickQueue();
+      res.json(orders);
     } catch (error) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });
     }
   });
 
-  // Get a specific order with items (for picking - only shippable items)
   app.get("/api/picking/orders/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const order = await storage.getOrderById(id);
-      
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      
+      if (!order) return res.status(404).json({ error: "Order not found" });
       const allItems = await storage.getOrderItems(id);
-      // Only include items that require shipping in the pick list
       const shippableItems = allItems.filter(item => item.requiresShipping === 1);
       res.json({ ...order, items: shippableItems });
     } catch (error) {
@@ -1231,83 +996,33 @@ export async function registerRoutes(
     }
   });
 
-  // Claim an order for picking
   app.post("/api/picking/orders/:id/claim", async (req, res) => {
     try {
+      const { picking } = req.app.locals.services as any;
       const id = parseInt(req.params.id);
       const { pickerId } = req.body;
-      
-      if (!pickerId) {
-        return res.status(400).json({ error: "pickerId is required" });
-      }
-      
-      const orderBefore = await storage.getOrderById(id);
-      console.log(`[CLAIM DEBUG] Order ${id} before claim:`, orderBefore ? {
-        warehouseStatus: orderBefore.warehouseStatus,
-        assignedPickerId: orderBefore.assignedPickerId,
-        onHold: orderBefore.onHold
-      } : 'NOT FOUND');
-      
-      const order = await storage.claimOrder(id, pickerId);
-      
-      if (!order) {
-        console.log(`[CLAIM DEBUG] Order ${id} claim FAILED - order not available`);
-        return res.status(409).json({ error: "Order is no longer available" });
-      }
-      
-      // Log the claim action (non-blocking)
-      const picker = await storage.getUser(pickerId);
-      storage.createPickingLog({
-        actionType: "order_claimed",
-        pickerId,
-        pickerName: picker?.displayName || picker?.username || pickerId,
-        pickerRole: picker?.role,
-        orderId: id,
-        orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.warehouseStatus,
-        orderStatusAfter: order.warehouseStatus,
-        deviceType: req.headers["x-device-type"] as string || "desktop",
-        sessionId: req.sessionID,
-      }).catch(err => console.warn("[PickingLog] Failed to log order_claimed:", err.message));
-      
-      const items = await storage.getOrderItems(id);
-      res.json({ ...order, items });
+      if (!pickerId) return res.status(400).json({ error: "pickerId is required" });
+      const result = await picking.claimOrder(id, pickerId, req.headers["x-device-type"] as string, req.sessionID);
+      if (!result) return res.status(409).json({ error: "Order is no longer available" });
+      res.json({ ...result.order, items: result.items });
     } catch (error) {
       console.error("Error claiming order:", error);
       res.status(500).json({ error: "Failed to claim order" });
     }
   });
 
-  // Release an order (unclaim)
   app.post("/api/picking/orders/:id/release", async (req, res) => {
     try {
+      const { picking } = req.app.locals.services as any;
       const id = parseInt(req.params.id);
       const { resetProgress = true, reason } = req.body || {};
-      
-      const orderBefore = await storage.getOrderById(id);
-      const order = await storage.releaseOrder(id, resetProgress);
-      
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      
-      // Log the release action (non-blocking)
-      const pickerId = orderBefore?.assignedPickerId;
-      const picker = pickerId ? await storage.getUser(pickerId) : null;
-      storage.createPickingLog({
-        actionType: "order_released",
-        pickerId: pickerId || undefined,
-        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-        pickerRole: picker?.role,
-        orderId: id,
-        orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.warehouseStatus,
-        orderStatusAfter: order.warehouseStatus,
-        reason: reason || (resetProgress ? "Progress reset" : "Progress preserved"),
-        deviceType: req.headers["x-device-type"] as string || "desktop",
+      const order = await picking.releaseOrder(id, {
+        resetProgress,
+        reason,
+        deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
-      }).catch(err => console.warn("[PickingLog] Failed to log order_released:", err.message));
-      
+      });
+      if (!order) return res.status(404).json({ error: "Order not found" });
       res.json(order);
     } catch (error) {
       console.error("Error releasing order:", error);
@@ -1315,420 +1030,90 @@ export async function registerRoutes(
     }
   });
 
-  // Update item picked status
   app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId } = req.body;
-
-      // Validate status is a known enum value
-      if (!itemStatusEnum.includes(status)) {
-        return res.status(400).json({
-          error: "Invalid status",
-          message: `Status must be one of: ${itemStatusEnum.join(", ")}`,
-        });
-      }
-
-      // Get item before update — needed for status transition check and revert
-      const beforeItem = await storage.getOrderItemById(id);
-      if (!beforeItem) {
-        return res.status(404).json({ error: "Item not found" });
-      }
-
-      // Prevent double-pick: if item is already completed, reject a second completion
-      if (status === "completed" && beforeItem.status === "completed") {
-        return res.status(409).json({
-          error: "Already picked",
-          message: `Item ${id} is already completed`,
-        });
-      }
-
-      // Validate pickedQuantity bounds
-      if (pickedQuantity !== undefined) {
-        const qty = Number(pickedQuantity);
-        if (!Number.isInteger(qty) || qty < 0 || qty > beforeItem.quantity) {
-          return res.status(400).json({
-            error: "Invalid pickedQuantity",
-            message: `pickedQuantity must be an integer between 0 and ${beforeItem.quantity}`,
-          });
-        }
-      }
-
-      // Pass expectedCurrentStatus so the UPDATE uses a WHERE guard on the
-      // current status — prevents a concurrent request from overwriting a
-      // status that already changed (database-level double-pick prevention).
-      const item = await storage.updateOrderItemStatus(
-        id, status, pickedQuantity, shortReason, beforeItem.status,
-      );
-
-      if (!item) {
-        // Row exists (we checked above) but WHERE guard didn't match —
-        // another request already changed the status concurrently.
-        return res.status(409).json({
-          error: "Status conflict",
-          message: `Item ${id} status was changed by another request`,
-        });
-      }
-
-      // Log the item pick/short action
-      const order = await storage.getOrderById(item.orderId);
-      const pickerId = order?.assignedPickerId;
-      const picker = pickerId ? await storage.getUser(pickerId) : null;
-
-      // Determine action type based on status change
-      let actionType: string;
-      if (status === "completed") {
-        actionType = "item_picked";
-      } else if (status === "short") {
-        actionType = "item_shorted";
-      } else if (pickedQuantity !== undefined && beforeItem.pickedQuantity !== pickedQuantity) {
-        actionType = "item_quantity_adjusted";
-      } else {
-        actionType = "item_picked"; // default
-      }
-
-      storage.createPickingLog({
-        actionType,
-        pickerId: pickerId || undefined,
-        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-        pickerRole: picker?.role,
-        orderId: item.orderId,
-        orderNumber: order?.orderNumber,
-        orderItemId: item.id,
-        sku: item.sku,
-        itemName: item.name,
-        locationCode: item.location,
-        qtyRequested: item.quantity,
-        qtyBefore: beforeItem.pickedQuantity || 0,
-        qtyAfter: item.pickedQuantity,
-        qtyDelta: item.pickedQuantity - (beforeItem.pickedQuantity || 0),
-        reason: shortReason,
-        itemStatusBefore: beforeItem.status,
-        itemStatusAfter: item.status,
-        deviceType: req.headers["x-device-type"] as string || "desktop",
+      const { picking } = req.app.locals.services as any;
+      const result = await picking.pickItem(parseInt(req.params.id), {
+        status: req.body.status,
+        pickedQuantity: req.body.pickedQuantity,
+        shortReason: req.body.shortReason,
+        pickMethod: req.body.pickMethod,
+        warehouseLocationId: req.body.warehouseLocationId,
+        userId: req.session.user?.id,
+        deviceType: req.headers["x-device-type"] as string,
         sessionId: req.sessionID,
-        pickMethod: pickMethod || "manual", // "scan", "manual", "pick_all", "button"
-      }).catch(err => console.warn("[PickingLog] Failed to log item action:", err.message));
-
-      // If item was just marked as completed, decrement inventory
-      if (status === "completed" && beforeItem.status !== "completed") {
-        const pickedQty = pickedQuantity || item.quantity;
-        const productVariant = await storage.getProductVariantBySku(item.sku);
-
-        if (productVariant) {
-          console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
-
-          const levels = await storage.getInventoryLevelsByProductVariantId(productVariant.id);
-          const allLocations = await storage.getAllWarehouseLocations();
-
-          // Resolve pick location: explicit ID > assigned bin > auto-select
-          let pickLocationId: number | null = warehouseLocationId ? Number(warehouseLocationId) : null;
-
-          // Try the location already assigned to this order item
-          if (!pickLocationId && item.location && item.location !== "UNASSIGNED") {
-            const assignedLoc = allLocations.find(loc => loc.code === item.location);
-            if (assignedLoc) {
-              const hasStock = levels.some((l: any) =>
-                l.warehouseLocationId === assignedLoc.id && l.variantQty >= pickedQty
-              );
-              if (hasStock) {
-                pickLocationId = assignedLoc.id;
-              }
-            }
-          }
-
-          // Fallback: auto-select by location type priority
-          if (!pickLocationId) {
-            const sortedLevels = levels
-              .filter((l: any) => l.variantQty >= pickedQty)
-              .sort((a: any, b: any) => {
-                const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
-                const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
-                const priorityOrder = { pick: 0, pallet: 1, reserve: 2, receiving: 3 };
-                const priorityA = priorityOrder[locA?.locationType as keyof typeof priorityOrder] ?? 99;
-                const priorityB = priorityOrder[locB?.locationType as keyof typeof priorityOrder] ?? 99;
-                return priorityA - priorityB;
-              });
-            pickLocationId = sortedLevels[0]?.warehouseLocationId || null;
-          }
-
-          if (pickLocationId) {
-            const { inventoryCore: pickCore } = req.app.locals.services as any;
-            const picked = await pickCore.pickItem({
-              productVariantId: productVariant.id,
-              warehouseLocationId: pickLocationId,
-              qty: pickedQty,
-              orderId: item.orderId,
-              orderItemId: item.id,
-              userId: req.session.user?.id,
-            });
-
-            if (!picked) {
-              // Revert item status — inventory couldn't be deducted
-              try {
-                await storage.updateOrderItemStatus(id, beforeItem.status, beforeItem.pickedQuantity, undefined);
-              } catch (revertErr) {
-                console.error(`[Pick] Failed to revert item ${id} status after inventory failure:`, revertErr);
-              }
-              return res.status(409).json({
-                error: "Insufficient inventory",
-                message: `Not enough stock to pick ${pickedQty} of ${item.sku}`,
-              });
-            }
-
-            console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
-
-            // NOTE: No channel sync here — picks are order-driven and Shopify
-            // already decremented available qty at checkout. Syncing would double-dip.
-
-            // Auto-trigger replenishment check (fire-and-forget)
-            const { replenishment } = req.app.locals.services as any;
-            if (replenishment) {
-              replenishment.checkAndTriggerAfterPick(productVariant.id, pickLocationId).catch((err: any) =>
-                console.warn(`[Replen] Auto-trigger failed for variant ${productVariant.id}:`, err)
-              );
-            }
-          } else {
-            // No location with sufficient stock — revert
-            try {
-              await storage.updateOrderItemStatus(id, beforeItem.status, beforeItem.pickedQuantity, undefined);
-            } catch (revertErr) {
-              console.error(`[Pick] Failed to revert item ${id} status after no-stock:`, revertErr);
-            }
-            return res.status(409).json({
-              error: "No inventory available",
-              message: `No location has sufficient stock for ${pickedQty} of ${item.sku}`,
-            });
-          }
-        }
+      });
+      if (!result.success) {
+        const code = result.error === "not_found" ? 404
+          : ["invalid_status", "invalid_quantity"].includes(result.error) ? 400 : 409;
+        return res.status(code).json({ error: result.error, message: result.message });
       }
-
-      // Update order progress
-      await storage.updateOrderProgress(item.orderId);
-
-      res.json(item);
+      res.json(result.item);
     } catch (error) {
       console.error("Error updating item:", error);
       res.status(500).json({ error: "Failed to update item" });
     }
   });
 
-  // === PICKER CASE BREAK ENDPOINTS ===
-  // These are used by the picker when a case break is needed at their bin.
-  // The picker taps "Case Break" on the card, does the physical work, then confirms.
-
-  // Picker initiates a case break (when system didn't predict but picker sees it's needed)
   app.post("/api/picking/case-break", requireAuth, async (req, res) => {
     try {
+      const { picking } = req.app.locals.services as any;
       const { sku, warehouseLocationId } = req.body;
       if (!sku || !warehouseLocationId) {
         return res.status(400).json({ error: "sku and warehouseLocationId are required" });
       }
-
-      const { replenishment } = req.app.locals.services as any;
-      if (!replenishment) {
-        return res.status(500).json({ error: "Replenishment service not available" });
+      const result = await picking.initiateCaseBreak(sku, warehouseLocationId, req.session.user?.id);
+      if (!result.success) {
+        const code = result.taskId ? 409 : 404;
+        return res.status(code).json({ error: result.error, taskId: result.taskId });
       }
-
-      const variant = await storage.getProductVariantBySku(sku);
-      if (!variant) {
-        return res.status(404).json({ error: `No variant found for SKU ${sku}` });
-      }
-
-      // Check if there's already a pending/blocked task for this SKU+location
-      const existingTasks = await storage.getPendingReplenTasksForLocation(warehouseLocationId);
-      const existing = existingTasks.find(t => t.pickProductVariantId === variant.id);
-      if (existing) {
-        // Execute the existing task instead of creating a new one
-        try {
-          if (existing.status === "blocked") {
-            await storage.updateReplenTask(existing.id, { status: "pending" });
-          }
-          const result = await replenishment.executeTask(existing.id, req.session.user?.id || "picker");
-          return res.json({ success: true, taskId: existing.id, moved: result.moved, action: "executed_existing" });
-        } catch (err: any) {
-          return res.status(409).json({ error: err.message, taskId: existing.id });
-        }
-      }
-
-      // No existing task — trigger a replen check which will create and potentially execute one
-      const task = await replenishment.checkAndTriggerAfterPick(variant.id, warehouseLocationId);
-      if (!task) {
-        return res.status(404).json({ error: "Could not create replen task — no source stock or no threshold configured" });
-      }
-
-      // If it was auto-executed, it's already done
-      if (task.status === "completed") {
-        return res.json({ success: true, taskId: task.id, moved: task.qtyCompleted, action: "auto_completed" });
-      }
-
-      // Otherwise try to execute it now (picker is requesting it)
-      try {
-        const result = await replenishment.executeTask(task.id, req.session.user?.id || "picker");
-        return res.json({ success: true, taskId: task.id, moved: result.moved, action: "executed" });
-      } catch (err: any) {
-        return res.status(409).json({ error: err.message, taskId: task.id });
-      }
+      res.json(result);
     } catch (error: any) {
       console.error("Error in picker case break:", error);
       res.status(500).json({ error: error.message || "Failed to execute case break" });
     }
   });
 
-  // Picker confirms case break completion with bin count (after physical work is done)
-  // This is the post-break count: "what's in the bin now?"
   app.post("/api/picking/case-break/confirm", requireAuth, async (req, res) => {
     try {
+      const { picking } = req.app.locals.services as any;
       const { sku, warehouseLocationId, actualBinQty } = req.body;
       if (!sku || !warehouseLocationId || actualBinQty == null) {
         return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
       }
-
-      const variant = await storage.getProductVariantBySku(sku);
-      if (!variant) {
-        return res.status(404).json({ error: `No variant found for SKU ${sku}` });
-      }
-
-      const { inventoryCore } = req.app.locals.services as any;
-      if (!inventoryCore) {
-        return res.status(500).json({ error: "Inventory service not available" });
-      }
-
-      // Get current system qty at this location
-      const level = await inventoryCore.getLevel(variant.id, warehouseLocationId);
-      const systemQty = level?.variantQty ?? 0;
-      const adjustment = actualBinQty - systemQty;
-
-      if (adjustment !== 0) {
-        // Cycle count adjustment — correct inventory to match reality
-        if (!level) {
-          // Create the inventory level if it doesn't exist
-          const newLevel = await inventoryCore.upsertLevel(variant.id, warehouseLocationId);
-          if (actualBinQty > 0) {
-            await inventoryCore.adjustLevel(newLevel.id, { variantQty: actualBinQty });
-          }
-        } else {
-          await inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-        }
-
-        // Log as cycle count
-        await inventoryCore.logTransaction({
-          productVariantId: variant.id,
-          toLocationId: warehouseLocationId,
-          transactionType: "cycle_count",
-          variantQtyDelta: adjustment,
-          variantQtyBefore: systemQty,
-          variantQtyAfter: actualBinQty,
-          sourceState: "on_hand",
-          targetState: "on_hand",
-          referenceType: "picker_case_break",
-          referenceId: `${sku}:${warehouseLocationId}`,
-          notes: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
-          userId: req.session.user?.id || null,
-        });
-      }
-
-      res.json({
-        success: true,
-        systemQtyBefore: systemQty,
-        actualBinQty,
-        adjustment,
-      });
+      const result = await picking.confirmCaseBreak(sku, warehouseLocationId, actualBinQty, req.session.user?.id);
+      res.json(result);
     } catch (error: any) {
       console.error("Error confirming case break:", error);
       res.status(500).json({ error: error.message || "Failed to confirm case break" });
     }
   });
 
-  // Picker skips a predicted replen (not needed — bin has enough stock)
-  // Also does a cycle count correction if the actual qty differs from system
   app.post("/api/picking/case-break/skip", requireAuth, async (req, res) => {
     try {
+      const { picking } = req.app.locals.services as any;
       const { sku, warehouseLocationId, actualBinQty } = req.body;
       if (!sku || !warehouseLocationId || actualBinQty == null) {
         return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
       }
-
-      const variant = await storage.getProductVariantBySku(sku);
-      if (!variant) {
-        return res.status(404).json({ error: `No variant found for SKU ${sku}` });
-      }
-
-      const { inventoryCore } = req.app.locals.services as any;
-
-      // Correct inventory if needed
-      const level = await inventoryCore.getLevel(variant.id, warehouseLocationId);
-      const systemQty = level?.variantQty ?? 0;
-      const adjustment = actualBinQty - systemQty;
-
-      if (adjustment !== 0 && level) {
-        await inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-        await inventoryCore.logTransaction({
-          productVariantId: variant.id,
-          toLocationId: warehouseLocationId,
-          transactionType: "cycle_count",
-          variantQtyDelta: adjustment,
-          variantQtyBefore: systemQty,
-          variantQtyAfter: actualBinQty,
-          sourceState: "on_hand",
-          targetState: "on_hand",
-          referenceType: "picker_replen_skip",
-          referenceId: `${sku}:${warehouseLocationId}`,
-          notes: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
-          userId: req.session.user?.id || null,
-        });
-      }
-
-      // Cancel any pending/blocked replen tasks for this SKU+location
-      const existingTasks = await storage.getPendingReplenTasksForLocation(warehouseLocationId);
-      for (const task of existingTasks) {
-        if (task.pickProductVariantId === variant.id && (task.status === "pending" || task.status === "blocked")) {
-          await storage.updateReplenTask(task.id, {
-            status: "cancelled",
-            notes: `${task.notes || ""}\nCancelled: picker confirmed no replen needed (actual qty=${actualBinQty})`,
-          });
-        }
-      }
-
-      res.json({
-        success: true,
-        systemQtyBefore: systemQty,
-        actualBinQty,
-        adjustment,
-      });
+      const result = await picking.skipReplen(sku, warehouseLocationId, actualBinQty, req.session.user?.id);
+      res.json(result);
     } catch (error: any) {
       console.error("Error skipping case break:", error);
       res.status(500).json({ error: error.message || "Failed to skip case break" });
     }
   });
 
-  // Mark order as ready to ship
   app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const orderBefore = await storage.getOrderById(id);
-      const order = await storage.updateOrderStatus(id, "ready_to_ship");
-      
-      if (!order) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-      
-      // Log the order completion (non-blocking)
-      const pickerId = order.assignedPickerId;
-      const picker = pickerId ? await storage.getUser(pickerId) : null;
-      storage.createPickingLog({
-        actionType: "order_completed",
-        pickerId: pickerId || undefined,
-        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-        pickerRole: picker?.role,
-        orderId: id,
-        orderNumber: order.orderNumber,
-        orderStatusBefore: orderBefore?.warehouseStatus,
-        orderStatusAfter: order.warehouseStatus,
-        deviceType: req.headers["x-device-type"] as string || "desktop",
-        sessionId: req.sessionID,
-      }).catch(err => console.warn("[PickingLog] Failed to log order_completed:", err.message));
-      
+      const { picking } = req.app.locals.services as any;
+      const order = await picking.markReadyToShip(
+        parseInt(req.params.id),
+        req.session?.user?.id,
+        req.headers["x-device-type"] as string,
+        req.sessionID,
+      );
+      if (!order) return res.status(404).json({ error: "Order not found" });
       res.json(order);
     } catch (error) {
       console.error("Error updating order:", error);
@@ -10211,6 +9596,9 @@ export async function registerRoutes(
         maxOrdersPerWave: data.maxOrdersPerWave || 50,
         maxItemsPerWave: data.maxItemsPerWave || 500,
         waveAutoRelease: data.waveAutoRelease || 0,
+        postPickStatus: data.postPickStatus || "ready_to_ship",
+        pickMode: data.pickMode || "single_order",
+        requireScanConfirm: data.requireScanConfirm ?? 0,
         isActive: data.isActive ?? 1,
       });
       res.status(201).json(settings);

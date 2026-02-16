@@ -21,6 +21,7 @@
  *     ├── reservation      (depends on core)
  *     ├── replenishment    (depends on core)
  *     ├── fulfillment      (depends on core)
+ *     ├── picking           (depends on core + replenishment + storage)
  *     ├── channel-sync     (depends on atp)
  *     └── returns          (depends on core)
  */
@@ -37,6 +38,8 @@ import { createInventoryAlertService } from "./inventory-alerts";
 import { createFulfillmentRouterService } from "./fulfillment-router";
 import { createInventorySourceService } from "./inventory-source";
 import { createSLAMonitorService } from "./sla-monitor";
+import { createPickingService } from "./picking";
+import { storage } from "../storage";
 
 export function createServices(db: any) {
   // Foundation
@@ -53,6 +56,9 @@ export function createServices(db: any) {
   // Depends on atp
   const channelSync = createChannelSyncService(db, atp);
 
+  // Depends on inventoryCore + replenishment + storage
+  const picking = createPickingService(db, inventoryCore, replenishment, storage);
+
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
   const fulfillmentRouter = createFulfillmentRouterService(db);
@@ -66,6 +72,7 @@ export function createServices(db: any) {
     fulfillment,
     reservation,
     replenishment,
+    picking,
     channelSync,
     returns,
     inventoryAlerts,
@@ -88,6 +95,7 @@ export { createInventoryAlertService } from "./inventory-alerts";
 export { createFulfillmentRouterService } from "./fulfillment-router";
 export { createInventorySourceService } from "./inventory-source";
 export { createSLAMonitorService } from "./sla-monitor";
+export { createPickingService } from "./picking";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";
@@ -99,3 +107,4 @@ export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./retu
 export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router";
 export type { SyncResult as InventorySourceSyncResult } from "./inventory-source";
 export type { SLAAlert, SLASummary } from "./sla-monitor";
+export type { PickingService, PickItemResult, CaseBreakResult, BinCountResult } from "./picking";

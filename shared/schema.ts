@@ -710,6 +710,11 @@ export const warehouseSettings = pgTable("warehouse_settings", {
   // Velocity calculation
   velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
 
+  // Picking workflow settings
+  postPickStatus: varchar("post_pick_status", { length: 30 }).notNull().default("ready_to_ship"), // ready_to_ship, picked, staged
+  pickMode: varchar("pick_mode", { length: 20 }).notNull().default("single_order"), // single_order, batch, wave
+  requireScanConfirm: integer("require_scan_confirm").notNull().default(0), // 0=optional, 1=required
+
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -106,6 +106,7 @@ function Router() {
         <Route path="/picking" component={PickingPage} />
         <Route path="/picking/logs" component={PickingPage} />
         <Route path="/picking/metrics" component={PickingPage} />
+        <Route path="/picking/settings" component={PickingPage} />
         <Route path="/order-history">
           <ProtectedRoute component={OrderHistory} allowedRoles={["admin", "lead"]} />
         </Route>

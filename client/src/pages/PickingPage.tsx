@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import PickingQueue from "./Picking";
 import PickingLogs from "./PickingLogs";
 import PickingMetrics from "./PickingMetrics";
+import PickingSettings from "./PickingSettings";
 
 export default function PickingPage() {
   const [location, navigate] = useLocation();
@@ -13,6 +14,7 @@ export default function PickingPage() {
   let activeTab = "queue";
   if (isAdminLead && location.startsWith("/picking/logs")) activeTab = "logs";
   else if (isAdminLead && location.startsWith("/picking/metrics")) activeTab = "metrics";
+  else if (isAdminLead && location.startsWith("/picking/settings")) activeTab = "settings";
 
   const handleTabChange = (tab: string) => {
     if (tab === "queue") navigate("/picking");
@@ -26,6 +28,7 @@ export default function PickingPage() {
           <TabsTrigger value="queue">Queue</TabsTrigger>
           {isAdminLead && <TabsTrigger value="logs">Logs</TabsTrigger>}
           {isAdminLead && <TabsTrigger value="metrics">Metrics</TabsTrigger>}
+          {isAdminLead && <TabsTrigger value="settings">Settings</TabsTrigger>}
         </TabsList>
       </div>
       <TabsContent value="queue" className="mt-0 flex-1">
@@ -39,6 +42,11 @@ export default function PickingPage() {
       {isAdminLead && (
         <TabsContent value="metrics" className="mt-0 flex-1 overflow-auto">
           <PickingMetrics />
+        </TabsContent>
+      )}
+      {isAdminLead && (
+        <TabsContent value="settings" className="mt-0 flex-1 overflow-auto">
+          <PickingSettings />
         </TabsContent>
       )}
     </Tabs>
