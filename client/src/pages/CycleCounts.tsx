@@ -1046,7 +1046,10 @@ export default function CycleCounts() {
                               autoFocus
                             />
                             {wrongSkuDropdownOpen && wrongSkuResults.length > 0 && (
-                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                              <div
+                                onMouseDown={(e) => e.preventDefault()}
+                                className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto"
+                              >
                                 {wrongSkuResults.map((result) => (
                                   <button
                                     key={result.sku}
@@ -1175,7 +1178,10 @@ export default function CycleCounts() {
                     data-testid="input-add-found-sku"
                   />
                   {extraItemSkuDropdownOpen && extraItemSkuResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                    <div
+                      onMouseDown={(e) => e.preventDefault()}
+                      className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto"
+                    >
                       {extraItemSkuResults.map((result) => (
                         <button
                           key={result.sku}
@@ -1807,7 +1813,11 @@ export default function CycleCounts() {
                           setUnknownSkuMode(false);
                         }}
                         onFocus={() => setSkuDropdownOpen(true)}
-                        onBlur={() => setTimeout(() => setSkuDropdownOpen(false), 200)}
+                        onBlur={(e) => {
+                          // Don't close if clicking within the dropdown (including scrollbar)
+                          if (e.relatedTarget?.closest?.('[data-sku-dropdown]')) return;
+                          setTimeout(() => setSkuDropdownOpen(false), 150);
+                        }}
                         placeholder="Search SKU..."
                         className="pl-8 h-10"
                         enterKeyHint="search"
@@ -1819,7 +1829,12 @@ export default function CycleCounts() {
                       />
                       {/* Dropdown */}
                       {skuDropdownOpen && skuSearch.length >= 2 && (
-                        <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                        <div
+                          data-sku-dropdown
+                          tabIndex={-1}
+                          onMouseDown={(e) => e.preventDefault()}
+                          className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-48 overflow-y-auto"
+                        >
                           {skuResults.length > 0 ? (
                             skuResults.map((result) => (
                               <button
