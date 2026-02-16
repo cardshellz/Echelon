@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -32,6 +33,8 @@ interface WarehouseSettings {
   postPickStatus: string;
   pickMode: string;
   requireScanConfirm: number;
+  pickingBatchSize: number;
+  autoReleaseDelayMinutes: number;
   isActive: number;
   [key: string]: any;
 }
@@ -72,6 +75,8 @@ export default function PickingSettings() {
     postPickStatus: "ready_to_ship",
     pickMode: "single_order",
     requireScanConfirm: "0",
+    pickingBatchSize: "20",
+    autoReleaseDelayMinutes: "30",
   });
 
   // Auto-select first warehouse
@@ -88,12 +93,14 @@ export default function PickingSettings() {
         postPickStatus: selectedWarehouse.postPickStatus || "ready_to_ship",
         pickMode: selectedWarehouse.pickMode || "single_order",
         requireScanConfirm: (selectedWarehouse.requireScanConfirm ?? 0).toString(),
+        pickingBatchSize: (selectedWarehouse.pickingBatchSize ?? 20).toString(),
+        autoReleaseDelayMinutes: (selectedWarehouse.autoReleaseDelayMinutes ?? 30).toString(),
       });
     }
   }, [selectedWarehouse]);
 
   const saveMutation = useMutation({
-    mutationFn: async (data: { postPickStatus: string; pickMode: string; requireScanConfirm: number }) => {
+    mutationFn: async (data: { postPickStatus: string; pickMode: string; requireScanConfirm: number; pickingBatchSize: number; autoReleaseDelayMinutes: number }) => {
       if (!selectedWarehouseData) throw new Error("No warehouse selected");
 
       if (selectedWarehouse?.id) {
@@ -334,6 +341,44 @@ export default function PickingSettings() {
                 </div>
               </div>
 
+              {/* Operational Defaults */}
+              <div className="pt-4 border-t">
+                <Label className="text-sm md:text-base font-semibold">Operational Defaults</Label>
+                <p className="text-xs md:text-sm text-muted-foreground mb-3">
+                  Batch sizing and order release timing for this warehouse
+                </p>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="pickingBatchSize" className="text-xs md:text-sm">Batch Size</Label>
+                    <Input
+                      id="pickingBatchSize"
+                      type="number"
+                      className="w-full h-10"
+                      value={form.pickingBatchSize}
+                      onChange={(e) => setForm({ ...form, pickingBatchSize: e.target.value })}
+                      min="1"
+                      max="100"
+                      autoComplete="off"
+                    />
+                    <p className="text-xs text-muted-foreground">Maximum orders in a single picking batch</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="autoReleaseDelayMinutes" className="text-xs md:text-sm">Auto-Release Delay (minutes)</Label>
+                    <Input
+                      id="autoReleaseDelayMinutes"
+                      type="number"
+                      className="w-full h-10"
+                      value={form.autoReleaseDelayMinutes}
+                      onChange={(e) => setForm({ ...form, autoReleaseDelayMinutes: e.target.value })}
+                      min="1"
+                      max="240"
+                      autoComplete="off"
+                    />
+                    <p className="text-xs text-muted-foreground">Time before unclaimed orders are released back to queue</p>
+                  </div>
+                </div>
+              </div>
+
               {/* Info callout */}
               <div className="flex items-start gap-3 p-3 md:p-4 bg-blue-50 dark:bg-blue-950/30 rounded-lg border border-blue-200 dark:border-blue-800">
                 <Info className="w-5 h-5 text-blue-500 mt-0.5 shrink-0" />
@@ -353,6 +398,8 @@ export default function PickingSettings() {
                     postPickStatus: form.postPickStatus,
                     pickMode: form.pickMode,
                     requireScanConfirm: parseInt(form.requireScanConfirm) || 0,
+                    pickingBatchSize: parseInt(form.pickingBatchSize) || 20,
+                    autoReleaseDelayMinutes: parseInt(form.autoReleaseDelayMinutes) || 30,
                   })}
                   disabled={saveMutation.isPending}
                 >

@@ -9599,6 +9599,8 @@ export async function registerRoutes(
         postPickStatus: data.postPickStatus || "ready_to_ship",
         pickMode: data.pickMode || "single_order",
         requireScanConfirm: data.requireScanConfirm ?? 0,
+        pickingBatchSize: data.pickingBatchSize || 20,
+        autoReleaseDelayMinutes: data.autoReleaseDelayMinutes || 30,
         isActive: data.isActive ?? 1,
       });
       res.status(201).json(settings);

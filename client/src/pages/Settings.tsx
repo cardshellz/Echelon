@@ -40,8 +40,6 @@ export default function Settings() {
     default_timezone: "America/New_York",
     default_warehouse_id: "",
     allow_multiple_skus_per_bin: "true",
-    picking_batch_size: "20",
-    auto_release_delay_minutes: "30",
     default_lead_time_days: "120",
     default_safety_stock_days: "7",
     cycle_count_auto_approve_tolerance: "0",
@@ -414,50 +412,11 @@ export default function Settings() {
         <TabsContent value="picking" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Picking Defaults</CardTitle>
-              <CardDescription>Configure default picking behavior</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="picking_batch_size" className="text-sm">Default Batch Size</Label>
-                  <Input
-                    id="picking_batch_size"
-                    type="number"
-                    value={formData.picking_batch_size || "20"}
-                    onChange={(e) => setFormData({ ...formData, picking_batch_size: e.target.value })}
-                    disabled={!canEdit}
-                    className="h-11"
-                    autoComplete="off"
-                    data-testid="input-batch-size"
-                  />
-                  <p className="text-xs text-muted-foreground">Maximum orders in a single picking batch</p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="auto_release_delay_minutes" className="text-sm">Auto-Release Delay (minutes)</Label>
-                  <Input
-                    id="auto_release_delay_minutes"
-                    type="number"
-                    value={formData.auto_release_delay_minutes || "30"}
-                    onChange={(e) => setFormData({ ...formData, auto_release_delay_minutes: e.target.value })}
-                    disabled={!canEdit}
-                    className="h-11"
-                    autoComplete="off"
-                    data-testid="input-release-delay"
-                  />
-                  <p className="text-xs text-muted-foreground">Time before unclaimed orders are released back to queue</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Volume2 className="h-5 w-5" />
                 Sound & Haptic Feedback
               </CardTitle>
-              <CardDescription>Choose sounds for picking confirmations</CardDescription>
+              <CardDescription>Choose sounds for picking confirmations. Operational settings like batch size live in Picking → Settings per warehouse.</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-3">

@@ -714,6 +714,8 @@ export const warehouseSettings = pgTable("warehouse_settings", {
   postPickStatus: varchar("post_pick_status", { length: 30 }).notNull().default("ready_to_ship"), // ready_to_ship, picked, staged
   pickMode: varchar("pick_mode", { length: 20 }).notNull().default("single_order"), // single_order, batch, wave
   requireScanConfirm: integer("require_scan_confirm").notNull().default(0), // 0=optional, 1=required
+  pickingBatchSize: integer("picking_batch_size").notNull().default(20), // Max orders per picking batch
+  autoReleaseDelayMinutes: integer("auto_release_delay_minutes").notNull().default(30), // Minutes before unclaimed orders release
 
   isActive: integer("is_active").notNull().default(1),
   createdAt: timestamp("created_at").defaultNow().notNull(),
