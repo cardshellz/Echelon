@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useDebounce } from "@/hooks/use-debounce";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -141,16 +142,13 @@ export default function WarehouseLocations() {
     enabled: canView,
   });
 
-  interface CatalogProduct {
+  interface CatalogProductSearchResult {
     id: number;
     title: string;
     sku: string | null;
     imageUrl: string | null;
+    matchedVariantSku: string | null;
   }
-  const { data: catalogProducts = [] } = useQuery<CatalogProduct[]>({
-    queryKey: ["/api/catalog/products"],
-    enabled: isAssignProductsOpen,
-  });
 
   interface ProductInBin {
     id: number;
@@ -201,19 +199,25 @@ export default function WarehouseLocations() {
 
   const [assignSkuSearch, setAssignSkuSearch] = useState("");
   const [assignSkuOpen, setAssignSkuOpen] = useState(false);
+  const debouncedAssignSkuSearch = useDebounce(assignSkuSearch, 300);
 
+  // Server-side search across catalog products AND variant SKUs
+  const { data: catalogSearchResults = [] } = useQuery<CatalogProductSearchResult[]>({
+    queryKey: ["/api/catalog/products/search", debouncedAssignSkuSearch],
+    queryFn: async () => {
+      if (!debouncedAssignSkuSearch || debouncedAssignSkuSearch.length < 2) return [];
+      const res = await fetch(`/api/catalog/products/search?q=${encodeURIComponent(debouncedAssignSkuSearch)}&limit=20`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedAssignSkuSearch.length >= 2 && assignSkuOpen,
+  });
+
+  // Filter out already-assigned products
   const filteredCatalogProducts = useMemo(() => {
-    if (!assignSkuSearch || assignSkuSearch.length < 2) return [];
-    const search = assignSkuSearch.toLowerCase();
     const assignedIds = new Set(productsInBin.map(p => p.catalogProductId));
-    return catalogProducts
-      .filter(p => !assignedIds.has(p.id))
-      .filter(p =>
-        (p.sku && p.sku.toLowerCase().includes(search)) ||
-        p.title.toLowerCase().includes(search)
-      )
-      .slice(0, 20);
-  }, [assignSkuSearch, catalogProducts, productsInBin]);
+    return catalogSearchResults.filter(p => !assignedIds.has(p.id));
+  }, [catalogSearchResults, productsInBin]);
 
   const assignProductMutation = useMutation({
     mutationFn: async ({ locationId, catalogProductId }: { locationId: number; catalogProductId: number }) => {
@@ -1751,6 +1755,9 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                                     )}
                                     <div className="flex-1 min-w-0">
                                       <div className="font-medium text-sm">{product.sku || "No SKU"}</div>
+                                      {product.matchedVariantSku && product.matchedVariantSku !== product.sku && (
+                                        <div className="text-xs text-blue-600 font-mono">variant: {product.matchedVariantSku}</div>
+                                      )}
                                       <div className="text-xs text-muted-foreground truncate">{product.title}</div>
                                     </div>
                                   </div>
