@@ -4386,6 +4386,57 @@ export async function registerRoutes(
     }
   });
 
+  // Search catalog products by SKU/name, also matching variant-level SKUs
+  // Returns catalog products (for bin assignment) but searches across both
+  // catalog_products.sku AND product_variants.sku so variant SKUs are findable
+  app.get("/api/catalog/products/search", async (req, res) => {
+    try {
+      const query = String(req.query.q || "").trim().toLowerCase();
+      const limit = parseInt(String(req.query.limit)) || 20;
+      if (!query || query.length < 2) return res.json([]);
+
+      const searchPattern = `%${query}%`;
+
+      // Search catalog products directly + via variant SKUs, deduplicating by catalog product ID
+      // DISTINCT ON picks the first row per cp.id; ORDER BY prefers rows where the variant SKU matched
+      const result = await db.execute<{
+        id: number;
+        sku: string | null;
+        title: string;
+        image_url: string | null;
+        matched_variant_sku: string | null;
+      }>(sql`
+        SELECT DISTINCT ON (cp.id)
+          cp.id,
+          cp.sku,
+          cp.title,
+          (SELECT ca.url FROM catalog_assets ca WHERE ca.catalog_product_id = cp.id ORDER BY ca.position LIMIT 1) as image_url,
+          CASE WHEN pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern} THEN pv.sku ELSE NULL END as matched_variant_sku
+        FROM catalog_products cp
+        LEFT JOIN products p ON p.id = cp.product_id
+        LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.is_active = true
+        WHERE
+          LOWER(cp.sku) LIKE ${searchPattern} OR
+          LOWER(cp.title) LIKE ${searchPattern} OR
+          (pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern}) OR
+          (pv.name IS NOT NULL AND LOWER(pv.name) LIKE ${searchPattern})
+        ORDER BY cp.id, (CASE WHEN pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern} THEN 0 ELSE 1 END), cp.sku
+        LIMIT ${limit}
+      `);
+
+      res.json(result.rows.map(r => ({
+        id: r.id,
+        sku: r.sku,
+        title: r.title,
+        imageUrl: r.image_url,
+        matchedVariantSku: r.matched_variant_sku,
+      })));
+    } catch (error) {
+      console.error("Error searching catalog products:", error);
+      res.status(500).json({ error: "Failed to search catalog products" });
+    }
+  });
+
   app.get("/api/catalog/products/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
