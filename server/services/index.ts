@@ -40,6 +40,7 @@ import { createInventorySourceService } from "./inventory-source";
 import { createSLAMonitorService } from "./sla-monitor";
 import { createPickingService } from "./picking";
 import { createOrderCombiningService } from "./order-combining";
+import { createCycleCountService } from "./cycle-count";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
@@ -67,6 +68,9 @@ export function createServices(db: any) {
   const slaMonitor = createSLAMonitorService(db);
   const orderCombining = createOrderCombiningService(db);
 
+  // Depends on inventoryCore + channelSync + replenishment + storage
+  const cycleCount = createCycleCountService(db, inventoryCore, channelSync, replenishment, storage);
+
   return {
     inventoryCore,
     atp,
@@ -82,6 +86,7 @@ export function createServices(db: any) {
     inventorySource,
     slaMonitor,
     orderCombining,
+    cycleCount,
   };
 }
 
@@ -100,6 +105,7 @@ export { createInventorySourceService } from "./inventory-source";
 export { createSLAMonitorService } from "./sla-monitor";
 export { createPickingService } from "./picking";
 export { createOrderCombiningService } from "./order-combining";
+export { createCycleCountService } from "./cycle-count";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";
@@ -113,3 +119,4 @@ export type { SyncResult as InventorySourceSyncResult } from "./inventory-source
 export type { SLAAlert, SLASummary } from "./sla-monitor";
 export type { PickingService, PickItemResult, CaseBreakResult, BinCountResult } from "./picking";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./order-combining";
+export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count";

@@ -8,7 +8,7 @@ import { insertProductLocationSchema, updateProductLocationSchema, insertWarehou
 import { createOrderCombiningService } from "./services/order-combining";
 import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
 import { broadcastOrdersUpdated } from "./websocket";
-import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation, CycleCountItem } from "@shared/schema";
+import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
 import multer from "multer";
@@ -7118,1184 +7118,175 @@ export async function registerRoutes(
   // CYCLE COUNTS (Inventory Reconciliation)
   // ============================================
 
-  // After cycle count approval, reconcile product_locations (bin assignments)
-  // to match physical reality. inventory_levels is adjusted by adjustInventory();
-  // this function handles the complementary bin assignment table.
-  async function reconcileBinAssignment(item: CycleCountItem): Promise<void> {
-    if (!item.varianceType) return;
-
-    // Only manage bin assignments for pick-type locations
-    const loc = await storage.getWarehouseLocationById(item.warehouseLocationId);
-    if (!loc || loc.locationType !== "pick") return;
-
-    // EXPECTED_MISSING: old SKU no longer in this bin → remove its assignment
-    if (item.mismatchType === "expected_missing") {
-      if (!item.catalogProductId) return;
-      const existing = await storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
-      if (existing) await storage.deleteProductLocation(existing.id);
-      return;
-    }
-
-    // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here now → create assignment
-    if (item.mismatchType === "unexpected_found" ||
-        (item.varianceType === "unexpected_item" && !item.mismatchType)) {
-      if (!item.catalogProductId) return;
-      // Idempotent: skip if already assigned
-      const existing = await storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
-      if (existing) return;
-
-      const cp = await storage.getCatalogProductById(item.catalogProductId);
-      if (!cp) return;
-
-      await storage.createProductLocation({
-        catalogProductId: item.catalogProductId,
-        sku: item.countedSku?.toUpperCase() || cp.sku || null,
-        name: cp.title || item.countedSku || "Unknown",
-        location: loc.code,
-        zone: loc.zone || "U",
-        warehouseLocationId: item.warehouseLocationId,
-        locationType: loc.locationType,
-        isPrimary: 1,
-        status: "active",
-      });
-      return;
-    }
-    // quantity_over, quantity_under: no bin assignment changes needed
-  }
-
-  // Helper: compute bin-level stats from cycle count items
-  function computeBinStats(items: { warehouseLocationId: number; status: string; varianceType: string | null }[]) {
-    const bins = new Map<number, typeof items>();
-    for (const item of items) {
-      const arr = bins.get(item.warehouseLocationId);
-      if (arr) arr.push(item);
-      else bins.set(item.warehouseLocationId, [item]);
-    }
-    let countedBins = 0;
-    let varianceBins = 0;
-    for (const binItems of bins.values()) {
-      const allPending = binItems.every(i => i.status === "pending");
-      if (!allPending) countedBins++;
-      if (!allPending && binItems.some(i => i.varianceType)) varianceBins++;
-    }
-    return { countedBins, varianceCount: varianceBins };
-  }
-
-  // Get all cycle counts
   app.get("/api/cycle-counts", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const counts = await storage.getAllCycleCounts();
-      res.json(counts);
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.getAll());
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error fetching cycle counts:", error);
       res.status(500).json({ error: "Failed to fetch cycle counts" });
     }
   });
 
-  // Get single cycle count with items
   app.get("/api/cycle-counts/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const cycleCount = await storage.getCycleCountById(id);
-      
-      if (!cycleCount) {
-        return res.status(404).json({ error: "Cycle count not found" });
-      }
-      
-      const items = await storage.getCycleCountItems(id);
-      
-      // Enrich items with location details
-      const enrichedItems = await Promise.all(items.map(async (item) => {
-        const location = await storage.getWarehouseLocationById(item.warehouseLocationId);
-        return {
-          ...item,
-          locationCode: location?.code,
-          zone: location?.zone,
-        };
-      }));
-      
-      res.json({ ...cycleCount, items: enrichedItems });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.getById(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error fetching cycle count:", error);
       res.status(500).json({ error: "Failed to fetch cycle count" });
     }
   });
 
-  // Get variance summary grouped by SKU
   app.get("/api/cycle-counts/:id/variance-summary", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const items = await storage.getCycleCountItems(id);
-
-      // Group items with variances by productVariantId
-      const variantMap = new Map<number, { sku: string; productVariantId: number; locations: any[]; totalVariance: number }>();
-
-      for (const item of items) {
-        if (!item.varianceType || !item.productVariantId) continue;
-
-        const sku = item.expectedSku || item.countedSku || "Unknown";
-        const existing = variantMap.get(item.productVariantId);
-        const location = await storage.getWarehouseLocationById(item.warehouseLocationId);
-
-        const locEntry = {
-          locationId: item.warehouseLocationId,
-          locationCode: location?.code || "?",
-          zone: location?.zone,
-          varianceQty: item.varianceQty ?? 0,
-          varianceType: item.varianceType,
-          mismatchType: item.mismatchType,
-          status: item.status,
-          itemId: item.id,
-        };
-
-        if (existing) {
-          existing.locations.push(locEntry);
-          existing.totalVariance += item.varianceQty ?? 0;
-        } else {
-          variantMap.set(item.productVariantId, {
-            sku,
-            productVariantId: item.productVariantId,
-            locations: [locEntry],
-            totalVariance: item.varianceQty ?? 0,
-          });
-        }
-      }
-
-      // Classify each SKU
-      const skuSummaries = Array.from(variantMap.values()).map(entry => ({
-        ...entry,
-        netVariance: entry.totalVariance,
-        classification: entry.totalVariance === 0
-          ? "misplacement"
-          : entry.totalVariance > 0
-            ? "surplus"
-            : "shortage",
-      }));
-
-      res.json({ skuSummaries });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.getVarianceSummary(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error fetching variance summary:", error);
       res.status(500).json({ error: "Failed to fetch variance summary" });
     }
   });
 
-  // Create new cycle count
   app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const userId = req.session.user?.id;
-      const { name, description, warehouseId, zoneFilter, locationTypeFilter, binTypeFilter } = req.body;
-
-      if (!name) {
-        return res.status(400).json({ error: "Name is required" });
-      }
-
-      const cycleCount = await storage.createCycleCount({
-        name,
-        description,
-        warehouseId: warehouseId || null,
-        zoneFilter: zoneFilter || null,
-        locationTypeFilter: locationTypeFilter || null,
-        binTypeFilter: binTypeFilter || null,
-        status: "draft",
-        createdBy: userId,
-      });
-      
-      res.status(201).json(cycleCount);
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      const result = await ccService.create(req.body, req.session.user?.id);
+      res.status(201).json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error creating cycle count:", error);
       res.status(500).json({ error: "Failed to create cycle count" });
     }
   });
 
-  // Initialize cycle count with bins (generates items from current inventory)
   app.post("/api/cycle-counts/:id/initialize", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const cycleCount = await storage.getCycleCountById(id);
-      
-      if (!cycleCount) {
-        return res.status(404).json({ error: "Cycle count not found" });
-      }
-      
-      if (cycleCount.status !== "draft") {
-        return res.status(400).json({ error: "Can only initialize draft cycle counts" });
-      }
-      
-      // Get all warehouse locations (filtered by zone, warehouse, and location type if specified)
-      let locations = await storage.getAllWarehouseLocations();
-      if (cycleCount.zoneFilter) {
-        locations = locations.filter(l => l.zone === cycleCount.zoneFilter);
-      }
-      if (cycleCount.warehouseId) {
-        locations = locations.filter(l => l.warehouseId === cycleCount.warehouseId);
-      }
-      if (cycleCount.locationTypeFilter) {
-        const allowedTypes = cycleCount.locationTypeFilter.split(",").map(t => t.trim());
-        locations = locations.filter(l => allowedTypes.includes(l.locationType));
-      }
-      if (cycleCount.binTypeFilter) {
-        const allowedBinTypes = cycleCount.binTypeFilter.split(",").map(t => t.trim());
-        locations = locations.filter(l => allowedBinTypes.includes(l.binType));
-      }
-      
-      // For each location, get current inventory and create count items
-      const items: any[] = [];
-      
-      for (const location of locations) {
-        // Get inventory levels at this location with actual stock
-        // Join to product_variants for the sellable SKU (source of truth)
-        const result = await db.execute<{
-          product_variant_id: number;
-          variant_qty: number;
-          catalog_product_id: number | null;
-          sku: string | null;
-        }>(sql`
-          SELECT
-            il.product_variant_id,
-            il.variant_qty,
-            cp.id as catalog_product_id,
-            COALESCE(pv.sku, cp.sku, p.sku) as sku
-          FROM inventory_levels il
-          LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
-          LEFT JOIN products p ON pv.product_id = p.id
-          LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
-          WHERE il.warehouse_location_id = ${location.id}
-            AND il.variant_qty > 0
-        `);
-
-        if (result.rows.length > 0) {
-          // Has inventory - create item for each product
-          for (const row of result.rows) {
-            items.push({
-              cycleCountId: id,
-              warehouseLocationId: location.id,
-              productVariantId: row.product_variant_id,
-              catalogProductId: row.catalog_product_id,
-              expectedSku: row.sku,
-              expectedQty: row.variant_qty,
-              status: "pending",
-            });
-          }
-        } else {
-          // Empty bin - still create item to verify it's empty
-          items.push({
-            cycleCountId: id,
-            warehouseLocationId: location.id,
-            productVariantId: null,
-            catalogProductId: null,
-            expectedSku: null,
-            expectedQty: 0,
-            status: "pending",
-          });
-        }
-      }
-      
-      // Bulk create items
-      if (items.length > 0) {
-        await storage.bulkCreateCycleCountItems(items);
-      }
-      
-      // Update cycle count status and counts
-      await storage.updateCycleCount(id, {
-        status: "in_progress",
-        totalBins: locations.length,
-        countedBins: 0,
-        startedAt: new Date(),
-      });
-      
-      res.json({ success: true, binsCreated: locations.length, itemsCreated: items.length });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.initialize(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error initializing cycle count:", error);
       res.status(500).json({ error: "Failed to initialize cycle count" });
     }
   });
 
-  // Record count for a bin
   app.post("/api/cycle-counts/:id/items/:itemId/count", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const itemId = parseInt(req.params.itemId);
-      const userId = req.session.user?.id;
-      const { countedSku: rawCountedSku, countedQty, notes } = req.body;
-      const countedSku = rawCountedSku?.trim() || null;
-
-      const item = await storage.getCycleCountItemById(itemId);
-      if (!item) {
-        return res.status(404).json({ error: "Item not found" });
-      }
-
-      // Clean up existing mismatch pairs when re-counting (edit without reset)
-      if (item.status !== "pending" && (item.relatedItemId || item.mismatchType)) {
-        // Delete the linked item if this item points to one
-        if (item.relatedItemId) {
-          const linkedItem = await storage.getCycleCountItemById(item.relatedItemId);
-          if (linkedItem && linkedItem.status !== "approved") {
-            await storage.deleteCycleCountItem(item.relatedItemId);
-          }
-        }
-        // Delete any item that points TO this one (reverse relationship)
-        const reverseResult = await db.execute<{ id: number; status: string }>(sql`
-          SELECT id, status FROM cycle_count_items
-          WHERE related_item_id = ${itemId} AND status != 'approved'
-        `);
-        for (const rev of reverseResult.rows) {
-          await storage.deleteCycleCountItem(rev.id);
-        }
-        // Clear mismatch fields on this item so the count logic starts fresh
-        await storage.updateCycleCountItem(itemId, {
-          mismatchType: null,
-          relatedItemId: null,
-        });
-        // Re-fetch to get clean state
-        Object.assign(item, { mismatchType: null, relatedItemId: null });
-      }
-
-      // Calculate variance
-      const varianceQty = (countedQty ?? 0) - (item.expectedQty ?? 0);
-      let varianceType: string | null = null;
-      let createdFoundItem = false;
-      
-      // Detect variance type
-      const isSkuMismatch = countedSku && item.expectedSku && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
-      
-      if (isSkuMismatch) {
-        // SKU MISMATCH WORKFLOW: Create TWO linked items
-        // 1. Mark original item as "expected_missing" (expected product not found)
-        // 2. Create NEW item for the "unexpected_found" product
-        
-        varianceType = "sku_mismatch";
-        
-        // Update original item as shortage (expected SKU not found in this bin, qty = 0)
-        await storage.updateCycleCountItem(itemId, {
-          countedSku: null, // Not found
-          countedQty: 0, // Zero - it's not there
-          varianceQty: -(item.expectedQty ?? 0), // Full negative variance
-          varianceType: "quantity_under",
-          varianceNotes: `Expected ${item.expectedSku} not found. Different SKU (${countedSku}) was in bin. ${notes || ''}`.trim(),
-          status: "variance",
-          requiresApproval: 1,
-          mismatchType: "expected_missing",
-          countedBy: userId,
-          countedAt: new Date(),
-        });
-        
-        // Look up product variant for the found SKU (case-insensitive)
-        const foundVariantResult = await db.execute<{ id: number }>(sql`
-          SELECT id FROM product_variants WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
-        `);
-        const foundProductVariantId = foundVariantResult.rows[0]?.id || null;
-
-        // Look up catalog product for the found SKU (case-insensitive)
-        const foundCatalogResult = await db.execute<{ id: number }>(sql`
-          SELECT id FROM catalog_products WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
-        `);
-        const foundCatalogProductId = foundCatalogResult.rows[0]?.id || null;
-        
-        // Create NEW item for the FOUND product (unexpected item in this bin)
-        const foundItemResult = await db.execute<{ id: number }>(sql`
-          INSERT INTO cycle_count_items (
-            cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
-            expected_sku, expected_qty, counted_sku, counted_qty,
-            variance_qty, variance_type, variance_notes, status,
-            requires_approval, mismatch_type, related_item_id,
-            counted_by, counted_at, created_at
-          ) VALUES (
-            ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundCatalogProductId},
-            NULL, 0, ${countedSku}, ${countedQty},
-            ${countedQty}, 'unexpected_item', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
-            1, 'unexpected_found', ${itemId},
-            ${userId}, NOW(), NOW()
-          ) RETURNING id
-        `);
-        
-        const foundItemId = foundItemResult.rows[0]?.id;
-        
-        // Link original item to the found item
-        if (foundItemId) {
-          await storage.updateCycleCountItem(itemId, {
-            relatedItemId: foundItemId,
-          });
-          createdFoundItem = true;
-        }
-        
-      } else if (countedQty > 0 && !item.expectedSku) {
-        varianceType = "unexpected_item";
-
-        // Look up product variant for the found SKU (it may already exist in the system)
-        let foundProductVariantId: number | null = null;
-        let foundCatalogProductId: number | null = null;
-        if (countedSku) {
-          const foundVariantResult = await db.execute<{ id: number }>(sql`
-            SELECT id FROM product_variants WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
-          `);
-          foundProductVariantId = foundVariantResult.rows[0]?.id || null;
-
-          const foundCatalogResult = await db.execute<{ id: number }>(sql`
-            SELECT id FROM catalog_products WHERE UPPER(sku) = ${countedSku.toUpperCase()} LIMIT 1
-          `);
-          foundCatalogProductId = foundCatalogResult.rows[0]?.id || null;
-        }
-
-        await storage.updateCycleCountItem(itemId, {
-          countedSku: countedSku || null,
-          countedQty,
-          varianceQty,
-          varianceType,
-          varianceNotes: notes || null,
-          status: "variance",
-          requiresApproval: 1,
-          mismatchType: "unexpected_found",
-          ...(foundProductVariantId && { productVariantId: foundProductVariantId }),
-          ...(foundCatalogProductId && { catalogProductId: foundCatalogProductId }),
-          countedBy: userId,
-          countedAt: new Date(),
-        });
-      } else {
-        // Normal count (same SKU or empty bin)
-        if (varianceQty > 0) {
-          varianceType = "quantity_over";
-        } else if (varianceQty < 0) {
-          varianceType = "quantity_under";
-        }
-
-        // Fetch configurable tolerance and threshold from settings
-        const toleranceSetting = await storage.getSetting("cycle_count_auto_approve_tolerance");
-        const thresholdSetting = await storage.getSetting("cycle_count_approval_threshold");
-        const autoApproveTolerance = parseInt(toleranceSetting || "0", 10);
-        const approvalThreshold = parseInt(thresholdSetting || "10", 10);
-
-        const absVariance = Math.abs(varianceQty);
-        const withinTolerance = autoApproveTolerance > 0 && absVariance > 0 && absVariance <= autoApproveTolerance;
-        const requiresApproval = absVariance > approvalThreshold;
-
-        if (withinTolerance && varianceType && item.productVariantId) {
-          // Auto-approve: apply adjustment immediately
-          const { inventoryCore: autoCore } = req.app.locals.services as any;
-          await autoCore.adjustInventory({
-            productVariantId: item.productVariantId,
-            warehouseLocationId: item.warehouseLocationId,
-            qtyDelta: varianceQty,
-            reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}`,
-            cycleCountId: item.cycleCountId,
-            userId,
-            allowNegative: true,
-          });
-
-          await storage.updateCycleCountItem(itemId, {
-            countedSku: countedSku || null,
-            countedQty,
-            varianceQty,
-            varianceType,
-            varianceNotes: notes || null,
-            status: "approved",
-            varianceReason: "within_tolerance",
-            requiresApproval: 0,
-            approvedBy: userId,
-            approvedAt: new Date(),
-            countedBy: userId,
-            countedAt: new Date(),
-          });
-          // Reconcile bin assignment (no-op for same-SKU qty variances, but future-proof)
-          await reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
-        } else {
-          await storage.updateCycleCountItem(itemId, {
-            countedSku: countedSku || null,
-            countedQty,
-            varianceQty,
-            varianceType,
-            varianceNotes: notes || null,
-            status: varianceType ? "variance" : "counted",
-            requiresApproval: requiresApproval ? 1 : 0,
-            countedBy: userId,
-            countedAt: new Date(),
-          });
-        }
-      }
-      
-      // Update cycle count progress (bin-level stats)
-      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
-      if (cycleCount) {
-        const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const binStats = computeBinStats(allItems);
-        await storage.updateCycleCount(item.cycleCountId, binStats);
-      }
-
-      res.json({
-        success: true,
-        varianceType,
-        varianceQty,
-        requiresApproval: true,
-        skuMismatch: isSkuMismatch,
-        createdFoundItem
-      });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.recordCount(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        req.body,
+        req.session.user?.id,
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error recording count:", error);
       res.status(500).json({ error: "Failed to record count" });
     }
   });
 
-  // Reset a counted item back to pending (for recount)
   app.post("/api/cycle-counts/:id/items/:itemId/reset", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const itemId = parseInt(req.params.itemId);
-
-      const item = await storage.getCycleCountItemById(itemId);
-      if (!item) {
-        return res.status(404).json({ error: "Item not found" });
-      }
-
-      if (item.status === "approved" || item.status === "adjusted") {
-        return res.status(400).json({ error: "Cannot reset an approved/adjusted item" });
-      }
-
-      // Clean up linked mismatch items
-      // If this item has a relatedItemId, delete the linked auto-created item
-      if (item.relatedItemId) {
-        const linkedItem = await storage.getCycleCountItemById(item.relatedItemId);
-        if (linkedItem && linkedItem.status !== "approved") {
-          await storage.deleteCycleCountItem(item.relatedItemId);
-        }
-      }
-
-      // Check if another item points TO this one (reverse relationship)
-      const reverseResult = await db.execute<{ id: number; status: string }>(sql`
-        SELECT id, status FROM cycle_count_items
-        WHERE related_item_id = ${itemId}
-        AND status != 'approved'
-      `);
-      for (const rev of reverseResult.rows) {
-        await storage.deleteCycleCountItem(rev.id);
-      }
-
-      // Reset item to pending
-      await storage.updateCycleCountItem(itemId, {
-        countedSku: null,
-        countedQty: null,
-        varianceQty: null,
-        varianceType: null,
-        varianceNotes: null,
-        varianceReason: null,
-        mismatchType: null,
-        relatedItemId: null,
-        requiresApproval: 0,
-        countedBy: null,
-        countedAt: null,
-        status: "pending",
-      });
-
-      // Recompute cycle count progress
-      // Recompute bin-level stats
-      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
-      if (cycleCount) {
-        const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const binStats = computeBinStats(allItems);
-        await storage.updateCycleCount(item.cycleCountId, binStats);
-      }
-
-      res.json({ success: true });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.resetItem(parseInt(req.params.id), parseInt(req.params.itemId)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error resetting count item:", error);
       res.status(500).json({ error: "Failed to reset count item" });
     }
   });
 
-  // Put a variance item on investigation hold
   app.post("/api/cycle-counts/:id/items/:itemId/investigate", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const itemId = parseInt(req.params.itemId);
-      const userId = req.session.user?.id;
-      const { notes } = req.body;
-
-      const item = await storage.getCycleCountItemById(itemId);
-      if (!item) {
-        return res.status(404).json({ error: "Item not found" });
-      }
-
-      if (item.status === "approved" || item.status === "adjusted") {
-        return res.status(400).json({ error: "Cannot investigate an already approved item" });
-      }
-
-      await storage.updateCycleCountItem(itemId, {
-        status: "investigate",
-        varianceNotes: notes ? `${item.varianceNotes || ''}\n[Investigation] ${notes}`.trim() : item.varianceNotes,
-      });
-
-      // Recompute cycle count progress
-      // Recompute bin-level stats
-      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
-      if (cycleCount) {
-        const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const binStats = computeBinStats(allItems);
-        await storage.updateCycleCount(item.cycleCountId, binStats);
-      }
-
-      res.json({ success: true });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.investigateItem(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        req.body.notes,
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error setting investigation hold:", error);
       res.status(500).json({ error: "Failed to set investigation hold" });
     }
   });
 
-  // Add unexpected/extra item found during cycle count
   app.post("/api/cycle-counts/:id/add-found-item", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const userId = req.session.user?.id;
-      const { sku: rawSku, quantity, warehouseLocationId, notes } = req.body;
-      const sku = rawSku?.trim() || null;
-
-      if (!sku || quantity === undefined || !warehouseLocationId) {
-        return res.status(400).json({ error: "SKU, quantity, and location are required" });
-      }
-      
-      const cycleCount = await storage.getCycleCountById(id);
-      if (!cycleCount) {
-        return res.status(404).json({ error: "Cycle count not found" });
-      }
-      
-      // Validate cycle count is in progress
-      if (cycleCount.status !== "in_progress") {
-        return res.status(400).json({ error: "Can only add items to in-progress cycle counts" });
-      }
-      
-      // Look up product variant and catalog product for the found SKU (case-insensitive)
-      const variantResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
-      `);
-      const productVariantId = variantResult.rows[0]?.id || null;
-
-      const catalogResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM catalog_products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
-      `);
-      const catalogProductId = catalogResult.rows[0]?.id || null;
-      
-      // Create new item for the unexpected found product
-      const result = await db.execute<{ id: number }>(sql`
-        INSERT INTO cycle_count_items (
-          cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
-          expected_sku, expected_qty, counted_sku, counted_qty,
-          variance_qty, variance_type, variance_notes, status,
-          requires_approval, mismatch_type,
-          counted_by, counted_at, created_at
-        ) VALUES (
-          ${id}, ${warehouseLocationId}, ${productVariantId}, ${catalogProductId},
-          NULL, 0, ${sku}, ${quantity},
-          ${quantity}, 'unexpected_item', ${notes || `Unexpected item found during count: ${sku} x ${quantity}`}, 'variance',
-          1, 'unexpected_found',
-          ${userId}, NOW(), NOW()
-        ) RETURNING id
-      `);
-      
-      // Recompute bin-level stats after adding found item
-      const allItemsAfterInsert = await storage.getCycleCountItems(id);
-      const binStats = computeBinStats(allItemsAfterInsert);
-      await storage.updateCycleCount(id, binStats);
-      
-      res.json({ 
-        success: true, 
-        itemId: result.rows[0]?.id,
-        message: `Added unexpected item: ${sku} x ${quantity}` 
-      });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.addFoundItem(parseInt(req.params.id), req.body, req.session.user?.id));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error adding found item:", error);
       res.status(500).json({ error: "Failed to add found item" });
     }
   });
 
-  // Approve variance and apply adjustment
   app.post("/api/cycle-counts/:id/items/:itemId/approve", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const itemId = parseInt(req.params.itemId);
-      const userId = req.session.user?.id;
-      const { reasonCode, notes } = req.body;
-      
-      const item = await storage.getCycleCountItemById(itemId);
-      if (!item) {
-        return res.status(404).json({ error: "Item not found" });
-      }
-      
-      if (!item.varianceType) {
-        return res.status(400).json({ error: "No variance to approve" });
-      }
-      
-      // Track adjustments made for audit response
-      const adjustmentsMade: any[] = [];
-      const { inventoryCore: ccCore } = req.app.locals.services as any;
-
-      // Apply inventory adjustment if we have a product variant
-      // allowNegative: cycle count is source of truth for physical reality
-      if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
-        await ccCore.adjustInventory({
-          productVariantId: item.productVariantId,
-          warehouseLocationId: item.warehouseLocationId,
-          qtyDelta: item.varianceQty,
-          reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`,
-          cycleCountId: item.cycleCountId,
-          userId,
-          allowNegative: true,
-        });
-        adjustmentsMade.push({
-          sku: item.expectedSku || item.countedSku,
-          type: item.mismatchType || item.varianceType,
-          qtyChange: item.varianceQty,
-          locationId: item.warehouseLocationId
-        });
-      }
-      
-      // Update item as approved
-      await storage.updateCycleCountItem(itemId, {
-        status: "approved",
-        approvedBy: userId,
-        approvedAt: new Date(),
-        varianceReason: reasonCode,
-      });
-      await reconcileBinAssignment(item);
-
-      // MISMATCH WORKFLOW: If this item has a related item, approve it too
-      if (item.relatedItemId) {
-        const relatedItem = await storage.getCycleCountItemById(item.relatedItemId);
-        
-        if (relatedItem && relatedItem.status !== "approved") {
-          // Apply adjustment for the related item too
-          if (relatedItem.productVariantId && relatedItem.varianceQty !== null && relatedItem.varianceQty !== 0) {
-            await ccCore.adjustInventory({
-              productVariantId: relatedItem.productVariantId,
-              warehouseLocationId: relatedItem.warehouseLocationId,
-              qtyDelta: relatedItem.varianceQty,
-              reason: `Cycle count adjustment (linked mismatch): ${relatedItem.expectedSku || relatedItem.countedSku}. ${notes || ''}`,
-              cycleCountId: relatedItem.cycleCountId,
-              userId,
-              allowNegative: true,
-            });
-            adjustmentsMade.push({
-              sku: relatedItem.expectedSku || relatedItem.countedSku,
-              type: relatedItem.mismatchType || relatedItem.varianceType,
-              qtyChange: relatedItem.varianceQty,
-              locationId: relatedItem.warehouseLocationId
-            });
-          }
-
-          // Update related item as approved
-          await storage.updateCycleCountItem(relatedItem.id, {
-            status: "approved",
-            approvedBy: userId,
-            approvedAt: new Date(),
-            varianceReason: reasonCode,
-          });
-          await reconcileBinAssignment(relatedItem);
-        }
-      }
-      
-      // Also check if another item points TO this one (reverse relationship)
-      const reverseRelatedResult = await db.execute<{ id: number }>(sql`
-        SELECT id FROM cycle_count_items 
-        WHERE related_item_id = ${itemId} 
-        AND status != 'approved'
-        LIMIT 1
-      `);
-      
-      if (reverseRelatedResult.rows.length > 0) {
-        const reverseItemId = reverseRelatedResult.rows[0].id;
-        const reverseItem = await storage.getCycleCountItemById(reverseItemId);
-        
-        if (reverseItem && reverseItem.status !== "approved") {
-          // Apply adjustment for the reverse-linked item
-          if (reverseItem.productVariantId && reverseItem.varianceQty !== null && reverseItem.varianceQty !== 0) {
-            await ccCore.adjustInventory({
-              productVariantId: reverseItem.productVariantId,
-              warehouseLocationId: reverseItem.warehouseLocationId,
-              qtyDelta: reverseItem.varianceQty,
-              reason: `Cycle count adjustment (linked mismatch): ${reverseItem.expectedSku || reverseItem.countedSku}. ${notes || ''}`,
-              cycleCountId: reverseItem.cycleCountId,
-              userId,
-              allowNegative: true,
-            });
-            adjustmentsMade.push({
-              sku: reverseItem.expectedSku || reverseItem.countedSku,
-              type: reverseItem.mismatchType || reverseItem.varianceType,
-              qtyChange: reverseItem.varianceQty,
-              locationId: reverseItem.warehouseLocationId
-            });
-          }
-          
-          await storage.updateCycleCountItem(reverseItem.id, {
-            status: "approved",
-            approvedBy: userId,
-            approvedAt: new Date(),
-            varianceReason: reasonCode,
-          });
-          await reconcileBinAssignment(reverseItem);
-        }
-      }
-      
-      // Update cycle count approved count
-      const cycleCount = await storage.getCycleCountById(item.cycleCountId);
-      if (cycleCount) {
-        const allItems = await storage.getCycleCountItems(item.cycleCountId);
-        const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
-        
-        await storage.updateCycleCount(item.cycleCountId, {
-          approvedVariances: approvedCount,
-        });
-      }
-      
-      // Sync affected variants to sales channels (fire-and-forget)
-      const { channelSync: ccSync } = req.app.locals.services as any;
-      if (ccSync && adjustmentsMade.length > 0) {
-        const syncedVariants = new Set<number>();
-        for (const adj of adjustmentsMade) {
-          // Resolve variant from SKU
-          const adjVariant = await storage.getProductVariantBySku(adj.sku);
-          if (adjVariant && !syncedVariants.has(adjVariant.id)) {
-            syncedVariants.add(adjVariant.id);
-            ccSync.queueSyncAfterInventoryChange(adjVariant.id).catch((err: any) =>
-              console.warn(`[ChannelSync] Post-cycle-count sync failed for ${adj.sku}:`, err)
-            );
-          }
-        }
-      }
-
-      // Check replen thresholds for adjusted locations (fire-and-forget)
-      const { replenishment: ccReplen } = req.app.locals.services as any;
-      if (ccReplen && adjustmentsMade.length > 0) {
-        for (const adj of adjustmentsMade) {
-          if (adj.qtyChange < 0) {
-            const adjVariant = await storage.getProductVariantBySku(adj.sku);
-            if (adjVariant) {
-              ccReplen.checkAndTriggerAfterPick(adjVariant.id, adj.locationId).catch((err: any) =>
-                console.warn(`[Replen] Post-cycle-count threshold check failed for ${adj.sku}:`, err)
-              );
-            }
-          }
-        }
-      }
-
-      res.json({
-        success: true,
-        adjustmentsMade,
-        linkedItemsApproved: (item.relatedItemId ? 1 : 0) + reverseRelatedResult.rows.length
-      });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.approveVariance(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        { reasonCode: req.body.reasonCode, notes: req.body.notes, approvedBy: req.session.user?.id },
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error approving variance:", error);
       res.status(500).json({ error: "Failed to approve variance" });
     }
   });
 
-  // Bulk approve variances
   app.post("/api/cycle-counts/:id/bulk-approve", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const cycleCountId = parseInt(req.params.id);
-      const userId = req.session.user?.id;
-      const { itemIds, reasonCode, notes } = req.body;
-
-      if (!Array.isArray(itemIds) || itemIds.length === 0) {
-        return res.status(400).json({ error: "itemIds array is required" });
-      }
-      if (!reasonCode) {
-        return res.status(400).json({ error: "reasonCode is required" });
-      }
-
-      const { inventoryCore: ccCore } = req.app.locals.services as any;
-      let approved = 0;
-      let skipped = 0;
-      let adjustmentsMade = 0;
-      const errors: string[] = [];
-      const processedIds = new Set<number>();
-
-      for (const rawId of itemIds) {
-        const itemId = parseInt(rawId);
-        if (isNaN(itemId) || processedIds.has(itemId)) continue;
-        processedIds.add(itemId);
-
-        try {
-          const item = await storage.getCycleCountItemById(itemId);
-          if (!item || item.cycleCountId !== cycleCountId) {
-            skipped++;
-            continue;
-          }
-          if (item.status === "approved" || item.status === "adjusted") {
-            skipped++;
-            continue;
-          }
-          if (!item.varianceType) {
-            skipped++;
-            continue;
-          }
-
-          // Apply inventory adjustment if we have a product variant
-          // allowNegative: cycle count is source of truth — if we counted fewer
-          // than system and picks already reduced stock further, we still adjust
-          if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
-            await ccCore.adjustInventory({
-              productVariantId: item.productVariantId,
-              warehouseLocationId: item.warehouseLocationId,
-              qtyDelta: item.varianceQty,
-              reason: `Cycle count bulk adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`.trim(),
-              cycleCountId: item.cycleCountId,
-              userId,
-              allowNegative: true,
-            });
-            adjustmentsMade++;
-          }
-
-          // Mark as approved
-          await storage.updateCycleCountItem(itemId, {
-            status: "approved",
-            approvedBy: userId,
-            approvedAt: new Date(),
-            varianceReason: reasonCode,
-          });
-          await reconcileBinAssignment(item);
-          approved++;
-
-          // Handle linked items (mismatch pairs)
-          const linkedIds: number[] = [];
-          if (item.relatedItemId) linkedIds.push(item.relatedItemId);
-          const reverseResult = await db.execute<{ id: number }>(sql`
-            SELECT id FROM cycle_count_items
-            WHERE related_item_id = ${itemId} AND status != 'approved'
-          `);
-          for (const row of reverseResult.rows) {
-            linkedIds.push(row.id);
-          }
-
-          for (const linkedId of linkedIds) {
-            if (processedIds.has(linkedId)) continue;
-            processedIds.add(linkedId);
-
-            const linked = await storage.getCycleCountItemById(linkedId);
-            if (!linked || linked.status === "approved") continue;
-
-            if (linked.productVariantId && linked.varianceQty !== null && linked.varianceQty !== 0) {
-              await ccCore.adjustInventory({
-                productVariantId: linked.productVariantId,
-                warehouseLocationId: linked.warehouseLocationId,
-                qtyDelta: linked.varianceQty,
-                reason: `Cycle count bulk adjustment (linked): ${linked.expectedSku || linked.countedSku}. ${notes || ''}`.trim(),
-                cycleCountId: linked.cycleCountId,
-                userId,
-                allowNegative: true,
-              });
-              adjustmentsMade++;
-            }
-            await storage.updateCycleCountItem(linkedId, {
-              status: "approved",
-              approvedBy: userId,
-              approvedAt: new Date(),
-              varianceReason: reasonCode,
-            });
-            await reconcileBinAssignment(linked);
-            approved++;
-          }
-        } catch (e: any) {
-          errors.push(`Item ${itemId}: ${e.message}`);
-        }
-      }
-
-      // Update cycle count approved count
-      const allItems = await storage.getCycleCountItems(cycleCountId);
-      const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
-      await storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
-
-      // Check replen thresholds for any bins that had negative adjustments (fire-and-forget)
-      const { replenishment: bulkReplen } = req.app.locals.services as any;
-      if (bulkReplen) {
-        // Collect variant+location pairs that had negative adjustments
-        const adjustedItems = allItems.filter(i =>
-          processedIds.has(i.id) && i.productVariantId && i.varianceQty != null && i.varianceQty < 0
-        );
-        for (const ai of adjustedItems) {
-          bulkReplen.checkAndTriggerAfterPick(ai.productVariantId!, ai.warehouseLocationId).catch((err: any) =>
-            console.warn(`[Replen] Post-bulk-approve threshold check failed:`, err?.message)
-          );
-        }
-      }
-
-      res.json({
-        success: true,
-        approved,
-        skipped,
-        adjustmentsMade,
-        errors: errors.length > 0 ? errors : undefined,
-      });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.bulkApprove(
+        parseInt(req.params.id),
+        { itemIds: req.body.itemIds, reasonCode: req.body.reasonCode, notes: req.body.notes, approvedBy: req.session.user?.id },
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error bulk approving variances:", error);
       res.status(500).json({ error: "Failed to bulk approve variances" });
     }
   });
 
-  // Create & link a product variant from an unknown SKU found during cycle count
   app.post("/api/cycle-counts/:id/items/:itemId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const cycleCountId = parseInt(req.params.id);
-      const itemId = parseInt(req.params.itemId);
-
-      const item = await storage.getCycleCountItemById(itemId);
-      if (!item) {
-        return res.status(404).json({ error: "Cycle count item not found" });
-      }
-      if (item.cycleCountId !== cycleCountId) {
-        return res.status(400).json({ error: "Item does not belong to this cycle count" });
-      }
-
-      const sku = item.countedSku?.trim();
-      if (!sku) {
-        return res.status(400).json({ error: "Item has no counted SKU to create a variant from" });
-      }
-      if (item.productVariantId) {
-        // Already linked - return the current item (idempotent)
-        const existingVariant = await storage.getProductVariantById(item.productVariantId);
-        const product = existingVariant ? await storage.getProductById(existingVariant.productId) : null;
-        return res.json({
-          item,
-          product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
-          variant: existingVariant ? { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant } : null,
-          alreadyExisted: true,
-          siblingItemsLinked: 0,
-        });
-      }
-
-      // Race condition check: variant may already exist
-      const existingVariant = await storage.getProductVariantBySku(sku.toUpperCase());
-      if (existingVariant) {
-        await storage.updateCycleCountItem(itemId, { productVariantId: existingVariant.id });
-        const product = await storage.getProductById(existingVariant.productId);
-        return res.json({
-          item: await storage.getCycleCountItemById(itemId),
-          product: product ? { id: product.id, sku: product.sku, name: product.name } : null,
-          variant: { id: existingVariant.id, sku: existingVariant.sku, name: existingVariant.name, unitsPerVariant: existingVariant.unitsPerVariant },
-          alreadyExisted: true,
-          siblingItemsLinked: 0,
-        });
-      }
-
-      // Parse SKU pattern (same as receiving flow)
-      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-      const match = sku.match(variantPattern);
-
-      let baseSku: string;
-      let unitsPerVariant: number;
-      let hierarchyLevel: number;
-      let variantName: string;
-
-      if (match) {
-        baseSku = match[1].toUpperCase();
-        const variantType = match[2].toUpperCase();
-        unitsPerVariant = parseInt(match[3], 10);
-        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
-        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
-        variantName = `${typeName} of ${unitsPerVariant}`;
-      } else {
-        baseSku = sku.toUpperCase();
-        unitsPerVariant = 1;
-        hierarchyLevel = 1;
-        variantName = "Each";
-      }
-
-      // Find or create parent product
-      let product = await storage.getProductBySku(baseSku);
-      if (!product) {
-        product = await storage.createProduct({
-          sku: baseSku,
-          name: baseSku,
-          baseUnit: "EA",
-        });
-        console.log(`[CycleCount] Created product ${product.id} for base SKU ${baseSku}`);
-      }
-
-      // Create variant
-      const variant = await storage.createProductVariant({
-        productId: product.id,
-        sku: sku.toUpperCase(),
-        name: variantName,
-        unitsPerVariant,
-        hierarchyLevel,
-      });
-      console.log(`[CycleCount] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
-
-      // Link variant to this cycle count item
-      await storage.updateCycleCountItem(itemId, { productVariantId: variant.id });
-
-      // Auto-link siblings with same unknown SKU in this count
-      const allItems = await storage.getCycleCountItems(cycleCountId);
-      const siblings = allItems.filter(i =>
-        i.id !== itemId &&
-        i.countedSku?.toUpperCase() === sku.toUpperCase() &&
-        !i.productVariantId
-      );
-      for (const sibling of siblings) {
-        await storage.updateCycleCountItem(sibling.id, { productVariantId: variant.id });
-      }
-
-      res.json({
-        item: await storage.getCycleCountItemById(itemId),
-        product: { id: product.id, sku: product.sku, name: product.name },
-        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
-        alreadyExisted: false,
-        siblingItemsLinked: siblings.length,
-      });
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.createVariant(parseInt(req.params.id), parseInt(req.params.itemId)));
     } catch (error: any) {
-      console.error("Error creating variant from cycle count item:", error);
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       if (error.code === "23505" || error.message?.includes("unique")) {
         return res.status(409).json({ error: "A variant with this SKU already exists. Try refreshing." });
       }
+      console.error("Error creating variant from cycle count item:", error);
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
 
-  // Complete cycle count
   app.post("/api/cycle-counts/:id/complete", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const cycleCount = await storage.getCycleCountById(id);
-      
-      if (!cycleCount) {
-        return res.status(404).json({ error: "Cycle count not found" });
-      }
-      
-      // Check all items are counted
-      const items = await storage.getCycleCountItems(id);
-      const pendingItems = items.filter(i => i.status === "pending");
-      
-      if (pendingItems.length > 0) {
-        return res.status(400).json({ error: `${pendingItems.length} items still pending` });
-      }
-      
-      // Check all variances are approved (investigate status also blocks completion)
-      const unapprovedVariances = items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "adjusted");
-      const investigatingItems = items.filter(i => i.status === "investigate");
-
-      if (investigatingItems.length > 0) {
-        return res.status(400).json({ error: `${investigatingItems.length} items still under investigation` });
-      }
-
-      if (unapprovedVariances.length > 0) {
-        return res.status(400).json({ error: `${unapprovedVariances.length} variances not approved` });
-      }
-      
-      await storage.updateCycleCount(id, {
-        status: "completed",
-        completedAt: new Date(),
-      });
-      
-      res.json({ success: true });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.complete(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error completing cycle count:", error);
       res.status(500).json({ error: "Failed to complete cycle count" });
     }
   });
 
-  // Delete cycle count
   app.delete("/api/cycle-counts/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const deleted = await storage.deleteCycleCount(id);
-      
-      if (!deleted) {
-        return res.status(404).json({ error: "Cycle count not found" });
-      }
-      
-      res.json({ success: true });
-    } catch (error) {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.delete(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error deleting cycle count:", error);
       res.status(500).json({ error: "Failed to delete cycle count" });
     }
