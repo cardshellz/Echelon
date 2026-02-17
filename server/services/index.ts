@@ -39,6 +39,7 @@ import { createFulfillmentRouterService } from "./fulfillment-router";
 import { createInventorySourceService } from "./inventory-source";
 import { createSLAMonitorService } from "./sla-monitor";
 import { createPickingService } from "./picking";
+import { createOrderCombiningService } from "./order-combining";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
@@ -64,6 +65,7 @@ export function createServices(db: any) {
   const fulfillmentRouter = createFulfillmentRouterService(db);
   const inventorySource = createInventorySourceService(db, inventoryCore);
   const slaMonitor = createSLAMonitorService(db);
+  const orderCombining = createOrderCombiningService(db);
 
   return {
     inventoryCore,
@@ -79,6 +81,7 @@ export function createServices(db: any) {
     fulfillmentRouter,
     inventorySource,
     slaMonitor,
+    orderCombining,
   };
 }
 
@@ -96,6 +99,7 @@ export { createFulfillmentRouterService } from "./fulfillment-router";
 export { createInventorySourceService } from "./inventory-source";
 export { createSLAMonitorService } from "./sla-monitor";
 export { createPickingService } from "./picking";
+export { createOrderCombiningService } from "./order-combining";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";
@@ -108,3 +112,4 @@ export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router";
 export type { SyncResult as InventorySourceSyncResult } from "./inventory-source";
 export type { SLAAlert, SLASummary } from "./sla-monitor";
 export type { PickingService, PickItemResult, CaseBreakResult, BinCountResult } from "./picking";
+export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./order-combining";

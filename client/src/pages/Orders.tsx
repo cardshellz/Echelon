@@ -18,7 +18,8 @@ import {
   MapPin,
   User2,
   Check,
-  Building2
+  Building2,
+  ChevronRight
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,6 +54,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useSettings, PickingMode } from "@/lib/settings";
 import { useToast } from "@/hooks/use-toast";
@@ -115,6 +117,8 @@ interface CombinableOrder {
   totalAmount: string | null;
   source: string;
   createdAt: string;
+  combinedGroupId: number | null;
+  combinedRole: string | null;
 }
 
 interface CombinableGroup {
@@ -155,6 +159,40 @@ const priorityColors: Record<string, string> = {
   normal: "",
 };
 
+function CombineOrderItems({ orderId }: { orderId: number }) {
+  const { data, isLoading } = useQuery<{ items: { id: number; sku: string; name: string; quantity: number; pickedQuantity: number }[] }>({
+    queryKey: ["/api/oms/orders", orderId],
+    queryFn: async () => {
+      const res = await fetch(`/api/oms/orders/${orderId}`);
+      if (!res.ok) throw new Error("Failed to fetch order items");
+      return res.json();
+    },
+  });
+
+  if (isLoading) {
+    return <div className="px-11 pb-2 text-xs text-muted-foreground">Loading items...</div>;
+  }
+
+  const items = data?.items || [];
+  if (items.length === 0) {
+    return <div className="px-11 pb-2 text-xs text-muted-foreground">No items</div>;
+  }
+
+  return (
+    <div className="px-11 pb-2 space-y-0.5 border-t border-dashed">
+      {items.map((item) => (
+        <div key={item.id} className="flex justify-between text-xs text-muted-foreground py-0.5">
+          <div className="truncate mr-3">
+            <span className="font-mono text-foreground/70">{item.sku}</span>
+            <span className="ml-2">{item.name}</span>
+          </div>
+          <span className="shrink-0">x{item.quantity}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Orders() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -175,6 +213,7 @@ export default function Orders() {
   const [isCombineOpen, setIsCombineOpen] = useState(false);
   const [selectedCombineGroup, setSelectedCombineGroup] = useState<CombinableGroup | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
+  const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
   const [newOrder, setNewOrder] = useState({
     orderNumber: "",
     customerName: "",
@@ -247,6 +286,7 @@ export default function Orders() {
       setIsCombineOpen(false);
       setSelectedCombineGroup(null);
       setSelectedOrderIds([]);
+      setExpandedOrderId(null);
       toast({ title: "Orders combined", description: "The selected orders have been grouped for combined picking and shipping." });
     },
     onError: (err: Error) => {
@@ -1130,47 +1170,78 @@ export default function Orders() {
                 
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">Select orders to combine:</Label>
-                  {selectedCombineGroup.orders.map((order) => (
-                    <div 
-                      key={order.id}
-                      className={cn(
-                        "flex items-center justify-between p-3 border rounded-lg cursor-pointer transition-colors",
-                        selectedOrderIds.includes(order.id) 
-                          ? "border-amber-400 bg-amber-50" 
-                          : "hover:bg-muted/50"
-                      )}
-                      onClick={() => {
-                        if (selectedOrderIds.includes(order.id)) {
-                          if (selectedOrderIds.length > 2) {
-                            setSelectedOrderIds(selectedOrderIds.filter(id => id !== order.id));
-                          }
-                        } else {
-                          setSelectedOrderIds([...selectedOrderIds, order.id]);
-                        }
-                      }}
-                      data-testid={`checkbox-order-${order.id}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={cn(
-                          "h-5 w-5 rounded border-2 flex items-center justify-center",
-                          selectedOrderIds.includes(order.id) 
-                            ? "bg-amber-500 border-amber-500 text-white" 
-                            : "border-gray-300"
-                        )}>
-                          {selectedOrderIds.includes(order.id) && <Check className="h-3 w-3" />}
-                        </div>
-                        <div>
-                          <div className="font-medium">{order.orderNumber}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {order.itemCount} items, {order.unitCount} units
+                  {selectedCombineGroup.orders.map((order) => {
+                    const isExpanded = expandedOrderId === order.id;
+                    const isSelected = selectedOrderIds.includes(order.id);
+                    return (
+                      <Collapsible
+                        key={order.id}
+                        open={isExpanded}
+                        onOpenChange={(open) => setExpandedOrderId(open ? order.id : null)}
+                      >
+                        <div
+                          className={cn(
+                            "border rounded-lg transition-colors overflow-hidden",
+                            isSelected
+                              ? "border-amber-400 bg-amber-50"
+                              : "hover:bg-muted/50"
+                          )}
+                        >
+                          <div
+                            className="flex items-center justify-between p-3 cursor-pointer"
+                            onClick={() => {
+                              if (isSelected) {
+                                if (selectedOrderIds.length > 2) {
+                                  setSelectedOrderIds(selectedOrderIds.filter(id => id !== order.id));
+                                }
+                              } else {
+                                setSelectedOrderIds([...selectedOrderIds, order.id]);
+                              }
+                            }}
+                            data-testid={`checkbox-order-${order.id}`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className={cn(
+                                "h-5 w-5 rounded border-2 flex items-center justify-center shrink-0",
+                                isSelected
+                                  ? "bg-amber-500 border-amber-500 text-white"
+                                  : "border-gray-300"
+                              )}>
+                                {isSelected && <Check className="h-3 w-3" />}
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium">{order.orderNumber}</span>
+                                  {order.combinedGroupId && (
+                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 border-indigo-300 text-indigo-600">
+                                      <Merge className="h-2.5 w-2.5 mr-0.5" />
+                                      combined
+                                    </Badge>
+                                  )}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {order.itemCount} items, {order.unitCount} units
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {order.totalAmount && (
+                                <span className="text-sm font-medium">${order.totalAmount}</span>
+                              )}
+                              <CollapsibleTrigger asChild onClick={(e) => e.stopPropagation()}>
+                                <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                                  <ChevronRight className={cn("h-4 w-4 transition-transform", isExpanded && "rotate-90")} />
+                                </Button>
+                              </CollapsibleTrigger>
+                            </div>
                           </div>
+                          <CollapsibleContent>
+                            <CombineOrderItems orderId={order.id} />
+                          </CollapsibleContent>
                         </div>
-                      </div>
-                      {order.totalAmount && (
-                        <span className="text-sm font-medium">${order.totalAmount}</span>
-                      )}
-                    </div>
-                  ))}
+                      </Collapsible>
+                    );
+                  })}
                 </div>
                 
                 {selectedOrderIds.length < 2 && (
@@ -1188,7 +1259,8 @@ export default function Orders() {
                   onClick={() => {
                     setSelectedCombineGroup(null);
                     setSelectedOrderIds([]);
-                  }} 
+                    setExpandedOrderId(null);
+                  }}
                   className="min-h-[44px]"
                   data-testid="button-back-combine"
                 >
