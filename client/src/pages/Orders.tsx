@@ -181,8 +181,8 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
   return (
     <div className="px-11 pb-2 space-y-0.5 border-t border-dashed">
       {items.map((item) => (
-        <div key={item.id} className="flex justify-between text-xs text-muted-foreground py-0.5">
-          <div className="truncate mr-3">
+        <div key={item.id} className="flex justify-between gap-2 text-xs text-muted-foreground py-0.5">
+          <div className="min-w-0 break-words">
             <span className="font-mono text-foreground/70">{item.sku}</span>
             <span className="ml-2">{item.name}</span>
           </div>
