@@ -168,15 +168,19 @@ class OrderCombiningService {
     // items = distinct shippable line items, units = sum of shippable quantities
     let result;
     try {
+      // LEFT JOIN combined_order_groups to only show "combined" badge when the group actually exists
+      // (prevents orphaned combined_group_id from showing false badges)
       result = await this.db.execute(sql`
         SELECT o.id, o.order_number, o.customer_name, o.customer_email,
                o.shipping_address, o.shipping_city, o.shipping_state,
                o.shipping_postal_code, o.shipping_country,
                o.total_amount, o.source, o.created_at,
-               o.combined_group_id, o.combined_role,
+               CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id,
+               CASE WHEN cog.id IS NOT NULL THEN o.combined_role ELSE NULL END AS combined_role,
                COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
                COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
         FROM orders o
+        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status = 'active'
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
       `);
@@ -412,15 +416,18 @@ class OrderCombiningService {
   async combineAll(createdBy: string): Promise<{ groupsCreated: number; totalOrdersCombined: number }> {
     let result;
     try {
+      // LEFT JOIN to validate combined_group_id references an existing active group
       result = await this.db.execute(sql`
-        SELECT id, order_number, customer_name, customer_email,
-               shipping_address, shipping_city, shipping_state,
-               shipping_postal_code, shipping_country, item_count,
-               unit_count, total_amount, source, created_at,
-               order_placed_at, shopify_created_at, combined_group_id
-        FROM orders
-        WHERE warehouse_status = 'ready'
-          AND on_hold = 0
+        SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+               o.shipping_address, o.shipping_city, o.shipping_state,
+               o.shipping_postal_code, o.shipping_country, o.item_count,
+               o.unit_count, o.total_amount, o.source, o.created_at,
+               o.order_placed_at, o.shopify_created_at,
+               CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id
+        FROM orders o
+        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status = 'active'
+        WHERE o.warehouse_status = 'ready'
+          AND o.on_hold = 0
       `);
     } catch {
       throw new CombineError("Failed to query orders", 500);
