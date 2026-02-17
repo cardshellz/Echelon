@@ -5271,68 +5271,7 @@ export async function registerRoutes(
   });
 
   // Replenishment - move stock from bulk to pick location
-  app.post("/api/inventory/replenish", async (req, res) => {
-    try {
-      const { inventoryItemId, productVariantId: pvId, targetLocationId, requestedUnits } = req.body;
-      const userId = req.session.user?.id;
-      const replenVariantId = pvId || inventoryItemId; // Support both old and new param names
 
-      if (!replenVariantId || !targetLocationId || !requestedUnits) {
-        return res.status(400).json({ error: "Missing required fields" });
-      }
-
-      const { inventoryCore: replenCore } = req.app.locals.services as any;
-
-      // Find parent (bulk) location for the target
-      const targetLocation = await storage.getWarehouseLocationById(targetLocationId);
-      if (!targetLocation?.parentLocationId) {
-        return res.json({ success: false, replenished: 0, sourceLocationId: null });
-      }
-
-      const parentLevel = await replenCore.getLevel(replenVariantId, targetLocation.parentLocationId);
-      if (!parentLevel || parentLevel.variantQty <= 0) {
-        return res.json({ success: false, replenished: 0, sourceLocationId: targetLocation.parentLocationId });
-      }
-
-      const replenishAmount = Math.min(requestedUnits, parentLevel.variantQty);
-      await replenCore.transfer({
-        productVariantId: replenVariantId,
-        fromLocationId: targetLocation.parentLocationId,
-        toLocationId: targetLocationId,
-        qty: replenishAmount,
-        userId,
-        notes: `Replenished from location ${targetLocation.parentLocationId}`,
-      });
-
-      const result = { replenished: replenishAmount, sourceLocationId: targetLocation.parentLocationId };
-
-      res.json({
-        success: result.replenished > 0,
-        replenished: result.replenished,
-        sourceLocationId: result.sourceLocationId,
-      });
-    } catch (error) {
-      console.error("Error replenishing inventory:", error);
-      res.status(500).json({ error: "Failed to replenish inventory" });
-    }
-  });
-
-  // Get locations needing replenishment
-  app.get("/api/inventory/replenishment-needed", async (req, res) => {
-    try {
-      const productVariantId = req.query.itemId ? parseInt(req.query.itemId as string) : undefined;
-      // Inline the replenishment-needed query (formerly on inventoryService)
-      const allLocations = await storage.getAllWarehouseLocations() as any[];
-      // Legacy endpoint — warehouse_locations no longer has a minQty column.
-      // Threshold logic is now in replen_tier_defaults / replen_rules / location_replen_config.
-      // Return empty for backwards compatibility; the replenishment service handles this now.
-      const locations: any[] = [];
-      res.json(locations);
-    } catch (error) {
-      console.error("Error fetching replenishment needs:", error);
-      res.status(500).json({ error: "Failed to fetch replenishment needs" });
-    }
-  });
 
   // Check backorder status for an item
   app.get("/api/inventory/backorder-status/:itemId", async (req, res) => {
@@ -9013,7 +8952,8 @@ export async function registerRoutes(
           return res.status(201).json({ ...task, ...result, autoExecuted: true });
         } catch (execErr: any) {
           console.error("Auto-execute failed for task", task.id, execErr);
-          return res.status(201).json({ ...task, autoExecuteError: execErr.message });
+          // Task was created but execution failed — return 207 (multi-status) so caller knows
+          return res.status(207).json({ ...task, autoExecuted: false, autoExecuteError: execErr.message });
         }
       }
 
@@ -9028,11 +8968,30 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const updates = req.body;
-      
+
+      // Block manual completion — must use /execute endpoint to move inventory
       if (updates.status === "completed") {
-        updates.completedAt = new Date();
+        return res.status(400).json({ error: "Use the /execute endpoint to complete tasks (ensures inventory is moved)" });
       }
-      
+
+      // Validate status transitions if status is being changed
+      if (updates.status) {
+        const VALID_TRANSITIONS: Record<string, string[]> = {
+          pending: ["assigned", "in_progress", "cancelled"],
+          assigned: ["in_progress", "pending", "cancelled"],
+          in_progress: ["pending", "cancelled", "blocked"],
+          blocked: ["pending", "cancelled"],
+        };
+        const existing = await storage.getReplenTaskById(id);
+        if (!existing) {
+          return res.status(404).json({ error: "Replen task not found" });
+        }
+        const allowed = VALID_TRANSITIONS[existing.status];
+        if (!allowed || !allowed.includes(updates.status)) {
+          return res.status(400).json({ error: `Cannot transition from '${existing.status}' to '${updates.status}'` });
+        }
+      }
+
       const task = await storage.updateReplenTask(id, updates);
       if (!task) {
         return res.status(404).json({ error: "Replen task not found" });
