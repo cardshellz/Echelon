@@ -164,29 +164,35 @@ class OrderCombiningService {
   // ---- Combinable groups ----
 
   async getCombinableGroups(): Promise<CombinableGroup[]> {
+    // Compute shippable item/unit counts from order_items (same logic as pick queue)
+    // items = distinct shippable line items, units = sum of shippable quantities
     let result;
     try {
       result = await this.db.execute(sql`
-        SELECT id, order_number, customer_name, customer_email,
-               shipping_address, shipping_city, shipping_state,
-               shipping_postal_code, shipping_country, item_count,
-               unit_count, total_amount, source, created_at,
-               combined_group_id, combined_role
-        FROM orders
-        WHERE warehouse_status = 'ready'
-          AND on_hold = 0
+        SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+               o.shipping_address, o.shipping_city, o.shipping_state,
+               o.shipping_postal_code, o.shipping_country,
+               o.total_amount, o.source, o.created_at,
+               o.combined_group_id, o.combined_role,
+               COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
+               COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
+        FROM orders o
+        WHERE o.warehouse_status = 'ready'
+          AND o.on_hold = 0
       `);
     } catch (columnError: any) {
       if (columnError?.code === "42703") {
         console.log("Note: combined_group_id column not yet in database, querying without it");
         result = await this.db.execute(sql`
-          SELECT id, order_number, customer_name, customer_email,
-                 shipping_address, shipping_city, shipping_state,
-                 shipping_postal_code, shipping_country, item_count,
-                 unit_count, total_amount, source, created_at
-          FROM orders
-          WHERE warehouse_status = 'ready'
-            AND on_hold = 0
+          SELECT o.id, o.order_number, o.customer_name, o.customer_email,
+                 o.shipping_address, o.shipping_city, o.shipping_state,
+                 o.shipping_postal_code, o.shipping_country,
+                 o.total_amount, o.source, o.created_at,
+                 COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
+                 COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
+          FROM orders o
+          WHERE o.warehouse_status = 'ready'
+            AND o.on_hold = 0
         `);
       } else {
         throw columnError;
@@ -225,8 +231,8 @@ class OrderCombiningService {
           orders: grpOrders.map((o: any) => ({
             id: o.id,
             orderNumber: o.order_number,
-            itemCount: o.item_count,
-            unitCount: o.unit_count,
+            itemCount: Number(o.shippable_items) || 0,
+            unitCount: Number(o.shippable_units) || 0,
             totalAmount: o.total_amount,
             source: o.source,
             createdAt: o.created_at,
@@ -234,8 +240,8 @@ class OrderCombiningService {
             combinedRole: o.combined_role ?? null,
           })),
           totalOrders: grpOrders.length,
-          totalItems: grpOrders.reduce((sum: number, o: any) => sum + (o.item_count || 0), 0),
-          totalUnits: grpOrders.reduce((sum: number, o: any) => sum + (o.unit_count || 0), 0),
+          totalItems: grpOrders.reduce((sum: number, o: any) => sum + (Number(o.shippable_items) || 0), 0),
+          totalUnits: grpOrders.reduce((sum: number, o: any) => sum + (Number(o.shippable_units) || 0), 0),
         };
       })
       .sort((a, b) => b.totalOrders - a.totalOrders);

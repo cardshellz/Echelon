@@ -160,7 +160,7 @@ const priorityColors: Record<string, string> = {
 };
 
 function CombineOrderItems({ orderId }: { orderId: number }) {
-  const { data, isLoading } = useQuery<{ items: { id: number; sku: string; name: string; quantity: number; pickedQuantity: number }[] }>({
+  const { data, isLoading } = useQuery<{ items: { id: number; sku: string; name: string; quantity: number; pickedQuantity: number; requiresShipping: number }[] }>({
     queryKey: ["/api/oms/orders", orderId],
     queryFn: async () => {
       const res = await fetch(`/api/oms/orders/${orderId}`);
@@ -173,9 +173,10 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
     return <div className="px-11 pb-2 text-xs text-muted-foreground">Loading items...</div>;
   }
 
-  const items = data?.items || [];
+  // Only show shippable/pickable items (same filter as pick queue)
+  const items = (data?.items || []).filter(item => item.requiresShipping === 1);
   if (items.length === 0) {
-    return <div className="px-11 pb-2 text-xs text-muted-foreground">No items</div>;
+    return <div className="px-11 pb-2 text-xs text-muted-foreground">No shippable items</div>;
   }
 
   return (
