@@ -4386,9 +4386,10 @@ export async function registerRoutes(
     }
   });
 
-  // Search catalog products by SKU/name, also matching variant-level SKUs
-  // Returns catalog products (for bin assignment) but searches across both
-  // catalog_products.sku AND product_variants.sku so variant SKUs are findable
+  // Search for SKUs to assign to bin locations
+  // Searches product_variants (source of truth for sellable SKUs) and resolves
+  // to catalog_products for assignment. Auto-creates catalog_products entry if
+  // a variant exists but has no corresponding catalog product.
   app.get("/api/catalog/products/search", async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
@@ -4397,40 +4398,68 @@ export async function registerRoutes(
 
       const searchPattern = `%${query}%`;
 
-      // Search catalog products directly + via variant SKUs, deduplicating by catalog product ID
-      // DISTINCT ON picks the first row per cp.id; ORDER BY prefers rows where the variant SKU matched
+      // Search product_variants first (source of truth), then resolve to catalog_products
       const result = await db.execute<{
-        id: number;
-        sku: string | null;
-        title: string;
+        variant_id: number;
+        variant_sku: string;
+        variant_name: string;
+        product_id: number;
+        catalog_product_id: number | null;
+        catalog_sku: string | null;
+        catalog_title: string | null;
         image_url: string | null;
-        matched_variant_sku: string | null;
       }>(sql`
-        SELECT DISTINCT ON (cp.id)
-          cp.id,
-          cp.sku,
-          cp.title,
-          (SELECT ca.url FROM catalog_assets ca WHERE ca.catalog_product_id = cp.id ORDER BY ca.position LIMIT 1) as image_url,
-          CASE WHEN pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern} THEN pv.sku ELSE NULL END as matched_variant_sku
-        FROM catalog_products cp
-        LEFT JOIN products p ON p.id = cp.product_id
-        LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.is_active = true
-        WHERE
-          LOWER(cp.sku) LIKE ${searchPattern} OR
-          LOWER(cp.title) LIKE ${searchPattern} OR
-          (pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern}) OR
-          (pv.name IS NOT NULL AND LOWER(pv.name) LIKE ${searchPattern})
-        ORDER BY cp.id, (CASE WHEN pv.sku IS NOT NULL AND LOWER(pv.sku) LIKE ${searchPattern} THEN 0 ELSE 1 END), cp.sku
+        SELECT
+          pv.id as variant_id,
+          pv.sku as variant_sku,
+          pv.name as variant_name,
+          pv.product_id,
+          cp.id as catalog_product_id,
+          cp.sku as catalog_sku,
+          cp.title as catalog_title,
+          (SELECT ca.url FROM catalog_assets ca WHERE ca.catalog_product_id = cp.id ORDER BY ca.position LIMIT 1) as image_url
+        FROM product_variants pv
+        JOIN products p ON p.id = pv.product_id
+        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
+        WHERE pv.is_active = true
+          AND pv.sku IS NOT NULL
+          AND (
+            LOWER(pv.sku) LIKE ${searchPattern} OR
+            LOWER(pv.name) LIKE ${searchPattern} OR
+            (cp.sku IS NOT NULL AND LOWER(cp.sku) LIKE ${searchPattern}) OR
+            (cp.title IS NOT NULL AND LOWER(cp.title) LIKE ${searchPattern})
+          )
+        ORDER BY pv.sku
         LIMIT ${limit}
       `);
 
-      res.json(result.rows.map(r => ({
-        id: r.id,
-        sku: r.sku,
-        title: r.title,
-        imageUrl: r.image_url,
-        matchedVariantSku: r.matched_variant_sku,
-      })));
+      // For variants without a catalog_product, auto-create one
+      const rows = [];
+      for (const r of result.rows) {
+        let catalogProductId = r.catalog_product_id;
+        let imageUrl = r.image_url;
+
+        if (!catalogProductId) {
+          // Auto-create catalog_product for this product
+          const newCatalog = await storage.createCatalogProduct({
+            productId: r.product_id,
+            sku: r.variant_sku,
+            title: r.variant_name,
+            status: "active",
+          });
+          catalogProductId = newCatalog.id;
+        }
+
+        rows.push({
+          id: catalogProductId,
+          sku: r.variant_sku,
+          title: r.catalog_title || r.variant_name,
+          imageUrl,
+          matchedVariantSku: r.variant_sku !== r.catalog_sku ? r.variant_sku : null,
+        });
+      }
+
+      res.json(rows);
     } catch (error) {
       console.error("Error searching catalog products:", error);
       res.status(500).json({ error: "Failed to search catalog products" });
