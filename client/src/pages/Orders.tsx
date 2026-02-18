@@ -214,7 +214,7 @@ export default function Orders() {
   const [isCombineOpen, setIsCombineOpen] = useState(false);
   const [selectedCombineGroup, setSelectedCombineGroup] = useState<CombinableGroup | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
-  const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
+  const [expandedOrderIds, setExpandedOrderIds] = useState<Set<number>>(new Set());
   const [newOrder, setNewOrder] = useState({
     orderNumber: "",
     customerName: "",
@@ -287,7 +287,7 @@ export default function Orders() {
       setIsCombineOpen(false);
       setSelectedCombineGroup(null);
       setSelectedOrderIds([]);
-      setExpandedOrderId(null);
+      setExpandedOrderIds(new Set());
       toast({ title: "Orders combined", description: "The selected orders have been grouped for combined picking and shipping." });
     },
     onError: (err: Error) => {
@@ -1172,13 +1172,17 @@ export default function Orders() {
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">Select orders to combine:</Label>
                   {selectedCombineGroup.orders.map((order) => {
-                    const isExpanded = expandedOrderId === order.id;
+                    const isExpanded = expandedOrderIds.has(order.id);
                     const isSelected = selectedOrderIds.includes(order.id);
                     return (
                       <Collapsible
                         key={order.id}
                         open={isExpanded}
-                        onOpenChange={(open) => setExpandedOrderId(open ? order.id : null)}
+                        onOpenChange={(open) => setExpandedOrderIds(prev => {
+                          const next = new Set(prev);
+                          if (open) next.add(order.id); else next.delete(order.id);
+                          return next;
+                        })}
                       >
                         <div
                           className={cn(
@@ -1262,7 +1266,7 @@ export default function Orders() {
                   onClick={() => {
                     setSelectedCombineGroup(null);
                     setSelectedOrderIds([]);
-                    setExpandedOrderId(null);
+                    setExpandedOrderIds(new Set());
                   }}
                   className="min-h-[44px]"
                   data-testid="button-back-combine"
