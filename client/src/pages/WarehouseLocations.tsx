@@ -142,7 +142,7 @@ export default function WarehouseLocations() {
     enabled: canView,
   });
 
-  interface CatalogProductSearchResult {
+  interface ProductSearchResult {
     id: number;
     title: string;
     sku: string | null;
@@ -152,7 +152,7 @@ export default function WarehouseLocations() {
 
   interface ProductInBin {
     id: number;
-    catalogProductId: number | null;
+    productId: number | null;
     name: string;
     sku: string | null;
     locationType: string;
@@ -170,7 +170,7 @@ export default function WarehouseLocations() {
     variantName: string | null;
     unitsPerVariant: number;
     productTitle: string | null;
-    catalogProductId: number | null;
+    productId: number | null;
     imageUrl: string | null;
     barcode: string | null;
   }
@@ -201,8 +201,8 @@ export default function WarehouseLocations() {
   const [assignSkuOpen, setAssignSkuOpen] = useState(false);
   const debouncedAssignSkuSearch = useDebounce(assignSkuSearch, 300);
 
-  // Server-side search across catalog products AND variant SKUs
-  const { data: catalogSearchResults = [] } = useQuery<CatalogProductSearchResult[]>({
+  // Server-side search across products AND variant SKUs
+  const { data: productSearchResults = [] } = useQuery<ProductSearchResult[]>({
     queryKey: ["/api/catalog/products/search", debouncedAssignSkuSearch],
     queryFn: async () => {
       if (!debouncedAssignSkuSearch || debouncedAssignSkuSearch.length < 2) return [];
@@ -214,17 +214,17 @@ export default function WarehouseLocations() {
   });
 
   // Filter out already-assigned products
-  const filteredCatalogProducts = useMemo(() => {
-    const assignedIds = new Set(productsInBin.map(p => p.catalogProductId));
-    return catalogSearchResults.filter(p => !assignedIds.has(p.id));
-  }, [catalogSearchResults, productsInBin]);
+  const filteredProducts = useMemo(() => {
+    const assignedIds = new Set(productsInBin.map(p => p.productId));
+    return productSearchResults.filter(p => !assignedIds.has(p.id));
+  }, [productSearchResults, productsInBin]);
 
   const assignProductMutation = useMutation({
-    mutationFn: async ({ locationId, catalogProductId }: { locationId: number; catalogProductId: number }) => {
+    mutationFn: async ({ locationId, productId }: { locationId: number; productId: number }) => {
       const res = await fetch(`/api/warehouse/locations/${locationId}/products`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ catalogProductId, locationType: "pick", isPrimary: 1 }),
+        body: JSON.stringify({ productId, locationType: "pick", isPrimary: 1 }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -1732,18 +1732,18 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                         <CommandList>
                           {assignSkuSearch.length < 2 ? (
                             <CommandEmpty>Type at least 2 characters to search...</CommandEmpty>
-                          ) : filteredCatalogProducts.length === 0 ? (
+                          ) : filteredProducts.length === 0 ? (
                             <CommandEmpty>No matching products found.</CommandEmpty>
                           ) : (
                             <CommandGroup>
-                              {filteredCatalogProducts.map((product) => (
+                              {filteredProducts.map((product) => (
                                 <CommandItem
                                   key={product.id}
                                   onSelect={() => {
                                     if (assigningToLocation) {
                                       assignProductMutation.mutate({
                                         locationId: assigningToLocation.id,
-                                        catalogProductId: product.id,
+                                        productId: product.id,
                                       });
                                     }
                                   }}

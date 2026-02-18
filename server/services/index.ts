@@ -17,12 +17,12 @@
  * Dependency graph:
  *   inventory-core (foundation — no deps)
  *     ├── inventory-atp   (read-only, depends on core indirectly via DB)
- *     ├── break-assembly   (depends on core)
- *     ├── reservation      (depends on core)
- *     ├── replenishment    (depends on core)
- *     ├── fulfillment      (depends on core)
- *     ├── picking           (depends on core + replenishment + storage)
  *     ├── channel-sync     (depends on atp)
+ *     ├── break-assembly   (depends on core)
+ *     ├── fulfillment      (depends on core + channelSync)
+ *     ├── reservation      (depends on core + channelSync)
+ *     ├── replenishment    (depends on core)
+ *     ├── picking           (depends on core + replenishment + storage)
  *     └── returns          (depends on core)
  */
 
@@ -42,6 +42,9 @@ import { createPickingService } from "./picking";
 import { createOrderCombiningService } from "./order-combining";
 import { createCycleCountService } from "./cycle-count";
 import { createOperationsDashboardService } from "./operations-dashboard";
+import { createReceivingService } from "./receiving";
+import { createProductImportService } from "./product-import";
+import { createChannelProductPushService } from "./channel-product-push";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
@@ -49,15 +52,15 @@ export function createServices(db: any) {
   const inventoryCore = createInventoryCoreService(db);
   const atp = createInventoryAtpService(db);
 
-  // Depends on inventoryCore
+  // Channel sync (depends on atp only — must precede fulfillment/reservation)
+  const channelSync = createChannelSyncService(db, atp);
+
+  // Depends on inventoryCore (+ channelSync for fulfillment/reservation)
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
-  const fulfillment = createFulfillmentService(db, inventoryCore);
-  const reservation = createReservationService(db, inventoryCore);
+  const fulfillment = createFulfillmentService(db, inventoryCore, channelSync);
+  const reservation = createReservationService(db, inventoryCore, channelSync);
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore);
-
-  // Depends on atp
-  const channelSync = createChannelSyncService(db, atp);
 
   // Depends on inventoryCore + replenishment + storage
   const picking = createPickingService(db, inventoryCore, replenishment, storage);
@@ -74,6 +77,15 @@ export function createServices(db: any) {
 
   // Standalone (read-only analytics)
   const operationsDashboard = createOperationsDashboardService(db);
+
+  // Depends on inventoryCore + channelSync + storage
+  const receiving = createReceivingService(db, inventoryCore, channelSync, storage);
+
+  // Standalone (imports from Shopify)
+  const productImport = createProductImportService();
+
+  // Channel product push (depends on storage only)
+  const channelProductPush = createChannelProductPushService(db);
 
   return {
     inventoryCore,
@@ -92,6 +104,9 @@ export function createServices(db: any) {
     orderCombining,
     cycleCount,
     operationsDashboard,
+    receiving,
+    productImport,
+    channelProductPush,
   };
 }
 
@@ -112,6 +127,9 @@ export { createPickingService } from "./picking";
 export { createOrderCombiningService } from "./order-combining";
 export { createCycleCountService } from "./cycle-count";
 export { createOperationsDashboardService } from "./operations-dashboard";
+export { createReceivingService } from "./receiving";
+export { createProductImportService } from "./product-import";
+export { createChannelProductPushService } from "./channel-product-push";
 
 // Re-export service types
 export type { InventoryCoreService } from "./inventory-core";
@@ -127,3 +145,6 @@ export type { PickingService, PickItemResult, CaseBreakResult, BinCountResult } 
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./order-combining";
 export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "./operations-dashboard";
+export type { ReceivingService, ReceivingError } from "./receiving";
+export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import";
+export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./channel-product-push";

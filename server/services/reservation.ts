@@ -15,6 +15,10 @@ type DrizzleDb = {
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
+interface ChannelSync {
+  queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // Interfaces
 // ---------------------------------------------------------------------------
@@ -49,6 +53,7 @@ class ReservationService {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryCore: any,
+    private readonly channelSync: ChannelSync,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -89,6 +94,8 @@ class ReservationService {
       .select()
       .from(orderItems)
       .where(eq(orderItems.orderId, orderId));
+
+    const syncVariantIds = new Set<number>();
 
     for (const item of items) {
       try {
@@ -179,6 +186,7 @@ class ReservationService {
         if (reserved) {
           result.reserved++;
           result.totalBaseUnits += baseUnitsReserved;
+          syncVariantIds.add(variant.id);
 
           // If we could not fully reserve, note the shortfall
           if (unitsToReserve < unitsNeeded) {
@@ -205,6 +213,13 @@ class ReservationService {
       }
     }
 
+    // Post-reservation: fire channel sync (reserving reduces available ATP)
+    for (const vid of Array.from(syncVariantIds)) {
+      this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-reserve sync failed for variant ${vid}:`, err),
+      );
+    }
+
     return result;
   }
 
@@ -228,6 +243,7 @@ class ReservationService {
     userId?: string,
   ): Promise<{ released: number; failed: Array<{ sku: string; orderItemId: number; reason: string }> }> {
     const result = { released: 0, failed: [] as Array<{ sku: string; orderItemId: number; reason: string }> };
+    const syncVariantIds = new Set<number>();
 
     const items = await this.db
       .select()
@@ -285,6 +301,7 @@ class ReservationService {
             });
             remaining -= releaseQty;
             result.released++;
+            syncVariantIds.add(variant.id);
           } catch (releaseErr) {
             const msg = releaseErr instanceof Error ? releaseErr.message : String(releaseErr);
             console.error(
@@ -321,6 +338,13 @@ class ReservationService {
           reason: `Unexpected error: ${msg}`,
         });
       }
+    }
+
+    // Post-release: fire channel sync (releasing increases available ATP)
+    for (const vid of Array.from(syncVariantIds)) {
+      this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-release sync failed for variant ${vid}:`, err),
+      );
     }
 
     return result;
@@ -512,6 +536,6 @@ class ReservationService {
  * await reservations.reserveOrder(orderId);
  * ```
  */
-export function createReservationService(db: any, inventoryCore: any) {
-  return new ReservationService(db, inventoryCore);
+export function createReservationService(db: any, inventoryCore: any, channelSync: any) {
+  return new ReservationService(db, inventoryCore, channelSync);
 }

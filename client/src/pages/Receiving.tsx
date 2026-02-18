@@ -75,7 +75,7 @@ interface ReceivingLine {
   receivedQty: number;
   damagedQty: number;
   productVariantId: number | null;
-  catalogProductId: number | null;
+  productId: number | null;
   putawayLocationId: number | null;
   putawayComplete: number;
   status: string;
@@ -238,11 +238,11 @@ export default function Receiving() {
     productName: "",
     expectedQty: "1",
     putawayLocationId: "",
-    catalogProductId: null as number | null,
+    productId: null as number | null,
     productVariantId: null as number | null,
   });
   const [skuSearch, setSkuSearch] = useState("");
-  const [skuResults, setSkuResults] = useState<{sku: string; name: string; catalogProductId: number | null; productVariantId: number; unitsPerVariant: number}[]>([]);
+  const [skuResults, setSkuResults] = useState<{sku: string; name: string; productId: number | null; productVariantId: number; unitsPerVariant: number}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
   const [skuSearchTimeout, setSkuSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const [locationSearch, setLocationSearch] = useState("");
@@ -492,7 +492,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         productName: "",
         expectedQty: "1",
         putawayLocationId: "",
-        catalogProductId: null,
+        productId: null,
         productVariantId: null,
       });
       setSkuSearch("");
@@ -1841,7 +1841,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                             ...newLine,
                             sku: item.sku,
                             productName: item.name,
-                            catalogProductId: item.catalogProductId,
+                            productId: item.productId,
                             productVariantId: item.productVariantId,
                           });
                           setSkuSearch(item.sku);
@@ -1951,7 +1951,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   productName: "",
                   expectedQty: "1",
                   putawayLocationId: "",
-                  catalogProductId: null,
+                  productId: null,
                   productVariantId: null,
                 });
               }}>
@@ -1972,7 +1972,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       receivedQty: isBlind ? qty : 0,
                       status: isBlind ? "complete" : "pending",
                       putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
-                      catalogProductId: newLine.catalogProductId,
+                      productId: newLine.productId,
                       productVariantId: newLine.productVariantId,
                     },
                   });

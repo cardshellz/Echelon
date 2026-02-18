@@ -46,6 +46,10 @@ interface InventoryCore {
   }): Promise<void>;
 }
 
+interface ChannelSync {
+  queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+}
+
 // ---------------------------------------------------------------------------
 // FulfillmentService
 // ---------------------------------------------------------------------------
@@ -69,6 +73,7 @@ class FulfillmentService {
   constructor(
     private readonly db: DrizzleDb,
     private readonly inventoryCore: InventoryCore,
+    private readonly channelSync: ChannelSync,
   ) {}
 
   // =========================================================================
@@ -179,7 +184,7 @@ class FulfillmentService {
       userId?: string;
     },
   ): Promise<void> {
-    await this.db.transaction(async (tx: any) => {
+    const affectedVariantIds = await this.db.transaction(async (tx: any) => {
       // 1. Load the shipment
       const [shipment] = await tx
         .select()
@@ -193,7 +198,7 @@ class FulfillmentService {
 
       if ((shipment as Shipment).status === "shipped" || (shipment as Shipment).status === "delivered") {
         // Already confirmed -- idempotent
-        return;
+        return [] as number[];
       }
 
       // 2. Load shipment items
@@ -203,12 +208,10 @@ class FulfillmentService {
         .where(eq(shipmentItems.shipmentId, shipmentId));
 
       // 3. For each item, release inventory via inventoryCore (qty = variant units)
+      const variantIds: number[] = [];
       for (const item of items) {
         if (!item.productVariantId) continue;
 
-        // Determine the warehouse location.  If fromLocationId is set on
-        // the item, use it.  Otherwise attempt to find the primary pick
-        // location for this variant (best-effort -- may still be null).
         const warehouseLocationId = item.fromLocationId;
 
         if (warehouseLocationId && item.qty > 0) {
@@ -221,6 +224,7 @@ class FulfillmentService {
             shipmentId: String(shipmentId),
             userId: params?.userId,
           });
+          variantIds.push(item.productVariantId);
         }
       }
 
@@ -240,7 +244,16 @@ class FulfillmentService {
         .update(shipments)
         .set(updateSet)
         .where(eq(shipments.id, shipmentId));
+
+      return variantIds;
     });
+
+    // Post-commit: fire channel sync for affected variants
+    for (const vid of affectedVariantIds) {
+      this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-shipment sync failed for variant ${vid}:`, err),
+      );
+    }
   }
 
   // =========================================================================
@@ -275,7 +288,7 @@ class FulfillmentService {
     trackingCompany?: string;
     lineItems: Array<{ sku: string; quantity: number }>;
   }): Promise<Shipment> {
-    return this.db.transaction(async (tx: any) => {
+    const { shipment, affectedVariantIds } = await this.db.transaction(async (tx: any) => {
       // -- Idempotency check --
       const [existing] = await tx
         .select()
@@ -284,7 +297,7 @@ class FulfillmentService {
         .limit(1);
 
       if (existing) {
-        return existing as Shipment;
+        return { shipment: existing as Shipment, affectedVariantIds: [] as number[] };
       }
 
       // -- Resolve internal order --
@@ -432,8 +445,22 @@ class FulfillmentService {
         .where(eq(shipments.id, createdShipment.id))
         .limit(1);
 
-      return (updated ?? createdShipment) as Shipment;
+      // Collect variant IDs for post-commit channel sync
+      const variantIds = shipmentItemValues
+        .filter((si: any) => si.productVariantId != null)
+        .map((si: any) => si.productVariantId as number);
+
+      return { shipment: (updated ?? createdShipment) as Shipment, affectedVariantIds: variantIds };
     });
+
+    // Post-commit: fire channel sync for affected variants
+    for (const vid of affectedVariantIds) {
+      this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
+        console.warn(`[ChannelSync] Post-fulfillment sync failed for variant ${vid}:`, err),
+      );
+    }
+
+    return shipment;
   }
 
   // =========================================================================
@@ -594,7 +621,7 @@ class FulfillmentService {
    * can share a single transaction boundary.
    */
   private withTx(tx: any): FulfillmentService {
-    return new FulfillmentService(tx, this.inventoryCore);
+    return new FulfillmentService(tx, this.inventoryCore, this.channelSync);
   }
 }
 
@@ -616,6 +643,6 @@ class FulfillmentService {
  * await fulfillment.processShopifyFulfillment({ ... });
  * ```
  */
-export function createFulfillmentService(db: any, inventoryCore: any) {
-  return new FulfillmentService(db, inventoryCore);
+export function createFulfillmentService(db: any, inventoryCore: any, channelSync: any) {
+  return new FulfillmentService(db, inventoryCore, channelSync);
 }

@@ -79,7 +79,7 @@ interface CycleCountItem {
   cycleCountId: number;
   warehouseLocationId: number;
   productVariantId: number | null;
-  catalogProductId: number | null;
+  productId: number | null;
   expectedSku: string | null;
   expectedQty: number;
   countedSku: string | null;

@@ -65,7 +65,7 @@ interface WarehouseLocation {
   isPickable: number | null;
 }
 
-interface CatalogProduct {
+interface ProductRecord {
   id: number;
   sku: string | null;
   title: string | null;
@@ -95,7 +95,7 @@ interface LocationInventoryItem {
   variantName: string | null;
   unitsPerVariant: number;
   productTitle: string | null;
-  catalogProductId: number | null;
+  productId: number | null;
   imageUrl: string | null;
   barcode: string | null;
 }
@@ -120,7 +120,7 @@ interface ReplenTierDefault {
 
 interface ReplenRule {
   id: number;
-  catalogProductId: number | null;
+  productId: number | null;
   pickVariantId: number | null;
   sourceVariantId: number | null;
   pickLocationType: string | null;
@@ -133,7 +133,7 @@ interface ReplenRule {
   isActive: number;
   createdAt: string;
   updatedAt: string;
-  catalogProduct?: CatalogProduct;
+  product?: ProductRecord;
   pickVariant?: ProductVariant;
   sourceVariant?: ProductVariant;
 }
@@ -143,7 +143,7 @@ interface ReplenTask {
   replenRuleId: number | null;
   fromLocationId: number;
   toLocationId: number;
-  catalogProductId: number | null;
+  productId: number | null;
   sourceProductVariantId: number | null;
   pickProductVariantId: number | null;
   qtySourceUnits: number;
@@ -167,7 +167,7 @@ interface ReplenTask {
   createdAt: string;
   fromLocation?: WarehouseLocation;
   toLocation?: WarehouseLocation;
-  catalogProduct?: CatalogProduct;
+  product?: ProductRecord;
   sourceVariant?: ProductVariant;
   pickVariant?: ProductVariant;
 }
@@ -289,7 +289,7 @@ export default function Replenishment() {
   });
 
   const [overrideForm, setOverrideForm] = useState({
-    catalogProductId: "",
+    productId: "",
     pickVariantId: "",
     sourceVariantId: "",
     pickLocationType: "",
@@ -308,7 +308,7 @@ export default function Replenishment() {
     toLocationId: "",
     sourceVariantId: "",
     pickVariantId: "",
-    catalogProductId: "",
+    productId: "",
     qtySourceUnits: "",
     qtyTargetUnits: "",
     priority: "5",
@@ -361,7 +361,7 @@ export default function Replenishment() {
     queryKey: ["/api/warehouse/locations"],
   });
 
-  const { data: products = [] } = useQuery<CatalogProduct[]>({
+  const { data: products = [] } = useQuery<ProductRecord[]>({
     queryKey: ["/api/catalog/products"],
   });
 
@@ -588,7 +588,7 @@ export default function Replenishment() {
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({
-          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          productId: data.productId ? parseInt(data.productId) : null,
           pickVariantId: data.pickVariantId ? parseInt(data.pickVariantId) : null,
           sourceVariantId: data.sourceVariantId ? parseInt(data.sourceVariantId) : null,
           pickLocationType: data.pickLocationType || null,
@@ -671,7 +671,7 @@ export default function Replenishment() {
         body: JSON.stringify({
           fromLocationId: parseInt(data.fromLocationId),
           toLocationId: parseInt(data.toLocationId),
-          catalogProductId: data.catalogProductId ? parseInt(data.catalogProductId) : null,
+          productId: data.productId ? parseInt(data.productId) : null,
           sourceVariantId: sourceVariantId,
           pickVariantId: pickVariantId,
           qtySourceUnits: qtySource,
@@ -954,7 +954,7 @@ export default function Replenishment() {
 
   const resetOverrideForm = () => {
     setOverrideForm({
-      catalogProductId: "",
+      productId: "",
       pickVariantId: "",
       sourceVariantId: "",
       pickLocationType: "",
@@ -975,7 +975,7 @@ export default function Replenishment() {
       toLocationId: "",
       sourceVariantId: "",
       pickVariantId: "",
-      catalogProductId: "",
+      productId: "",
       qtySourceUnits: "",
       qtyTargetUnits: "",
       priority: "5",
@@ -998,7 +998,7 @@ export default function Replenishment() {
         setTaskForm(prev => ({
           ...prev,
           sourceVariantId: newVariantId,
-          catalogProductId: item.catalogProductId?.toString() || "",
+          productId: item.productId?.toString() || "",
           pickVariantId: "",
           qtySourceUnits: taskMode === "case_break" ? "1" : "",
           qtyTargetUnits: taskMode === "transfer" ? (available > 0 ? available.toString() : "") : "",
@@ -1101,7 +1101,7 @@ export default function Replenishment() {
     setEditingOverride(override);
     const ar = (override as any).autoReplen;
     setOverrideForm({
-      catalogProductId: override.catalogProductId?.toString() || "",
+      productId: override.productId?.toString() || "",
       pickVariantId: override.pickVariantId?.toString() || "",
       sourceVariantId: override.sourceVariantId?.toString() || "",
       pickLocationType: override.pickLocationType || "",
@@ -1143,7 +1143,7 @@ export default function Replenishment() {
       updateOverrideMutation.mutate({
         id: editingOverride.id,
         data: {
-          catalogProductId: overrideForm.catalogProductId ? parseInt(overrideForm.catalogProductId) : null,
+          productId: overrideForm.productId ? parseInt(overrideForm.productId) : null,
           pickVariantId: overrideForm.pickVariantId ? parseInt(overrideForm.pickVariantId) : null,
           sourceVariantId: overrideForm.sourceVariantId ? parseInt(overrideForm.sourceVariantId) : null,
           pickLocationType: overrideForm.pickLocationType || null,
@@ -1421,7 +1421,7 @@ export default function Replenishment() {
                         </TableCell>
                         <TableCell className="hidden md:table-cell py-2">
                           <div className="text-xs sm:text-sm">
-                            {task.pickVariant?.sku || task.sourceVariant?.sku || task.catalogProduct?.sku || task.catalogProduct?.title || "-"}
+                            {task.pickVariant?.sku || task.sourceVariant?.sku || task.product?.sku || task.product?.title || "-"}
                             {task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId && (
                               <div className="text-[10px] text-muted-foreground">
                                 from {task.sourceVariant.sku} ({uomLabel(task.sourceVariant.hierarchyLevel)})
@@ -1687,7 +1687,7 @@ export default function Replenishment() {
                           <div className="flex items-center gap-2">
                             <Package className="w-4 h-4 text-blue-500 shrink-0" />
                             <span className="text-xs sm:text-sm font-medium truncate max-w-[120px] sm:max-w-none">
-                              {override.catalogProduct?.sku || override.catalogProduct?.title || `Product ${override.catalogProductId}`}
+                              {override.product?.sku || override.product?.title || `Product ${override.productId}`}
                             </span>
                           </div>
                         </TableCell>
@@ -2280,8 +2280,8 @@ export default function Replenishment() {
             <div>
               <Label className="text-xs md:text-sm">Product (Required)</Label>
               <Select 
-                value={overrideForm.catalogProductId} 
-                onValueChange={(v) => setOverrideForm({ ...overrideForm, catalogProductId: v })}
+                value={overrideForm.productId}
+                onValueChange={(v) => setOverrideForm({ ...overrideForm, productId: v })}
               >
                 <SelectTrigger className="h-10" data-testid="select-override-product">
                   <SelectValue placeholder="Select product..." />
@@ -2308,7 +2308,7 @@ export default function Replenishment() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="">Use default</SelectItem>
-                    {getVariantsForProduct(overrideForm.catalogProductId).map((v) => (
+                    {getVariantsForProduct(overrideForm.productId).map((v) => (
                       <SelectItem key={v.id} value={v.id.toString()}>
                         {v.sku || v.name} ({v.unitsPerVariant} units)
                       </SelectItem>
@@ -2327,7 +2327,7 @@ export default function Replenishment() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="">Use default</SelectItem>
-                    {getVariantsForProduct(overrideForm.catalogProductId).map((v) => (
+                    {getVariantsForProduct(overrideForm.productId).map((v) => (
                       <SelectItem key={v.id} value={v.id.toString()}>
                         {v.sku || v.name} ({v.unitsPerVariant} units)
                       </SelectItem>
@@ -2436,7 +2436,7 @@ export default function Replenishment() {
               <Button
                 className="min-h-[44px]"
                 onClick={handleSaveOverride}
-                disabled={!overrideForm.catalogProductId}
+                disabled={!overrideForm.productId}
                 data-testid="button-save-override"
               >
                 {editingOverride ? "Update Override" : "Create Override"}
@@ -2782,7 +2782,7 @@ export default function Replenishment() {
                 variant={taskMode === "transfer" ? "default" : "outline"}
                 size="sm"
                 className="flex-1 min-h-[36px]"
-                onClick={() => { setTaskMode("transfer"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
+                onClick={() => { setTaskMode("transfer"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", productId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
               >
                 <ArrowRight className="w-3 h-3 mr-1.5" />
                 Transfer
@@ -2791,7 +2791,7 @@ export default function Replenishment() {
                 variant={taskMode === "case_break" ? "default" : "outline"}
                 size="sm"
                 className="flex-1 min-h-[36px]"
-                onClick={() => { setTaskMode("case_break"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
+                onClick={() => { setTaskMode("case_break"); setTaskForm(prev => ({ ...prev, sourceVariantId: "", pickVariantId: "", productId: "", qtySourceUnits: "", qtyTargetUnits: "" })); }}
               >
                 <Package className="w-3 h-3 mr-1.5" />
                 Case Break
@@ -2820,7 +2820,7 @@ export default function Replenishment() {
                           .filter(loc => !taskFromSearch || loc.code.toLowerCase().includes(taskFromSearch.toLowerCase()) || (loc.name && loc.name.toLowerCase().includes(taskFromSearch.toLowerCase())))
                           .slice(0, 50)
                           .map(loc => (
-                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", pickVariantId: "", catalogProductId: "", qtySourceUnits: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
+                            <CommandItem key={loc.id} value={loc.code} onSelect={() => { setTaskForm({ ...taskForm, fromLocationId: loc.id.toString(), sourceVariantId: "", pickVariantId: "", productId: "", qtySourceUnits: "", qtyTargetUnits: "" }); setTaskFromOpen(false); setTaskFromSearch(""); }}>
                               <Check className={`mr-2 h-4 w-4 ${taskForm.fromLocationId === loc.id.toString() ? "opacity-100" : "opacity-0"}`} />
                               <span className="font-medium">{loc.code}</span>
                               {loc.name && <span className="ml-2 text-muted-foreground text-xs">{loc.name}</span>}
@@ -2868,7 +2868,7 @@ export default function Replenishment() {
                             setTaskForm(prev => ({
                               ...prev,
                               sourceVariantId: item.variantId.toString(),
-                              catalogProductId: item.catalogProductId?.toString() || "",
+                              productId: item.productId?.toString() || "",
                               pickVariantId: "",
                               qtySourceUnits: taskMode === "case_break" ? "1" : "",
                               qtyTargetUnits: taskMode === "transfer" ? (available > 0 ? available.toString() : "") : "",

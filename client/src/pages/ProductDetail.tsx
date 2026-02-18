@@ -22,6 +22,17 @@ import {
   Plus,
   Pencil,
   Trash2,
+  FileText,
+  Star,
+  X,
+  ChevronUp,
+  ChevronDown,
+  Send,
+  Globe,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  Loader2,
 } from "lucide-react";
 
 const HIERARCHY_TYPES = [
@@ -54,24 +65,22 @@ interface ProductDetailData {
   productId: number;
   sku: string;
   name: string;
+  title: string | null;
   description: string | null;
   category: string | null;
+  subcategory: string | null;
   brand: string | null;
+  manufacturer: string | null;
+  bulletPoints: string[] | null;
+  tags: string[] | null;
+  seoTitle: string | null;
+  seoDescription: string | null;
+  status: string | null;
   baseUnit: string;
-  imageUrl: string | null;
   isActive: boolean;
   leadTimeDays: number;
   safetyStockDays: number;
-  catalogProduct: {
-    id: number;
-    title: string;
-    description: string | null;
-    status: string;
-    category: string | null;
-    subcategory: string | null;
-    brand: string | null;
-    manufacturer: string | null;
-  } | null;
+  shopifyProductId: string | null;
   variants: ProductVariantRow[];
   assets: Array<{
     id: number;
@@ -80,6 +89,7 @@ interface ProductDetailData {
     assetType: string;
     isPrimary: number;
     position: number;
+    productVariantId: number | null;
   }>;
 }
 
@@ -113,11 +123,30 @@ export default function ProductDetail() {
     name: "",
     sku: "",
     baseUnit: "",
-    description: "",
     leadTimeDays: 120,
     safetyStockDays: 7,
   });
   const [isDirty, setIsDirty] = useState(false);
+
+  // --- Content edit state ---
+  const [contentForm, setContentForm] = useState({
+    title: "",
+    description: "",
+    bulletPoints: "",
+    category: "",
+    subcategory: "",
+    brand: "",
+    manufacturer: "",
+    tags: "",
+    seoTitle: "",
+    seoDescription: "",
+    status: "active",
+  });
+  const [contentDirty, setContentDirty] = useState(false);
+
+  // --- Image add state ---
+  const [addImageUrl, setAddImageUrl] = useState("");
+  const [addImageAlt, setAddImageAlt] = useState("");
 
   useEffect(() => {
     if (product) {
@@ -125,11 +154,24 @@ export default function ProductDetail() {
         name: product.name || "",
         sku: product.sku || "",
         baseUnit: product.baseUnit || "piece",
-        description: product.description || "",
         leadTimeDays: product.leadTimeDays ?? 120,
         safetyStockDays: product.safetyStockDays ?? 7,
       });
+      setContentForm({
+        title: product.title || "",
+        description: product.description || "",
+        bulletPoints: (product.bulletPoints || []).join("\n"),
+        category: product.category || "",
+        subcategory: product.subcategory || "",
+        brand: product.brand || "",
+        manufacturer: product.manufacturer || "",
+        tags: (product.tags || []).join(", "),
+        seoTitle: product.seoTitle || "",
+        seoDescription: product.seoDescription || "",
+        status: product.status || "active",
+      });
       setIsDirty(false);
+      setContentDirty(false);
     }
   }, [product]);
 
@@ -138,19 +180,41 @@ export default function ProductDetail() {
     setIsDirty(true);
   }, []);
 
+  const updateContentField = useCallback((field: string, value: string) => {
+    setContentForm((prev) => ({ ...prev, [field]: value }));
+    setContentDirty(true);
+  }, []);
+
   // --- Save product mutation ---
   const saveProductMutation = useMutation({
-    mutationFn: async (data: typeof editForm) => {
+    mutationFn: async () => {
+      const bulletPoints = contentForm.bulletPoints.trim()
+        ? contentForm.bulletPoints.split("\n").map((s) => s.trim()).filter(Boolean)
+        : null;
+      const tags = contentForm.tags.trim()
+        ? contentForm.tags.split(",").map((s) => s.trim()).filter(Boolean)
+        : null;
+
       const res = await fetch(`/api/products/${product?.productId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: data.name,
-          sku: data.sku,
-          baseUnit: data.baseUnit,
-          description: data.description || null,
-          leadTimeDays: data.leadTimeDays,
-          safetyStockDays: data.safetyStockDays,
+          name: editForm.name,
+          sku: editForm.sku,
+          baseUnit: editForm.baseUnit,
+          leadTimeDays: editForm.leadTimeDays,
+          safetyStockDays: editForm.safetyStockDays,
+          title: contentForm.title || null,
+          description: contentForm.description || null,
+          bulletPoints,
+          category: contentForm.category || null,
+          subcategory: contentForm.subcategory || null,
+          brand: contentForm.brand || null,
+          manufacturer: contentForm.manufacturer || null,
+          tags,
+          seoTitle: contentForm.seoTitle || null,
+          seoDescription: contentForm.seoDescription || null,
+          status: contentForm.status || "active",
         }),
       });
       if (!res.ok) throw new Error("Failed to update product");
@@ -160,9 +224,109 @@ export default function ProductDetail() {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       toast({ title: "Product updated" });
       setIsDirty(false);
+      setContentDirty(false);
     },
     onError: () => {
       toast({ title: "Failed to update product", variant: "destructive" });
+    },
+  });
+
+  // --- Asset mutations ---
+  const addAssetMutation = useMutation({
+    mutationFn: async ({ url, altText }: { url: string; altText: string }) => {
+      const res = await fetch(`/api/products/${product?.productId}/assets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, altText: altText || null, assetType: "image" }),
+      });
+      if (!res.ok) throw new Error("Failed to add image");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      setAddImageUrl("");
+      setAddImageAlt("");
+      toast({ title: "Image added" });
+    },
+  });
+
+  const deleteAssetMutation = useMutation({
+    mutationFn: async (assetId: number) => {
+      const res = await fetch(`/api/product-assets/${assetId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete image");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      toast({ title: "Image removed" });
+    },
+  });
+
+  const setPrimaryMutation = useMutation({
+    mutationFn: async (assetId: number) => {
+      const res = await fetch(`/api/product-assets/${assetId}/primary`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productId: product?.productId }),
+      });
+      if (!res.ok) throw new Error("Failed to set primary");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      toast({ title: "Primary image updated" });
+    },
+  });
+
+  const reorderMutation = useMutation({
+    mutationFn: async (orderedIds: number[]) => {
+      const res = await fetch(`/api/products/${product?.productId}/assets/reorder`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orderedIds }),
+      });
+      if (!res.ok) throw new Error("Failed to reorder");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+    },
+  });
+
+  // --- Channel status query ---
+  interface ChannelStatus {
+    channelId: number;
+    channelName: string;
+    provider: string;
+    isListed: boolean;
+    listings: Array<{
+      variantId: number;
+      externalProductId: string | null;
+      externalVariantId: string | null;
+      syncStatus: string | null;
+      syncError: string | null;
+      lastSyncedAt: string | null;
+    }>;
+  }
+
+  const { data: channelStatuses, isLoading: channelStatusLoading } = useQuery<ChannelStatus[]>({
+    queryKey: [`/api/products/${productId}/channel-status`],
+    enabled: !!productId && activeTab === "channels",
+  });
+
+  const pushToChannelMutation = useMutation({
+    mutationFn: async ({ channelId }: { channelId?: number }) => {
+      const url = channelId
+        ? `/api/channel-push/product/${product?.productId}/channel/${channelId}`
+        : `/api/channel-push/product/${product?.productId}`;
+      const res = await fetch(url, { method: "POST" });
+      if (!res.ok) throw new Error("Failed to push product");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      toast({ title: "Product pushed to channel" });
+    },
+    onError: () => {
+      toast({ title: "Failed to push product", variant: "destructive" });
     },
   });
 
@@ -379,14 +543,14 @@ export default function ProductDetail() {
         </Button>
         <div className="flex-1 min-w-0">
           <h1 className="text-lg md:text-2xl font-bold truncate">
-            {product.catalogProduct?.title || product.name}
+            {product.title || product.name}
           </h1>
           <p className="text-sm text-muted-foreground font-mono">{product.sku}</p>
         </div>
         <div className="flex items-center gap-2">
-          {isDirty && (
+          {(isDirty || contentDirty) && (
             <Button
-              onClick={() => saveProductMutation.mutate(editForm)}
+              onClick={() => saveProductMutation.mutate()}
               disabled={saveProductMutation.isPending}
               size="sm"
               className="min-h-[44px]"
@@ -409,10 +573,23 @@ export default function ProductDetail() {
                 <Package className="h-4 w-4 mr-2" />
                 <span className="hidden sm:inline">Overview</span>
               </TabsTrigger>
+              <TabsTrigger value="content" className="min-h-[44px]" data-testid="tab-content">
+                <FileText className="h-4 w-4 mr-2" />
+                <span className="hidden sm:inline">Content</span>
+              </TabsTrigger>
+              <TabsTrigger value="images" className="min-h-[44px]" data-testid="tab-images">
+                <ImageIcon className="h-4 w-4 mr-2" />
+                <span className="hidden sm:inline">Images</span>
+                <span className="ml-1">({product.assets?.length || 0})</span>
+              </TabsTrigger>
               <TabsTrigger value="variants" className="min-h-[44px]" data-testid="tab-variants">
                 <Layers className="h-4 w-4 mr-2" />
                 <span className="hidden sm:inline">Variants</span>
                 <span className="ml-1">({sortedVariants.length})</span>
+              </TabsTrigger>
+              <TabsTrigger value="channels" className="min-h-[44px]" data-testid="tab-channels">
+                <Globe className="h-4 w-4 mr-2" />
+                <span className="hidden sm:inline">Channels</span>
               </TabsTrigger>
               <TabsTrigger value="inventory" className="min-h-[44px]" data-testid="tab-inventory">
                 <BarChart3 className="h-4 w-4 mr-2" />
@@ -452,15 +629,6 @@ export default function ProductDetail() {
                         className="h-9 capitalize"
                       />
                     </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs md:text-sm">Description</Label>
-                    <Textarea
-                      value={editForm.description}
-                      onChange={(e) => updateField("description", e.target.value)}
-                      rows={3}
-                      className="resize-none"
-                    />
                   </div>
                 </CardContent>
               </Card>
@@ -505,39 +673,395 @@ export default function ProductDetail() {
                 </CardContent>
               </Card>
 
-              {/* Catalog Data (read-only, from Shopify sync) */}
-              {product.catalogProduct && (
-                <Card>
-                  <CardHeader className="p-3 md:p-6">
-                    <CardTitle className="text-base md:text-lg">Catalog Data</CardTitle>
-                    <CardDescription className="text-xs md:text-sm">
-                      From Shopify sync (read-only)
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <Label className="text-xs md:text-sm">Title</Label>
-                        <p className="mt-1 text-sm">{product.catalogProduct.title}</p>
-                      </div>
-                      <div>
-                        <Label className="text-xs md:text-sm">Status</Label>
-                        <Badge variant="outline" className="mt-1 text-xs">
-                          {product.catalogProduct.status}
-                        </Badge>
-                      </div>
-                      <div>
-                        <Label className="text-xs md:text-sm">Category</Label>
-                        <p className="mt-1 text-sm">{product.catalogProduct.category || "-"}</p>
-                      </div>
-                      <div>
-                        <Label className="text-xs md:text-sm">Brand</Label>
-                        <p className="mt-1 text-sm">{product.catalogProduct.brand || "-"}</p>
-                      </div>
+            </TabsContent>
+
+            {/* ===== CONTENT TAB ===== */}
+            <TabsContent value="content" className="space-y-4 mt-4">
+              <Card>
+                <CardHeader className="p-3 md:p-6">
+                  <CardTitle className="text-base md:text-lg">Product Content</CardTitle>
+                  <CardDescription className="text-xs md:text-sm">
+                    Marketing title, description, and metadata
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Title</Label>
+                      <Input
+                        value={contentForm.title}
+                        onChange={(e) => updateContentField("title", e.target.value)}
+                        placeholder="Marketing title for listings"
+                        className="h-9"
+                      />
                     </div>
-                  </CardContent>
-                </Card>
-              )}
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Status</Label>
+                      <Select
+                        value={contentForm.status}
+                        onValueChange={(v) => updateContentField("status", v)}
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="active">Active</SelectItem>
+                          <SelectItem value="draft">Draft</SelectItem>
+                          <SelectItem value="archived">Archived</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs md:text-sm">Description</Label>
+                    <Textarea
+                      value={contentForm.description}
+                      onChange={(e) => updateContentField("description", e.target.value)}
+                      rows={4}
+                      className="resize-none"
+                      placeholder="Product description for listings"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs md:text-sm">Bullet Points</Label>
+                    <Textarea
+                      value={contentForm.bulletPoints}
+                      onChange={(e) => updateContentField("bulletPoints", e.target.value)}
+                      rows={4}
+                      className="resize-none"
+                      placeholder="One bullet point per line"
+                    />
+                    <p className="text-xs text-muted-foreground">One per line. Used in Amazon, eBay listings.</p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-3 md:p-6">
+                  <CardTitle className="text-base md:text-lg">Classification</CardTitle>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Category</Label>
+                      <Input
+                        value={contentForm.category}
+                        onChange={(e) => updateContentField("category", e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Subcategory</Label>
+                      <Input
+                        value={contentForm.subcategory}
+                        onChange={(e) => updateContentField("subcategory", e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Brand</Label>
+                      <Input
+                        value={contentForm.brand}
+                        onChange={(e) => updateContentField("brand", e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs md:text-sm">Manufacturer</Label>
+                      <Input
+                        value={contentForm.manufacturer}
+                        onChange={(e) => updateContentField("manufacturer", e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs md:text-sm">Tags</Label>
+                    <Input
+                      value={contentForm.tags}
+                      onChange={(e) => updateContentField("tags", e.target.value)}
+                      placeholder="Comma-separated tags"
+                      className="h-9"
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="p-3 md:p-6">
+                  <CardTitle className="text-base md:text-lg">SEO</CardTitle>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs md:text-sm">SEO Title</Label>
+                    <Input
+                      value={contentForm.seoTitle}
+                      onChange={(e) => updateContentField("seoTitle", e.target.value)}
+                      placeholder="Page title for search engines"
+                      className="h-9"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {contentForm.seoTitle.length}/70 characters
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs md:text-sm">SEO Description</Label>
+                    <Textarea
+                      value={contentForm.seoDescription}
+                      onChange={(e) => updateContentField("seoDescription", e.target.value)}
+                      rows={3}
+                      className="resize-none"
+                      placeholder="Meta description for search engines"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {contentForm.seoDescription.length}/160 characters
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ===== IMAGES TAB ===== */}
+            <TabsContent value="images" className="mt-4">
+              <Card>
+                <CardHeader className="p-3 md:p-6 flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle className="text-base md:text-lg">Product Images</CardTitle>
+                    <CardDescription className="text-xs md:text-sm">
+                      Manage product images across all channels
+                    </CardDescription>
+                  </div>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0 space-y-4">
+                  {/* Add image by URL */}
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Input
+                      value={addImageUrl}
+                      onChange={(e) => setAddImageUrl(e.target.value)}
+                      placeholder="Image URL"
+                      className="h-9 flex-1"
+                    />
+                    <Input
+                      value={addImageAlt}
+                      onChange={(e) => setAddImageAlt(e.target.value)}
+                      placeholder="Alt text (optional)"
+                      className="h-9 sm:w-48"
+                    />
+                    <Button
+                      size="sm"
+                      onClick={() => addImageUrl && addAssetMutation.mutate({ url: addImageUrl, altText: addImageAlt })}
+                      disabled={!addImageUrl || addAssetMutation.isPending}
+                      className="min-h-[36px]"
+                    >
+                      <Plus className="h-4 w-4 mr-1" />
+                      Add
+                    </Button>
+                  </div>
+
+                  {/* Image gallery */}
+                  {product.assets && product.assets.length > 0 ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                      {[...product.assets].sort((a, b) => a.position - b.position).map((asset, idx) => (
+                        <div
+                          key={asset.id}
+                          className="relative group border rounded-lg overflow-hidden"
+                        >
+                          <div className="aspect-square bg-muted">
+                            <img
+                              src={asset.url}
+                              alt={asset.altText || "Product image"}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                          {asset.isPrimary === 1 && (
+                            <Badge className="absolute top-1 left-1 text-[10px] px-1.5 py-0">
+                              Primary
+                            </Badge>
+                          )}
+                          <div className="absolute top-1 right-1 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {asset.isPrimary !== 1 && (
+                              <Button
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => setPrimaryMutation.mutate(asset.id)}
+                                title="Set as primary"
+                              >
+                                <Star className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {idx > 0 && (
+                              <Button
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => {
+                                  const sorted = [...product.assets].sort((a, b) => a.position - b.position);
+                                  const ids = sorted.map((a) => a.id);
+                                  [ids[idx - 1], ids[idx]] = [ids[idx], ids[idx - 1]];
+                                  reorderMutation.mutate(ids);
+                                }}
+                                title="Move up"
+                              >
+                                <ChevronUp className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {idx < product.assets.length - 1 && (
+                              <Button
+                                variant="secondary"
+                                size="icon"
+                                className="h-7 w-7"
+                                onClick={() => {
+                                  const sorted = [...product.assets].sort((a, b) => a.position - b.position);
+                                  const ids = sorted.map((a) => a.id);
+                                  [ids[idx], ids[idx + 1]] = [ids[idx + 1], ids[idx]];
+                                  reorderMutation.mutate(ids);
+                                }}
+                                title="Move down"
+                              >
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            <Button
+                              variant="destructive"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => {
+                                if (window.confirm("Remove this image?")) {
+                                  deleteAssetMutation.mutate(asset.id);
+                                }
+                              }}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <ImageIcon className="h-10 w-10 md:h-12 md:w-12 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No images yet.</p>
+                      <p className="text-xs">Add images by URL above, or sync from Shopify.</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* ===== CHANNELS TAB ===== */}
+            <TabsContent value="channels" className="mt-4">
+              <Card>
+                <CardHeader className="p-3 md:p-6 flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle className="text-base md:text-lg">Channel Sync Status</CardTitle>
+                    <CardDescription className="text-xs md:text-sm">
+                      Push product data to sales channels
+                    </CardDescription>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => pushToChannelMutation.mutate({})}
+                    disabled={pushToChannelMutation.isPending}
+                    className="min-h-[44px]"
+                  >
+                    {pushToChannelMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                    ) : (
+                      <Send className="h-4 w-4 mr-1" />
+                    )}
+                    Push to All
+                  </Button>
+                </CardHeader>
+                <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+                  {channelStatusLoading ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-50" />
+                      <p className="text-sm">Loading channels...</p>
+                    </div>
+                  ) : channelStatuses && channelStatuses.length > 0 ? (
+                    <div className="space-y-3">
+                      {channelStatuses.map((cs) => (
+                        <div key={cs.channelId} className="border rounded-lg p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <Globe className="h-4 w-4 text-muted-foreground" />
+                              <span className="font-medium text-sm">{cs.channelName}</span>
+                              <Badge variant="outline" className="text-[10px]">
+                                {cs.provider}
+                              </Badge>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {cs.listings.length > 0 ? (
+                                (() => {
+                                  const hasError = cs.listings.some((l) => l.syncStatus === "error");
+                                  const allSynced = cs.listings.every((l) => l.syncStatus === "synced");
+                                  return hasError ? (
+                                    <Badge variant="destructive" className="text-[10px]">
+                                      <AlertCircle className="h-3 w-3 mr-1" />
+                                      Error
+                                    </Badge>
+                                  ) : allSynced ? (
+                                    <Badge variant="default" className="text-[10px] bg-green-600">
+                                      <CheckCircle2 className="h-3 w-3 mr-1" />
+                                      Synced
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="secondary" className="text-[10px]">
+                                      <Clock className="h-3 w-3 mr-1" />
+                                      Pending
+                                    </Badge>
+                                  );
+                                })()
+                              ) : (
+                                <Badge variant="secondary" className="text-[10px]">Not Listed</Badge>
+                              )}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-8 text-xs"
+                                onClick={() => pushToChannelMutation.mutate({ channelId: cs.channelId })}
+                                disabled={pushToChannelMutation.isPending}
+                              >
+                                <Send className="h-3 w-3 mr-1" />
+                                Push
+                              </Button>
+                            </div>
+                          </div>
+                          {cs.listings.length > 0 && (
+                            <div className="text-xs text-muted-foreground space-y-1 mt-2 border-t pt-2">
+                              {cs.listings.map((l, i) => (
+                                <div key={i} className="flex items-center justify-between">
+                                  <span className="font-mono">
+                                    {l.externalProductId ? `#${l.externalProductId}` : "—"}
+                                    {l.externalVariantId ? ` / v${l.externalVariantId}` : ""}
+                                  </span>
+                                  <span>
+                                    {l.lastSyncedAt
+                                      ? new Date(l.lastSyncedAt).toLocaleDateString()
+                                      : "Never synced"}
+                                  </span>
+                                </div>
+                              ))}
+                              {cs.listings.some((l) => l.syncError) && (
+                                <p className="text-destructive mt-1">
+                                  {cs.listings.find((l) => l.syncError)?.syncError}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Globe className="h-10 w-10 md:h-12 md:w-12 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No sales channels configured.</p>
+                      <p className="text-xs">Set up channels in Settings to push product data.</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </TabsContent>
 
             {/* ===== VARIANTS TAB ===== */}
@@ -700,15 +1224,18 @@ export default function ProductDetail() {
             </CardHeader>
             <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
               <div className="aspect-square bg-muted rounded-lg flex items-center justify-center overflow-hidden">
-                {product.imageUrl ? (
-                  <img
-                    src={product.imageUrl}
-                    alt={product.name}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <ImageIcon className="h-12 w-12 md:h-16 md:w-16 text-muted-foreground/30" />
-                )}
+                {(() => {
+                  const primaryAsset = product.assets?.find((a) => a.isPrimary === 1) || product.assets?.[0];
+                  return primaryAsset ? (
+                    <img
+                      src={primaryAsset.url}
+                      alt={primaryAsset.altText || product.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <ImageIcon className="h-12 w-12 md:h-16 md:w-16 text-muted-foreground/30" />
+                  );
+                })()}
               </div>
             </CardContent>
           </Card>
@@ -723,10 +1250,8 @@ export default function ProductDetail() {
                 <span className="text-sm font-medium">{sortedVariants.length}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-xs md:text-sm text-muted-foreground">Has Catalog</span>
-                <span className="text-sm font-medium">
-                  {product.catalogProduct ? "Yes" : "No"}
-                </span>
+                <span className="text-xs md:text-sm text-muted-foreground">Images</span>
+                <span className="text-sm font-medium">{product.assets?.length || 0}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-xs md:text-sm text-muted-foreground">Lead Time</span>

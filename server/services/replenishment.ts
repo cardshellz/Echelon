@@ -7,7 +7,7 @@ import {
   inventoryTransactions,
   warehouseLocations,
   productVariants,
-  catalogProducts,
+
   locationReplenConfig,
   productLocations,
   warehouseSettings,
@@ -220,10 +220,6 @@ class ReplenishmentService {
     }
 
     // Add synthetic zero-qty levels for assigned bins with no inventory level
-    // Load catalog products to resolve product IDs for assigned bins
-    const allCatalogProducts = await this.db.select().from(catalogProducts);
-    const catalogProductMap = new Map(allCatalogProducts.map((cp: any) => [cp.id, cp]));
-
     // Build lowest-level variant per product for assigned bin resolution
     const lowestVariantByProduct = new Map<number, ProductVariant>();
     for (const v of allProductVariantsArr) {
@@ -235,14 +231,11 @@ class ReplenishmentService {
     }
 
     for (const ab of assignedBins) {
-      if (!ab.warehouseLocationId || !ab.catalogProductId) continue;
+      if (!ab.warehouseLocationId || !ab.productId) continue;
       if (!pickLocationMap.has(ab.warehouseLocationId)) continue; // Not a pick location we're scanning
 
-      const cp = catalogProductMap.get(ab.catalogProductId) as any;
-      if (!cp?.productId) continue;
-
       // Find the pick variant (lowest hierarchy level) for this product
-      const pickVariant = lowestVariantByProduct.get(cp.productId);
+      const pickVariant = lowestVariantByProduct.get(ab.productId);
       if (!pickVariant) continue;
 
       const key = `${ab.warehouseLocationId}:${pickVariant.id}`;
@@ -380,7 +373,7 @@ class ReplenishmentService {
             replenRuleId: rule?.id ?? null,
             fromLocationId: location.id, // placeholder — no actual source
             toLocationId: level.warehouseLocationId,
-            catalogProductId: rule?.catalogProductId ?? null,
+            productId: rule?.productId ?? null,
             sourceProductVariantId: sourceVariantId ?? level.productVariantId,
             pickProductVariantId: level.productVariantId,
             qtySourceUnits: 0,
@@ -423,7 +416,7 @@ class ReplenishmentService {
           replenRuleId: rule?.id ?? null,
           fromLocationId: sourceLocation.id,
           toLocationId: level.warehouseLocationId,
-          catalogProductId: rule?.catalogProductId ?? null,
+          productId: rule?.productId ?? null,
           sourceProductVariantId: sourceVariantId ?? level.productVariantId,
           pickProductVariantId: level.productVariantId,
           qtySourceUnits,
@@ -957,7 +950,7 @@ class ReplenishmentService {
           replenRuleId: rule?.id ?? null,
           fromLocationId: warehouseLocationId, // placeholder — no actual source
           toLocationId: warehouseLocationId,
-          catalogProductId: rule?.catalogProductId ?? null,
+          productId: rule?.productId ?? null,
           sourceProductVariantId: sourceVariantId ?? productVariantId,
           pickProductVariantId: productVariantId,
           qtySourceUnits: 0,
@@ -1004,7 +997,7 @@ class ReplenishmentService {
         replenRuleId: rule?.id ?? null,
         fromLocationId: sourceLocation.id,
         toLocationId: warehouseLocationId,
-        catalogProductId: rule?.catalogProductId ?? null,
+        productId: rule?.productId ?? null,
         sourceProductVariantId: sourceVariantId ?? productVariantId,
         pickProductVariantId: productVariantId,
         qtySourceUnits,
@@ -1066,7 +1059,6 @@ class ReplenishmentService {
       .select().from(replenRules).where(eq(replenRules.isActive, 1));
     const allLevels: InventoryLevel[] = await this.db.select().from(inventoryLevels);
     const allLocations: WarehouseLocation[] = await this.db.select().from(warehouseLocations);
-    const allCatalogProducts = await this.db.select().from(catalogProducts);
     const allVariants: ProductVariant[] = await this.db.select().from(productVariants);
     const allProducts = await this.db.select().from(products);
     const allWarehouses = await this.db.select().from(warehouses);
@@ -1092,17 +1084,6 @@ class ReplenishmentService {
       return settingsByWarehouseCode.get((wh as any).code) || defaultSettings;
     };
 
-    // Catalog product -> product_id mapping
-    const catalogProductByProductId = new Map<number, number>();
-    for (const cp of allCatalogProducts) {
-      if ((cp as any).productId) catalogProductByProductId.set((cp as any).productId, cp.id);
-    }
-    const catalogProductByVariantId = new Map<number, number>();
-    for (const v of allVariants) {
-      const cpId = catalogProductByProductId.get(v.productId);
-      if (cpId) catalogProductByVariantId.set(v.id, cpId);
-    }
-
     // Group variants by product + hierarchy level
     const variantsByProduct = new Map<number, Map<number, ProductVariant>>();
     for (const v of allVariants) {
@@ -1111,10 +1092,16 @@ class ReplenishmentService {
       variantsByProduct.get(v.productId)!.set(v.hierarchyLevel, v);
     }
 
-    // Index SKU overrides by catalog product ID
-    const overridesByCatalogProduct = new Map<number, ReplenRule>();
+    // Map variant ID -> product ID for override lookup
+    const productIdByVariantId = new Map<number, number>();
+    for (const v of allVariants) {
+      if (v.productId) productIdByVariantId.set(v.id, v.productId);
+    }
+
+    // Index SKU overrides by product ID
+    const overridesByProduct = new Map<number, ReplenRule>();
     for (const rule of allRules) {
-      if (rule.catalogProductId) overridesByCatalogProduct.set(rule.catalogProductId, rule);
+      if (rule.productId) overridesByProduct.set(rule.productId, rule);
     }
 
     // --- 3. Build inventory index: variantId-locationType -> locations with stock ---
@@ -1149,20 +1136,15 @@ class ReplenishmentService {
     }
 
     // Also check product_locations for assigned bins with no inventory level
-    const catalogProductToProductId = new Map<number, number>();
-    for (const cp of allCatalogProducts) {
-      if ((cp as any).productId) catalogProductToProductId.set(cp.id, (cp as any).productId);
-    }
-
     for (const pl of allProductLocs) {
       if ((pl as any).locationType !== "pick" || (pl as any).status !== "active") continue;
-      if (!(pl as any).warehouseLocationId || !(pl as any).catalogProductId) continue;
+      if (!(pl as any).warehouseLocationId || !(pl as any).productId) continue;
       if (warehouseId != null) {
         const loc = locationMap.get((pl as any).warehouseLocationId);
         if (!loc || loc.warehouseId !== warehouseId) continue;
       }
 
-      const productId = catalogProductToProductId.get((pl as any).catalogProductId);
+      const productId = (pl as any).productId;
       if (!productId) continue;
 
       const productVars = variantsByProduct.get(productId);
@@ -1204,9 +1186,9 @@ class ReplenishmentService {
         const pickVariant = variantMap.get(pickLoc.variantId);
         if (!pickVariant) continue;
 
-        // Look up SKU override via catalog product mapping
-        const pickCpId = catalogProductByVariantId.get(pickLoc.variantId);
-        const override = pickCpId ? overridesByCatalogProduct.get(pickCpId) : undefined;
+        // Look up SKU override via product mapping
+        const pickProductId = productIdByVariantId.get(pickLoc.variantId);
+        const override = pickProductId ? overridesByProduct.get(pickProductId) : undefined;
 
         for (const tierDefault of sortedTierDefaults) {
           if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
@@ -1257,7 +1239,7 @@ class ReplenishmentService {
             replenRuleId: override?.id ?? null,
             fromLocationId: pickLoc.locationId,
             toLocationId: pickLoc.locationId,
-            catalogProductId: pickCpId ?? null,
+            productId: pickProductId ?? null,
             sourceProductVariantId: sourceVariant.id,
             pickProductVariantId: pickLoc.variantId,
             qtySourceUnits: 0,
@@ -1330,7 +1312,7 @@ class ReplenishmentService {
             replenRuleId: override?.id ?? null,
             fromLocationId: pickLoc.locationId,
             toLocationId: pickLoc.locationId,
-            catalogProductId: pickCpId ?? null,
+            productId: pickProductId ?? null,
             sourceProductVariantId: sourceVariant.id,
             pickProductVariantId: pickLoc.variantId,
             qtySourceUnits: 0,
@@ -1495,7 +1477,7 @@ class ReplenishmentService {
             replenRuleId: override?.id ?? null,
             fromLocationId: selectedSource.locationId,
             toLocationId: pickLoc.locationId,
-            catalogProductId: pickCpId ?? null,
+            productId: pickProductId ?? null,
             sourceProductVariantId: sourceVariant.id,
             pickProductVariantId: pickLoc.variantId,
             qtySourceUnits,
@@ -1556,7 +1538,7 @@ class ReplenishmentService {
             replenRuleId: override?.id ?? null,
             fromLocationId: selectedSource.locationId,
             toLocationId: overflowBinId,
-            catalogProductId: pickCpId ?? null,
+            productId: pickProductId ?? null,
             sourceProductVariantId: sourceVariant.id,
             pickProductVariantId: pickLoc.variantId,
             qtySourceUnits: actualOverflowSourceUnits,
@@ -1673,7 +1655,7 @@ class ReplenishmentService {
       cycleCountId: cycleCount.id,
       warehouseLocationId: task.fromLocationId,
       productVariantId: sourceVariant?.id || null,
-      catalogProductId: task.catalogProductId,
+      productId: task.productId,
       expectedSku: sourceVariant?.sku || null,
       expectedQty: inventoryLevel?.variantQty ?? 0,
       countedSku: reason === "wrong_product" ? (actualSku || null) : (sourceVariant?.sku || null),
@@ -1909,7 +1891,7 @@ class ReplenishmentService {
         replenRuleId: null,
         fromLocationId: cascadeSourceLocation.id,
         toLocationId: cascadeSourceLocation.id, // in-place break at reserve
-        catalogProductId: opts.rule?.catalogProductId ?? null,
+        productId: opts.rule?.productId ?? null,
         sourceProductVariantId: grandparentVariantId,
         pickProductVariantId: opts.sourceVariantId, // intermediate variant
         qtySourceUnits: cascadeQtySource,
@@ -1945,7 +1927,7 @@ class ReplenishmentService {
         replenRuleId: opts.rule?.id ?? null,
         fromLocationId: cascadeSourceLocation.id, // boxes will appear here after Task A
         toLocationId: opts.pickLocationId,
-        catalogProductId: opts.rule?.catalogProductId ?? null,
+        productId: opts.rule?.productId ?? null,
         sourceProductVariantId: opts.sourceVariantId, // intermediate variant
         pickProductVariantId: opts.pickVariantId,
         qtySourceUnits: downstreamQtySource,

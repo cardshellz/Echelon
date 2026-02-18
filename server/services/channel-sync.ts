@@ -2,6 +2,7 @@ import { eq, and, sql, inArray } from "drizzle-orm";
 import {
   channelFeeds,
   channelConnections,
+  channelReservations,
   channels,
   productVariants,
   products,
@@ -141,10 +142,33 @@ class ChannelSyncService {
       return result;
     }
 
+    // Load channel reservation caps for per-channel stock limits
+    const reservationCaps = await this.db
+      .select()
+      .from(channelReservations)
+      .where(inArray(channelReservations.productVariantId, variantIds));
+
+    const capLookup = new Map<string, number>();
+    for (const cr of reservationCaps) {
+      if ((cr as any).maxStockBase != null) {
+        capLookup.set(`${(cr as any).channelId}:${(cr as any).productVariantId}`, (cr as any).maxStockBase);
+      }
+    }
+
     // Push each feed
     for (const feed of feeds) {
       const atp = atpByVariantId.get(feed.productVariantId);
-      const atpUnits = atp?.atpUnits ?? 0;
+      let atpUnits = atp?.atpUnits ?? 0;
+      const unitsPerVariant = atp?.unitsPerVariant ?? 1;
+
+      // Apply maxStockBase cap if configured for this channel+variant
+      if (feed.channelId) {
+        const maxBase = capLookup.get(`${feed.channelId}:${feed.productVariantId}`);
+        if (maxBase != null) {
+          const maxVariantUnits = Math.floor(maxBase / unitsPerVariant);
+          atpUnits = Math.min(atpUnits, maxVariantUnits);
+        }
+      }
 
       try {
         await this.pushToChannel(feed, atpUnits);

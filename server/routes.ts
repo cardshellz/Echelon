@@ -4,9 +4,11 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertCatalogProductSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, inventoryLevels, inventoryTransactions, orders, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channelListings, inventoryLevels, inventoryTransactions, orders, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
 import { createOrderCombiningService } from "./services/order-combining";
-import { fetchAllShopifyProducts, fetchShopifyCatalogProducts, fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, syncInventoryToShopify, type ShopifyOrder, type InventoryLevelUpdate } from "./shopify";
+import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
+import { createProductImportService } from "./services/product-import";
+import { createChannelProductPushService } from "./services/channel-product-push";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -16,6 +18,8 @@ import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons, getUserPermission
 
 const upload = multer({ storage: multer.memoryStorage() });
 const orderCombining = createOrderCombiningService(db);
+const productImport = createProductImportService();
+const channelProductPush = createChannelProductPushService(db);
 
 // Permission checking middleware
 function requirePermission(resource: string, action: string) {
@@ -394,8 +398,8 @@ export async function registerRoutes(
   // Get all locations
   app.get("/api/locations", async (req, res) => {
     try {
-      // Return ALL catalog products with their locations (if assigned)
-      const locations = await storage.getAllCatalogProductsWithLocations();
+      // Return ALL products with their locations (if assigned)
+      const locations = await storage.getAllProductsWithLocations();
       res.json(locations);
     } catch (error) {
       console.error("Error fetching locations:", error);
@@ -462,7 +466,7 @@ export async function registerRoutes(
     }
   }
 
-  // Create location (with upsert support for catalogProductId)
+  // Create location (with upsert support for productId)
   app.post("/api/locations", async (req, res) => {
     try {
       const parsed = insertProductLocationSchema.safeParse(req.body);
@@ -488,9 +492,9 @@ export async function registerRoutes(
         zone: warehouseLoc.zone || data.zone, // Use zone from warehouse location
       };
       
-      // Check if a product_location already exists for this catalogProductId (upsert)
-      if (data.catalogProductId) {
-        const existing = await storage.getProductLocationByCatalogProductId(data.catalogProductId);
+      // Check if a product_location already exists for this productId (upsert)
+      if (data.productId) {
+        const existing = await storage.getProductLocationByProductId(data.productId);
         if (existing) {
           // Update existing record instead of creating duplicate
           const updated = await storage.updateProductLocation(existing.id, dataWithRef);
@@ -620,7 +624,7 @@ export async function registerRoutes(
       });
       
       // Log the move as an inventory transaction (transfer type)
-      if (productLocation.catalogProductId) {
+      if (productLocation.productId) {
         const userId = req.session?.user?.id || 'system';
         await db.insert(inventoryTransactions).values({
           productVariantId: null,
@@ -2142,130 +2146,15 @@ export async function registerRoutes(
     }
   });
 
-  // Shopify Sync API - syncs to products (grouped by Shopify product), product_variants, catalog_products, and catalog_assets
+  // Shopify Sync API - syncs content fields + assets to products table and product_assets
   // Uses Shopify's natural hierarchy: Product -> Variants
-  // - products: ONE per Shopify Product (parent container)
+  // - products: ONE per Shopify Product (parent container + content fields)
   // - product_variants: ONE per Shopify Variant (sellable SKUs)
-  // - catalog_products: ONE per Shopify Product (the unsellable parent / storefront card)
-  // - catalog_assets: product-level + variant-level images
+  // - product_assets: product-level + variant-level images
   app.post("/api/shopify/sync", async (req, res) => {
     try {
-      console.log("Starting Shopify catalog sync...");
-
-      // Fetch full catalog data from Shopify
-      const shopifyProducts = await fetchShopifyCatalogProducts();
-      console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
-
-      // Group variants by Shopify Product ID
-      const productGroups = new Map<number, typeof shopifyProducts>();
-      for (const variant of shopifyProducts) {
-        const group = productGroups.get(variant.shopifyProductId) || [];
-        group.push(variant);
-        productGroups.set(variant.shopifyProductId, group);
-      }
-      console.log(`Grouped into ${productGroups.size} parent products`);
-
-      let variantsUpdated = 0; // SKU matches found
-      let catalogCreated = 0;
-      let catalogUpdated = 0;
-      let assetsCreated = 0;
-      let skuNotFound = 0;
-      const unmatchedSkus: string[] = [];
-
-      for (const [shopifyProductId, variants] of productGroups) {
-        // Echelon owns inventory - Shopify sync only creates catalog_products
-        // and links to existing product_variants by SKU match
-        const firstVariant = variants[0];
-
-        // Resolve the Echelon product_id by matching any variant SKU
-        let echelonProductId: number | null = null;
-        for (const variant of variants) {
-          if (variant.sku) {
-            const pv = await storage.getProductVariantBySku(variant.sku);
-            if (pv) {
-              echelonProductId = pv.productId;
-              variantsUpdated++;
-            } else {
-              skuNotFound++;
-              unmatchedSkus.push(variant.sku);
-            }
-          } else {
-            skuNotFound++;
-            unmatchedSkus.push(`(no SKU) ${variant.title}`);
-          }
-        }
-
-        // Create/update ONE catalog_product per Shopify product (the parent)
-        const existingCatalog = await storage.getCatalogProductByShopifyProductId(shopifyProductId);
-        const catalogProduct = await storage.upsertCatalogProductByShopifyProductId(shopifyProductId, {
-          productId: echelonProductId,
-          sku: firstVariant.sku?.toUpperCase() || null,
-          title: firstVariant.productTitle || firstVariant.title,
-          description: firstVariant.description,
-          brand: firstVariant.vendor,
-          category: firstVariant.productType,
-          tags: firstVariant.tags,
-          status: firstVariant.status,
-        });
-
-        if (existingCatalog) {
-          catalogUpdated++;
-        } else {
-          catalogCreated++;
-        }
-
-        // Sync catalog_assets — clear existing and recreate
-        await storage.deleteCatalogAssetsByProductId(catalogProduct.id);
-
-        // Collect all unique product-level images (shared across variants)
-        const seenUrls = new Set<string>();
-        for (const variant of variants) {
-          for (let i = 0; i < variant.allImages.length; i++) {
-            const img = variant.allImages[i];
-            if (!seenUrls.has(img.url)) {
-              seenUrls.add(img.url);
-
-              // Try to find which variant this image belongs to
-              let variantId: number | null = null;
-              if (variant.sku) {
-                const pv = await storage.getProductVariantBySku(variant.sku);
-                if (pv) variantId = pv.id;
-              }
-
-              await storage.createCatalogAsset({
-                catalogProductId: catalogProduct.id,
-                productVariantId: variantId,
-                assetType: "image",
-                url: img.url,
-                position: img.position,
-                isPrimary: seenUrls.size === 1 ? 1 : 0,
-              });
-              assetsCreated++;
-            }
-          }
-
-          // Also sync to product_locations for warehouse assignment (only if has SKU)
-          if (variant.sku) {
-            await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, variant.imageUrl || undefined, variant.barcode || undefined);
-          }
-        }
-      }
-
-      console.log(`Sync complete: ${variantsUpdated} SKUs matched, ${skuNotFound} unmatched, catalog ${catalogCreated} created/${catalogUpdated} updated, ${assetsCreated} assets`);
-      if (unmatchedSkus.length > 0) {
-        console.log(`Unmatched SKUs (need to be created in Echelon first):`, unmatchedSkus.slice(0, 20));
-      }
-
-      res.json({
-        success: true,
-        skuMatched: variantsUpdated,
-        skuNotFound: skuNotFound,
-        unmatchedSkus: unmatchedSkus.slice(0, 50), // Return first 50 for UI display
-        catalog: { created: catalogCreated, updated: catalogUpdated },
-        assets: assetsCreated,
-        totalProducts: productGroups.size,
-        totalVariants: shopifyProducts.length,
-      });
+      const result = await productImport.syncContentAndAssets();
+      res.json(result);
     } catch (error: any) {
       console.error("Shopify sync error:", error);
       res.status(500).json({
@@ -2275,264 +2164,17 @@ export async function registerRoutes(
     }
   });
 
-  // NEW: Sync Shopify variants to products/product_variants tables
+  // Sync Shopify variants to products/product_variants tables
   // Parses SKU pattern: BASE-SKU-P50, BASE-SKU-C700 etc.
-  // P = Pack, B = Box, C = Case, number = units per variant
   app.post("/api/shopify/sync-products", async (req, res) => {
     try {
-      console.log("Starting Shopify product sync to new products/product_variants tables...");
-      
-      const shopifyProducts = await fetchShopifyCatalogProducts();
-      console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
-      
-      // SKU parsing pattern: BASE-SKU-[P|B|C]### 
-      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-      
-      // Group by parsed base SKU
-      const baseSkuMap: Record<string, {
-        baseSku: string;
-        baseName: string;
-        shopifyProductId: number;
-        vendor: string | null;
-        productType: string | null;
-        description: string | null;
-        imageUrl: string | null;
-        variants: Array<{
-          sku: string;
-          name: string;
-          type: string;
-          unitsPerVariant: number;
-          shopifyVariantId: number;
-          shopifyInventoryItemId: number | null;
-          barcode: string | null;
-          imageUrl: string | null;
-        }>;
-      }> = {};
-      
-      // Variants without the -P/-B/-C suffix (treated as single units)
-      const standaloneVariants: Array<{
-        sku: string;
-        name: string;
-        shopifyProductId: number;
-        shopifyVariantId: number;
-        shopifyInventoryItemId: number | null;
-        vendor: string | null;
-        productType: string | null;
-        description: string | null;
-        barcode: string | null;
-        imageUrl: string | null;
-      }> = [];
-      
-      for (const variant of shopifyProducts) {
-        if (!variant.sku) continue; // Skip variants without SKU
-        
-        const match = variant.sku.match(variantPattern);
-        
-        if (match) {
-          const baseSku = match[1];
-          const variantType = match[2].toUpperCase();
-          const unitsPerVariant = parseInt(match[3], 10);
-          
-          if (!baseSkuMap[baseSku]) {
-            // Extract base name (remove variant suffix from title)
-            let baseName = variant.productTitle || variant.title;
-            const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case)\s+of\s+\d+.*/i);
-            if (packMatch) {
-              baseName = baseName.substring(0, packMatch.index).trim();
-            }
-            
-            baseSkuMap[baseSku] = {
-              baseSku,
-              baseName,
-              shopifyProductId: variant.shopifyProductId,
-              vendor: variant.vendor,
-              productType: variant.productType,
-              description: variant.description,
-              imageUrl: variant.imageUrl,
-              variants: []
-            };
-          }
-          
-          baseSkuMap[baseSku].variants.push({
-            sku: variant.sku,
-            name: variant.variantTitle || `${variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case'} of ${unitsPerVariant}`,
-            type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
-            unitsPerVariant,
-            shopifyVariantId: variant.variantId,
-            shopifyInventoryItemId: variant.inventoryItemId,
-            barcode: variant.barcode,
-            imageUrl: variant.imageUrl
-          });
-        } else {
-          // No variant pattern - treat as standalone single unit
-          standaloneVariants.push({
-            sku: variant.sku,
-            name: variant.title,
-            shopifyProductId: variant.shopifyProductId,
-            shopifyVariantId: variant.variantId,
-            shopifyInventoryItemId: variant.inventoryItemId,
-            vendor: variant.vendor,
-            productType: variant.productType,
-            description: variant.description,
-            barcode: variant.barcode,
-            imageUrl: variant.imageUrl
-          });
-        }
-      }
-      
-      console.log(`Parsed: ${Object.keys(baseSkuMap).length} base SKUs with variants, ${standaloneVariants.length} standalone`);
-      
-      let productsCreated = 0;
-      let productsUpdated = 0;
-      let variantsCreated = 0;
-      let variantsUpdated = 0;
-      
-      // Process base SKUs with variants
-      for (const [baseSku, data] of Object.entries(baseSkuMap)) {
-        // Find or create product
-        let product = await storage.getProductBySku(baseSku);
-        
-        if (product) {
-          // Update existing product
-          await storage.updateProduct(product.id, {
-            name: data.baseName,
-            category: data.productType,
-            brand: data.vendor,
-            description: data.description,
-            imageUrl: data.imageUrl,
-            shopifyProductId: String(data.shopifyProductId),
-          });
-          productsUpdated++;
-        } else {
-          // Create new product
-          product = await storage.createProduct({
-            sku: baseSku,
-            name: data.baseName,
-            category: data.productType,
-            brand: data.vendor,
-            description: data.description,
-            imageUrl: data.imageUrl,
-            shopifyProductId: String(data.shopifyProductId),
-            baseUnit: 'EA',
-            active: 1,
-          });
-          productsCreated++;
-        }
-        
-        // Process variants
-        for (const v of data.variants) {
-          // Determine hierarchy level: Pack=1, Box=2, Case=3
-          const hierarchyLevel = v.type === 'Pack' ? 1 : v.type === 'Box' ? 2 : 3;
-          
-          let variant = await storage.getProductVariantBySku(v.sku);
-          
-          if (variant) {
-            // Update existing variant
-            await storage.updateProductVariant(variant.id, {
-              name: v.name,
-              unitsPerVariant: v.unitsPerVariant,
-              hierarchyLevel,
-              barcode: v.barcode,
-              shopifyVariantId: String(v.shopifyVariantId),
-              shopifyInventoryItemId: v.shopifyInventoryItemId ? String(v.shopifyInventoryItemId) : undefined,
-              imageUrl: v.imageUrl,
-            });
-            variantsUpdated++;
-          } else {
-            // Create new variant
-            await storage.createProductVariant({
-              productId: product.id,
-              sku: v.sku,
-              name: v.name,
-              unitsPerVariant: v.unitsPerVariant,
-              hierarchyLevel,
-              barcode: v.barcode,
-              shopifyVariantId: String(v.shopifyVariantId),
-              shopifyInventoryItemId: v.shopifyInventoryItemId ? String(v.shopifyInventoryItemId) : null,
-              imageUrl: v.imageUrl,
-              active: 1,
-            });
-            variantsCreated++;
-          }
-        }
-      }
-      
-      // Process standalone variants (no -P/-B/-C suffix)
-      for (const sv of standaloneVariants) {
-        // Create product with same SKU as variant
-        let product = await storage.getProductBySku(sv.sku);
-        
-        if (product) {
-          await storage.updateProduct(product.id, {
-            name: sv.name,
-            category: sv.productType,
-            brand: sv.vendor,
-            description: sv.description,
-            imageUrl: sv.imageUrl,
-            shopifyProductId: String(sv.shopifyProductId),
-          });
-          productsUpdated++;
-        } else {
-          product = await storage.createProduct({
-            sku: sv.sku,
-            name: sv.name,
-            category: sv.productType,
-            brand: sv.vendor,
-            description: sv.description,
-            imageUrl: sv.imageUrl,
-            shopifyProductId: String(sv.shopifyProductId),
-            baseUnit: 'EA',
-            active: 1,
-          });
-          productsCreated++;
-        }
-        
-        // Create/update default variant (1:1 ratio)
-        let variant = await storage.getProductVariantBySku(sv.sku);
-        
-        if (variant) {
-          await storage.updateProductVariant(variant.id, {
-            name: 'Each',
-            unitsPerVariant: 1,
-            hierarchyLevel: 1,
-            barcode: sv.barcode,
-            shopifyVariantId: String(sv.shopifyVariantId),
-            shopifyInventoryItemId: sv.shopifyInventoryItemId ? String(sv.shopifyInventoryItemId) : undefined,
-            imageUrl: sv.imageUrl,
-          });
-          variantsUpdated++;
-        } else {
-          await storage.createProductVariant({
-            productId: product.id,
-            sku: sv.sku,
-            name: 'Each',
-            unitsPerVariant: 1,
-            hierarchyLevel: 1,
-            barcode: sv.barcode,
-            shopifyVariantId: String(sv.shopifyVariantId),
-            shopifyInventoryItemId: sv.shopifyInventoryItemId ? String(sv.shopifyInventoryItemId) : null,
-            imageUrl: sv.imageUrl,
-            active: 1,
-          });
-          variantsCreated++;
-        }
-      }
-      
-      console.log(`Sync complete: products ${productsCreated} created/${productsUpdated} updated, variants ${variantsCreated} created/${variantsUpdated} updated`);
-      
-      res.json({
-        success: true,
-        products: { created: productsCreated, updated: productsUpdated },
-        variants: { created: variantsCreated, updated: variantsUpdated },
-        baseSkusWithVariants: Object.keys(baseSkuMap).length,
-        standaloneProducts: standaloneVariants.length,
-        totalShopifyVariants: shopifyProducts.length,
-      });
+      const result = await productImport.syncProductsWithMultiUOM();
+      res.json(result);
     } catch (error: any) {
       console.error("Shopify product sync error:", error);
-      res.status(500).json({ 
+      res.status(500).json({
         error: "Failed to sync products from Shopify",
-        message: error.message 
+        message: error.message
       });
     }
   });
@@ -2645,11 +2287,13 @@ export async function registerRoutes(
                 SELECT pl.image_url FROM product_locations pl
                 WHERE UPPER(pl.sku) = ${item.sku.toUpperCase()} AND pl.image_url IS NOT NULL
                 UNION ALL
-                SELECT COALESCE(pv.image_url, p.image_url) as image_url
+                SELECT COALESCE(
+                  (SELECT pa.url FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
+                  (SELECT pa.url FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
+                ) as image_url
                 FROM product_variants pv
-                LEFT JOIN products p ON pv.product_id = p.id
                 WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
-                  AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM product_assets pa WHERE (pa.product_variant_id = pv.id OR (pa.product_id = pv.product_id AND pa.product_variant_id IS NULL)) AND pa.is_primary = 1)
               ) sub
               LIMIT 1
             `);
@@ -3730,11 +3374,10 @@ export async function registerRoutes(
       }
       const variants = await storage.getProductVariantsByProductId(id);
 
-      // Look up linked catalog product via productId
-      const catalogProduct = await storage.getCatalogProductByProductId(id);
-      const assets = catalogProduct ? await storage.getCatalogAssetsByProductId(catalogProduct.id) : [];
+      // Get product assets directly (content fields are now on the product itself)
+      const assets = await storage.getProductAssetsByProductId(id);
 
-      res.json({ ...product, productId: product.id, variants, catalogProduct, assets });
+      res.json({ ...product, productId: product.id, variants, assets });
     } catch (error) {
       console.error("Error fetching product:", error);
       res.status(500).json({ error: "Failed to fetch product" });
@@ -3796,6 +3439,92 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting product:", error);
       res.status(500).json({ error: "Failed to delete product" });
+    }
+  });
+
+  // ============================================================================
+  // Product Assets API
+  // ============================================================================
+  app.get("/api/products/:id/assets", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const assets = await storage.getProductAssetsByProductId(productId);
+      res.json(assets);
+    } catch (error) {
+      console.error("Error fetching product assets:", error);
+      res.status(500).json({ error: "Failed to fetch assets" });
+    }
+  });
+
+  app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const asset = await storage.createProductAsset({
+        ...req.body,
+        productId,
+      });
+      res.status(201).json(asset);
+    } catch (error) {
+      console.error("Error creating product asset:", error);
+      res.status(500).json({ error: "Failed to create asset" });
+    }
+  });
+
+  app.patch("/api/product-assets/:id", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const asset = await storage.updateProductAsset(id, req.body);
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.json(asset);
+    } catch (error) {
+      console.error("Error updating product asset:", error);
+      res.status(500).json({ error: "Failed to update asset" });
+    }
+  });
+
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const success = await storage.deleteProductAsset(id);
+      if (!success) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error deleting product asset:", error);
+      res.status(500).json({ error: "Failed to delete asset" });
+    }
+  });
+
+  app.put("/api/products/:id/assets/reorder", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const { orderedIds } = req.body;
+      if (!Array.isArray(orderedIds)) {
+        return res.status(400).json({ error: "orderedIds array required" });
+      }
+      await storage.reorderProductAssets(productId, orderedIds);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error reordering product assets:", error);
+      res.status(500).json({ error: "Failed to reorder assets" });
+    }
+  });
+
+  app.put("/api/product-assets/:id/primary", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const assetId = parseInt(req.params.id);
+      const { productId } = req.body;
+      if (!productId) {
+        return res.status(400).json({ error: "productId required" });
+      }
+      await storage.setPrimaryProductAsset(productId, assetId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error setting primary asset:", error);
+      res.status(500).json({ error: "Failed to set primary asset" });
     }
   });
 
@@ -4191,7 +3920,7 @@ export async function registerRoutes(
         variant_name: string | null;
         units_per_variant: number;
         product_title: string | null;
-        catalog_product_id: number | null;
+        product_id: number | null;
         image_url: string | null;
         barcode: string | null;
       }>(sql`
@@ -4204,19 +3933,18 @@ export async function registerRoutes(
           pv.sku,
           pv.name as variant_name,
           pv.units_per_variant,
-          cp.title as product_title,
-          cp.id as catalog_product_id,
-          COALESCE(pv.image_url, p.image_url) as image_url,
+          COALESCE(p.title, p.name) as product_title,
+          p.id as product_id,
+          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url,
           pv.barcode
         FROM inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE il.warehouse_location_id = ${warehouseLocationId}
           AND il.variant_qty > 0
         ORDER BY pv.sku
       `);
-      
+
       const inventory = result.rows.map(row => ({
         id: row.id,
         variantId: row.product_variant_id,
@@ -4227,7 +3955,7 @@ export async function registerRoutes(
         variantName: row.variant_name,
         unitsPerVariant: row.units_per_variant,
         productTitle: row.product_title,
-        catalogProductId: row.catalog_product_id,
+        productId: row.product_id,
         imageUrl: row.image_url,
         barcode: row.barcode,
       }));
@@ -4264,50 +3992,38 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid location ID" });
       }
       
-      const { catalogProductId, locationType, isPrimary } = req.body;
-      if (!catalogProductId) {
-        return res.status(400).json({ error: "catalogProductId is required" });
+      const { productId, locationType, isPrimary } = req.body;
+      if (!productId) {
+        return res.status(400).json({ error: "productId is required" });
       }
-      
+
       // Get warehouse location details
       const warehouseLocation = await storage.getWarehouseLocationById(warehouseLocationId);
       if (!warehouseLocation) {
         return res.status(404).json({ error: "Warehouse location not found" });
       }
-      
-      // Get catalog product details
-      const catalogProduct = await storage.getCatalogProductById(catalogProductId);
-      if (!catalogProduct) {
+
+      // Get product details
+      const product = await storage.getProductById(productId);
+      if (!product) {
         return res.status(404).json({ error: "Product not found" });
-      }
-      
-      // Get image/barcode from product if linked
-      let imageUrl: string | null = null;
-      let barcode: string | null = null;
-      if (catalogProduct.productId) {
-        const product = await storage.getProductById(catalogProduct.productId);
-        if (product) {
-          imageUrl = product.imageUrl || null;
-        }
       }
 
       const productLocation = await storage.addProductToLocation({
-        catalogProductId,
+        productId,
         warehouseLocationId,
-        sku: catalogProduct.sku || null,
-        shopifyVariantId: catalogProduct.shopifyProductId || null,
-        name: catalogProduct.title,
+        sku: product.sku || null,
+        shopifyVariantId: product.shopifyProductId ? Number(product.shopifyProductId) : null,
+        name: product.title || product.name,
         location: warehouseLocation.code,
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
         locationType: locationType || "pick",
         isPrimary: isPrimary ?? 1,
-        imageUrl,
-        barcode,
       });
 
       // Auto-sync pick queue for this SKU (fire-and-forget)
-      if (catalogProduct.sku) {
-        syncPickQueueForSku(catalogProduct.sku).catch(() => {});
+      if (product.sku) {
+        syncPickQueueForSku(product.sku).catch(() => {});
       }
 
       res.status(201).json(productLocation);
@@ -4318,13 +4034,13 @@ export async function registerRoutes(
   });
 
   // Get all locations for a specific product
-  app.get("/api/products/:catalogProductId/locations", async (req, res) => {
+  app.get("/api/products/:productId/locations", async (req, res) => {
     try {
-      const catalogProductId = parseInt(req.params.catalogProductId);
-      if (isNaN(catalogProductId)) {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
         return res.status(400).json({ error: "Invalid product ID" });
       }
-      const locations = await storage.getProductLocationsByCatalogProductId(catalogProductId);
+      const locations = await storage.getProductLocationsByProductId(productId);
       res.json(locations);
     } catch (error: any) {
       console.error("Error fetching locations for product:", error);
@@ -4375,11 +4091,11 @@ export async function registerRoutes(
     }
   });
 
-  // Catalog Products API
+  // Catalog Products API — now backed by `products` table directly
   app.get("/api/catalog/products", async (req, res) => {
     try {
-      const products = await storage.getAllCatalogProducts();
-      res.json(products);
+      const allProducts = await storage.getAllProducts();
+      res.json(allProducts);
     } catch (error) {
       console.error("Error fetching catalog products:", error);
       res.status(500).json({ error: "Failed to fetch catalog products" });
@@ -4387,10 +4103,7 @@ export async function registerRoutes(
   });
 
   // Search for SKUs to assign to bin locations
-  // Searches product_variants (source of truth for sellable SKUs) and resolves
-  // to catalog_products for assignment. Auto-creates catalog_products entry if
-  // Search catalog products for bin assignment — searches both catalog_products
-  // and product_variants SKUs, returning only variants that have a catalog product
+  // Searches product_variants and resolves to their parent product
   app.get("/api/catalog/products/search", async (req, res) => {
     try {
       const query = String(req.query.q || "").trim().toLowerCase();
@@ -4399,44 +4112,42 @@ export async function registerRoutes(
 
       const searchPattern = `%${query}%`;
 
-      // Search product_variants and resolve to their catalog_product
-      // Only returns results that have a catalog_products entry
+      // Search product_variants and resolve to their parent product
       const result = await db.execute<{
-        catalog_product_id: number;
+        product_id: number;
         variant_sku: string;
         variant_name: string;
-        catalog_sku: string | null;
-        catalog_title: string | null;
+        product_sku: string | null;
+        product_title: string | null;
         image_url: string | null;
       }>(sql`
         SELECT
-          cp.id as catalog_product_id,
+          p.id as product_id,
           pv.sku as variant_sku,
           pv.name as variant_name,
-          cp.sku as catalog_sku,
-          cp.title as catalog_title,
-          (SELECT ca.url FROM catalog_assets ca WHERE ca.catalog_product_id = cp.id ORDER BY ca.position LIMIT 1) as image_url
+          p.sku as product_sku,
+          COALESCE(p.title, p.name) as product_title,
+          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
         FROM product_variants pv
         JOIN products p ON p.id = pv.product_id
-        JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE pv.is_active = true
           AND pv.sku IS NOT NULL
           AND (
             LOWER(pv.sku) LIKE ${searchPattern} OR
             LOWER(pv.name) LIKE ${searchPattern} OR
-            LOWER(cp.sku) LIKE ${searchPattern} OR
-            LOWER(cp.title) LIKE ${searchPattern}
+            LOWER(p.sku) LIKE ${searchPattern} OR
+            LOWER(COALESCE(p.title, p.name)) LIKE ${searchPattern}
           )
         ORDER BY pv.sku
         LIMIT ${limit}
       `);
 
       res.json(result.rows.map(r => ({
-        id: r.catalog_product_id,
+        id: r.product_id,
         sku: r.variant_sku,
-        title: r.catalog_title || r.variant_name,
+        title: r.product_title || r.variant_name,
         imageUrl: r.image_url,
-        matchedVariantSku: r.variant_sku !== r.catalog_sku ? r.variant_sku : null,
+        matchedVariantSku: r.variant_sku !== r.product_sku ? r.variant_sku : null,
       })));
     } catch (error) {
       console.error("Error searching catalog products:", error);
@@ -4447,21 +4158,16 @@ export async function registerRoutes(
   app.get("/api/catalog/products/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const product = await storage.getCatalogProductById(id);
+      const product = await storage.getProductById(id);
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
-      
-      // Also get linked product and variants
-      const parentProduct = product.productId
-        ? await storage.getProductById(product.productId)
-        : null;
-      const variants = parentProduct
-        ? await storage.getProductVariantsByProductId(parentProduct.id)
-        : [];
-      const assets = await storage.getCatalogAssetsByProductId(product.id);
 
-      res.json({ ...product, product: parentProduct, variants, assets });
+      // Get variants and assets
+      const variants = await storage.getProductVariantsByProductId(product.id);
+      const assets = await storage.getProductAssetsByProductId(product.id);
+
+      res.json({ ...product, variants, assets });
     } catch (error) {
       console.error("Error fetching catalog product:", error);
       res.status(500).json({ error: "Failed to fetch catalog product" });
@@ -4470,8 +4176,8 @@ export async function registerRoutes(
 
   app.post("/api/catalog/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const validatedData = insertCatalogProductSchema.parse(req.body);
-      const product = await storage.createCatalogProduct(validatedData);
+      const validatedData = insertProductSchema.parse(req.body);
+      const product = await storage.createProduct(validatedData);
       res.json(product);
     } catch (error: any) {
       if (error.name === "ZodError") {
@@ -4485,8 +4191,8 @@ export async function registerRoutes(
   app.patch("/api/catalog/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const validatedData = insertCatalogProductSchema.partial().parse(req.body);
-      const product = await storage.updateCatalogProduct(id, validatedData);
+      const validatedData = insertProductSchema.partial().parse(req.body);
+      const product = await storage.updateProduct(id, validatedData);
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
@@ -4503,7 +4209,7 @@ export async function registerRoutes(
   app.delete("/api/catalog/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const deleted = await storage.deleteCatalogProduct(id);
+      const deleted = await storage.deleteProduct(id);
       if (!deleted) {
         return res.status(404).json({ error: "Product not found" });
       }
@@ -4514,19 +4220,15 @@ export async function registerRoutes(
     }
   });
 
-  // NOTE: Duplicate GET /api/products/:id removed — catalog data now included in the primary handler above
+  // NOTE: Duplicate GET /api/products/:id removed — content fields now on products table
 
-  // Products with joined data (for list views) - uses catalog_products as master
+  // Products with joined data (for list views) - uses products table as master
   app.get("/api/products", async (req, res) => {
     try {
-      // Get all catalog products (master source from Shopify sync)
-      const catalogProductsList = await storage.getAllCatalogProducts();
       const productsList = await storage.getAllProducts();
       const variantsList = await storage.getAllProductVariants();
 
       // Create lookup maps
-      const productById = new Map(productsList.map(p => [p.id, p]));
-      const variantById = new Map(variantsList.map(v => [v.id, v]));
       const variantsByProductId = new Map<number, typeof variantsList>();
       for (const v of variantsList) {
         if (!variantsByProductId.has(v.productId)) {
@@ -4535,23 +4237,17 @@ export async function registerRoutes(
         variantsByProductId.get(v.productId)!.push(v);
       }
 
-      // Combine into product view
-      const products = catalogProductsList.map(catalog => {
-        const parentProduct = catalog.productId ? productById.get(catalog.productId) : null;
-        const productId = parentProduct?.id;
-        return {
-          id: catalog.id,
-          baseSku: catalog.sku,
-          name: catalog.title,
-          imageUrl: parentProduct?.imageUrl || null,
-          active: catalog.status === "active" ? 1 : 0,
-          catalogProduct: catalog,
-          variantCount: productId ? (variantsByProductId.get(productId)?.length || 0) : 0,
-          variants: productId ? (variantsByProductId.get(productId) || []) : [],
-        };
-      });
+      // Build product view directly from products table
+      const resultProducts = productsList.map(p => ({
+        ...p,
+        baseSku: p.sku,
+        name: p.title || p.name,
+        active: p.status === "active" ? 1 : 0,
+        variantCount: variantsByProductId.get(p.id)?.length || 0,
+        variants: variantsByProductId.get(p.id) || [],
+      }));
 
-      res.json(products);
+      res.json(resultProducts);
     } catch (error) {
       console.error("Error fetching products:", error);
       res.status(500).json({ error: "Failed to fetch products" });
@@ -4569,10 +4265,10 @@ export async function registerRoutes(
     }
   });
 
-  // Get catalog products without bin locations (for assignment)
+  // Get products without bin locations (for assignment)
   app.get("/api/inventory/items/unassigned", async (req, res) => {
     try {
-      const products = await storage.getCatalogProductsWithoutLocations();
+      const products = await storage.getProductsWithoutLocations();
       res.json(products);
     } catch (error) {
       console.error("Error fetching unassigned products:", error);
@@ -4758,12 +4454,10 @@ export async function registerRoutes(
           pv.sku as sku,
           pv.name as name,
           'product_variant' as source,
-          cp.id as "catalogProductId",
           pv.product_id as "productId",
           pv.id as "productVariantId",
           pv.units_per_variant as "unitsPerVariant"
         FROM product_variants pv
-        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE pv.is_active = true
           AND pv.sku IS NOT NULL
           AND (
@@ -5495,57 +5189,32 @@ export async function registerRoutes(
     }
   });
 
-  // Sync inventory levels to Shopify for a specific product or all products
+  // Sync inventory to all active channels via channel-sync service.
+  // Supports single-product sync (productId in body) or full sync.
   app.post("/api/inventory/sync-shopify", async (req, res) => {
     try {
+      const { channelSync } = req.app.locals.services as any;
       const { productId } = req.body;
 
-      // Get all products or a specific one
-      const products = productId
-        ? [await storage.getProductById(productId)].filter(Boolean)
-        : await storage.getAllProducts();
-
-      const updates: InventoryLevelUpdate[] = [];
-
-      for (const product of products) {
-        if (!product) continue;
-
-        // Get all variants for this product
-        const variants = await storage.getProductVariantsByProductId(product.id);
-
-        // Get channel feeds to find Shopify variant IDs
-        for (const variant of variants) {
-          const feeds = await storage.getChannelFeedsByProductVariantId(variant.id);
-          const shopifyFeed = feeds.find(f => f.channelType === "shopify");
-
-          if (shopifyFeed) {
-            // Calculate availability for this variant
-            const summary = await (req.app.locals.services as any).atp.getInventoryItemSummary(product.id);
-            const variantAvail = summary?.variants.find(v => v.variantId === variant.id);
-
-            if (variantAvail) {
-              updates.push({
-                shopifyVariantId: shopifyFeed.channelVariantId,
-                available: variantAvail.available,
-              });
-            }
-          }
-        }
+      if (productId) {
+        const result = await channelSync.syncProduct(Number(productId));
+        return res.json({
+          message: "Channel inventory sync completed",
+          synced: result.synced,
+          errors: result.errors,
+          variants: result.variants,
+        });
       }
 
-      if (updates.length === 0) {
-        return res.json({ message: "No variants with Shopify channel feeds found", synced: 0 });
-      }
-
-      const result = await syncInventoryToShopify(updates);
+      const result = await channelSync.syncAllProducts();
       res.json({
-        message: "Shopify inventory sync completed",
-        success: result.success,
-        failed: result.failed,
-        total: updates.length,
+        message: "Channel inventory sync completed",
+        synced: result.synced,
+        errors: result.errors,
+        total: result.total,
       });
     } catch (error) {
-      console.error("Error syncing inventory to Shopify:", error);
+      console.error("Error syncing inventory to channels:", error);
       res.status(500).json({ error: "Failed to sync inventory" });
     }
   });
@@ -6296,6 +5965,270 @@ export async function registerRoutes(
     }
   });
   
+  // ============================================
+  // CHANNEL PRODUCT PUSH API
+  // ============================================
+
+  // Preview resolved product for a channel (master + overrides merged)
+  app.get("/api/channel-push/preview/:productId/:channelId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const channelId = parseInt(req.params.channelId);
+      const resolved = await channelProductPush.getResolvedProductForChannel(productId, channelId);
+      if (!resolved) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      res.json(resolved);
+    } catch (error) {
+      console.error("Error previewing product:", error);
+      res.status(500).json({ error: "Failed to preview product" });
+    }
+  });
+
+  // Push product to all active channels
+  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const results = await channelProductPush.pushProductToAllChannels(productId);
+      res.json({ success: true, results });
+    } catch (error) {
+      console.error("Error pushing product:", error);
+      res.status(500).json({ error: "Failed to push product" });
+    }
+  });
+
+  // Push product to specific channel
+  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const channelId = parseInt(req.params.channelId);
+      const result = await channelProductPush.pushProduct(productId, channelId);
+      res.json(result);
+    } catch (error) {
+      console.error("Error pushing product to channel:", error);
+      res.status(500).json({ error: "Failed to push product" });
+    }
+  });
+
+  // Push all products to a channel (bulk)
+  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const result = await channelProductPush.pushAllProducts(channelId);
+      res.json(result);
+    } catch (error) {
+      console.error("Error bulk pushing products:", error);
+      res.status(500).json({ error: "Failed to push products" });
+    }
+  });
+
+  // Get channel sync status for a product
+  app.get("/api/products/:productId/channel-status", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      const activeChannels = await storage.getAllChannels();
+      const statuses = [];
+      for (const channel of activeChannels) {
+        const listings = await storage.getChannelListingsByProduct(channel.id, productId);
+        const override = await storage.getChannelProductOverride(channel.id, productId);
+        statuses.push({
+          channelId: channel.id,
+          channelName: channel.name,
+          provider: channel.provider,
+          isListed: override ? override.isListed === 1 : true,
+          listings: listings.map((l) => ({
+            variantId: l.productVariantId,
+            externalProductId: l.externalProductId,
+            externalVariantId: l.externalVariantId,
+            syncStatus: l.syncStatus,
+            syncError: l.syncError,
+            lastSyncedAt: l.lastSyncedAt,
+          })),
+        });
+      }
+      res.json(statuses);
+    } catch (error) {
+      console.error("Error fetching channel status:", error);
+      res.status(500).json({ error: "Failed to fetch channel status" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL PRODUCT OVERRIDES API
+  // ============================================
+
+  app.get("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const override = await storage.getChannelProductOverride(channelId, productId);
+      res.json(override || null);
+    } catch (error) {
+      console.error("Error fetching product override:", error);
+      res.status(500).json({ error: "Failed to fetch override" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const override = await storage.upsertChannelProductOverride({
+        channelId,
+        productId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      console.error("Error saving product override:", error);
+      res.status(500).json({ error: "Failed to save override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/products/:productId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const deleted = await storage.deleteChannelProductOverride(channelId, productId);
+      res.json({ deleted });
+    } catch (error) {
+      console.error("Error deleting product override:", error);
+      res.status(500).json({ error: "Failed to delete override" });
+    }
+  });
+
+  // Channel variant overrides
+  app.get("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const override = await storage.getChannelVariantOverride(channelId, variantId);
+      res.json(override || null);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch variant override" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const override = await storage.upsertChannelVariantOverride({
+        channelId,
+        productVariantId: variantId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save variant override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/variants/:variantId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const deleted = await storage.deleteChannelVariantOverride(channelId, variantId);
+      res.json({ deleted });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete variant override" });
+    }
+  });
+
+  // Channel pricing
+  app.get("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const pricing = await storage.getChannelPricing(channelId, variantId);
+      res.json(pricing || null);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch pricing" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const pricing = await storage.upsertChannelPricing({
+        channelId,
+        productVariantId: variantId,
+        ...req.body,
+      });
+      res.json(pricing);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save pricing" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/variants/:variantId/pricing", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const variantId = parseInt(req.params.variantId);
+      const deleted = await storage.deleteChannelPricing(channelId, variantId);
+      res.json({ deleted });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete pricing" });
+    }
+  });
+
+  // Channel asset overrides
+  app.get("/api/channels/:channelId/products/:productId/asset-overrides", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const overrides = await storage.getChannelAssetOverridesByProduct(channelId, productId);
+      res.json(overrides);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch asset overrides" });
+    }
+  });
+
+  app.put("/api/channels/:channelId/assets/:assetId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const assetId = parseInt(req.params.assetId);
+      const override = await storage.upsertChannelAssetOverride({
+        channelId,
+        productAssetId: assetId,
+        ...req.body,
+      });
+      res.json(override);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save asset override" });
+    }
+  });
+
+  app.delete("/api/channels/:channelId/assets/:assetId/overrides", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const assetId = parseInt(req.params.assetId);
+      const deleted = await storage.deleteChannelAssetOverride(channelId, assetId);
+      res.json({ deleted });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to delete asset override" });
+    }
+  });
+
+  // Channel listings
+  app.get("/api/channels/:channelId/listings", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const productId = req.query.productId ? parseInt(req.query.productId as string) : undefined;
+      if (productId) {
+        const listings = await storage.getChannelListingsByProduct(channelId, productId);
+        res.json(listings);
+      } else {
+        // Return all listings for this channel - use raw query
+        const allListings = await db.select().from(channelListings).where(eq(channelListings.channelId, channelId));
+        res.json(allListings);
+      }
+    } catch (error) {
+      res.status(500).json({ error: "Failed to fetch listings" });
+    }
+  });
+
   // ============================================
   // CHANNEL RESERVATIONS API
   // ============================================
@@ -7481,30 +7414,13 @@ export async function registerRoutes(
     }
   });
   
-  // Open a receiving order for receiving
   app.post("/api/receiving/:id/open", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const order = await storage.getReceivingOrderById(id);
-      if (!order) {
-        return res.status(404).json({ error: "Receiving order not found" });
-      }
-      if (order.status !== "draft") {
-        return res.status(400).json({ error: "Can only open orders in draft status" });
-      }
-      
-      const userId = req.session.user?.id || null;
-      const updated = await storage.updateReceivingOrder(id, {
-        status: "open",
-        receivedBy: userId,
-        receivedDate: new Date(),
-      });
-      
-      // Return order with lines included so UI doesn't lose them
-      const lines = await storage.getReceivingLines(id);
-      const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
-      res.json({ ...updated, lines, vendor });
-    } catch (error) {
+      const { receiving: rcvService } = req.app.locals.services as any;
+      const result = await rcvService.open(parseInt(req.params.id), req.session.user?.id || null);
+      res.json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error opening receiving order:", error);
       res.status(500).json({ error: "Failed to open receiving order" });
     }
@@ -7513,129 +7429,11 @@ export async function registerRoutes(
   // Close/complete a receiving order - updates inventory
   app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const order = await storage.getReceivingOrderById(id);
-      if (!order) {
-        return res.status(404).json({ error: "Receiving order not found" });
-      }
-      if (order.status === "closed" || order.status === "cancelled") {
-        return res.status(400).json({ error: "Order already closed or cancelled" });
-      }
-      
-      const lines = await storage.getReceivingLines(id);
-      const userId = req.session.user?.id || null;
-
-      // Auto-resolve missing productVariantId from SKU before processing
-      for (const line of lines) {
-        if (line.receivedQty > 0 && !line.productVariantId && line.sku) {
-          const variant = await storage.getProductVariantBySku(line.sku);
-          if (variant) {
-            await storage.updateReceivingLine(line.id, { productVariantId: variant.id });
-            (line as any).productVariantId = variant.id;
-          }
-        }
-      }
-
-      // Block close if any received lines are still missing required data
-      const unresolvable = lines.filter(l => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId));
-      if (unresolvable.length > 0) {
-        const issues = unresolvable.map(l => ({
-          lineId: l.id,
-          sku: l.sku || "(no SKU)",
-          missingVariant: !l.productVariantId,
-          missingLocation: !l.putawayLocationId,
-        }));
-        return res.status(400).json({
-          error: `${unresolvable.length} received line(s) cannot be processed`,
-          issues,
-          hint: "Link SKUs to product variants and assign putaway locations before closing.",
-        });
-      }
-
-      // Create inventory transactions for each line
-      const batchId = `RCV-${id}-${Date.now()}`;
-      let totalReceived = 0;
-      let linesReceived = 0;
-
-      // Diagnostic: log every line's state before processing
-      console.log(`[Receiving Close] Order ${id} (${order.receiptNumber}): ${lines.length} line(s)`);
-      for (const line of lines) {
-        console.log(`[Receiving Close]   Line ${line.id}: sku=${line.sku}, receivedQty=${line.receivedQty} (type ${typeof line.receivedQty}), productVariantId=${line.productVariantId} (type ${typeof line.productVariantId}), putawayLocationId=${line.putawayLocationId} (type ${typeof line.putawayLocationId}), status=${line.status}`);
-      }
-
-      for (const line of lines) {
-        if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
-          // Get or create inventory level at location by productVariantId (source of truth)
-          let level = await storage.getInventoryLevelByLocationAndVariant(line.putawayLocationId, line.productVariantId);
-          console.log(`[Receiving Close]   Line ${line.id}: existing level=${level?.id ?? 'NONE'}, currentQty=${level?.variantQty ?? 0}, adding ${line.receivedQty}`);
-
-          const qtyToAdd = line.receivedQty;
-
-          if (level) {
-            // Update existing level
-            await storage.updateInventoryLevel(level.id, {
-              variantQty: (level.variantQty || 0) + qtyToAdd,
-            });
-          } else {
-            // Create new level - productVariantId is required
-            const newLevel = await storage.createInventoryLevel({
-              productVariantId: line.productVariantId,
-              warehouseLocationId: line.putawayLocationId,
-              variantQty: qtyToAdd,
-              reservedQty: 0,
-            });
-            console.log(`[Receiving Close]   Line ${line.id}: created inventory_level ${newLevel.id} with qty=${qtyToAdd}`);
-          }
-
-          // Create transaction record
-          await storage.createInventoryTransaction({
-            productVariantId: line.productVariantId,
-            toLocationId: line.putawayLocationId, // Receive = TO location
-            transactionType: "receipt",
-            variantQtyDelta: qtyToAdd,
-            variantQtyBefore: level?.variantQty || 0,
-            variantQtyAfter: (level?.variantQty || 0) + qtyToAdd,
-            batchId,
-            sourceState: "external", // Coming from outside
-            targetState: "on_hand", // Now on hand
-            receivingOrderId: id, // Link to receiving order
-            referenceType: "receiving",
-            referenceId: order.receiptNumber,
-            notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
-            userId,
-          });
-
-          // Mark line as put away
-          await storage.updateReceivingLine(line.id, {
-            putawayComplete: 1,
-            status: "complete",
-          });
-
-          totalReceived += qtyToAdd;
-          linesReceived++;
-        } else {
-          console.warn(`[Receiving Close]   Line ${line.id} SKIPPED: receivedQty=${line.receivedQty}, productVariantId=${line.productVariantId}, putawayLocationId=${line.putawayLocationId}`);
-        }
-      }
-
-      console.log(`[Receiving Close] Order ${id}: ${linesReceived}/${lines.length} lines processed, ${totalReceived} units received`);
-
-      // Update order totals and close
-      const updated = await storage.updateReceivingOrder(id, {
-        status: "closed",
-        closedDate: new Date(),
-        closedBy: userId,
-        receivedLineCount: linesReceived,
-        receivedTotalUnits: totalReceived,
-      });
-
-      res.json({
-        success: true,
-        order: updated,
-        linesProcessed: linesReceived,
-        unitsReceived: totalReceived,
-      });
-    } catch (error) {
+      const { receiving: rcvService } = req.app.locals.services as any;
+      const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null);
+      res.json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error closing receiving order:", error);
       res.status(500).json({ error: "Failed to close receiving order" });
     }
@@ -7657,7 +7455,7 @@ export async function registerRoutes(
   app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const { sku, productName, expectedQty, receivedQty, status, productVariantId, catalogProductId, barcode, unitCost, putawayLocationId } = req.body;
+      const { sku, productName, expectedQty, receivedQty, status, productVariantId, productId, barcode, unitCost, putawayLocationId } = req.body;
 
       await storage.createReceivingLine({
         receivingOrderId: orderId,
@@ -7667,7 +7465,7 @@ export async function registerRoutes(
         receivedQty: receivedQty || 0,
         damagedQty: 0,
         productVariantId: productVariantId || null,
-        catalogProductId: catalogProductId || null,
+        productId: productId || null,
         barcode: barcode || null,
         unitCost: unitCost || null,
         putawayLocationId: putawayLocationId || null,
@@ -7730,81 +7528,12 @@ export async function registerRoutes(
   // Uses the same SKU pattern as Shopify sync: BASE-SKU-[P|B|C]###
   app.post("/api/receiving/lines/:lineId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const lineId = parseInt(req.params.lineId);
-      const line = await storage.getReceivingLineById(lineId);
-      if (!line) {
-        return res.status(404).json({ error: "Receiving line not found" });
-      }
-      if (!line.sku) {
-        return res.status(400).json({ error: "Line has no SKU" });
-      }
-      if (line.productVariantId) {
-        return res.status(400).json({ error: "Line already has a linked product variant" });
-      }
-
-      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-      const match = line.sku.match(variantPattern);
-
-      let baseSku: string;
-      let variantType: string;
-      let unitsPerVariant: number;
-      let hierarchyLevel: number;
-      let variantName: string;
-
-      if (match) {
-        baseSku = match[1].toUpperCase();
-        variantType = match[2].toUpperCase();
-        unitsPerVariant = parseInt(match[3], 10);
-        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
-        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
-        variantName = `${typeName} of ${unitsPerVariant}`;
-      } else {
-        // Standalone SKU — single unit
-        baseSku = line.sku.toUpperCase();
-        variantType = "EA";
-        unitsPerVariant = 1;
-        hierarchyLevel = 1;
-        variantName = "Each";
-      }
-
-      // Find or create the parent product
-      let product = await storage.getProductBySku(baseSku);
-      if (!product) {
-        product = await storage.createProduct({
-          sku: baseSku,
-          name: baseSku,
-          baseUnit: "EA",
-        });
-        console.log(`[Receiving] Created product ${product.id} for base SKU ${baseSku}`);
-      }
-
-      // Create the variant
-      const variant = await storage.createProductVariant({
-        productId: product.id,
-        sku: line.sku.toUpperCase(),
-        name: variantName,
-        unitsPerVariant,
-        hierarchyLevel,
-      });
-      console.log(`[Receiving] Created variant ${variant.id} (${variant.sku}) under product ${product.id}`);
-
-      // Link the variant to the receiving line
-      const updatedLine = await storage.updateReceivingLine(lineId, {
-        productVariantId: variant.id,
-        productName: `${product.name} — ${variantName}`,
-      });
-
-      res.json({
-        line: updatedLine,
-        product: { id: product.id, sku: product.sku, name: product.name },
-        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
-      });
+      const { receiving: rcvService } = req.app.locals.services as any;
+      const result = await rcvService.createVariantFromLine(parseInt(req.params.lineId));
+      res.json(result);
     } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error creating variant from receiving line:", error);
-      // Handle unique constraint violation (SKU already exists)
-      if (error.code === "23505" || error.message?.includes("unique")) {
-        return res.status(409).json({ error: "A variant with this SKU already exists. Use the search to link it instead." });
-      }
       res.status(500).json({ error: "Failed to create variant" });
     }
   });
@@ -7813,16 +7542,16 @@ export async function registerRoutes(
   app.delete("/api/receiving/:orderId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const order = await storage.getReceivingOrder(orderId);
-      
+      const order = await storage.getReceivingOrderById(orderId);
+
       if (!order) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
-      
+
       if (order.status === "closed") {
         return res.status(400).json({ error: "Cannot delete a closed receiving order" });
       }
-      
+
       await storage.deleteReceivingOrder(orderId);
       res.json({ success: true });
     } catch (error) {
@@ -7834,37 +7563,11 @@ export async function registerRoutes(
   // Bulk complete all lines in a receiving order
   app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const orderId = parseInt(req.params.orderId);
-      const lines = await storage.getReceivingLines(orderId);
-      
-      if (!lines || lines.length === 0) {
-        return res.status(404).json({ error: "No lines found for this order" });
-      }
-      
-      // Update all lines: set receivedQty = expectedQty and status = complete
-      let updated = 0;
-      for (const line of lines) {
-        if (line.status !== "complete") {
-          await storage.updateReceivingLine(line.id, { 
-            receivedQty: line.expectedQty || 0,
-            status: "complete" 
-          });
-          updated++;
-        }
-      }
-      
-      // Update order received totals
-      const updatedLines = await storage.getReceivingLines(orderId);
-      await storage.updateReceivingOrder(orderId, {
-        receivedLineCount: updatedLines.filter(l => l.status === "complete").length,
-        receivedTotalUnits: updatedLines.reduce((sum, l) => sum + (l.receivedQty || 0), 0),
-      });
-      
-      // Return updated order with lines for real-time UI update
-      const order = await storage.getReceivingOrderById(orderId);
-      const vendor = order?.vendorId ? await storage.getVendorById(order.vendorId) : null;
-      res.json({ message: `Completed ${updated} lines`, updated, order: { ...order, lines: updatedLines, vendor } });
-    } catch (error) {
+      const { receiving: rcvService } = req.app.locals.services as any;
+      const result = await rcvService.completeAllLines(parseInt(req.params.orderId));
+      res.json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error completing all lines:", error);
       res.status(500).json({ error: "Failed to complete all lines" });
     }
@@ -7894,293 +7597,18 @@ export async function registerRoutes(
     }
   });
   
-  // Helper: generate candidate location codes for fuzzy matching
-  function normalizeLocationCode(input: string): string[] {
-    const clean = input.trim().toUpperCase();
-    const candidates = new Set<string>();
-    candidates.add(clean);
-
-    // Strip all hyphens
-    candidates.add(clean.replace(/-/g, ''));
-
-    // Zero-pad single-digit numeric segments
-    const segments = clean.split('-');
-    const padded = segments.map(seg => {
-      const num = parseInt(seg, 10);
-      if (!isNaN(num) && seg === num.toString()) return num.toString().padStart(2, '0');
-      return seg;
-    });
-    candidates.add(padded.join('-'));
-    candidates.add(padded.join(''));
-
-    // If no hyphens, insert at letter↔digit transitions: H6 → H-6, J1A → J-1-A
-    if (!clean.includes('-')) {
-      const withHyphens = clean
-        .replace(/([A-Z])(\d)/g, '$1-$2')
-        .replace(/(\d)([A-Z])/g, '$1-$2');
-      candidates.add(withHyphens);
-      // Also pad the hyphenated version
-      const hSegments = withHyphens.split('-');
-      const hPadded = hSegments.map(seg => {
-        const num = parseInt(seg, 10);
-        if (!isNaN(num) && seg === num.toString()) return num.toString().padStart(2, '0');
-        return seg;
-      });
-      candidates.add(hPadded.join('-'));
-      candidates.add(hPadded.join(''));
-    }
-
-    return Array.from(candidates);
-  }
-
   // Bulk add lines from CSV for initial inventory load
   app.post("/api/receiving/:orderId/lines/bulk", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const orderId = parseInt(req.params.orderId);
-      const { lines } = req.body;
-      
-      if (!Array.isArray(lines) || lines.length === 0) {
-        return res.status(400).json({ error: "Lines array is required" });
-      }
-      
-      // Check setting for multiple SKUs per bin
-      const allowMultipleSkusSetting = await storage.getSetting("allow_multiple_skus_per_bin");
-      const allowMultipleSkus = allowMultipleSkusSetting !== "false"; // Default to true
-      
-      // Pre-fetch product locations if we need to validate bin occupancy
-      let existingProductLocations: any[] = [];
-      if (!allowMultipleSkus) {
-        existingProductLocations = await storage.getAllProductLocations();
-      }
-      
-      // Fetch existing lines for this order to enable idempotent imports (update vs create)
-      // Uniqueness key: SKU + Location (allows same SKU at different locations)
-      const existingLines = await storage.getReceivingLines(orderId);
-      const existingBySkuLocation = new Map(
-        existingLines
-          .filter(l => l.sku)
-          .map(l => {
-            const locationId = l.putawayLocationId || 'none';
-            return [`${l.sku!.toUpperCase()}|${locationId}`, l];
-          })
+      const { receiving: rcvService } = req.app.locals.services as any;
+      const result = await rcvService.bulkImportLines(
+        parseInt(req.params.orderId),
+        req.body.lines,
+        req.session?.user?.id || null,
       );
-      
-      // Lookup SKUs to get inventory item IDs
-      const linesToCreate: any[] = [];
-      const linesToUpdate: { id: number; updates: any }[] = [];
-      const errors: string[] = [];
-      const warnings: string[] = [];
-      
-      // Pre-fetch warehouse locations for efficient lookup - match by code OR name
-      const allWarehouseLocations = await storage.getAllWarehouseLocations();
-      const locationByCode = new Map(allWarehouseLocations.map(l => [l.code.toUpperCase().trim(), l]));
-      const locationByName = new Map(
-        allWarehouseLocations
-          .filter(l => l.name)
-          .map(l => [l.name!.toUpperCase().trim(), l])
-      );
-      // Normalized index: stripped hyphens → location (for fuzzy matching)
-      const locationByNormalized = new Map<string, typeof allWarehouseLocations[0]>();
-      for (const loc of allWarehouseLocations) {
-        const stripped = loc.code.toUpperCase().replace(/-/g, '');
-        if (!locationByNormalized.has(stripped)) {
-          locationByNormalized.set(stripped, loc);
-        }
-      }
-      console.log(`[CSV Import] Loaded ${allWarehouseLocations.length} warehouse locations. Sample codes:`,
-        allWarehouseLocations.slice(0, 5).map(l => l.code).join(', '));
-      
-      // Pre-fetch catalog products for efficient lookup
-      const catalogProducts = await storage.getAllCatalogProducts();
-      const catalogBySku = new Map(
-        catalogProducts
-          .filter(p => p.sku)
-          .map(p => [p.sku!.toUpperCase(), p])
-      );
-      console.log(`[CSV Import] Loaded ${catalogProducts.length} catalog products, ${catalogBySku.size} with SKUs`);
-      
-      // Pre-fetch product_variants for efficient lookup (source of truth)
-      const allProductVariants = await storage.getAllProductVariants();
-      const productVariantBySku = new Map(
-        allProductVariants
-          .filter(v => v.sku)
-          .map(v => [v.sku!.toUpperCase(), v])
-      );
-      console.log(`[CSV Import] Loaded ${allProductVariants.length} product_variants, ${productVariantBySku.size} with SKUs`);
-      
-      for (const line of lines) {
-        const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
-        
-        if (!sku) {
-          errors.push(`Missing SKU in line`);
-          continue;
-        }
-        
-        // Source of truth: product_variants (sellable SKUs with product linkage)
-        const lookupKey = sku.toUpperCase();
-        const productVariant = productVariantBySku.get(lookupKey);
-        const catalog = catalogBySku.get(lookupKey);
-
-        let productVariantId: number | null = null;
-        let catalogProductId: number | null = null;
-        let productName = sku;
-        let productBarcode = barcode || null;
-
-        console.log(`[CSV Import] SKU "${sku}" lookup key="${lookupKey}" productVariant=${!!productVariant} catalog=${!!catalog}`);
-
-        if (productVariant) {
-          // Found in product_variants - use this as source of truth
-          productVariantId = productVariant.id;
-          productName = productVariant.name;
-          if (!productBarcode && productVariant.barcode) {
-            productBarcode = productVariant.barcode;
-          }
-          // Also get catalogProductId if exists
-          if (catalog) {
-            catalogProductId = catalog.id;
-          }
-          console.log(`[CSV Import] SKU "${sku}" -> productVariantId=${productVariantId}, catalogProductId=${catalogProductId}`);
-        } else if (catalog) {
-          // Fallback to catalog_products (product-level)
-          catalogProductId = catalog.id;
-          productName = catalog.title;
-          console.log(`[CSV Import] SKU "${sku}" -> catalogProductId=${catalogProductId} (fallback path, no product_variant)`);
-          warnings.push(`SKU ${sku} found in catalog but not in product_variants - please set up variant hierarchy`);
-        } else {
-          // SKU not found anywhere - add warning but continue
-          console.log(`[CSV Import] SKU "${sku}" NOT FOUND in product_variants or catalog_products`);
-          warnings.push(`SKU ${sku} not found in product catalog - inventory will not be updated on close`);
-        }
-        
-        // Look up location: exact code → exact name → normalized/fuzzy
-        let putawayLocationId = null;
-        let csvLocationRaw: string | null = null;
-        if (location) {
-          const cleanLocation = location.trim().toUpperCase();
-          csvLocationRaw = location.trim();
-          let loc = locationByCode.get(cleanLocation);
-          let matchMethod = 'exact';
-
-          if (!loc) {
-            loc = locationByName.get(cleanLocation);
-            if (loc) matchMethod = 'name';
-          }
-
-          // Fuzzy matching: try normalized candidate codes
-          if (!loc) {
-            const candidates = normalizeLocationCode(cleanLocation);
-            for (const candidate of candidates) {
-              loc = locationByCode.get(candidate);
-              if (loc) { matchMethod = 'normalized'; break; }
-              const stripped = candidate.replace(/-/g, '');
-              loc = locationByNormalized.get(stripped);
-              if (loc) { matchMethod = 'fuzzy'; break; }
-            }
-          }
-
-          if (loc) {
-            putawayLocationId = loc.id;
-            if (matchMethod !== 'exact') {
-              warnings.push(`Location "${location}" auto-matched to "${loc.code}" (${matchMethod})`);
-            }
-
-            // Check if bin is already occupied by a different SKU
-            if (!allowMultipleSkus) {
-              const existingInBin = existingProductLocations.find(
-                pl => pl.location?.trim().toUpperCase() === loc!.code.toUpperCase() &&
-                      pl.sku?.toUpperCase() !== sku.toUpperCase()
-              );
-              if (existingInBin) {
-                errors.push(`Bin ${loc.code} already contains SKU ${existingInBin.sku} - cannot add ${sku} (multiple SKUs per bin is disabled)`);
-                continue;
-              }
-            }
-          } else {
-            console.log(`[CSV Import] Location '${location}' (cleaned: '${cleanLocation}') not found after normalization.`);
-            warnings.push(`Location "${location}" not found for SKU ${sku} - needs manual resolution`);
-          }
-        }
-        
-        // Parse numeric values
-        const parsedQty = parseInt(qty) || 0;
-        const parsedDamagedQty = parseInt(damaged_qty) || 0;
-        const parsedUnitCost = unit_cost ? Math.round(parseFloat(unit_cost) * 100) : null; // Convert dollars to cents
-        
-        // Build notes: append CSV location if unmatched for resolution UI
-        let lineNotes = notes || null;
-        if (csvLocationRaw && !putawayLocationId) {
-          lineNotes = lineNotes ? `${lineNotes} | CSV location: ${csvLocationRaw}` : `CSV location: ${csvLocationRaw}`;
-        }
-
-        // Check if line with same SKU + Location already exists in this order (idempotent import)
-        const uniqueKey = `${sku.toUpperCase()}|${putawayLocationId || 'none'}`;
-        const existingLine = existingBySkuLocation.get(uniqueKey);
-        if (existingLine) {
-          // Update existing line instead of creating duplicate
-          linesToUpdate.push({
-            id: existingLine.id,
-            updates: {
-              productName,
-              barcode: productBarcode,
-              expectedQty: parsedQty,
-              receivedQty: parsedQty,
-              damagedQty: parsedDamagedQty,
-              unitCost: parsedUnitCost,
-              productVariantId,
-              catalogProductId,
-              putawayLocationId,
-              notes: lineNotes,
-              status: putawayLocationId ? "complete" : "pending",
-              receivedBy: req.session?.user?.id || null,
-              receivedAt: new Date(),
-            }
-          });
-        } else {
-          linesToCreate.push({
-            receivingOrderId: orderId,
-            sku: sku.toUpperCase(),
-            productName,
-            barcode: productBarcode,
-            expectedQty: parsedQty,
-            receivedQty: parsedQty, // For initial load, received = expected
-            damagedQty: parsedDamagedQty,
-            unitCost: parsedUnitCost,
-            productVariantId,
-            catalogProductId,
-            putawayLocationId,
-            notes: lineNotes,
-            status: putawayLocationId ? "complete" : "pending",
-            receivedBy: req.session?.user?.id || null,
-            receivedAt: new Date(),
-          });
-        }
-      }
-      
-      // Update existing lines
-      for (const item of linesToUpdate) {
-        await storage.updateReceivingLine(item.id, item.updates);
-      }
-      
-      // Create new lines
-      const created = await storage.bulkCreateReceivingLines(linesToCreate);
-      
-      // Update order totals
-      const allLines = await storage.getReceivingLines(orderId);
-      await storage.updateReceivingOrder(orderId, {
-        expectedLineCount: allLines.length,
-        receivedLineCount: allLines.filter(l => l.receivedQty > 0).length,
-        expectedTotalUnits: allLines.reduce((sum, l) => sum + (l.expectedQty || 0), 0),
-        receivedTotalUnits: allLines.reduce((sum, l) => sum + (l.receivedQty || 0), 0),
-      });
-      
-      res.status(201).json({
-        success: true,
-        created: created.length,
-        updated: linesToUpdate.length,
-        errors: errors.length > 0 ? errors : undefined,
-        warnings: warnings.length > 0 ? warnings : undefined,
-      });
-    } catch (error) {
+      res.status(201).json(result);
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error bulk creating receiving lines:", error);
       res.status(500).json({ error: "Failed to create receiving lines" });
     }
@@ -8377,13 +7805,13 @@ export async function registerRoutes(
       const productIds = new Set<number>();
       const variantIds = new Set<number>();
       for (const rule of rules) {
-        if (rule.catalogProductId) productIds.add(rule.catalogProductId);
+        if (rule.productId) productIds.add(rule.productId);
         if (rule.pickProductVariantId) variantIds.add(rule.pickProductVariantId);
         if (rule.sourceProductVariantId) variantIds.add(rule.sourceProductVariantId);
       }
 
       const [allProducts, allVariants] = await Promise.all([
-        storage.getAllCatalogProducts(),
+        storage.getAllProducts(),
         storage.getAllProductVariants(),
       ]);
 
@@ -8392,7 +7820,7 @@ export async function registerRoutes(
 
       const enriched = rules.map(rule => ({
         ...rule,
-        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        product: rule.productId ? productMap.get(rule.productId) : null,
         pickVariant: rule.pickProductVariantId ? variantMap.get(rule.pickProductVariantId) : null,
         sourceVariant: rule.sourceProductVariantId ? variantMap.get(rule.sourceProductVariantId) : null,
       }));
@@ -8413,7 +7841,7 @@ export async function registerRoutes(
       }
 
       const [allProducts, allVariants] = await Promise.all([
-        storage.getAllCatalogProducts(),
+        storage.getAllProducts(),
         storage.getAllProductVariants(),
       ]);
 
@@ -8422,7 +7850,7 @@ export async function registerRoutes(
 
       const enriched = {
         ...rule,
-        catalogProduct: rule.catalogProductId ? productMap.get(rule.catalogProductId) : null,
+        product: rule.productId ? productMap.get(rule.productId) : null,
         pickVariant: rule.pickProductVariantId ? variantMap.get(rule.pickProductVariantId) : null,
         sourceVariant: rule.sourceProductVariantId ? variantMap.get(rule.sourceProductVariantId) : null,
       };
@@ -8436,18 +7864,17 @@ export async function registerRoutes(
   
   app.post("/api/replen/rules", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { catalogProductId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority, autoReplen } = req.body;
-      
-      if (!catalogProductId || !pickVariantId || !sourceVariantId) {
-        return res.status(400).json({ error: "catalogProductId, pickVariantId, and sourceVariantId are required" });
+      const { productId, pickVariantId, sourceVariantId, pickLocationType, sourceLocationType, sourcePriority, triggerValue, maxQty, replenMethod, priority, autoReplen } = req.body;
+
+      if (!productId || !pickVariantId || !sourceVariantId) {
+        return res.status(400).json({ error: "productId, pickVariantId, and sourceVariantId are required" });
       }
-      
+
       // Validate that variants belong to the product
-      const [product, pickVariant, sourceVariant, allCatalogProducts] = await Promise.all([
-        storage.getCatalogProductById(catalogProductId),
+      const [product, pickVariant, sourceVariant] = await Promise.all([
+        storage.getProductById(productId),
         storage.getProductVariantById(pickVariantId),
         storage.getProductVariantById(sourceVariantId),
-        storage.getAllCatalogProducts(),
       ]);
 
       if (!product) {
@@ -8460,20 +7887,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Source variant not found" });
       }
 
-      // Validate pick and source variants belong to the catalog product's product
-      const catalogProduct = allCatalogProducts.find(cp => cp.id === catalogProductId);
-      if (!catalogProduct?.productId) {
-        return res.status(400).json({ error: "Catalog product has no linked product" });
-      }
-      if (pickVariant.productId !== catalogProduct.productId) {
+      // Validate pick and source variants belong to the product
+      if (pickVariant.productId !== product.id) {
         return res.status(400).json({ error: "Pick variant does not belong to the specified product" });
       }
-      if (sourceVariant.productId !== catalogProduct.productId) {
+      if (sourceVariant.productId !== product.id) {
         return res.status(400).json({ error: "Source variant does not belong to the specified product" });
       }
-      
+
       const rule = await storage.createReplenRule({
-        catalogProductId,
+        productId,
         pickProductVariantId: pickVariantId,
         sourceProductVariantId: sourceVariantId,
         pickLocationType: pickLocationType || "pick",
@@ -8571,20 +7994,20 @@ export async function registerRoutes(
         }
         
         // Get lookup data
-        const [products, variants] = await Promise.all([
-          storage.getAllCatalogProducts(),
+        const [allProducts, variants] = await Promise.all([
+          storage.getAllProducts(),
           storage.getAllProductVariants(),
         ]);
 
         // Build lookup maps
-        const productBySku = new Map(products.filter(p => p.sku).map(p => [p.sku!.toLowerCase(), p]));
+        const productBySku = new Map(allProducts.filter(p => p.sku).map(p => [p.sku!.toLowerCase(), p]));
         const variantBySku = new Map(variants.filter(v => v.sku).map(v => [v.sku!.toLowerCase(), v]));
 
-        // Build variant-to-catalog-product mapping via productId
-        const catalogByProductId = new Map(products.filter(p => p.productId).map(p => [p.productId!, p]));
+        // Build variant-to-product mapping via productId
+        const productById = new Map(allProducts.map(p => [p.id, p]));
 
         const getProductForVariant = (variant: typeof variants[0]) => {
-          return catalogByProductId.get(variant.productId);
+          return productById.get(variant.productId);
         };
         
         const results = { created: 0, skipped: 0, errors: [] as string[] };
@@ -8657,7 +8080,7 @@ export async function registerRoutes(
           
           try {
             await storage.createReplenRule({
-              catalogProductId: product.id,
+              productId: product.id,
               pickProductVariantId: pickVariant.id,
               sourceProductVariantId: sourceVariant.id,
               pickLocationType: (row.pick_location_type || "pick").trim(),
@@ -8900,14 +8323,14 @@ export async function registerRoutes(
       for (const task of tasks) {
         locationIds.add(task.fromLocationId);
         locationIds.add(task.toLocationId);
-        if (task.catalogProductId) productIds.add(task.catalogProductId);
+        if (task.productId) productIds.add(task.productId);
         if (task.sourceProductVariantId) variantIds.add(task.sourceProductVariantId);
         if (task.pickProductVariantId) variantIds.add(task.pickProductVariantId);
       }
 
       const [allLocations, allProducts, allVariants] = await Promise.all([
         storage.getAllWarehouseLocations(),
-        storage.getAllCatalogProducts(),
+        storage.getAllProducts(),
         storage.getAllProductVariants(),
       ]);
 
@@ -8919,7 +8342,7 @@ export async function registerRoutes(
         ...task,
         fromLocation: locationMap.get(task.fromLocationId),
         toLocation: locationMap.get(task.toLocationId),
-        catalogProduct: task.catalogProductId ? productMap.get(task.catalogProductId) : null,
+        product: task.productId ? productMap.get(task.productId) : null,
         sourceVariant: task.sourceProductVariantId ? variantMap.get(task.sourceProductVariantId) : null,
         pickVariant: task.pickProductVariantId ? variantMap.get(task.pickProductVariantId) : null,
       }));
@@ -8941,17 +8364,17 @@ export async function registerRoutes(
       
       const [allLocations, allProducts] = await Promise.all([
         storage.getAllWarehouseLocations(),
-        storage.getAllCatalogProducts(),
+        storage.getAllProducts(),
       ]);
-      
+
       const locationMap = new Map(allLocations.map(l => [l.id, l]));
       const productMap = new Map(allProducts.map(p => [p.id, p]));
-      
+
       const enriched = {
         ...task,
         fromLocation: locationMap.get(task.fromLocationId),
         toLocation: locationMap.get(task.toLocationId),
-        catalogProduct: task.catalogProductId ? productMap.get(task.catalogProductId) : null,
+        product: task.productId ? productMap.get(task.productId) : null,
       };
       
       res.json(enriched);
@@ -8963,7 +8386,7 @@ export async function registerRoutes(
   
   app.post("/api/replen/tasks", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { replenRuleId, fromLocationId, toLocationId, catalogProductId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes, replenMethod, autoExecute } = req.body;
+      const { replenRuleId, fromLocationId, toLocationId, productId, sourceVariantId, pickVariantId, qtySourceUnits, qtyTargetUnits, priority, triggeredBy, assignedTo, notes, replenMethod, autoExecute } = req.body;
 
       if (!fromLocationId || !toLocationId || !qtyTargetUnits) {
         return res.status(400).json({ error: "fromLocationId, toLocationId, and qtyTargetUnits are required" });
@@ -8988,7 +8411,7 @@ export async function registerRoutes(
         replenRuleId: replenRuleId || null,
         fromLocationId,
         toLocationId,
-        catalogProductId: catalogProductId || null,
+        productId: productId || null,
         sourceProductVariantId: sourceVariantId || null,
         pickProductVariantId: pickVariantId || null,
         qtySourceUnits: qtySourceUnits || 1,
@@ -9373,7 +8796,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid order ID" });
       }
 
-      const result = await reservation.releaseOrderReservation(orderId);
+      const result = await reservation.releaseOrderReservation(orderId, "Manual release via API");
       res.json(result);
     } catch (error: any) {
       console.error("Error releasing reservation:", error);

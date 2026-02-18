@@ -67,10 +67,10 @@ type Storage = {
   getAllWarehouseLocations(): Promise<any[]>;
   getWarehouseLocationById(id: number): Promise<any | undefined>;
   // Product locations (bin assignments)
-  getProductLocationByComposite(catalogProductId: number, warehouseLocationId: number): Promise<any | undefined>;
+  getProductLocationByComposite(productId: number, warehouseLocationId: number): Promise<any | undefined>;
   deleteProductLocation(id: number): Promise<boolean>;
   createProductLocation(data: any): Promise<any>;
-  getCatalogProductById(id: number): Promise<any | undefined>;
+  getProductById(id: number): Promise<any | undefined>;
   // Products & variants
   getProductVariantBySku(sku: string): Promise<any | undefined>;
   getProductVariantById(id: number): Promise<any | undefined>;
@@ -150,8 +150,8 @@ class CycleCountService {
 
     // EXPECTED_MISSING: old SKU no longer in this bin → remove assignment
     if (item.mismatchType === "expected_missing") {
-      if (!item.catalogProductId) return;
-      const existing = await this.storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
+      if (!item.productId) return;
+      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
       if (existing) await this.storage.deleteProductLocation(existing.id);
       return;
     }
@@ -159,17 +159,17 @@ class CycleCountService {
     // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here → create assignment
     if (item.mismatchType === "unexpected_found" ||
         (item.varianceType === "unexpected_item" && !item.mismatchType)) {
-      if (!item.catalogProductId) return;
-      const existing = await this.storage.getProductLocationByComposite(item.catalogProductId, item.warehouseLocationId);
+      if (!item.productId) return;
+      const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
       if (existing) return; // idempotent
 
-      const cp = await this.storage.getCatalogProductById(item.catalogProductId);
-      if (!cp) return;
+      const product = await this.storage.getProductById(item.productId);
+      if (!product) return;
 
       await this.storage.createProductLocation({
-        catalogProductId: item.catalogProductId,
-        sku: item.countedSku?.toUpperCase() || cp.sku || null,
-        name: cp.title || item.countedSku || "Unknown",
+        productId: item.productId,
+        sku: item.countedSku?.toUpperCase() || product.sku || null,
+        name: product.name || item.countedSku || "Unknown",
         location: loc.code,
         zone: loc.zone || "U",
         warehouseLocationId: item.warehouseLocationId,
@@ -204,20 +204,20 @@ class CycleCountService {
   }
 
   /**
-   * Lookup product_variants and catalog_products by SKU (case-insensitive).
+   * Lookup product_variants and products by SKU (case-insensitive).
    */
-  private async lookupVariantAndCatalogBySku(sku: string): Promise<{ productVariantId: number | null; catalogProductId: number | null }> {
+  private async lookupVariantAndProductBySku(sku: string): Promise<{ productVariantId: number | null; productId: number | null }> {
     const variantResult = await this.db.execute<{ id: number }>(sql`
       SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productVariantId = variantResult.rows[0]?.id || null;
 
-    const catalogResult = await this.db.execute<{ id: number }>(sql`
-      SELECT id FROM catalog_products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
+    const productResult = await this.db.execute<{ id: number }>(sql`
+      SELECT id FROM products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
-    const catalogProductId = catalogResult.rows[0]?.id || null;
+    const productId = productResult.rows[0]?.id || null;
 
-    return { productVariantId, catalogProductId };
+    return { productVariantId, productId };
   }
 
   /**
@@ -443,18 +443,17 @@ class CycleCountService {
       const result = await this.db.execute<{
         product_variant_id: number;
         variant_qty: number;
-        catalog_product_id: number | null;
+        product_id: number | null;
         sku: string | null;
       }>(sql`
         SELECT
           il.product_variant_id,
           il.variant_qty,
-          cp.id as catalog_product_id,
-          COALESCE(pv.sku, cp.sku, p.sku) as sku
+          p.id as product_id,
+          COALESCE(pv.sku, p.sku) as sku
         FROM inventory_levels il
         LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN catalog_products cp ON cp.product_id = pv.product_id
         WHERE il.warehouse_location_id = ${location.id}
           AND il.variant_qty > 0
       `);
@@ -465,7 +464,7 @@ class CycleCountService {
             cycleCountId: id,
             warehouseLocationId: location.id,
             productVariantId: row.product_variant_id,
-            catalogProductId: row.catalog_product_id,
+            productId: row.product_id,
             expectedSku: row.sku,
             expectedQty: row.variant_qty,
             status: "pending",
@@ -477,7 +476,7 @@ class CycleCountService {
           cycleCountId: id,
           warehouseLocationId: location.id,
           productVariantId: null,
-          catalogProductId: null,
+          productId: null,
           expectedSku: null,
           expectedQty: 0,
           status: "pending",
@@ -545,20 +544,20 @@ class CycleCountService {
         countedAt: new Date(),
       });
 
-      // Lookup variant + catalog for the found SKU
-      const { productVariantId: foundProductVariantId, catalogProductId: foundCatalogProductId } =
-        await this.lookupVariantAndCatalogBySku(countedSku!);
+      // Lookup variant + product for the found SKU
+      const { productVariantId: foundProductVariantId, productId: foundProductId } =
+        await this.lookupVariantAndProductBySku(countedSku!);
 
       // Create new item for the FOUND product
       const foundItemResult = await this.db.execute<{ id: number }>(sql`
         INSERT INTO cycle_count_items (
-          cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
+          cycle_count_id, warehouse_location_id, product_variant_id, product_id,
           expected_sku, expected_qty, counted_sku, counted_qty,
           variance_qty, variance_type, variance_notes, status,
           requires_approval, mismatch_type, related_item_id,
           counted_by, counted_at, created_at
         ) VALUES (
-          ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundCatalogProductId},
+          ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundProductId},
           NULL, 0, ${countedSku}, ${countedQty},
           ${countedQty}, 'unexpected_item', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
           1, 'unexpected_found', ${itemId},
@@ -577,11 +576,11 @@ class CycleCountService {
       varianceType = "unexpected_item";
 
       let foundProductVariantId: number | null = null;
-      let foundCatalogProductId: number | null = null;
+      let foundProductId: number | null = null;
       if (countedSku) {
-        const lookup = await this.lookupVariantAndCatalogBySku(countedSku);
+        const lookup = await this.lookupVariantAndProductBySku(countedSku);
         foundProductVariantId = lookup.productVariantId;
-        foundCatalogProductId = lookup.catalogProductId;
+        foundProductId = lookup.productId;
       }
 
       await this.storage.updateCycleCountItem(itemId, {
@@ -594,7 +593,7 @@ class CycleCountService {
         requiresApproval: 1,
         mismatchType: "unexpected_found",
         ...(foundProductVariantId && { productVariantId: foundProductVariantId }),
-        ...(foundCatalogProductId && { catalogProductId: foundCatalogProductId }),
+        ...(foundProductId && { productId: foundProductId }),
         countedBy: userId,
         countedAt: new Date(),
       });
@@ -731,17 +730,17 @@ class CycleCountService {
       throw new CycleCountError("Can only add items to in-progress cycle counts");
     }
 
-    const { productVariantId, catalogProductId } = await this.lookupVariantAndCatalogBySku(sku);
+    const { productVariantId, productId } = await this.lookupVariantAndProductBySku(sku);
 
     const result = await this.db.execute<{ id: number }>(sql`
       INSERT INTO cycle_count_items (
-        cycle_count_id, warehouse_location_id, product_variant_id, catalog_product_id,
+        cycle_count_id, warehouse_location_id, product_variant_id, product_id,
         expected_sku, expected_qty, counted_sku, counted_qty,
         variance_qty, variance_type, variance_notes, status,
         requires_approval, mismatch_type,
         counted_by, counted_at, created_at
       ) VALUES (
-        ${id}, ${params.warehouseLocationId}, ${productVariantId}, ${catalogProductId},
+        ${id}, ${params.warehouseLocationId}, ${productVariantId}, ${productId},
         NULL, 0, ${sku}, ${params.quantity},
         ${params.quantity}, 'unexpected_item', ${params.notes || `Unexpected item found during count: ${sku} x ${params.quantity}`}, 'variance',
         1, 'unexpected_found',

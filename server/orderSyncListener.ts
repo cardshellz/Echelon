@@ -4,13 +4,17 @@ import { sql } from "drizzle-orm";
 import { storage } from "./storage";
 import type { InsertOrderItem } from "@shared/schema";
 import { createInventoryCoreService } from "./services/inventory-core";
+import { createInventoryAtpService } from "./services/inventory-atp";
+import { createChannelSyncService } from "./services/channel-sync";
 import { createReservationService } from "./services/reservation";
 import { createFulfillmentRouterService } from "./services/fulfillment-router";
 import { createSLAMonitorService } from "./services/sla-monitor";
 
 // Services for order processing
 const inventoryCore = createInventoryCoreService(db);
-const reservation = createReservationService(db, inventoryCore);
+const atp = createInventoryAtpService(db);
+const channelSync = createChannelSyncService(db, atp);
+const reservation = createReservationService(db, inventoryCore, channelSync);
 const fulfillmentRouter = createFulfillmentRouterService(db);
 const slaMonitor = createSLAMonitorService(db);
 

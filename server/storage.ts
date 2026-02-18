@@ -41,12 +41,20 @@ import {
   type InsertPartnerProfile,
   type ChannelReservation,
   type InsertChannelReservation,
-  type CatalogProduct,
-  type InsertCatalogProduct,
+  type ProductAsset,
+  type InsertProductAsset,
+  type ChannelProductOverride,
+  type InsertChannelProductOverride,
+  type ChannelVariantOverride,
+  type InsertChannelVariantOverride,
+  type ChannelPricing,
+  type InsertChannelPricing,
+  type ChannelListing,
+  type InsertChannelListing,
+  type ChannelAssetOverride,
+  type InsertChannelAssetOverride,
   type ReplenTierDefault,
   type InsertReplenTierDefault,
-  type CatalogAsset,
-  type InsertCatalogAsset,
   type CycleCount,
   type InsertCycleCount,
   type CycleCountItem,
@@ -83,8 +91,12 @@ import {
   channelConnections,
   partnerProfiles,
   channelReservations,
-  catalogProducts,
-  catalogAssets,
+  productAssets,
+  channelProductOverrides,
+  channelVariantOverrides,
+  channelPricing,
+  channelListings,
+  channelAssetOverrides,
   cycleCounts,
   cycleCountItems,
   vendors,
@@ -113,7 +125,7 @@ export interface IStorage {
   getAllProductLocations(): Promise<ProductLocation[]>;
   getProductLocationById(id: number): Promise<ProductLocation | undefined>;
   getProductLocationBySku(sku: string): Promise<ProductLocation | undefined>;
-  getProductLocationByComposite(catalogProductId: number, warehouseLocationId: number): Promise<ProductLocation | undefined>;
+  getProductLocationByComposite(productId: number, warehouseLocationId: number): Promise<ProductLocation | undefined>;
   getBinLocationFromInventoryBySku(sku: string): Promise<{ location: string; zone: string; barcode: string | null; imageUrl: string | null } | undefined>;
   createProductLocation(location: InsertProductLocation): Promise<ProductLocation>;
   updateProductLocation(id: number, location: UpdateProductLocation): Promise<ProductLocation | undefined>;
@@ -183,28 +195,16 @@ export interface IStorage {
   updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null>;
   deleteWarehouseLocation(id: number): Promise<boolean>;
   
-  // Catalog Products
-  getAllCatalogProducts(): Promise<CatalogProduct[]>;
-  getCatalogProductById(id: number): Promise<CatalogProduct | undefined>;
-  getCatalogProductByProductId(productId: number): Promise<CatalogProduct | undefined>;
-  createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct>;
-  updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null>;
-  deleteCatalogProduct(id: number): Promise<boolean>;
-  
-  // Catalog Assets
-  getCatalogAssetsByProductId(catalogProductId: number): Promise<CatalogAsset[]>;
-  createCatalogAsset(asset: InsertCatalogAsset): Promise<CatalogAsset>;
-  deleteCatalogAsset(id: number): Promise<boolean>;
-  
-  // Products (Master Catalog - NEW)
+  // Products
   getAllProducts(): Promise<Product[]>;
   getProductById(id: number): Promise<Product | undefined>;
   getProductBySku(sku: string): Promise<Product | undefined>;
+  getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
   updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product | null>;
   deleteProduct(id: number): Promise<boolean>;
-  
-  // Product Variants (Sellable SKUs - NEW)
+
+  // Product Variants
   getAllProductVariants(): Promise<ProductVariant[]>;
   getProductVariantById(id: number): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
@@ -212,15 +212,46 @@ export interface IStorage {
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
-  
-  // Catalog Products - additional methods
-  getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined>;
-  getCatalogProductByShopifyProductId(shopifyProductId: number): Promise<CatalogProduct | undefined>;
-  upsertCatalogProductBySku(sku: string, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
-  upsertCatalogProductByShopifyProductId(shopifyProductId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct>;
-  deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number>;
-  getCatalogAssetsByVariantId(productVariantId: number): Promise<CatalogAsset[]>;
-  
+
+  // Product Assets
+  getProductAssetsByProductId(productId: number): Promise<ProductAsset[]>;
+  getProductAssetsByVariantId(productVariantId: number): Promise<ProductAsset[]>;
+  createProductAsset(asset: InsertProductAsset): Promise<ProductAsset>;
+  deleteProductAsset(id: number): Promise<boolean>;
+  deleteProductAssetsByProductId(productId: number): Promise<number>;
+  updateProductAsset(id: number, updates: Partial<InsertProductAsset>): Promise<ProductAsset | null>;
+  reorderProductAssets(productId: number, orderedIds: number[]): Promise<void>;
+  setPrimaryProductAsset(productId: number, assetId: number): Promise<void>;
+
+  // Channel Product Overrides
+  getChannelProductOverride(channelId: number, productId: number): Promise<ChannelProductOverride | undefined>;
+  getChannelProductOverridesByProduct(productId: number): Promise<ChannelProductOverride[]>;
+  upsertChannelProductOverride(data: InsertChannelProductOverride): Promise<ChannelProductOverride>;
+  deleteChannelProductOverride(channelId: number, productId: number): Promise<boolean>;
+
+  // Channel Variant Overrides
+  getChannelVariantOverride(channelId: number, productVariantId: number): Promise<ChannelVariantOverride | undefined>;
+  getChannelVariantOverridesByProduct(channelId: number, productId: number): Promise<ChannelVariantOverride[]>;
+  upsertChannelVariantOverride(data: InsertChannelVariantOverride): Promise<ChannelVariantOverride>;
+  deleteChannelVariantOverride(channelId: number, productVariantId: number): Promise<boolean>;
+
+  // Channel Pricing
+  getChannelPricing(channelId: number, productVariantId: number): Promise<ChannelPricing | undefined>;
+  getChannelPricingByProduct(channelId: number, productId: number): Promise<ChannelPricing[]>;
+  upsertChannelPricing(data: InsertChannelPricing): Promise<ChannelPricing>;
+  deleteChannelPricing(channelId: number, productVariantId: number): Promise<boolean>;
+
+  // Channel Listings
+  getChannelListing(channelId: number, productVariantId: number): Promise<ChannelListing | undefined>;
+  getChannelListingsByProduct(channelId: number, productId: number): Promise<ChannelListing[]>;
+  upsertChannelListing(data: InsertChannelListing): Promise<ChannelListing>;
+  getChannelListingByExternalId(channelId: number, externalProductId: string): Promise<ChannelListing | undefined>;
+
+  // Channel Asset Overrides
+  getChannelAssetOverridesByProduct(channelId: number, productId: number): Promise<ChannelAssetOverride[]>;
+  upsertChannelAssetOverride(data: InsertChannelAssetOverride): Promise<ChannelAssetOverride>;
+  deleteChannelAssetOverride(channelId: number, productAssetId: number): Promise<boolean>;
+
   // Inventory Levels
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
@@ -428,7 +459,7 @@ export interface IStorage {
   getAllReplenRules(): Promise<ReplenRule[]>;
   getReplenRuleById(id: number): Promise<ReplenRule | undefined>;
   getReplenRulesForVariant(pickProductVariantId: number): Promise<ReplenRule[]>;
-  getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]>;
+  getReplenRulesForProduct(productId: number): Promise<ReplenRule[]>;
   createReplenRule(data: InsertReplenRule): Promise<ReplenRule>;
   updateReplenRule(id: number, updates: Partial<InsertReplenRule>): Promise<ReplenRule | null>;
   deleteReplenRule(id: number): Promise<boolean>;
@@ -570,11 +601,12 @@ export class DatabaseStorage implements IStorage {
         wl.code as location_code,
         wl.zone,
         pv.barcode,
-        COALESCE(pv.image_url, p.image_url) as image_url
+        COALESCE(pva.url, pa.url) as image_url
       FROM product_variants pv
       JOIN inventory_levels il ON il.product_variant_id = pv.id
       JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-      LEFT JOIN products p ON pv.product_id = p.id
+      LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
+      LEFT JOIN product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
       WHERE UPPER(pv.sku) = ${sku.toUpperCase()}
         AND il.variant_qty > 0
         AND wl.is_pickable = 1
@@ -612,10 +644,8 @@ export class DatabaseStorage implements IStorage {
         pl.location as location_code,
         pl.zone,
         pl.barcode,
-        COALESCE(pl.image_url, p.image_url) as image_url
+        pl.image_url
       FROM product_locations pl
-      LEFT JOIN catalog_products cp ON pl.catalog_product_id = cp.id
-      LEFT JOIN products p ON cp.product_id = p.id
       WHERE UPPER(pl.sku) = ${sku.toUpperCase()}
         AND pl.is_primary = 1
         AND pl.status = 'active'
@@ -634,14 +664,14 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async getProductLocationByCatalogProductId(catalogProductId: number): Promise<ProductLocation | undefined> {
-    const result = await db.select().from(productLocations).where(eq(productLocations.catalogProductId, catalogProductId));
+  async getProductLocationByProductId(productId: number): Promise<ProductLocation | undefined> {
+    const result = await db.select().from(productLocations).where(eq(productLocations.productId, productId));
     return result[0];
   }
 
-  async getProductLocationsByCatalogProductId(catalogProductId: number): Promise<ProductLocation[]> {
+  async getProductLocationsByProductId(productId: number): Promise<ProductLocation[]> {
     return await db.select().from(productLocations)
-      .where(eq(productLocations.catalogProductId, catalogProductId))
+      .where(eq(productLocations.productId, productId))
       .orderBy(sql`${productLocations.isPrimary} DESC`);
   }
 
@@ -651,17 +681,17 @@ export class DatabaseStorage implements IStorage {
       .orderBy(productLocations.name);
   }
 
-  async getProductLocationByComposite(catalogProductId: number, warehouseLocationId: number): Promise<ProductLocation | undefined> {
+  async getProductLocationByComposite(productId: number, warehouseLocationId: number): Promise<ProductLocation | undefined> {
     const result = await db.select().from(productLocations)
       .where(and(
-        eq(productLocations.catalogProductId, catalogProductId),
+        eq(productLocations.productId, productId),
         eq(productLocations.warehouseLocationId, warehouseLocationId)
       ));
     return result[0];
   }
 
   async addProductToLocation(data: {
-    catalogProductId: number;
+    productId: number;
     warehouseLocationId: number;
     sku?: string | null;
     shopifyVariantId?: number | null;
@@ -673,11 +703,11 @@ export class DatabaseStorage implements IStorage {
     imageUrl?: string | null;
     barcode?: string | null;
   }): Promise<ProductLocation> {
-    // Check if product already has a location entry (handles legacy unique constraints on sku or catalog_product_id)
+    // Check if product already has a location entry
     // If so, update the existing entry instead of inserting
     const existingByProduct = await db.select().from(productLocations)
-      .where(eq(productLocations.catalogProductId, data.catalogProductId));
-    
+      .where(eq(productLocations.productId, data.productId));
+
     if (existingByProduct.length > 0) {
       // Product already has a location - update the existing entry to the new location
       const existing = existingByProduct[0];
@@ -699,17 +729,17 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return result[0];
     }
-    
+
     // Also check by SKU in case product was synced via legacy path
     if (data.sku) {
       const existingBySku = await db.select().from(productLocations)
         .where(eq(productLocations.sku, data.sku.toUpperCase()));
-      
+
       if (existingBySku.length > 0) {
         const existing = existingBySku[0];
         const result = await db.update(productLocations)
           .set({
-            catalogProductId: data.catalogProductId,
+            productId: data.productId,
             warehouseLocationId: data.warehouseLocationId,
             shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
             name: data.name || existing.name,
@@ -726,15 +756,15 @@ export class DatabaseStorage implements IStorage {
         return result[0];
       }
     }
-    
+
     if (data.isPrimary === 1) {
       await db.update(productLocations)
         .set({ isPrimary: 0, updatedAt: new Date() })
-        .where(eq(productLocations.catalogProductId, data.catalogProductId));
+        .where(eq(productLocations.productId, data.productId));
     }
-    
+
     const result = await db.insert(productLocations).values({
-      catalogProductId: data.catalogProductId,
+      productId: data.productId,
       warehouseLocationId: data.warehouseLocationId,
       sku: data.sku?.toUpperCase() || null,
       shopifyVariantId: data.shopifyVariantId || null,
@@ -752,11 +782,11 @@ export class DatabaseStorage implements IStorage {
 
   async setPrimaryLocation(productLocationId: number): Promise<ProductLocation | undefined> {
     const location = await this.getProductLocationById(productLocationId);
-    if (!location || !location.catalogProductId) return undefined;
-    
+    if (!location || !location.productId) return undefined;
+
     await db.update(productLocations)
       .set({ isPrimary: 0, updatedAt: new Date() })
-      .where(eq(productLocations.catalogProductId, location.catalogProductId));
+      .where(eq(productLocations.productId, location.productId));
     
     const result = await db.update(productLocations)
       .set({ isPrimary: 1, updatedAt: new Date() })
@@ -984,11 +1014,12 @@ export class DatabaseStorage implements IStorage {
             SELECT pl.sku, pl.image_url FROM product_locations pl
             WHERE UPPER(pl.sku) = ANY(${skusMissingImages}) AND pl.image_url IS NOT NULL
             UNION ALL
-            SELECT pv.sku, COALESCE(pv.image_url, p.image_url) as image_url
+            SELECT pv.sku, COALESCE(pva.url, pa.url) as image_url
             FROM product_variants pv
-            LEFT JOIN products p ON pv.product_id = p.id
+            LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
+            LEFT JOIN product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
             WHERE UPPER(pv.sku) = ANY(${skusMissingImages})
-              AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
+              AND COALESCE(pva.url, pa.url) IS NOT NULL
           ) sub
         `);
         for (const row of imageResults.rows) {
@@ -1617,53 +1648,296 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
-  // Catalog Products
-  async getAllCatalogProducts(): Promise<CatalogProduct[]> {
-    return await db.select().from(catalogProducts).orderBy(desc(catalogProducts.updatedAt));
+  // Product Assets
+  async getProductAssetsByProductId(productId: number): Promise<ProductAsset[]> {
+    return await db.select().from(productAssets)
+      .where(eq(productAssets.productId, productId))
+      .orderBy(asc(productAssets.position));
   }
 
-  async getCatalogProductById(id: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.id, id));
+  async getProductAssetsByVariantId(productVariantId: number): Promise<ProductAsset[]> {
+    return await db.select().from(productAssets)
+      .where(eq(productAssets.productVariantId, productVariantId))
+      .orderBy(asc(productAssets.position));
+  }
+
+  async createProductAsset(asset: InsertProductAsset): Promise<ProductAsset> {
+    const result = await db.insert(productAssets).values(asset).returning();
     return result[0];
   }
 
-  async getCatalogProductByProductId(productId: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.productId, productId));
-    return result[0];
+  async deleteProductAsset(id: number): Promise<boolean> {
+    const result = await db.delete(productAssets).where(eq(productAssets.id, id)).returning();
+    return result.length > 0;
   }
 
-  async createCatalogProduct(product: InsertCatalogProduct): Promise<CatalogProduct> {
-    const result = await db.insert(catalogProducts).values(product).returning();
-    return result[0];
+  async deleteProductAssetsByProductId(productId: number): Promise<number> {
+    const result = await db.delete(productAssets).where(eq(productAssets.productId, productId)).returning();
+    return result.length;
   }
 
-  async updateCatalogProduct(id: number, updates: Partial<InsertCatalogProduct>): Promise<CatalogProduct | null> {
-    const result = await db.update(catalogProducts)
-      .set({ ...updates, updatedAt: new Date() })
-      .where(eq(catalogProducts.id, id))
+  async updateProductAsset(id: number, updates: Partial<InsertProductAsset>): Promise<ProductAsset | null> {
+    const result = await db.update(productAssets)
+      .set(updates)
+      .where(eq(productAssets.id, id))
       .returning();
     return result[0] || null;
   }
 
-  async deleteCatalogProduct(id: number): Promise<boolean> {
-    const result = await db.delete(catalogProducts).where(eq(catalogProducts.id, id)).returning();
-    return result.length > 0;
+  async reorderProductAssets(productId: number, orderedIds: number[]): Promise<void> {
+    for (let i = 0; i < orderedIds.length; i++) {
+      await db.update(productAssets)
+        .set({ position: i })
+        .where(and(eq(productAssets.id, orderedIds[i]), eq(productAssets.productId, productId)));
+    }
   }
 
-  // Catalog Assets
-  async getCatalogAssetsByProductId(catalogProductId: number): Promise<CatalogAsset[]> {
-    return await db.select().from(catalogAssets)
-      .where(eq(catalogAssets.catalogProductId, catalogProductId))
-      .orderBy(asc(catalogAssets.position));
+  async setPrimaryProductAsset(productId: number, assetId: number): Promise<void> {
+    // Clear existing primary
+    await db.update(productAssets)
+      .set({ isPrimary: 0 })
+      .where(and(eq(productAssets.productId, productId), eq(productAssets.isPrimary, 1)));
+    // Set new primary
+    await db.update(productAssets)
+      .set({ isPrimary: 1 })
+      .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
   }
 
-  async createCatalogAsset(asset: InsertCatalogAsset): Promise<CatalogAsset> {
-    const result = await db.insert(catalogAssets).values(asset).returning();
+  // ============================================================================
+  // Channel Product Overrides
+  // ============================================================================
+  async getChannelProductOverride(channelId: number, productId: number): Promise<ChannelProductOverride | undefined> {
+    const result = await db.select().from(channelProductOverrides)
+      .where(and(
+        eq(channelProductOverrides.channelId, channelId),
+        eq(channelProductOverrides.productId, productId)
+      ));
     return result[0];
   }
 
-  async deleteCatalogAsset(id: number): Promise<boolean> {
-    const result = await db.delete(catalogAssets).where(eq(catalogAssets.id, id)).returning();
+  async getChannelProductOverridesByProduct(productId: number): Promise<ChannelProductOverride[]> {
+    return await db.select().from(channelProductOverrides)
+      .where(eq(channelProductOverrides.productId, productId));
+  }
+
+  async upsertChannelProductOverride(data: InsertChannelProductOverride): Promise<ChannelProductOverride> {
+    const result = await db.insert(channelProductOverrides)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [channelProductOverrides.channelId, channelProductOverrides.productId],
+        set: {
+          titleOverride: data.titleOverride,
+          descriptionOverride: data.descriptionOverride,
+          bulletPointsOverride: data.bulletPointsOverride,
+          categoryOverride: data.categoryOverride,
+          tagsOverride: data.tagsOverride,
+          isListed: data.isListed,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async deleteChannelProductOverride(channelId: number, productId: number): Promise<boolean> {
+    const result = await db.delete(channelProductOverrides)
+      .where(and(
+        eq(channelProductOverrides.channelId, channelId),
+        eq(channelProductOverrides.productId, productId)
+      ))
+      .returning();
+    return result.length > 0;
+  }
+
+  // ============================================================================
+  // Channel Variant Overrides
+  // ============================================================================
+  async getChannelVariantOverride(channelId: number, productVariantId: number): Promise<ChannelVariantOverride | undefined> {
+    const result = await db.select().from(channelVariantOverrides)
+      .where(and(
+        eq(channelVariantOverrides.channelId, channelId),
+        eq(channelVariantOverrides.productVariantId, productVariantId)
+      ));
+    return result[0];
+  }
+
+  async getChannelVariantOverridesByProduct(channelId: number, productId: number): Promise<ChannelVariantOverride[]> {
+    return await db.select().from(channelVariantOverrides)
+      .where(and(
+        eq(channelVariantOverrides.channelId, channelId),
+        sql`${channelVariantOverrides.productVariantId} IN (
+          SELECT id FROM product_variants WHERE product_id = ${productId}
+        )`
+      ));
+  }
+
+  async upsertChannelVariantOverride(data: InsertChannelVariantOverride): Promise<ChannelVariantOverride> {
+    const result = await db.insert(channelVariantOverrides)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [channelVariantOverrides.channelId, channelVariantOverrides.productVariantId],
+        set: {
+          nameOverride: data.nameOverride,
+          skuOverride: data.skuOverride,
+          barcodeOverride: data.barcodeOverride,
+          weightOverride: data.weightOverride,
+          isListed: data.isListed,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async deleteChannelVariantOverride(channelId: number, productVariantId: number): Promise<boolean> {
+    const result = await db.delete(channelVariantOverrides)
+      .where(and(
+        eq(channelVariantOverrides.channelId, channelId),
+        eq(channelVariantOverrides.productVariantId, productVariantId)
+      ))
+      .returning();
+    return result.length > 0;
+  }
+
+  // ============================================================================
+  // Channel Pricing
+  // ============================================================================
+  async getChannelPricing(channelId: number, productVariantId: number): Promise<ChannelPricing | undefined> {
+    const result = await db.select().from(channelPricing)
+      .where(and(
+        eq(channelPricing.channelId, channelId),
+        eq(channelPricing.productVariantId, productVariantId)
+      ));
+    return result[0];
+  }
+
+  async getChannelPricingByProduct(channelId: number, productId: number): Promise<ChannelPricing[]> {
+    return await db.select().from(channelPricing)
+      .where(and(
+        eq(channelPricing.channelId, channelId),
+        sql`${channelPricing.productVariantId} IN (
+          SELECT id FROM product_variants WHERE product_id = ${productId}
+        )`
+      ));
+  }
+
+  async upsertChannelPricing(data: InsertChannelPricing): Promise<ChannelPricing> {
+    const result = await db.insert(channelPricing)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [channelPricing.channelId, channelPricing.productVariantId],
+        set: {
+          price: data.price,
+          compareAtPrice: data.compareAtPrice,
+          cost: data.cost,
+          currency: data.currency,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async deleteChannelPricing(channelId: number, productVariantId: number): Promise<boolean> {
+    const result = await db.delete(channelPricing)
+      .where(and(
+        eq(channelPricing.channelId, channelId),
+        eq(channelPricing.productVariantId, productVariantId)
+      ))
+      .returning();
+    return result.length > 0;
+  }
+
+  // ============================================================================
+  // Channel Listings
+  // ============================================================================
+  async getChannelListing(channelId: number, productVariantId: number): Promise<ChannelListing | undefined> {
+    const result = await db.select().from(channelListings)
+      .where(and(
+        eq(channelListings.channelId, channelId),
+        eq(channelListings.productVariantId, productVariantId)
+      ));
+    return result[0];
+  }
+
+  async getChannelListingsByProduct(channelId: number, productId: number): Promise<ChannelListing[]> {
+    return await db.select().from(channelListings)
+      .where(and(
+        eq(channelListings.channelId, channelId),
+        sql`${channelListings.productVariantId} IN (
+          SELECT id FROM product_variants WHERE product_id = ${productId}
+        )`
+      ));
+  }
+
+  async upsertChannelListing(data: InsertChannelListing): Promise<ChannelListing> {
+    const result = await db.insert(channelListings)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [channelListings.channelId, channelListings.productVariantId],
+        set: {
+          externalProductId: data.externalProductId,
+          externalVariantId: data.externalVariantId,
+          externalSku: data.externalSku,
+          externalUrl: data.externalUrl,
+          lastSyncedQty: data.lastSyncedQty,
+          lastSyncedPrice: data.lastSyncedPrice,
+          lastSyncedAt: data.lastSyncedAt,
+          syncStatus: data.syncStatus,
+          syncError: data.syncError,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async getChannelListingByExternalId(channelId: number, externalProductId: string): Promise<ChannelListing | undefined> {
+    const result = await db.select().from(channelListings)
+      .where(and(
+        eq(channelListings.channelId, channelId),
+        eq(channelListings.externalProductId, externalProductId)
+      ));
+    return result[0];
+  }
+
+  // ============================================================================
+  // Channel Asset Overrides
+  // ============================================================================
+  async getChannelAssetOverridesByProduct(channelId: number, productId: number): Promise<ChannelAssetOverride[]> {
+    return await db.select().from(channelAssetOverrides)
+      .where(and(
+        eq(channelAssetOverrides.channelId, channelId),
+        sql`${channelAssetOverrides.productAssetId} IN (
+          SELECT id FROM product_assets WHERE product_id = ${productId}
+        )`
+      ));
+  }
+
+  async upsertChannelAssetOverride(data: InsertChannelAssetOverride): Promise<ChannelAssetOverride> {
+    const result = await db.insert(channelAssetOverrides)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [channelAssetOverrides.channelId, channelAssetOverrides.productAssetId],
+        set: {
+          urlOverride: data.urlOverride,
+          altTextOverride: data.altTextOverride,
+          positionOverride: data.positionOverride,
+          isIncluded: data.isIncluded,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async deleteChannelAssetOverride(channelId: number, productAssetId: number): Promise<boolean> {
+    const result = await db.delete(channelAssetOverrides)
+      .where(and(
+        eq(channelAssetOverrides.channelId, channelId),
+        eq(channelAssetOverrides.productAssetId, productAssetId)
+      ))
+      .returning();
     return result.length > 0;
   }
 
@@ -1782,11 +2056,10 @@ export class DatabaseStorage implements IStorage {
   }
 
 
-  async getAllCatalogProductsWithLocations(): Promise<{
+  async getAllProductsWithLocations(): Promise<{
     id: number;
-    catalogProductId: number;
     productLocationId: number | null;
-    shopifyProductId: number | null;
+    shopifyProductId: string | null;
     sku: string | null;
     name: string;
     location: string | null;
@@ -1797,136 +2070,53 @@ export class DatabaseStorage implements IStorage {
     imageUrl: string | null;
     updatedAt: Date | null;
   }[]> {
-    // Get ALL catalog products with their locations (if assigned)
-    // Join to warehouse_locations to get warehouseId for filtering
-    // Join to products for imageUrl
     const result = await db
       .select({
-        id: catalogProducts.id,
-        catalogProductId: catalogProducts.id,
+        id: products.id,
         productLocationId: productLocations.id,
-        shopifyProductId: catalogProducts.shopifyProductId,
-        sku: catalogProducts.sku,
-        name: catalogProducts.title,
+        shopifyProductId: products.shopifyProductId,
+        sku: products.sku,
+        name: sql<string>`COALESCE(${products.title}, ${products.name})`.as('name'),
         location: productLocations.location,
         zone: productLocations.zone,
         warehouseLocationId: productLocations.warehouseLocationId,
         warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
-        imageUrl: products.imageUrl,
+        imageUrl: sql<string | null>`(SELECT url FROM product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
         updatedAt: productLocations.updatedAt,
       })
-      .from(catalogProducts)
-      .leftJoin(products, eq(catalogProducts.productId, products.id))
-      .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
+      .from(products)
+      .leftJoin(productLocations, eq(products.id, productLocations.productId))
       .leftJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
-      .orderBy(asc(catalogProducts.title));
+      .orderBy(sql`COALESCE(${products.title}, ${products.name})`);
     return result;
   }
 
-  async getCatalogProductsWithoutLocations(): Promise<{
+  async getProductsWithoutLocations(): Promise<{
     id: number;
-    shopifyProductId: number | null;
+    shopifyProductId: string | null;
     sku: string | null;
     title: string;
     imageUrl: string | null;
   }[]> {
-    // Get all catalog products that don't have a product_locations entry
     const result = await db
       .select({
-        id: catalogProducts.id,
-        shopifyProductId: catalogProducts.shopifyProductId,
-        sku: catalogProducts.sku,
-        title: catalogProducts.title,
-        imageUrl: products.imageUrl,
+        id: products.id,
+        shopifyProductId: products.shopifyProductId,
+        sku: products.sku,
+        title: sql<string>`COALESCE(${products.title}, ${products.name})`.as('title'),
+        imageUrl: sql<string | null>`(SELECT url FROM product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
       })
-      .from(catalogProducts)
-      .leftJoin(products, eq(catalogProducts.productId, products.id))
-      .leftJoin(productLocations, eq(catalogProducts.id, productLocations.catalogProductId))
+      .from(products)
+      .leftJoin(productLocations, eq(products.id, productLocations.productId))
       .where(isNull(productLocations.id))
-      .orderBy(asc(catalogProducts.title));
+      .orderBy(sql`COALESCE(${products.title}, ${products.name})`);
     return result;
   }
 
-  async getCatalogProductBySku(sku: string): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.sku, sku.toUpperCase()));
+  async getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined> {
+    const result = await db.select().from(products).where(eq(products.shopifyProductId, shopifyProductId));
     return result[0];
-  }
-
-  async getCatalogProductByShopifyProductId(shopifyProductId: number): Promise<CatalogProduct | undefined> {
-    const result = await db.select().from(catalogProducts).where(eq(catalogProducts.shopifyProductId, shopifyProductId));
-    return result[0];
-  }
-
-  async upsertCatalogProductBySku(sku: string, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
-    const normalizedSku = sku.toUpperCase();
-    const existing = await this.getCatalogProductBySku(normalizedSku);
-
-    if (existing) {
-      const result = await db.update(catalogProducts)
-        .set({
-          ...data,
-          updatedAt: new Date(),
-        })
-        .where(eq(catalogProducts.id, existing.id))
-        .returning();
-      return result[0];
-    }
-
-    const result = await db.insert(catalogProducts).values({
-      productId: data.productId,
-      sku: normalizedSku,
-      title: data.title || normalizedSku,
-      description: data.description,
-      category: data.category,
-      brand: data.brand,
-      manufacturer: data.manufacturer,
-      tags: data.tags,
-      status: data.status || "active",
-    }).returning();
-    return result[0];
-  }
-
-  async upsertCatalogProductByShopifyProductId(shopifyProductId: number, data: Partial<InsertCatalogProduct>): Promise<CatalogProduct> {
-    const existing = await this.getCatalogProductByShopifyProductId(shopifyProductId);
-
-    if (existing) {
-      const result = await db.update(catalogProducts)
-        .set({
-          ...data,
-          sku: data.sku?.toUpperCase() || existing.sku,
-          shopifyProductId: shopifyProductId,
-          updatedAt: new Date(),
-        })
-        .where(eq(catalogProducts.id, existing.id))
-        .returning();
-      return result[0];
-    }
-
-    const result = await db.insert(catalogProducts).values({
-      productId: data.productId,
-      shopifyProductId: shopifyProductId,
-      sku: data.sku?.toUpperCase() || null,
-      title: data.title || "Untitled Product",
-      description: data.description,
-      category: data.category,
-      brand: data.brand,
-      manufacturer: data.manufacturer,
-      tags: data.tags,
-      status: data.status || "active",
-    }).returning();
-    return result[0];
-  }
-
-  async deleteCatalogAssetsByProductId(catalogProductId: number): Promise<number> {
-    const result = await db.delete(catalogAssets).where(eq(catalogAssets.catalogProductId, catalogProductId)).returning();
-    return result.length;
-  }
-
-  async getCatalogAssetsByVariantId(productVariantId: number): Promise<CatalogAsset[]> {
-    return await db.select().from(catalogAssets)
-      .where(eq(catalogAssets.productVariantId, productVariantId))
-      .orderBy(asc(catalogAssets.position));
   }
 
   // Inventory Levels
@@ -3320,10 +3510,10 @@ export class DatabaseStorage implements IStorage {
       .orderBy(asc(replenRules.priority));
   }
   
-  async getReplenRulesForProduct(catalogProductId: number): Promise<ReplenRule[]> {
+  async getReplenRulesForProduct(productId: number): Promise<ReplenRule[]> {
     return await db.select().from(replenRules)
       .where(and(
-        eq(replenRules.catalogProductId, catalogProductId),
+        eq(replenRules.productId, productId),
         eq(replenRules.isActive, 1)
       ))
       .orderBy(asc(replenRules.priority));

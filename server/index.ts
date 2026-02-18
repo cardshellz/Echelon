@@ -160,6 +160,61 @@ function startReplenScheduler(services: ReturnType<typeof createServices>, dbIns
   setupInterval();
 }
 
+/**
+ * Scheduled channel sync — periodically pushes ATP to all active channel feeds
+ * as a safety net for missed reactive syncs (e.g. transient API failures).
+ */
+function startChannelSyncScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
+  let intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+  async function runChannelSync() {
+    try {
+      const result = await services.channelSync.syncAllProducts();
+      if (result.synced > 0 || result.errors.length > 0) {
+        log(
+          `[Channel Sync Scheduler] Synced ${result.synced} feeds across ${result.total} products` +
+            (result.errors.length > 0 ? `, ${result.errors.length} errors` : ""),
+          "channel-sync",
+        );
+      }
+    } catch (err: any) {
+      console.warn("[Channel Sync Scheduler] Error:", err?.message);
+    }
+  }
+
+  async function setupInterval() {
+    try {
+      // Load warehouse settings to check for channel sync interval
+      const settings = await dbInstance
+        .select()
+        .from(warehouseSettings)
+        .where(eq(warehouseSettings.isActive, 1));
+
+      const defaultSettings = settings.find((s: any) => s.warehouseCode === "DEFAULT") || settings[0];
+
+      // Use channel_sync_interval_minutes from settings, default 15 min
+      // Setting to 0 disables the scheduler
+      const intervalMinutes = (defaultSettings as any)?.channelSyncIntervalMinutes ?? 15;
+      if (intervalMinutes <= 0) {
+        log("[Channel Sync Scheduler] Disabled (interval = 0)", "channel-sync");
+        return;
+      }
+
+      log(`[Channel Sync Scheduler] Starting with ${intervalMinutes}-minute interval`, "channel-sync");
+
+      // First run after 30-second startup delay
+      setTimeout(() => runChannelSync(), 30_000);
+
+      // Then run on the configured interval
+      intervalHandle = setInterval(() => runChannelSync(), intervalMinutes * 60 * 1000);
+    } catch (err: any) {
+      console.warn("[Channel Sync Scheduler] Failed to start:", err?.message);
+    }
+  }
+
+  setupInterval();
+}
+
 (async () => {
   // Run startup migrations to ensure database schema is up to date
   await runStartupMigrations();
@@ -170,6 +225,9 @@ function startReplenScheduler(services: ReturnType<typeof createServices>, dbIns
 
   // Start scheduled replenishment sync (checks warehouse settings for interval)
   startReplenScheduler(services, db);
+
+  // Start scheduled channel sync (safety net for missed reactive syncs)
+  startChannelSyncScheduler(services, db);
 
   await registerRoutes(httpServer, app);
 
