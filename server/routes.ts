@@ -4091,6 +4091,147 @@ export async function registerRoutes(
     }
   });
 
+  // ============================================================================
+  // Bin Assignments (variant-centric pick location management)
+  // ============================================================================
+  app.get("/api/bin-assignments", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { search, unassignedOnly, zone, warehouseId } = req.query;
+      const assignments = await storage.getBinAssignmentsView({
+        search: search as string || undefined,
+        unassignedOnly: unassignedOnly === "true",
+        zone: zone as string || undefined,
+        warehouseId: warehouseId ? parseInt(warehouseId as string) : undefined,
+      });
+      res.json(assignments);
+    } catch (error: any) {
+      console.error("Error fetching bin assignments:", error);
+      res.status(500).json({ error: "Failed to fetch bin assignments" });
+    }
+  });
+
+  app.put("/api/bin-assignments", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productVariantId, warehouseLocationId, isPrimary } = req.body;
+      if (!productVariantId || !warehouseLocationId) {
+        return res.status(400).json({ error: "productVariantId and warehouseLocationId are required" });
+      }
+      const result = await storage.upsertBinAssignment({
+        productVariantId,
+        warehouseLocationId,
+        isPrimary,
+      });
+
+      // Fire-and-forget: sync pick queue for this SKU
+      if (result.sku) {
+        syncPickQueueForSku(result.sku).catch(() => {});
+      }
+
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error upserting bin assignment:", error);
+      res.status(500).json({ error: error.message || "Failed to update bin assignment" });
+    }
+  });
+
+  app.delete("/api/bin-assignments/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const existing = await storage.getProductLocationById(id);
+      const deleted = await storage.deleteProductLocation(id);
+      if (!deleted) return res.status(404).json({ error: "Assignment not found" });
+
+      // Fire-and-forget: sync pick queue for this SKU
+      if (existing?.sku) {
+        syncPickQueueForSku(existing.sku).catch(() => {});
+      }
+
+      res.status(204).end();
+    } catch (error: any) {
+      console.error("Error deleting bin assignment:", error);
+      res.status(500).json({ error: "Failed to delete bin assignment" });
+    }
+  });
+
+  app.post("/api/bin-assignments/import", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { assignments } = req.body;
+      if (!Array.isArray(assignments) || assignments.length === 0) {
+        return res.status(400).json({ error: "assignments array is required" });
+      }
+
+      const results = { created: 0, updated: 0, errors: [] as { row: number; sku: string; error: string }[] };
+
+      for (let i = 0; i < assignments.length; i++) {
+        const { sku, locationCode } = assignments[i];
+        try {
+          if (!sku || !locationCode) {
+            results.errors.push({ row: i + 1, sku: sku || "", error: "Missing sku or locationCode" });
+            continue;
+          }
+
+          // Look up variant by SKU
+          const variant = await storage.getProductVariantBySku(sku.toUpperCase());
+          if (!variant) {
+            results.errors.push({ row: i + 1, sku, error: `Variant not found for SKU: ${sku}` });
+            continue;
+          }
+
+          // Look up warehouse location by code
+          const loc = await storage.getWarehouseLocationByCode(locationCode.toUpperCase());
+          if (!loc) {
+            results.errors.push({ row: i + 1, sku, error: `Location not found: ${locationCode}` });
+            continue;
+          }
+
+          // Check if this variant already has a pick assignment
+          const existingResult = await db.select().from(productLocations)
+            .where(and(
+              eq(productLocations.productVariantId, variant.id),
+              eq(productLocations.locationType, "pick")
+            ));
+
+          await storage.upsertBinAssignment({
+            productVariantId: variant.id,
+            warehouseLocationId: loc.id,
+          });
+
+          if (existingResult.length > 0) {
+            results.updated++;
+          } else {
+            results.created++;
+          }
+        } catch (e: any) {
+          results.errors.push({ row: i + 1, sku: sku || "", error: e.message });
+        }
+      }
+
+      res.json(results);
+    } catch (error: any) {
+      console.error("Error importing bin assignments:", error);
+      res.status(500).json({ error: "Failed to import bin assignments" });
+    }
+  });
+
+  app.get("/api/bin-assignments/export", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const assignments = await storage.getBinAssignmentsView();
+      const assigned = assignments.filter(a => a.productLocationId !== null);
+
+      const csvHeader = "sku,product_name,variant_name,location_code,zone,is_primary,current_qty\n";
+      const csvRows = assigned.map(a =>
+        `"${a.sku || ""}","${(a.productName || "").replace(/"/g, '""')}","${(a.variantName || "").replace(/"/g, '""')}","${a.assignedLocationCode || ""}","${a.zone || ""}",${a.isPrimary || 0},${a.currentQty || 0}`
+      ).join("\n");
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=bin-assignments.csv");
+      res.send(csvHeader + csvRows);
+    } catch (error: any) {
+      console.error("Error exporting bin assignments:", error);
+      res.status(500).json({ error: "Failed to export bin assignments" });
+    }
+  });
+
   // Legacy Warehouse Locations (for backward compatibility with existing /api/inventory/locations)
   app.get("/api/inventory/locations", async (req, res) => {
     try {

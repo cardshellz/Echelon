@@ -524,7 +524,14 @@ class CycleCountService {
     let varianceType: string | null = null;
     let createdFoundItem = false;
 
-    const isSkuMismatch = countedSku && item.expectedSku && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
+    // Only treat different SKUs as mismatch for pick locations.
+    // Reserve/staging locations hold changing inventory — SKU differences are normal quantity variances.
+    const warehouseLoc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+    const isPickLocation = warehouseLoc?.locationType === "pick";
+
+    const isSkuMismatch = isPickLocation
+      && countedSku && item.expectedSku
+      && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
 
     if (isSkuMismatch) {
       // SKU MISMATCH: create two linked items
@@ -590,8 +597,8 @@ class CycleCountService {
         varianceType,
         varianceNotes: notes || null,
         status: "variance",
-        requiresApproval: 1,
-        mismatchType: "unexpected_found",
+        requiresApproval: isPickLocation ? 1 : 0, // Reserve bins: auto-approvable, no assignment impact
+        mismatchType: isPickLocation ? "unexpected_found" : null,
         ...(foundProductVariantId && { productVariantId: foundProductVariantId }),
         ...(foundProductId && { productId: foundProductId }),
         countedBy: userId,

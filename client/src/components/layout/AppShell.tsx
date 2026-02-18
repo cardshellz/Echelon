@@ -83,6 +83,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory" },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
+      { label: "Bin Assignments", icon: MapPin, href: "/bin-assignments" },
       { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },

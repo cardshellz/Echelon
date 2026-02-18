@@ -27,6 +27,7 @@ import ProductCatalog from "@/pages/ProductCatalog";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
+import BinAssignments from "@/pages/BinAssignments";
 import Returns from "@/pages/Returns";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
@@ -93,6 +94,9 @@ function Router() {
         </Route>
         <Route path="/cycle-counts">
           <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/bin-assignments">
+          <ProtectedRoute component={BinAssignments} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/transfers">
           <ProtectedRoute component={Transfers} allowedRoles={["admin", "lead"]} />

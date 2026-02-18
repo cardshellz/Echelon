@@ -33,7 +33,9 @@ import {
   AlertCircle,
   Clock,
   Loader2,
+  MapPin,
 } from "lucide-react";
+import { Link } from "wouter";
 
 const HIERARCHY_TYPES = [
   { level: 1, label: "Pack", prefix: "P" },
@@ -117,6 +119,12 @@ export default function ProductDetail() {
   });
   const globalDefaultLeadTime = parseInt(settings?.default_lead_time_days || "120") || 120;
   const globalDefaultSafetyStock = parseInt(settings?.default_safety_stock_days || "7") || 7;
+
+  // --- Pick location assignments ---
+  const { data: productLocations = [] } = useQuery<{ id: number; sku: string | null; location: string; locationType: string; isPrimary: number }[]>({
+    queryKey: [`/api/products/${productId}/locations`],
+    enabled: !!productId,
+  });
 
   // --- Overview edit state ---
   const [editForm, setEditForm] = useState({
@@ -1237,6 +1245,32 @@ export default function ProductDetail() {
                   );
                 })()}
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="p-3 md:p-6">
+              <CardTitle className="text-base md:text-lg flex items-center gap-2">
+                <MapPin className="h-4 w-4" /> Pick Location
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+              {productLocations.filter(pl => pl.locationType === "pick").length > 0 ? (
+                <div className="space-y-1">
+                  {productLocations.filter(pl => pl.locationType === "pick").map(pl => (
+                    <div key={pl.id} className="flex items-center gap-2 text-sm">
+                      <span className="font-mono font-medium">{pl.location}</span>
+                      {pl.sku && <span className="text-muted-foreground text-xs">({pl.sku})</span>}
+                      {pl.isPrimary === 1 && <Badge variant="outline" className="text-[10px] px-1">Primary</Badge>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No pick location assigned</p>
+              )}
+              <Link href="/bin-assignments" className="text-xs text-blue-600 hover:underline mt-2 inline-block">
+                Manage in Bin Assignments
+              </Link>
             </CardContent>
           </Card>
 

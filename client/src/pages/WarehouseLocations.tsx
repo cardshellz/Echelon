@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, MoveRight, Package, Star, Search } from "lucide-react";
+import { Plus, Trash2, Edit, MapPin, Layers, Box, ArrowRight, Upload, Download, CheckSquare, Package, Star, Search } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
@@ -95,12 +95,8 @@ export default function WarehouseLocations() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [csvData, setCsvData] = useState("");
   const [importWarehouseId, setImportWarehouseId] = useState<string>("");
-  const [isReassignOpen, setIsReassignOpen] = useState(false);
-  const [targetLocationId, setTargetLocationId] = useState<string>("");
   const [isAssignProductsOpen, setIsAssignProductsOpen] = useState(false);
   const [assigningToLocation, setAssigningToLocation] = useState<WarehouseLocation | null>(null);
-  const [reassignLocationSearch, setReassignLocationSearch] = useState("");
-  const [reassignLocationOpen, setReassignLocationOpen] = useState(false);
   const [newLocation, setNewLocation] = useState({
     zone: "",
     aisle: "",
@@ -348,32 +344,6 @@ export default function WarehouseLocations() {
     },
     onError: () => {
       toast({ title: "Error", description: "Failed to delete locations", variant: "destructive" });
-    },
-  });
-
-  const bulkReassignMutation = useMutation({
-    mutationFn: async ({ sourceIds, targetId }: { sourceIds: number[]; targetId: number }) => {
-      const res = await fetch("/api/warehouse/locations/bulk-reassign", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceLocationIds: sourceIds, targetLocationId: targetId }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to reassign products");
-      }
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse/locations"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/product-locations"] });
-      setSelectedIds(new Set());
-      setIsReassignOpen(false);
-      setTargetLocationId("");
-      toast({ title: `Moved ${data.reassigned} products to new location` });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
     },
   });
 
@@ -709,19 +679,8 @@ export default function WarehouseLocations() {
             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
               {selectedIds.size > 0 && canEdit && (
                 <>
-                  <Button 
-                    variant="outline" 
-                    onClick={() => setIsReassignOpen(true)}
-                    disabled={bulkReassignMutation.isPending}
-                    data-testid="btn-bulk-reassign"
-                    className="flex-1 sm:flex-none min-h-[44px]"
-                  >
-                    <MoveRight className="h-4 w-4 mr-2" />
-                    <span className="hidden sm:inline">Move Products</span>
-                    <span className="sm:hidden">Move</span> ({selectedIds.size})
-                  </Button>
-                  <Button 
-                    variant="destructive" 
+                  <Button
+                    variant="destructive"
                     onClick={handleBulkDelete}
                     disabled={bulkDeleteMutation.isPending}
                     data-testid="btn-bulk-delete"
@@ -1543,116 +1502,6 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
             >
               <Upload className="h-4 w-4 mr-2" />
               {bulkImportMutation.isPending ? "Importing..." : "Import Locations"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Bulk Reassign Dialog */}
-      <Dialog open={isReassignOpen} onOpenChange={(open) => {
-        setIsReassignOpen(open);
-        if (!open) {
-          setTargetLocationId("");
-          setReassignLocationSearch("");
-        }
-      }}>
-        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
-          <DialogHeader>
-            <DialogTitle>Move Products to New Location</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <p className="text-xs md:text-sm text-muted-foreground">
-              Move all products from the {selectedIds.size} selected location(s) to a new location.
-              This will update the product-location mappings so you can delete the old locations.
-            </p>
-            <div>
-              <Label className="text-xs">Target Location (Holding Bin)</Label>
-              <Popover open={reassignLocationOpen} onOpenChange={setReassignLocationOpen}>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    role="combobox"
-                    aria-expanded={reassignLocationOpen}
-                    className="w-full justify-between mt-1 h-11"
-                    data-testid="select-target-location"
-                  >
-                    {targetLocationId
-                      ? (() => {
-                          const loc = locations.find(l => l.id.toString() === targetLocationId);
-                          return loc ? loc.code : "Select...";
-                        })()
-                      : "Search for location..."}
-                    <Search className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-full p-0" align="start">
-                  <Command>
-                    <CommandInput
-                      placeholder="Search by bin code..."
-                      value={reassignLocationSearch}
-                      onValueChange={setReassignLocationSearch}
-                      className="h-11"
-                      data-testid="input-reassign-location-search"
-                    />
-                    <CommandList>
-                      <CommandEmpty>No locations found.</CommandEmpty>
-                      <CommandGroup>
-                        {locations
-                          .filter(loc => !selectedIds.has(loc.id))
-                          .filter(loc => 
-                            loc.code.toLowerCase().includes(reassignLocationSearch.toLowerCase()) ||
-                            (loc.zone && loc.zone.toLowerCase().includes(reassignLocationSearch.toLowerCase()))
-                          )
-                          .sort((a, b) => {
-                            if (a.locationType === 'staging' && b.locationType !== 'staging') return -1;
-                            if (a.locationType !== 'staging' && b.locationType === 'staging') return 1;
-                            return a.code.localeCompare(b.code);
-                          })
-                          .slice(0, 50)
-                          .map(loc => (
-                              <CommandItem
-                                key={loc.id}
-                                value={`${loc.code} ${loc.zone || ''}`}
-                                onSelect={() => {
-                                  setTargetLocationId(loc.id.toString());
-                                  setReassignLocationOpen(false);
-                                }}
-                                className="flex justify-between items-center min-h-[44px]"
-                              >
-                                <div className="flex-1 min-w-0">
-                                  <div className="font-medium text-sm">{loc.code}</div>
-                                  <div className="text-xs text-muted-foreground truncate">
-                                    {loc.locationType.replace('_', ' ')}
-                                    {loc.zone && ` • Zone ${loc.zone}`}
-                                  </div>
-                                </div>
-                              </CommandItem>
-                            ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
-              <p className="text-xs text-muted-foreground mt-1">
-                Tip: Empty bins are shown first. Create a staging location for products awaiting reassignment.
-              </p>
-            </div>
-          </div>
-          <DialogFooter className="flex-col sm:flex-row gap-2">
-            <Button variant="outline" onClick={() => { setIsReassignOpen(false); setTargetLocationId(""); setReassignLocationSearch(""); }} className="min-h-[44px] w-full sm:w-auto">
-              Cancel
-            </Button>
-            <Button 
-              onClick={() => bulkReassignMutation.mutate({ 
-                sourceIds: Array.from(selectedIds), 
-                targetId: parseInt(targetLocationId) 
-              })}
-              disabled={!targetLocationId || bulkReassignMutation.isPending}
-              className="min-h-[44px] w-full sm:w-auto"
-              data-testid="btn-confirm-reassign"
-            >
-              <MoveRight className="h-4 w-4 mr-2" />
-              {bulkReassignMutation.isPending ? "Moving..." : "Move Products"}
             </Button>
           </DialogFooter>
         </DialogContent>

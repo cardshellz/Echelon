@@ -70,6 +70,7 @@ export const productLocations = pgTable("product_locations", {
   productId: integer("product_id"), // Primary link to products - NOT unique, allows multiple locations per product
   sku: varchar("sku", { length: 100 }), // Optional - cached from catalog for display/legacy
   shopifyVariantId: bigint("shopify_variant_id", { mode: "number" }), // Optional - cached from catalog for quick Shopify lookups
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   name: text("name").notNull(),
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
