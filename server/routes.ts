@@ -3351,14 +3351,39 @@ export async function registerRoutes(
   app.get("/api/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const allProducts = await storage.getAllProducts();
-      // Include variants for each product
-      const productsWithVariants = await Promise.all(
-        allProducts.map(async (product) => {
-          const variants = await storage.getProductVariantsByProductId(product.id);
-          return { ...product, variants };
-        })
-      );
-      res.json(productsWithVariants);
+      const allVariants = await storage.getAllProductVariants();
+
+      // Bulk-fetch primary images (one query instead of N)
+      const primaryAssets = await db.select()
+        .from(productAssets)
+        .where(eq(productAssets.isPrimary, 1));
+      const primaryImageByProductId = new Map<number, string>();
+      for (const asset of primaryAssets) {
+        if (asset.productId && asset.url) {
+          primaryImageByProductId.set(asset.productId, asset.url);
+        }
+      }
+
+      // Build variant lookup
+      const variantsByProductId = new Map<number, typeof allVariants>();
+      for (const v of allVariants) {
+        if (!variantsByProductId.has(v.productId)) {
+          variantsByProductId.set(v.productId, []);
+        }
+        variantsByProductId.get(v.productId)!.push(v);
+      }
+
+      const productsWithData = allProducts.map(p => ({
+        ...p,
+        baseSku: p.sku,
+        name: p.title || p.name,
+        active: p.status === "active" ? 1 : 0,
+        imageUrl: primaryImageByProductId.get(p.id) || null,
+        variantCount: variantsByProductId.get(p.id)?.length || 0,
+        variants: variantsByProductId.get(p.id) || [],
+      }));
+
+      res.json(productsWithData);
     } catch (error) {
       console.error("Error fetching products:", error);
       res.status(500).json({ error: "Failed to fetch products" });
@@ -4220,39 +4245,7 @@ export async function registerRoutes(
     }
   });
 
-  // NOTE: Duplicate GET /api/products/:id removed — content fields now on products table
-
-  // Products with joined data (for list views) - uses products table as master
-  app.get("/api/products", async (req, res) => {
-    try {
-      const productsList = await storage.getAllProducts();
-      const variantsList = await storage.getAllProductVariants();
-
-      // Create lookup maps
-      const variantsByProductId = new Map<number, typeof variantsList>();
-      for (const v of variantsList) {
-        if (!variantsByProductId.has(v.productId)) {
-          variantsByProductId.set(v.productId, []);
-        }
-        variantsByProductId.get(v.productId)!.push(v);
-      }
-
-      // Build product view directly from products table
-      const resultProducts = productsList.map(p => ({
-        ...p,
-        baseSku: p.sku,
-        name: p.title || p.name,
-        active: p.status === "active" ? 1 : 0,
-        variantCount: variantsByProductId.get(p.id)?.length || 0,
-        variants: variantsByProductId.get(p.id) || [],
-      }));
-
-      res.json(resultProducts);
-    } catch (error) {
-      console.error("Error fetching products:", error);
-      res.status(500).json({ error: "Failed to fetch products" });
-    }
-  });
+  // NOTE: Duplicate GET /api/products and /api/products/:id removed — consolidated into master catalog section above
 
   // Products (Master SKUs) - replaces legacy inventory_items
   app.get("/api/inventory/items", async (req, res) => {
