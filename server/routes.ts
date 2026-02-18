@@ -9,6 +9,7 @@ import { createOrderCombiningService } from "./services/order-combining";
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import { createProductImportService } from "./services/product-import";
 import { createChannelProductPushService } from "./services/channel-product-push";
+import { createBinAssignmentService } from "./services/bin-assignment";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -20,6 +21,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const orderCombining = createOrderCombiningService(db);
 const productImport = createProductImportService();
 const channelProductPush = createChannelProductPushService(db);
+const binAssignment = createBinAssignmentService(db, storage);
 
 // Permission checking middleware
 function requirePermission(resource: string, action: string) {
@@ -4017,7 +4019,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid location ID" });
       }
       
-      const { productId, locationType, isPrimary } = req.body;
+      const { productId, isPrimary } = req.body;
       if (!productId) {
         return res.status(400).json({ error: "productId is required" });
       }
@@ -4026,6 +4028,10 @@ export async function registerRoutes(
       const warehouseLocation = await storage.getWarehouseLocationById(warehouseLocationId);
       if (!warehouseLocation) {
         return res.status(404).json({ error: "Warehouse location not found" });
+      }
+
+      if (warehouseLocation.isPickable !== 1) {
+        return res.status(400).json({ error: `Location ${warehouseLocation.code} is not pickable` });
       }
 
       // Get product details
@@ -4042,7 +4048,6 @@ export async function registerRoutes(
         name: product.title || product.name,
         location: warehouseLocation.code,
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
-        locationType: locationType || "pick",
         isPrimary: isPrimary ?? 1,
       });
 
@@ -4097,7 +4102,7 @@ export async function registerRoutes(
   app.get("/api/bin-assignments", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { search, unassignedOnly, zone, warehouseId } = req.query;
-      const assignments = await storage.getBinAssignmentsView({
+      const assignments = await binAssignment.getAssignmentsView({
         search: search as string || undefined,
         unassignedOnly: unassignedOnly === "true",
         zone: zone as string || undefined,
@@ -4116,7 +4121,7 @@ export async function registerRoutes(
       if (!productVariantId || !warehouseLocationId) {
         return res.status(400).json({ error: "productVariantId and warehouseLocationId are required" });
       }
-      const result = await storage.upsertBinAssignment({
+      const result = await binAssignment.assignVariantToLocation({
         productVariantId,
         warehouseLocationId,
         isPrimary,
@@ -4137,13 +4142,12 @@ export async function registerRoutes(
   app.delete("/api/bin-assignments/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const existing = await storage.getProductLocationById(id);
-      const deleted = await storage.deleteProductLocation(id);
+      const deleted = await binAssignment.unassignVariant(id);
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
 
       // Fire-and-forget: sync pick queue for this SKU
-      if (existing?.sku) {
-        syncPickQueueForSku(existing.sku).catch(() => {});
+      if (deleted.sku) {
+        syncPickQueueForSku(deleted.sku).catch(() => {});
       }
 
       res.status(204).end();
@@ -4160,52 +4164,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "assignments array is required" });
       }
 
-      const results = { created: 0, updated: 0, errors: [] as { row: number; sku: string; error: string }[] };
-
-      for (let i = 0; i < assignments.length; i++) {
-        const { sku, locationCode } = assignments[i];
-        try {
-          if (!sku || !locationCode) {
-            results.errors.push({ row: i + 1, sku: sku || "", error: "Missing sku or locationCode" });
-            continue;
-          }
-
-          // Look up variant by SKU
-          const variant = await storage.getProductVariantBySku(sku.toUpperCase());
-          if (!variant) {
-            results.errors.push({ row: i + 1, sku, error: `Variant not found for SKU: ${sku}` });
-            continue;
-          }
-
-          // Look up warehouse location by code
-          const loc = await storage.getWarehouseLocationByCode(locationCode.toUpperCase());
-          if (!loc) {
-            results.errors.push({ row: i + 1, sku, error: `Location not found: ${locationCode}` });
-            continue;
-          }
-
-          // Check if this variant already has a pick assignment
-          const existingResult = await db.select().from(productLocations)
-            .where(and(
-              eq(productLocations.productVariantId, variant.id),
-              eq(productLocations.locationType, "pick")
-            ));
-
-          await storage.upsertBinAssignment({
-            productVariantId: variant.id,
-            warehouseLocationId: loc.id,
-          });
-
-          if (existingResult.length > 0) {
-            results.updated++;
-          } else {
-            results.created++;
-          }
-        } catch (e: any) {
-          results.errors.push({ row: i + 1, sku: sku || "", error: e.message });
-        }
-      }
-
+      const results = await binAssignment.importAssignments(assignments);
       res.json(results);
     } catch (error: any) {
       console.error("Error importing bin assignments:", error);
@@ -4215,17 +4174,10 @@ export async function registerRoutes(
 
   app.get("/api/bin-assignments/export", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const assignments = await storage.getBinAssignmentsView();
-      const assigned = assignments.filter(a => a.productLocationId !== null);
-
-      const csvHeader = "sku,product_name,variant_name,location_code,zone,is_primary,current_qty\n";
-      const csvRows = assigned.map(a =>
-        `"${a.sku || ""}","${(a.productName || "").replace(/"/g, '""')}","${(a.variantName || "").replace(/"/g, '""')}","${a.assignedLocationCode || ""}","${a.zone || ""}",${a.isPrimary || 0},${a.currentQty || 0}`
-      ).join("\n");
-
+      const csv = await binAssignment.exportAssignments();
       res.setHeader("Content-Type", "text/csv");
       res.setHeader("Content-Disposition", "attachment; filename=bin-assignments.csv");
-      res.send(csvHeader + csvRows);
+      res.send(csv);
     } catch (error: any) {
       console.error("Error exporting bin assignments:", error);
       res.status(500).json({ error: "Failed to export bin assignments" });

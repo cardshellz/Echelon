@@ -75,7 +75,6 @@ export const productLocations = pgTable("product_locations", {
   location: varchar("location", { length: 50 }).notNull(), // Location code (must match a warehouse_locations.code)
   zone: varchar("zone", { length: 10 }).notNull(), // Derived from location for grouping
   warehouseLocationId: integer("warehouse_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }), // FK to warehouse_locations
-  locationType: varchar("location_type", { length: 30 }).notNull().default("pick"), // pick, reserve, receiving, staging
   isPrimary: integer("is_primary").notNull().default(1), // 1 = primary pick location, 0 = secondary/bulk
   status: varchar("status", { length: 20 }).notNull().default("active"), // "active" or "draft"
   imageUrl: text("image_url"),

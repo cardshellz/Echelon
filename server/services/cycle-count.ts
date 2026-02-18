@@ -146,7 +146,7 @@ class CycleCountService {
     if (!item.varianceType) return;
 
     const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
-    if (!loc || loc.locationType !== "pick") return;
+    if (!loc || loc.isPickable !== 1) return;
 
     // EXPECTED_MISSING: old SKU no longer in this bin → remove assignment
     if (item.mismatchType === "expected_missing") {
@@ -173,7 +173,6 @@ class CycleCountService {
         location: loc.code,
         zone: loc.zone || "U",
         warehouseLocationId: item.warehouseLocationId,
-        locationType: loc.locationType,
         isPrimary: 1,
         status: "active",
       });
@@ -527,7 +526,7 @@ class CycleCountService {
     // Only treat different SKUs as mismatch for pick locations.
     // Reserve/staging locations hold changing inventory — SKU differences are normal quantity variances.
     const warehouseLoc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
-    const isPickLocation = warehouseLoc?.locationType === "pick";
+    const isPickLocation = warehouseLoc?.isPickable === 1;
 
     const isSkuMismatch = isPickLocation
       && countedSku && item.expectedSku

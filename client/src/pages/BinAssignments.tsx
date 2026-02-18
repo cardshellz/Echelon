@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,7 +21,6 @@ type BinAssignment = {
   productLocationId: number | null;
   assignedLocationCode: string | null;
   assignedLocationId: number | null;
-  locationType: string | null;
   zone: string | null;
   isPrimary: number | null;
   currentQty: number | null;
@@ -33,16 +32,12 @@ type WarehouseLocation = {
   zone: string | null;
   locationType: string;
   warehouseId: number | null;
+  isPickable: number;
 };
 
 function useDebounce(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
-  useState(() => {
-    const timer = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(timer);
-  });
-  // Simple implementation using useMemo + setTimeout
-  useMemo(() => {
+  useEffect(() => {
     const timer = setTimeout(() => setDebounced(value), delay);
     return () => clearTimeout(timer);
   }, [value, delay]);
@@ -55,7 +50,7 @@ export default function BinAssignments() {
 
   // Filters
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebounce(search, 300);
   const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [zoneFilter, setZoneFilter] = useState("");
 
@@ -67,16 +62,6 @@ export default function BinAssignments() {
   const [editingVariantId, setEditingVariantId] = useState<number | null>(null);
   const [locationSearch, setLocationSearch] = useState("");
   const [locationPopoverOpen, setLocationPopoverOpen] = useState(false);
-
-  // Debounce search
-  useState(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 300);
-    return () => clearTimeout(timer);
-  });
-  useMemo(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 300);
-    return () => clearTimeout(timer);
-  }, [search]);
 
   // Data queries
   const { data: assignments = [], isLoading } = useQuery<BinAssignment[]>({
@@ -107,9 +92,9 @@ export default function BinAssignments() {
     return Array.from(zoneSet).sort();
   }, [locations]);
 
-  // Pick-type locations only for assignment
+  // Pickable locations only for assignment (uses is_pickable flag, not location_type)
   const pickLocations = useMemo(() => {
-    return locations.filter(l => l.locationType === "pick");
+    return locations.filter(l => l.isPickable === 1);
   }, [locations]);
 
   // Mutations

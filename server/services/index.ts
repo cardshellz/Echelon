@@ -45,6 +45,7 @@ import { createOperationsDashboardService } from "./operations-dashboard";
 import { createReceivingService } from "./receiving";
 import { createProductImportService } from "./product-import";
 import { createChannelProductPushService } from "./channel-product-push";
+import { createBinAssignmentService } from "./bin-assignment";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
@@ -87,6 +88,9 @@ export function createServices(db: any) {
   // Channel product push (depends on storage only)
   const channelProductPush = createChannelProductPushService(db);
 
+  // Bin assignment (depends on storage)
+  const binAssignment = createBinAssignmentService(db, storage);
+
   return {
     inventoryCore,
     atp,
@@ -107,6 +111,7 @@ export function createServices(db: any) {
     receiving,
     productImport,
     channelProductPush,
+    binAssignment,
   };
 }
 
@@ -148,3 +153,5 @@ export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams 
 export type { ReceivingService, ReceivingError } from "./receiving";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./channel-product-push";
+export { createBinAssignmentService } from "./bin-assignment";
+export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment";

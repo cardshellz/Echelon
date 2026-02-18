@@ -113,22 +113,6 @@ import {
 import { db } from "./db";
 import { eq, inArray, notInArray, and, or, isNull, isNotNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
 
-export type BinAssignmentRow = {
-  productVariantId: number;
-  productId: number;
-  sku: string | null;
-  productName: string;
-  variantName: string;
-  unitsPerVariant: number;
-  productLocationId: number | null;
-  assignedLocationCode: string | null;
-  assignedLocationId: number | null;
-  locationType: string | null;
-  zone: string | null;
-  isPrimary: number | null;
-  currentQty: number | null;
-};
-
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -147,10 +131,6 @@ export interface IStorage {
   updateProductLocation(id: number, location: UpdateProductLocation): Promise<ProductLocation | undefined>;
   deleteProductLocation(id: number): Promise<boolean>;
   
-  // Bin Assignments (variant-centric)
-  getBinAssignmentsView(filters?: { search?: string; unassignedOnly?: boolean; zone?: string; warehouseId?: number }): Promise<BinAssignmentRow[]>;
-  upsertBinAssignment(params: { productVariantId: number; warehouseLocationId: number; isPrimary?: number }): Promise<ProductLocation>;
-
   // Bulk operations for Shopify sync
   upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string, barcode?: string): Promise<ProductLocation>;
   deleteProductLocationsBySku(skus: string[]): Promise<number>;
@@ -718,7 +698,6 @@ export class DatabaseStorage implements IStorage {
     name: string;
     location: string;
     zone: string;
-    locationType?: string;
     isPrimary?: number;
     imageUrl?: string | null;
     barcode?: string | null;
@@ -739,7 +718,6 @@ export class DatabaseStorage implements IStorage {
           name: data.name || existing.name,
           location: data.location.toUpperCase(),
           zone: data.zone.toUpperCase(),
-          locationType: data.locationType || existing.locationType,
           isPrimary: data.isPrimary ?? 1,
           imageUrl: data.imageUrl || existing.imageUrl,
           barcode: data.barcode || existing.barcode,
@@ -765,7 +743,6 @@ export class DatabaseStorage implements IStorage {
             name: data.name || existing.name,
             location: data.location.toUpperCase(),
             zone: data.zone.toUpperCase(),
-            locationType: data.locationType || existing.locationType,
             isPrimary: data.isPrimary ?? 1,
             imageUrl: data.imageUrl || existing.imageUrl,
             barcode: data.barcode || existing.barcode,
@@ -791,7 +768,6 @@ export class DatabaseStorage implements IStorage {
       name: data.name,
       location: data.location.toUpperCase(),
       zone: data.zone.toUpperCase(),
-      locationType: data.locationType || "pick",
       isPrimary: data.isPrimary ?? 1,
       status: "active",
       imageUrl: data.imageUrl || null,
@@ -898,133 +874,6 @@ export class DatabaseStorage implements IStorage {
   async getAllSkus(): Promise<string[]> {
     const result = await db.select({ sku: productLocations.sku }).from(productLocations);
     return result.map(r => r.sku);
-  }
-
-  // Bin Assignments (variant-centric view)
-  async getBinAssignmentsView(filters?: { search?: string; unassignedOnly?: boolean; zone?: string; warehouseId?: number }): Promise<BinAssignmentRow[]> {
-    const conditions: any[] = [eq(productVariants.isActive, true)];
-
-    if (filters?.zone) {
-      conditions.push(eq(warehouseLocations.zone, filters.zone.toUpperCase()));
-    }
-    if (filters?.warehouseId) {
-      conditions.push(eq(warehouseLocations.warehouseId, filters.warehouseId));
-    }
-
-    const rows = await db.execute<{
-      product_variant_id: number;
-      product_id: number;
-      sku: string | null;
-      product_name: string;
-      variant_name: string;
-      units_per_variant: number;
-      product_location_id: number | null;
-      assigned_location_code: string | null;
-      assigned_location_id: number | null;
-      location_type: string | null;
-      zone: string | null;
-      is_primary: number | null;
-      current_qty: number | null;
-    }>(sql`
-      SELECT
-        pv.id AS product_variant_id,
-        p.id AS product_id,
-        COALESCE(pv.sku, p.sku) AS sku,
-        COALESCE(p.title, p.name) AS product_name,
-        pv.name AS variant_name,
-        pv.units_per_variant,
-        pl.id AS product_location_id,
-        wl.code AS assigned_location_code,
-        wl.id AS assigned_location_id,
-        pl.location_type,
-        wl.zone,
-        pl.is_primary,
-        il.variant_qty AS current_qty
-      FROM product_variants pv
-      JOIN products p ON pv.product_id = p.id
-      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.location_type = 'pick'
-      LEFT JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
-      LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id AND il.warehouse_location_id = wl.id
-      WHERE pv.is_active = true
-      ${filters?.search ? sql`AND (UPPER(COALESCE(pv.sku, p.sku, '')) LIKE ${'%' + filters.search.toUpperCase() + '%'} OR UPPER(COALESCE(p.title, p.name, '')) LIKE ${'%' + filters.search.toUpperCase() + '%'})` : sql``}
-      ${filters?.unassignedOnly ? sql`AND pl.id IS NULL` : sql``}
-      ${filters?.zone ? sql`AND wl.zone = ${filters.zone.toUpperCase()}` : sql``}
-      ${filters?.warehouseId ? sql`AND wl.warehouse_id = ${filters.warehouseId}` : sql``}
-      ORDER BY COALESCE(pv.sku, p.sku) ASC
-    `);
-
-    return rows.rows.map(r => ({
-      productVariantId: r.product_variant_id,
-      productId: r.product_id,
-      sku: r.sku,
-      productName: r.product_name,
-      variantName: r.variant_name,
-      unitsPerVariant: r.units_per_variant,
-      productLocationId: r.product_location_id,
-      assignedLocationCode: r.assigned_location_code,
-      assignedLocationId: r.assigned_location_id,
-      locationType: r.location_type,
-      zone: r.zone,
-      isPrimary: r.is_primary,
-      currentQty: r.current_qty,
-    }));
-  }
-
-  async upsertBinAssignment(params: { productVariantId: number; warehouseLocationId: number; isPrimary?: number }): Promise<ProductLocation> {
-    const variant = await this.getProductVariantById(params.productVariantId);
-    if (!variant) throw new Error(`Variant ${params.productVariantId} not found`);
-
-    const loc = await this.getWarehouseLocationById(params.warehouseLocationId);
-    if (!loc) throw new Error(`Warehouse location ${params.warehouseLocationId} not found`);
-
-    const product = await this.getProductById(variant.productId);
-
-    // Check for existing pick assignment for this variant
-    const existing = await db.select().from(productLocations)
-      .where(and(
-        eq(productLocations.productVariantId, params.productVariantId),
-        eq(productLocations.locationType, "pick")
-      ));
-
-    const isPrimary = params.isPrimary ?? 1;
-
-    if (existing.length > 0) {
-      // Update existing assignment to new location
-      const result = await db.update(productLocations)
-        .set({
-          warehouseLocationId: params.warehouseLocationId,
-          location: loc.code,
-          zone: loc.zone || "U",
-          isPrimary,
-          updatedAt: new Date(),
-        })
-        .where(eq(productLocations.id, existing[0].id))
-        .returning();
-      return result[0];
-    }
-
-    // Clear isPrimary on other locations for same product if setting this as primary
-    if (isPrimary === 1) {
-      await db.update(productLocations)
-        .set({ isPrimary: 0, updatedAt: new Date() })
-        .where(eq(productLocations.productId, variant.productId));
-    }
-
-    // Insert new assignment
-    const result = await db.insert(productLocations).values({
-      productId: variant.productId,
-      productVariantId: params.productVariantId,
-      sku: (variant.sku || product?.sku || "").toUpperCase() || null,
-      name: product?.name || variant.name,
-      location: loc.code,
-      zone: loc.zone || "U",
-      warehouseLocationId: params.warehouseLocationId,
-      locationType: "pick",
-      isPrimary,
-      status: "active",
-      barcode: variant.barcode || null,
-    }).returning();
-    return result[0];
   }
 
   // Order methods

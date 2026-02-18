@@ -136,12 +136,13 @@ class ReplenishmentService {
       .where(inArray(inventoryLevels.warehouseLocationId, pickLocationIds));
 
     // Also load product_locations to find assigned bins with no inventory level
+    // Filter by warehouse_location_id being in our pick locations (source of truth)
     const assignedBins = await this.db
       .select()
       .from(productLocations)
       .where(
         and(
-          eq(productLocations.locationType, "pick"),
+          inArray(productLocations.warehouseLocationId, pickLocationIds),
           eq(productLocations.status, "active"),
         ),
       );
@@ -1136,13 +1137,13 @@ class ReplenishmentService {
     }
 
     // Also check product_locations for assigned bins with no inventory level
+    // Use warehouse_locations (via locationMap) as source of truth for pickable status
     for (const pl of allProductLocs) {
-      if ((pl as any).locationType !== "pick" || (pl as any).status !== "active") continue;
+      if ((pl as any).status !== "active") continue;
       if (!(pl as any).warehouseLocationId || !(pl as any).productId) continue;
-      if (warehouseId != null) {
-        const loc = locationMap.get((pl as any).warehouseLocationId);
-        if (!loc || loc.warehouseId !== warehouseId) continue;
-      }
+      const loc = locationMap.get((pl as any).warehouseLocationId);
+      if (!loc || loc.isPickable !== 1) continue;
+      if (warehouseId != null && loc.warehouseId !== warehouseId) continue;
 
       const productId = (pl as any).productId;
       if (!productId) continue;
