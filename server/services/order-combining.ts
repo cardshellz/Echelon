@@ -370,7 +370,29 @@ class OrderCombiningService {
     });
 
     const parentOrder = ordersToGroup[0];
-    const groupCode = `G-${parentOrder.orderNumber.replace("#", "")}`;
+    let groupCode = `G-${parentOrder.orderNumber.replace("#", "")}`;
+
+    // Clean up stale group with same code if no orders reference it
+    const staleGroup = await this.db
+      .select()
+      .from(combinedOrderGroups)
+      .where(eq(combinedOrderGroups.groupCode, groupCode))
+      .limit(1);
+    if (staleGroup.length > 0) {
+      const refs = await this.db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(eq(orders.combinedGroupId, staleGroup[0].id))
+        .limit(1);
+      if (refs.length === 0) {
+        await this.db
+          .delete(combinedOrderGroups)
+          .where(eq(combinedOrderGroups.id, staleGroup[0].id));
+      } else {
+        // Group is still referenced — use a unique suffix
+        groupCode = `G-${parentOrder.orderNumber.replace("#", "")}-${Date.now().toString(36)}`;
+      }
+    }
 
     const [group] = await this.db
       .insert(combinedOrderGroups)
@@ -482,7 +504,28 @@ class OrderCombiningService {
         return dateA - dateB;
       });
       const parentOrder = grpOrders[0];
-      const groupCode = `G-${(parentOrder.order_number || "").replace("#", "")}`;
+      let groupCode = `G-${(parentOrder.order_number || "").replace("#", "")}`;
+
+      // Clean up stale group with same code if no orders reference it
+      const staleGroup = await this.db
+        .select()
+        .from(combinedOrderGroups)
+        .where(eq(combinedOrderGroups.groupCode, groupCode))
+        .limit(1);
+      if (staleGroup.length > 0) {
+        const refs = await this.db
+          .select({ id: orders.id })
+          .from(orders)
+          .where(eq(orders.combinedGroupId, staleGroup[0].id))
+          .limit(1);
+        if (refs.length === 0) {
+          await this.db
+            .delete(combinedOrderGroups)
+            .where(eq(combinedOrderGroups.id, staleGroup[0].id));
+        } else {
+          groupCode = `G-${(parentOrder.order_number || "").replace("#", "")}-${Date.now().toString(36)}`;
+        }
+      }
 
       const [group] = await this.db
         .insert(combinedOrderGroups)
