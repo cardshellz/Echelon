@@ -202,10 +202,9 @@ function startChannelSyncScheduler(services: ReturnType<typeof createServices>, 
 
       log(`[Channel Sync Scheduler] Starting with ${intervalMinutes}-minute interval`, "channel-sync");
 
-      // First run after 30-second startup delay
-      setTimeout(() => runChannelSync(), 30_000);
-
-      // Then run on the configured interval
+      // Skip startup sync — deploying triggers a full inventory push to Shopify which
+      // floods downstream webhook receivers (shellz-club-app) with fulfillment events.
+      // The scheduled interval handles catch-up within minutes anyway.
       intervalHandle = setInterval(() => runChannelSync(), intervalMinutes * 60 * 1000);
     } catch (err: any) {
       console.warn("[Channel Sync Scheduler] Failed to start:", err?.message);
