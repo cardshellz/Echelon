@@ -1188,54 +1188,56 @@ export default function Orders() {
                               : "hover:bg-muted/50"
                           )}
                         >
-                          <div
-                            className="flex items-center justify-between p-3 cursor-pointer"
-                            onClick={() => {
-                              if (isSelected) {
-                                if (selectedOrderIds.length > 2) {
-                                  setSelectedOrderIds(selectedOrderIds.filter(id => id !== order.id));
-                                }
-                              } else {
-                                setSelectedOrderIds([...selectedOrderIds, order.id]);
-                              }
-                            }}
-                            data-testid={`checkbox-order-${order.id}`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className={cn(
-                                "h-5 w-5 rounded border-2 flex items-center justify-center shrink-0",
-                                isSelected
-                                  ? "bg-amber-500 border-amber-500 text-white"
-                                  : "border-gray-300"
-                              )}>
-                                {isSelected && <Check className="h-3 w-3" />}
-                              </div>
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium">{order.orderNumber}</span>
-                                  {order.combinedGroupId && (
-                                    <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 border-indigo-300 text-indigo-600">
-                                      <Merge className="h-2.5 w-2.5 mr-0.5" />
-                                      combined
-                                    </Badge>
+                          <CollapsibleTrigger asChild>
+                            <div
+                              className="flex items-center justify-between p-3 cursor-pointer"
+                              data-testid={`row-order-${order.id}`}
+                            >
+                              <div className="flex items-center gap-3">
+                                <div
+                                  className={cn(
+                                    "h-5 w-5 rounded border-2 flex items-center justify-center shrink-0",
+                                    isSelected
+                                      ? "bg-amber-500 border-amber-500 text-white"
+                                      : "border-gray-300"
                                   )}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (isSelected) {
+                                      if (selectedOrderIds.length > 2) {
+                                        setSelectedOrderIds(selectedOrderIds.filter(id => id !== order.id));
+                                      }
+                                    } else {
+                                      setSelectedOrderIds([...selectedOrderIds, order.id]);
+                                    }
+                                  }}
+                                  data-testid={`checkbox-order-${order.id}`}
+                                >
+                                  {isSelected && <Check className="h-3 w-3" />}
                                 </div>
-                                <div className="text-xs text-muted-foreground">
-                                  {order.itemCount} items, {order.unitCount} units
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-medium">{order.orderNumber}</span>
+                                    {order.combinedGroupId && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 border-indigo-300 text-indigo-600">
+                                        <Merge className="h-2.5 w-2.5 mr-0.5" />
+                                        combined
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <div className="text-xs text-muted-foreground">
+                                    {order.itemCount} items, {order.unitCount} units
+                                  </div>
                                 </div>
                               </div>
+                              <div className="flex items-center gap-2">
+                                {order.totalAmount && (
+                                  <span className="text-sm font-medium">${order.totalAmount}</span>
+                                )}
+                                <ChevronRight className={cn("h-4 w-4 transition-transform text-muted-foreground", isExpanded && "rotate-90")} />
+                              </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                              {order.totalAmount && (
-                                <span className="text-sm font-medium">${order.totalAmount}</span>
-                              )}
-                              <CollapsibleTrigger asChild onClick={(e) => e.stopPropagation()}>
-                                <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
-                                  <ChevronRight className={cn("h-4 w-4 transition-transform", isExpanded && "rotate-90")} />
-                                </Button>
-                              </CollapsibleTrigger>
-                            </div>
-                          </div>
+                          </CollapsibleTrigger>
                           <CollapsibleContent>
                             <CombineOrderItems orderId={order.id} />
                           </CollapsibleContent>
