@@ -332,13 +332,13 @@ export default function BinAssignments() {
           <TableHeader>
             <TableRow>
               {([
-                ["sku", "SKU", "w-[140px]", ""],
-                ["productName", "Product", "", ""],
-                ["variantName", "Variant", "", ""],
-                ["assignedLocationCode", "Pick Location", "w-[110px]", ""],
+                ["sku", "SKU", "w-[130px]", ""],
+                ["productName", "Product", "w-[30%]", ""],
+                ["variantName", "Variant", "w-[20%]", ""],
+                ["assignedLocationCode", "Location", "w-[90px]", ""],
                 ["zone", "Zone", "w-[60px]", ""],
-                ["isPrimary", "Primary", "w-[80px]", "text-center"],
-                ["currentQty", "Qty", "w-[60px]", "text-right"],
+                ["isPrimary", "Primary", "w-[70px]", "text-center"],
+                ["currentQty", "Qty", "w-[55px]", "text-right"],
               ] as [SortKey, string, string, string][]).map(([key, label, width, align]) => (
                 <TableHead key={key} className={cn(width, "cursor-pointer select-none", align)} onClick={() => toggleSort(key)}>
                   <span className="inline-flex items-center gap-1">
