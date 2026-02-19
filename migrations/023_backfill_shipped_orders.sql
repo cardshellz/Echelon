@@ -13,8 +13,7 @@
 BEGIN;
 
 UPDATE orders o
-SET warehouse_status = 'shipped',
-    updated_at = NOW()
+SET warehouse_status = 'shipped'
 FROM shopify_orders so
 WHERE o.source_table_id = so.id::text
   AND so.fulfillment_status = 'fulfilled'
