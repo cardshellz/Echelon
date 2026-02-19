@@ -1630,25 +1630,46 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
               ) : (
                 <ScrollArea className="h-48 border rounded-md mt-2">
                   <div className="p-2 space-y-2">
-                    {inventoryInBin.map((inv) => (
-                      <div key={inv.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
-                        <div className="flex items-center gap-3">
-                          {inv.imageUrl && (
-                            <img src={inv.imageUrl} alt="" className="w-10 h-10 object-cover rounded" />
-                          )}
-                          <div>
-                            <div className="font-medium text-xs md:text-sm">{inv.sku || inv.variantName || "Unknown"}</div>
-                            <div className="text-xs text-muted-foreground">
-                              {inv.productTitle && <span className="truncate max-w-[200px] block">{inv.productTitle}</span>}
+                    {inventoryInBin.map((inv) => {
+                      const isAssigned = productsInBin.some(p => p.productId === inv.productId);
+                      return (
+                        <div key={inv.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
+                          <div className="flex items-center gap-3">
+                            {inv.imageUrl && (
+                              <img src={inv.imageUrl} alt="" className="w-10 h-10 object-cover rounded" />
+                            )}
+                            <div>
+                              <div className="font-medium text-xs md:text-sm">{inv.sku || inv.variantName || "Unknown"}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {inv.productTitle && <span className="truncate max-w-[200px] block">{inv.productTitle}</span>}
+                              </div>
                             </div>
                           </div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-right">
+                              <div className="font-bold text-sm">{inv.qty}</div>
+                              <div className="text-xs text-muted-foreground">on hand</div>
+                            </div>
+                            {canEdit && !isAssigned && inv.productId && assigningToLocation && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-8 text-xs shrink-0"
+                                onClick={() => assignProductMutation.mutate({
+                                  locationId: assigningToLocation.id,
+                                  productId: inv.productId!,
+                                })}
+                                disabled={assignProductMutation.isPending}
+                                title="Assign this SKU to this bin"
+                              >
+                                <Plus className="h-3 w-3 mr-1" />
+                                Assign
+                              </Button>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-right">
-                          <div className="font-bold text-sm">{inv.qty}</div>
-                          <div className="text-xs text-muted-foreground">on hand</div>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </ScrollArea>
               )}

@@ -586,15 +586,15 @@ class CycleCountService {
       && countedSku.toUpperCase() !== item.expectedSku.toUpperCase();
 
     if (isSkuMismatch) {
-      // SKU MISMATCH: create two linked items
-      varianceType = "sku_mismatch";
+      // SKU MISMATCH: create two linked items with "unexpected_sku" variance type
+      varianceType = "unexpected_sku";
 
       // Mark original as expected_missing
       await this.storage.updateCycleCountItem(itemId, {
         countedSku: null,
         countedQty: 0,
         varianceQty: -(item.expectedQty ?? 0),
-        varianceType: "quantity_under",
+        varianceType: "unexpected_sku",
         varianceNotes: `Expected ${item.expectedSku} not found. Different SKU (${countedSku}) was in bin. ${notes || ''}`.trim(),
         status: "variance",
         requiresApproval: 1,
@@ -618,7 +618,7 @@ class CycleCountService {
         ) VALUES (
           ${item.cycleCountId}, ${item.warehouseLocationId}, ${foundProductVariantId}, ${foundProductId},
           NULL, 0, ${countedSku}, ${countedQty},
-          ${countedQty}, 'unexpected_item', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
+          ${countedQty}, 'unexpected_sku', ${`Found in bin where ${item.expectedSku} was expected. ${notes || ''}`.trim()}, 'variance',
           1, 'unexpected_found', ${itemId},
           ${userId}, NOW(), NOW()
         ) RETURNING id
