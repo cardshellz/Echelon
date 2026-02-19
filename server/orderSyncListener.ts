@@ -412,6 +412,82 @@ export async function syncNewOrders() {
   }
 }
 
+// Deduct inventory for items that were shipped externally (e.g. ShipStation)
+// without going through the Echelon pick flow. Only deducts the delta
+// (quantity - picked_quantity) so partially-picked items aren't double-deducted.
+async function deductInventoryForExternalShipment(orderId: number): Promise<void> {
+  const items = await db.execute<{
+    id: number;
+    sku: string;
+    quantity: number;
+    picked_quantity: number;
+    location: string;
+  }>(sql`
+    SELECT id, sku, quantity, picked_quantity, location
+    FROM order_items
+    WHERE order_id = ${orderId}
+      AND quantity > picked_quantity
+      AND sku IS NOT NULL
+  `);
+
+  if (items.rows.length === 0) return;
+
+  const allLocations = await storage.getAllWarehouseLocations();
+  const priorityOrder: Record<string, number> = { pick: 0, pallet: 1, reserve: 2, receiving: 3 };
+
+  for (const item of items.rows) {
+    const remainingQty = item.quantity - item.picked_quantity;
+    if (remainingQty <= 0) continue;
+
+    const variant = await storage.getProductVariantBySku(item.sku);
+    if (!variant) continue; // non-inventory item
+
+    const levels = await storage.getInventoryLevelsByProductVariantId(variant.id);
+
+    // Prefer assigned bin if it has stock, else auto-select by type priority
+    let pickLocationId: number | null = null;
+    if (item.location && item.location !== "UNASSIGNED") {
+      const assignedLoc = allLocations.find(l => l.code === item.location);
+      if (assignedLoc) {
+        const hasStock = levels.some((l: any) => l.warehouseLocationId === assignedLoc.id && l.variantQty >= remainingQty);
+        if (hasStock) pickLocationId = assignedLoc.id;
+      }
+    }
+    if (!pickLocationId) {
+      const sorted = levels
+        .filter((l: any) => l.variantQty >= remainingQty)
+        .sort((a: any, b: any) => {
+          const la = allLocations.find(l => l.id === a.warehouseLocationId);
+          const lb = allLocations.find(l => l.id === b.warehouseLocationId);
+          return (priorityOrder[la?.locationType as string] ?? 99) - (priorityOrder[lb?.locationType as string] ?? 99);
+        });
+      pickLocationId = sorted[0]?.warehouseLocationId || null;
+    }
+
+    if (!pickLocationId) {
+      console.warn(`[ORDER SYNC] No stock location for ${item.sku} (order ${orderId}), skipping deduction`);
+      continue;
+    }
+
+    try {
+      await inventoryCore.pickItem({
+        productVariantId: variant.id,
+        warehouseLocationId: pickLocationId,
+        qty: remainingQty,
+        orderId,
+        orderItemId: item.id,
+        userId: "system",
+      });
+      await db.execute(sql`
+        UPDATE order_items SET picked_quantity = quantity WHERE id = ${item.id}
+      `);
+      console.log(`[ORDER SYNC] Deducted ${remainingQty}x ${item.sku} from location ${pickLocationId} for order ${orderId}`);
+    } catch (err: any) {
+      console.warn(`[ORDER SYNC] Inventory deduction failed for ${item.sku} (order ${orderId}): ${err.message}`);
+    }
+  }
+}
+
 async function syncOrderUpdate(shopifyOrderId: string) {
   try {
     console.log(`[ORDER SYNC] Processing update for shopify order: ${shopifyOrderId}`);
@@ -487,6 +563,8 @@ async function syncOrderUpdate(shopifyOrderId: string) {
         UPDATE orders SET warehouse_status = 'shipped'
         WHERE id = ${orderId}
       `);
+      // Deduct inventory for anything not picked through the normal pick flow
+      await deductInventoryForExternalShipment(orderId);
       await db.execute(sql`
         UPDATE order_items SET status = 'completed'
         WHERE order_id = ${orderId}
