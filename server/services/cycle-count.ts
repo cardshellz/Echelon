@@ -444,13 +444,15 @@ class CycleCountService {
         variant_qty: number;
         product_id: number | null;
         sku: string | null;
+        is_assigned: number;
       }>(sql`
         -- Assigned bins: always include even if qty=0 (verify the assignment)
         SELECT
           pv.id as product_variant_id,
           COALESCE(il.variant_qty, 0) as variant_qty,
           pv.product_id as product_id,
-          pv.sku as sku
+          pv.sku as sku,
+          1 as is_assigned
         FROM product_locations pl
         JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
         LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
@@ -459,12 +461,13 @@ class CycleCountService {
 
         UNION
 
-        -- Unassigned bins with stock > 0: include (discovered stock)
+        -- Unassigned bins with stock > 0: stray inventory — flag for investigation
         SELECT
           il.product_variant_id,
           il.variant_qty,
           p.id as product_id,
-          COALESCE(pv.sku, p.sku) as sku
+          COALESCE(pv.sku, p.sku) as sku,
+          0 as is_assigned
         FROM inventory_levels il
         LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
@@ -480,15 +483,33 @@ class CycleCountService {
 
       if (result.rows.length > 0) {
         for (const row of result.rows) {
-          items.push({
-            cycleCountId: id,
-            warehouseLocationId: location.id,
-            productVariantId: row.product_variant_id,
-            productId: row.product_id,
-            expectedSku: row.sku,
-            expectedQty: row.variant_qty,
-            status: "pending",
-          });
+          if (row.is_assigned) {
+            // Assigned bin: expected = assignment, count against it normally
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
+              status: "pending",
+            });
+          } else {
+            // Unassigned bin with stray stock: expected = empty, pre-flag for investigation
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: null,
+              productId: null,
+              expectedSku: null,
+              expectedQty: 0,
+              mismatchType: "unexpected_found",
+              varianceType: "unexpected_item",
+              requiresApproval: 1,
+              varianceNotes: `No bin assignment. System shows: ${row.sku ?? "unknown SKU"} qty ${row.variant_qty}`,
+              status: "pending",
+            });
+          }
         }
       } else {
         // Empty bin — still create item to verify it's empty
