@@ -123,19 +123,69 @@ async function forceReleaseOrder(orderId: number, resetProgress: boolean = false
   return res.json();
 }
 
+type PickInventoryContext = {
+  deducted: boolean;
+  systemQtyAfter: number;
+  locationId: number | null;
+  locationCode: string | null;
+  sku: string;
+  binCountNeeded: boolean;
+  replen: {
+    triggered: boolean;
+    taskId: number | null;
+    taskStatus: string | null;
+    autoExecuted: boolean;
+    stockout: boolean;
+  };
+};
+
+type PickResponse = {
+  item: OrderItem;
+  inventory: PickInventoryContext;
+};
+
+type BinCountResponse = {
+  success: boolean;
+  systemQtyBefore: number;
+  actualBinQty: number;
+  adjustment: number;
+  replenTriggered: boolean;
+  replenTaskStatus: string | null;
+};
+
 async function updateOrderItem(
-  itemId: number, 
-  status: ItemStatus, 
-  pickedQuantity?: number, 
+  itemId: number,
+  status: ItemStatus,
+  pickedQuantity?: number,
   shortReason?: string,
   pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short"
-): Promise<OrderItem> {
+): Promise<PickResponse> {
   const res = await fetch(`/api/picking/items/${itemId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, pickedQuantity, shortReason, pickMethod }),
   });
   if (!res.ok) throw new Error("Failed to update item");
+  return res.json();
+}
+
+async function confirmBinCount(sku: string, locationId: number, actualQty: number): Promise<BinCountResponse> {
+  const res = await fetch("/api/picking/case-break/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sku, warehouseLocationId: locationId, actualBinQty: actualQty }),
+  });
+  if (!res.ok) throw new Error("Failed to confirm bin count");
+  return res.json();
+}
+
+async function skipBinCount(sku: string, locationId: number, actualQty: number): Promise<BinCountResponse> {
+  const res = await fetch("/api/picking/case-break/skip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sku, warehouseLocationId: locationId, actualBinQty: actualQty }),
+  });
+  if (!res.ok) throw new Error("Failed to skip bin count");
   return res.json();
 }
 
@@ -798,26 +848,87 @@ export default function Picking() {
     },
   });
   
+  // Bin count dialog state
+  const [binCountOpen, setBinCountOpen] = useState(false);
+  const [binCountContext, setBinCountContext] = useState<PickInventoryContext | null>(null);
+  const [binCountQty, setBinCountQty] = useState("");
+
   // Mutation for updating items
   const updateItemMutation = useMutation({
-    mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: { 
-      itemId: number; 
-      status: ItemStatus; 
-      pickedQuantity?: number; 
+    mutationFn: ({ itemId, status, pickedQuantity, shortReason, pickMethod }: {
+      itemId: number;
+      status: ItemStatus;
+      pickedQuantity?: number;
       shortReason?: string;
       pickMethod?: "scan" | "manual" | "pick_all" | "button" | "short";
     }) => updateOrderItem(itemId, status, pickedQuantity, shortReason, pickMethod),
-    onSuccess: (updatedItem) => {
+    onSuccess: (data: PickResponse) => {
+      const { item: updatedItem, inventory } = data;
       queryClient.setQueryData<OrderWithItems[]>(["picking-queue"], (oldData) => {
         if (!oldData) return oldData;
         return oldData.map(order => ({
           ...order,
-          items: order.items.map(item => 
+          items: order.items.map(item =>
             item.id === updatedItem.id ? { ...item, ...updatedItem } : item
           )
         }));
       });
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+
+      // Show bin count prompt when needed
+      if (inventory?.binCountNeeded) {
+        setBinCountContext(inventory);
+        setBinCountQty("");
+        setBinCountOpen(true);
+      }
+    },
+  });
+
+  // Mutation for confirming bin count
+  const binCountMutation = useMutation({
+    mutationFn: ({ sku, locationId, actualQty }: { sku: string; locationId: number; actualQty: number }) =>
+      confirmBinCount(sku, locationId, actualQty),
+    onSuccess: (result: BinCountResponse) => {
+      setBinCountOpen(false);
+      setBinCountContext(null);
+      if (result.adjustment !== 0) {
+        toast({
+          title: "Bin count adjusted",
+          description: `Adjusted by ${result.adjustment > 0 ? "+" : ""}${result.adjustment} (was ${result.systemQtyBefore}, now ${result.actualBinQty})`,
+        });
+      } else {
+        toast({ title: "Bin count verified", description: "Count matches system" });
+      }
+      if (result.replenTriggered) {
+        toast({
+          title: result.replenTaskStatus === "blocked" ? "Stockout — no reserve" : "Replen triggered",
+          description: result.replenTaskStatus === "blocked"
+            ? "No reserve stock available for replenishment"
+            : "Replenishment task created for this bin",
+          variant: result.replenTaskStatus === "blocked" ? "destructive" : "default",
+        });
+      }
+      playSound("success");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Bin count failed", description: error.message, variant: "destructive" });
+      playSound("error");
+    },
+  });
+
+  // Mutation for skipping bin count / replen
+  const skipBinCountMutation = useMutation({
+    mutationFn: ({ sku, locationId, actualQty }: { sku: string; locationId: number; actualQty: number }) =>
+      skipBinCount(sku, locationId, actualQty),
+    onSuccess: () => {
+      setBinCountOpen(false);
+      setBinCountContext(null);
+      toast({ title: "Replen skipped", description: "Pending replen tasks cancelled" });
+      playSound("success");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Skip failed", description: error.message, variant: "destructive" });
+      playSound("error");
     },
   });
   
@@ -4127,6 +4238,125 @@ export default function Picking() {
         </DialogContent>
       </Dialog>
       
+      {/* Bin Count Dialog — shown after pick when inventory needs verification */}
+      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { setBinCountOpen(false); setBinCountContext(null); } }}>
+        <DialogContent className="w-[95vw] max-w-sm p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2">
+              {binCountContext && !binCountContext.deducted ? (
+                <>
+                  <AlertTriangle className="h-5 w-5 text-amber-600" />
+                  Inventory Discrepancy
+                </>
+              ) : binCountContext?.replen.stockout ? (
+                <>
+                  <AlertTriangle className="h-5 w-5 text-red-600" />
+                  Out of Stock
+                </>
+              ) : (
+                <>
+                  <PackageCheck className="h-5 w-5 text-blue-600" />
+                  Bin Count
+                </>
+              )}
+            </DialogTitle>
+            {binCountContext && (
+              <DialogDescription className="text-center space-y-1">
+                <div>
+                  <span className="font-mono font-medium">{binCountContext.sku}</span>
+                  {binCountContext.locationCode && (
+                    <span className="ml-2 text-muted-foreground">@ {binCountContext.locationCode}</span>
+                  )}
+                </div>
+                <div className="text-xs">
+                  System shows: <span className="font-medium">{binCountContext.systemQtyAfter}</span>
+                </div>
+                {!binCountContext.deducted && (
+                  <div className="text-xs text-amber-600 font-medium">
+                    System inventory may be out of sync
+                  </div>
+                )}
+                {binCountContext.replen.autoExecuted && (
+                  <div className="text-xs text-blue-600 font-medium">
+                    Replenished from reserve
+                  </div>
+                )}
+                {binCountContext.replen.stockout && (
+                  <div className="text-xs text-red-600 font-medium">
+                    No reserve stock available
+                  </div>
+                )}
+              </DialogDescription>
+            )}
+          </DialogHeader>
+
+          <div className="py-4 space-y-3">
+            <label className="text-sm font-medium">How many are in the bin?</label>
+            <Input
+              type="number"
+              inputMode="numeric"
+              value={binCountQty}
+              onChange={(e) => setBinCountQty(e.target.value)}
+              min={0}
+              className="w-full h-14 text-xl text-center font-bold"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && binCountQty !== "" && binCountContext?.locationId) {
+                  binCountMutation.mutate({
+                    sku: binCountContext.sku,
+                    locationId: binCountContext.locationId,
+                    actualQty: parseInt(binCountQty),
+                  });
+                }
+              }}
+            />
+          </div>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-col">
+            <Button
+              className="w-full h-14 min-h-[44px] text-lg"
+              onClick={() => {
+                if (binCountContext?.locationId && binCountQty !== "") {
+                  binCountMutation.mutate({
+                    sku: binCountContext.sku,
+                    locationId: binCountContext.locationId,
+                    actualQty: parseInt(binCountQty),
+                  });
+                }
+              }}
+              disabled={binCountQty === "" || !binCountContext?.locationId || binCountMutation.isPending}
+            >
+              {binCountMutation.isPending ? "Saving..." : "Confirm Count"}
+            </Button>
+            {binCountContext?.replen.triggered && !binCountContext.replen.stockout && (
+              <Button
+                variant="outline"
+                className="w-full h-12 min-h-[44px] text-amber-600 border-amber-300"
+                onClick={() => {
+                  if (binCountContext?.locationId && binCountQty !== "") {
+                    skipBinCountMutation.mutate({
+                      sku: binCountContext.sku,
+                      locationId: binCountContext.locationId,
+                      actualQty: parseInt(binCountQty),
+                    });
+                  }
+                }}
+                disabled={binCountQty === "" || !binCountContext?.locationId || skipBinCountMutation.isPending}
+              >
+                {skipBinCountMutation.isPending ? "Skipping..." : "Skip Replen"}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              className="w-full h-10 min-h-[44px] text-xs text-muted-foreground"
+              onClick={() => { setBinCountOpen(false); setBinCountContext(null); }}
+            >
+              Dismiss
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* CSS for shake animation */}
       <style>{`
         @keyframes shake {

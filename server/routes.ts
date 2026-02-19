@@ -1056,7 +1056,7 @@ export async function registerRoutes(
           : ["invalid_status", "invalid_quantity"].includes(result.error) ? 400 : 409;
         return res.status(code).json({ error: result.error, message: result.message });
       }
-      res.json(result.item);
+      res.json({ item: result.item, inventory: result.inventory });
     } catch (error) {
       console.error("Error updating item:", error);
       res.status(500).json({ error: "Failed to update item" });

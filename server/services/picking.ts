@@ -30,6 +30,7 @@ type DrizzleDb = {
 
 type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
+  getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
   upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
   adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
   logTransaction: (txn: any) => Promise<void>;
@@ -78,8 +79,24 @@ type Storage = {
 // Result types
 // ---------------------------------------------------------------------------
 
+export type PickInventoryContext = {
+  deducted: boolean;
+  systemQtyAfter: number;
+  locationId: number | null;
+  locationCode: string | null;
+  sku: string;
+  binCountNeeded: boolean;
+  replen: {
+    triggered: boolean;
+    taskId: number | null;
+    taskStatus: string | null;
+    autoExecuted: boolean;
+    stockout: boolean;
+  };
+};
+
 export type PickItemResult =
-  | { success: true; item: OrderItem; inventoryDeducted: boolean; replenTriggered: boolean }
+  | { success: true; item: OrderItem; inventory: PickInventoryContext }
   | { success: false; error: string; message: string };
 
 export type CaseBreakResult =
@@ -91,6 +108,8 @@ export type BinCountResult = {
   systemQtyBefore: number;
   actualBinQty: number;
   adjustment: number;
+  replenTriggered: boolean;
+  replenTaskStatus: string | null;
 };
 
 export type PickQueueOrder = any; // Pass-through type from storage
@@ -211,35 +230,91 @@ class PickingService {
       pickMethod: pickMethod || "manual",
     }).catch((err: any) => console.warn("[PickingLog] Failed to log item action:", err.message));
 
-    // If item was just completed, deduct inventory
-    let inventoryDeducted = false;
-    let replenTriggered = false;
+    // Build inventory context for picker UI
+    const inventoryCtx: PickInventoryContext = {
+      deducted: false,
+      systemQtyAfter: 0,
+      locationId: null,
+      locationCode: null,
+      sku: item.sku,
+      binCountNeeded: false,
+      replen: {
+        triggered: false,
+        taskId: null,
+        taskStatus: null,
+        autoExecuted: false,
+        stockout: false,
+      },
+    };
 
+    // If item was just completed, deduct inventory
     if (status === "completed" && beforeItem.status !== "completed") {
       const deductResult = await this._deductInventory(item, beforeItem, {
         warehouseLocationId,
         userId,
       });
 
-      if (!deductResult.success) {
-        // Revert item status
-        try {
-          await this.storage.updateOrderItemStatus(itemId, beforeItem.status as ItemStatus, beforeItem.pickedQuantity, undefined);
-        } catch (revertErr) {
-          console.error(`[Pick] Failed to revert item ${itemId} status after inventory failure:`, revertErr);
-        }
-        return { success: false, error: deductResult.error, message: deductResult.message };
-      }
+      if (deductResult.success && !deductResult.noVariant) {
+        // Deduction succeeded — check replen
+        inventoryCtx.deducted = true;
+        inventoryCtx.systemQtyAfter = deductResult.systemQtyAfter;
+        inventoryCtx.locationId = deductResult.locationId;
+        inventoryCtx.locationCode = deductResult.locationCode;
 
-      inventoryDeducted = true;
-      replenTriggered = deductResult.replenTriggered;
+        // Await replen check (need result for picker UI — no longer fire-and-forget)
+        const replenTask = await this.replenishment
+          .checkAndTriggerAfterPick(deductResult.productVariantId, deductResult.locationId)
+          .catch((err: any) => { console.warn("[Replen] trigger failed:", err.message); return null; });
+
+        if (replenTask) {
+          inventoryCtx.replen.triggered = true;
+          inventoryCtx.replen.taskId = replenTask.id;
+          inventoryCtx.replen.taskStatus = replenTask.status;
+          inventoryCtx.replen.autoExecuted = replenTask.status === "completed";
+          inventoryCtx.replen.stockout = replenTask.status === "blocked";
+          inventoryCtx.binCountNeeded = true;
+        }
+
+      } else if (!deductResult.success) {
+        // Deduction FAILED — system inventory is wrong.
+        // DO NOT revert the pick. Item stays completed.
+        inventoryCtx.deducted = false;
+        inventoryCtx.systemQtyAfter = deductResult.systemQty;
+        inventoryCtx.locationId = deductResult.locationId;
+        inventoryCtx.locationCode = deductResult.locationCode;
+        inventoryCtx.binCountNeeded = true;
+
+        // Check if reserve has stock (for stockout indicator)
+        const hasReserve = await this._hasReserveStock(deductResult.productVariantId);
+        inventoryCtx.replen.stockout = !hasReserve;
+
+        // Log discrepancy to picking_logs (fire-and-forget)
+        this.storage.createPickingLog({
+          actionType: "inventory_discrepancy",
+          pickerId: pickerId || undefined,
+          pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+          orderId: item.orderId,
+          orderNumber: order?.orderNumber,
+          orderItemId: item.id,
+          sku: item.sku,
+          itemName: item.name,
+          locationCode: inventoryCtx.locationCode || item.location,
+          qtyRequested: item.pickedQuantity || item.quantity,
+          qtyBefore: deductResult.systemQty,
+          qtyAfter: deductResult.systemQty,
+          reason: deductResult.message,
+          deviceType: deviceType || "desktop",
+          sessionId,
+        }).catch((err: any) => console.warn("[PickingLog] discrepancy log failed:", err.message));
+      }
+      // else: noVariant = true (non-inventory item) — no deduction needed, inventoryCtx stays default
     }
 
-    // Update order progress with configured post-pick status
+    // ALWAYS update order progress (regardless of deduction result)
     const settings = await this.getPickSettings();
     await this.storage.updateOrderProgress(item.orderId, settings.postPickStatus);
 
-    return { success: true, item, inventoryDeducted, replenTriggered };
+    return { success: true, item, inventory: inventoryCtx };
   }
 
   /** Internal: resolve pick location and deduct inventory via inventoryCore. */
@@ -247,12 +322,16 @@ class PickingService {
     item: OrderItem,
     beforeItem: OrderItem,
     opts: { warehouseLocationId?: number; userId?: string },
-  ): Promise<{ success: true; replenTriggered: boolean } | { success: false; error: string; message: string }> {
+  ): Promise<
+    | { success: true; noVariant?: undefined; productVariantId: number; locationId: number; locationCode: string; systemQtyAfter: number }
+    | { success: false; error: string; message: string; productVariantId: number; locationId: number | null; locationCode: string | null; systemQty: number }
+    | { success: true; noVariant: true; productVariantId: 0; locationId: 0; locationCode: null; systemQtyAfter: 0 }
+  > {
     const pickedQty = item.pickedQuantity || item.quantity;
     const productVariant = await this.storage.getProductVariantBySku(item.sku);
     if (!productVariant) {
       // No variant mapping — can't deduct, but this is non-fatal for non-inventory items
-      return { success: true, replenTriggered: false };
+      return { success: true, noVariant: true, productVariantId: 0, locationId: 0, locationCode: null, systemQtyAfter: 0 };
     }
 
     console.log(`[Inventory] Picking ${pickedQty} x ${productVariant.sku} (${productVariant.unitsPerVariant} units each)`);
@@ -260,19 +339,27 @@ class PickingService {
     const levels = await this.storage.getInventoryLevelsByProductVariantId(productVariant.id);
     const allLocations = await this.storage.getAllWarehouseLocations();
 
+    // Resolve assigned bin info for context (even if deduction fails)
+    let assignedLocationId: number | null = null;
+    let assignedLocationCode: string | null = null;
+    if (item.location && item.location !== "UNASSIGNED") {
+      const assignedLoc = allLocations.find(loc => loc.code === item.location);
+      if (assignedLoc) {
+        assignedLocationId = assignedLoc.id;
+        assignedLocationCode = assignedLoc.code;
+      }
+    }
+
     // Resolve pick location: explicit ID > assigned bin > auto-select
     let pickLocationId: number | null = opts.warehouseLocationId ? Number(opts.warehouseLocationId) : null;
 
     // Try the location already assigned to this order item
-    if (!pickLocationId && item.location && item.location !== "UNASSIGNED") {
-      const assignedLoc = allLocations.find(loc => loc.code === item.location);
-      if (assignedLoc) {
-        const hasStock = levels.some((l: any) =>
-          l.warehouseLocationId === assignedLoc.id && l.variantQty >= pickedQty
-        );
-        if (hasStock) {
-          pickLocationId = assignedLoc.id;
-        }
+    if (!pickLocationId && assignedLocationId) {
+      const hasStock = levels.some((l: any) =>
+        l.warehouseLocationId === assignedLocationId && l.variantQty >= pickedQty
+      );
+      if (hasStock) {
+        pickLocationId = assignedLocationId;
       }
     }
 
@@ -292,7 +379,19 @@ class PickingService {
     }
 
     if (!pickLocationId) {
-      return { success: false, error: "no_inventory", message: `No location has sufficient stock for ${pickedQty} of ${item.sku}` };
+      // Resolve system qty at assigned bin for context
+      const assignedLevel = assignedLocationId
+        ? levels.find((l: any) => l.warehouseLocationId === assignedLocationId)
+        : null;
+      return {
+        success: false,
+        error: "no_inventory",
+        message: `No location has sufficient stock for ${pickedQty} of ${item.sku}`,
+        productVariantId: productVariant.id,
+        locationId: assignedLocationId,
+        locationCode: assignedLocationCode,
+        systemQty: assignedLevel?.variantQty ?? 0,
+      };
     }
 
     const picked = await this.inventoryCore.pickItem({
@@ -305,20 +404,42 @@ class PickingService {
     });
 
     if (!picked) {
-      return { success: false, error: "insufficient_inventory", message: `Not enough stock to pick ${pickedQty} of ${item.sku}` };
+      const level = levels.find((l: any) => l.warehouseLocationId === pickLocationId);
+      const loc = allLocations.find(l => l.id === pickLocationId);
+      return {
+        success: false,
+        error: "insufficient_inventory",
+        message: `Not enough stock to pick ${pickedQty} of ${item.sku}`,
+        productVariantId: productVariant.id,
+        locationId: pickLocationId,
+        locationCode: loc?.code || assignedLocationCode,
+        systemQty: level?.variantQty ?? 0,
+      };
     }
+
+    // Read back updated level for accurate systemQtyAfter
+    const updatedLevel = await this.inventoryCore.getLevel(productVariant.id, pickLocationId);
+    const loc = allLocations.find(l => l.id === pickLocationId);
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
 
-    // Auto-trigger replenishment (fire-and-forget)
-    let replenTriggered = false;
-    this.replenishment.checkAndTriggerAfterPick(productVariant.id, pickLocationId).then(() => {
-      replenTriggered = true;
-    }).catch((err: any) =>
-      console.warn(`[Replen] Auto-trigger failed for variant ${productVariant.id}:`, err)
-    );
+    return {
+      success: true,
+      productVariantId: productVariant.id,
+      locationId: pickLocationId,
+      locationCode: loc?.code || assignedLocationCode || "",
+      systemQtyAfter: updatedLevel?.variantQty ?? 0,
+    };
+  }
 
-    return { success: true, replenTriggered };
+  /** Check if any non-pick location has stock for this variant */
+  private async _hasReserveStock(productVariantId: number): Promise<boolean> {
+    const levels = await this.inventoryCore.getLevelsByVariant(productVariantId);
+    const locations = await this.storage.getAllWarehouseLocations();
+    return levels.some(l => {
+      const loc = locations.find(wl => wl.id === l.warehouseLocationId);
+      return loc && loc.locationType !== "pick" && l.variantQty > 0;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -499,9 +620,37 @@ class PickingService {
         notes: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
         userId: userId || null,
       });
+    } else {
+      // Log verification even when count matches system (audit trail)
+      await this.inventoryCore.logTransaction({
+        productVariantId: variant.id,
+        toLocationId: warehouseLocationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: 0,
+        variantQtyBefore: systemQty,
+        variantQtyAfter: actualBinQty,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "picker_verification",
+        referenceId: `${sku}:${warehouseLocationId}`,
+        notes: `Picker verified bin count matches system: qty=${systemQty}`,
+        userId: userId || null,
+      });
     }
 
-    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment };
+    // Evaluate replen on corrected qty
+    const replenTask = await this.replenishment
+      .checkAndTriggerAfterPick(variant.id, warehouseLocationId)
+      .catch((err: any) => { console.warn("[Replen] post-count trigger failed:", err.message); return null; });
+
+    return {
+      success: true,
+      systemQtyBefore: systemQty,
+      actualBinQty,
+      adjustment,
+      replenTriggered: !!replenTask,
+      replenTaskStatus: replenTask?.status || null,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -548,7 +697,7 @@ class PickingService {
       }
     }
 
-    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment };
+    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null };
   }
 
   // -------------------------------------------------------------------------

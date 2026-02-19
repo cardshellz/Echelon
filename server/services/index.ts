@@ -146,7 +146,7 @@ export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./retu
 export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router";
 export type { SyncResult as InventorySourceSyncResult } from "./inventory-source";
 export type { SLAAlert, SLASummary } from "./sla-monitor";
-export type { PickingService, PickItemResult, CaseBreakResult, BinCountResult } from "./picking";
+export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "./picking";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./order-combining";
 export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "./operations-dashboard";

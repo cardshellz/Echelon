@@ -471,6 +471,23 @@ async function syncOrderUpdate(shopifyOrderId: string) {
       }
     }
 
+    // Safety net: transition warehouse_status to shipped when Shopify says fulfilled
+    // This catches orders that were shipped in Shopify without completing Echelon pick flow
+    if (
+      shopifyOrder.fulfillment_status === "fulfilled" &&
+      existingOrder.rows.length > 0 &&
+      existingOrder.rows[0].warehouse_status !== "shipped" &&
+      existingOrder.rows[0].warehouse_status !== "ready_to_ship"
+    ) {
+      const orderId = existingOrder.rows[0].id;
+      const prevStatus = existingOrder.rows[0].warehouse_status;
+      await db.execute(sql`
+        UPDATE orders SET warehouse_status = 'shipped', updated_at = NOW()
+        WHERE id = ${orderId}
+      `);
+      console.log(`[ORDER SYNC] Transitioned order ${orderId} to shipped (was ${prevStatus}, Shopify says fulfilled)`);
+    }
+
     console.log(`[ORDER SYNC] Updated order from shopify order ${shopifyOrderId}`);
   } catch (error) {
     console.error(`[ORDER SYNC] Error syncing update for ${shopifyOrderId}:`, error);
