@@ -1028,15 +1028,42 @@ export class DatabaseStorage implements IStorage {
       }
     }
     
-    // Apply enriched images to items missing them
+    // Enrich items missing barcode by looking up from product_variants
+    const skusMissingBarcodes = [...new Set(
+      allItems.filter(item => !item.barcode && item.sku).map(item => item.sku!.toUpperCase())
+    )];
+
+    const barcodeMap = new Map<string, string>();
+    if (skusMissingBarcodes.length > 0) {
+      try {
+        const barcodeResults = await db.execute<{ sku: string; barcode: string }>(sql`
+          SELECT UPPER(pv.sku) as sku, pv.barcode
+          FROM product_variants pv
+          WHERE UPPER(pv.sku) = ANY(${skusMissingBarcodes})
+            AND pv.barcode IS NOT NULL
+        `);
+        for (const row of barcodeResults.rows) {
+          if (row.barcode && !barcodeMap.has(row.sku)) {
+            barcodeMap.set(row.sku, row.barcode);
+          }
+        }
+      } catch (err) {
+        console.warn("[PickQueue] Failed to enrich barcodes:", (err as Error).message);
+      }
+    }
+
+    // Apply enriched images and barcodes to items missing them
     const enrichedItems = allItems.map(item => {
+      let enriched = item;
       if (!item.imageUrl && item.sku) {
         const foundImage = imageMap.get(item.sku.toUpperCase());
-        if (foundImage) {
-          return { ...item, imageUrl: foundImage };
-        }
+        if (foundImage) enriched = { ...enriched, imageUrl: foundImage };
       }
-      return item;
+      if (!item.barcode && item.sku) {
+        const foundBarcode = barcodeMap.get(item.sku.toUpperCase());
+        if (foundBarcode) enriched = { ...enriched, barcode: foundBarcode };
+      }
+      return enriched;
     });
     
     // Group items by orderId
