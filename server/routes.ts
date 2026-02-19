@@ -4256,6 +4256,7 @@ export async function registerRoutes(
       // Search product_variants and resolve to their parent product
       const result = await db.execute<{
         product_id: number;
+        variant_id: number;
         variant_sku: string;
         variant_name: string;
         product_sku: string | null;
@@ -4264,6 +4265,7 @@ export async function registerRoutes(
       }>(sql`
         SELECT
           p.id as product_id,
+          pv.id as variant_id,
           pv.sku as variant_sku,
           pv.name as variant_name,
           p.sku as product_sku,
@@ -4285,6 +4287,7 @@ export async function registerRoutes(
 
       res.json(result.rows.map(r => ({
         id: r.product_id,
+        variantId: r.variant_id,
         sku: r.variant_sku,
         title: r.product_title || r.variant_name,
         imageUrl: r.image_url,

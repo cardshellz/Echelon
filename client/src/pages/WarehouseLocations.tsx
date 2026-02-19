@@ -140,6 +140,7 @@ export default function WarehouseLocations() {
 
   interface ProductSearchResult {
     id: number;
+    variantId: number;
     title: string;
     sku: string | null;
     imageUrl: string | null;
@@ -1587,12 +1588,12 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                             <CommandGroup>
                               {filteredProducts.map((product) => (
                                 <CommandItem
-                                  key={product.id}
+                                  key={product.variantId}
                                   onSelect={() => {
                                     if (assigningToLocation) {
                                       assignProductMutation.mutate({
                                         locationId: assigningToLocation.id,
-                                        productId: product.id,
+                                        productVariantId: product.variantId,
                                       });
                                     }
                                   }}
