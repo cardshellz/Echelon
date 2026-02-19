@@ -706,28 +706,6 @@ export default function Replenishment() {
     },
   });
 
-  const generateTasksMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/replen/generate", {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to generate tasks");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
-      if (data.tasksCreated > 0) {
-        toast({ title: `Created ${data.tasksCreated} replen tasks` });
-      } else {
-        toast({ title: "No replen tasks needed", description: "All pick bins are above minimum levels" });
-      }
-    },
-    onError: () => {
-      toast({ title: "Failed to generate tasks", variant: "destructive" });
-    },
-  });
-
   const reportExceptionMutation = useMutation({
     mutationFn: async ({ taskId, reason, notes }: { taskId: number; reason: string; notes: string }) => {
       const res = await fetch(`/api/replen/tasks/${taskId}/exception`, {
@@ -1362,21 +1340,6 @@ export default function Replenishment() {
                 )}
                 <span className="hidden sm:inline">Replen Empty Bins</span>
                 <span className="sm:hidden">Empty Bins</span>
-              </Button>
-              <Button
-                variant="outline"
-                className="flex-1 sm:flex-none min-h-[44px]"
-                onClick={() => generateTasksMutation.mutate()}
-                disabled={generateTasksMutation.isPending}
-                data-testid="button-auto-generate"
-              >
-                {generateTasksMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 mr-2" />
-                )}
-                <span className="hidden sm:inline">Auto-Generate</span>
-                <span className="sm:hidden">Generate</span>
               </Button>
               <Button className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowTaskDialog(true)} data-testid="button-create-task">
                 <Plus className="w-4 h-4 mr-2" />

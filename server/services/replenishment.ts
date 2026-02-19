@@ -2029,13 +2029,28 @@ class ReplenishmentService {
    */
   async getSettingsForWarehouse(warehouseId?: number): Promise<WarehouseSettings | null> {
     if (warehouseId != null) {
-      // Try warehouse-specific settings first
+      // Try by warehouse_id FK first
       const [specific] = await this.db
         .select()
         .from(warehouseSettings)
         .where(eq(warehouseSettings.warehouseId, warehouseId))
         .limit(1);
       if (specific) return specific as WarehouseSettings;
+
+      // Try by warehouse code (settings may be linked by code, not FK)
+      const [wh] = await this.db
+        .select()
+        .from(warehouses)
+        .where(eq(warehouses.id, warehouseId))
+        .limit(1);
+      if (wh) {
+        const [byCode] = await this.db
+          .select()
+          .from(warehouseSettings)
+          .where(eq(warehouseSettings.warehouseCode, (wh as any).code))
+          .limit(1);
+        if (byCode) return byCode as WarehouseSettings;
+      }
     }
 
     // Fall back to DEFAULT row
