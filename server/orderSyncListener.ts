@@ -473,11 +473,13 @@ async function syncOrderUpdate(shopifyOrderId: string) {
 
     // Safety net: transition warehouse_status to shipped when Shopify says fulfilled
     // This catches orders that were shipped in Shopify without completing Echelon pick flow
+    // Skips only "shipped" and "cancelled" — all other statuses (ready, in_progress,
+    // completed, ready_to_ship) should transition to shipped when Shopify confirms fulfillment
     if (
       shopifyOrder.fulfillment_status === "fulfilled" &&
       existingOrder.rows.length > 0 &&
       existingOrder.rows[0].warehouse_status !== "shipped" &&
-      existingOrder.rows[0].warehouse_status !== "ready_to_ship"
+      existingOrder.rows[0].warehouse_status !== "cancelled"
     ) {
       const orderId = existingOrder.rows[0].id;
       const prevStatus = existingOrder.rows[0].warehouse_status;
