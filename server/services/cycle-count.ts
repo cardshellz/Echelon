@@ -494,10 +494,8 @@ class CycleCountService {
               expectedQty: row.variant_qty,
               status: "pending",
             });
-          } else {
-            // Stray SKU: in system at this bin but not assigned here — flag for investigation
-            // expectedSku = the stray SKU (picker needs to see it to count it)
-            // expectedQty = system inventory qty (labelled "system shows" in UI, not "expected")
+          } else if (location.isPickable) {
+            // Pickable bin with unassigned inventory — stray, flag for investigation
             items.push({
               cycleCountId: id,
               warehouseLocationId: location.id,
@@ -509,6 +507,17 @@ class CycleCountService {
               varianceType: "unexpected_item",
               requiresApproval: 1,
               varianceNotes: "Not assigned to this bin",
+              status: "pending",
+            });
+          } else {
+            // Reserve/bulk/non-pickable bin — no assignment concept, count everything normally
+            items.push({
+              cycleCountId: id,
+              warehouseLocationId: location.id,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
               status: "pending",
             });
           }
