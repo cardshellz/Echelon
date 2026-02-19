@@ -126,7 +126,7 @@ export default function CycleCounts() {
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(new Set());
   const [bulkApproveForm, setBulkApproveForm] = useState({ reasonCode: "", notes: "" });
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
-  const defaultCountName = () => new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }) + " Cycle Count";
+  const defaultCountName = () => { const d = new Date(); return `${d.toLocaleDateString("en-US", { month: "long" })} ${d.getDate()} ${d.getFullYear()} Cycle Count`; };
   const [newCountForm, setNewCountForm] = useState({ name: defaultCountName(), description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
     { value: "pick", label: "Pick" },
