@@ -861,7 +861,10 @@ export default function CycleCounts() {
                 </div>
                 <div className="text-center bg-slate-100 rounded-lg px-3 py-1 shrink-0">
                   <div className="text-xs text-muted-foreground">SKUs</div>
-                  <div className="text-xl font-bold">{currentBinItems.length}</div>
+                  <div className="text-xl font-bold">{currentBinItems.filter(i => i.mismatchType !== "unexpected_found").length}</div>
+                  {currentBinItems.some(i => i.mismatchType === "unexpected_found") && (
+                    <div className="text-xs text-amber-600 font-medium">+{currentBinItems.filter(i => i.mismatchType === "unexpected_found").length} stray</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -885,15 +888,25 @@ export default function CycleCounts() {
                       : ''
                   }`}
                 >
+                  {binItem.mismatchType === "unexpected_found" && (
+                    <div className="flex items-center gap-1 mb-2 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
+                      <span className="text-xs text-amber-700 font-medium">Stray — not assigned to this bin</span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs text-muted-foreground">SKU {idx + 1} of {currentBinItems.length}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {binItem.mismatchType === "unexpected_found" ? "Stray SKU" : `SKU ${idx + 1} of ${currentBinItems.length}`}
+                      </div>
                       <div className="text-sm font-medium truncate">
                         {binItem.expectedSku || "(Empty bin)"}
                       </div>
                     </div>
-                    <div className="text-center bg-slate-100 rounded-lg px-3 py-1 shrink-0">
-                      <div className="text-xs text-muted-foreground">Expected</div>
+                    <div className={`text-center rounded-lg px-3 py-1 shrink-0 ${binItem.mismatchType === "unexpected_found" ? "bg-amber-100" : "bg-slate-100"}`}>
+                      <div className="text-xs text-muted-foreground">
+                        {binItem.mismatchType === "unexpected_found" ? "System" : "Expected"}
+                      </div>
                       <div className="text-lg font-bold">{binItem.expectedQty}</div>
                     </div>
                   </div>
@@ -997,7 +1010,7 @@ export default function CycleCounts() {
                             (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(binItem.expectedQty);
                           }}
                         >
-                          Matches ({binItem.expectedQty})
+                          {binItem.mismatchType === "unexpected_found" ? `Confirm system (${binItem.expectedQty})` : `Matches (${binItem.expectedQty})`}
                         </Button>
                         <Button 
                           variant="outline" 

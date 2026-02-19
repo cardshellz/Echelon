@@ -495,18 +495,20 @@ class CycleCountService {
               status: "pending",
             });
           } else {
-            // Unassigned bin with stray stock: expected = empty, pre-flag for investigation
+            // Stray SKU: in system at this bin but not assigned here — flag for investigation
+            // expectedSku = the stray SKU (picker needs to see it to count it)
+            // expectedQty = system inventory qty (labelled "system shows" in UI, not "expected")
             items.push({
               cycleCountId: id,
               warehouseLocationId: location.id,
-              productVariantId: null,
-              productId: null,
-              expectedSku: null,
-              expectedQty: 0,
+              productVariantId: row.product_variant_id,
+              productId: row.product_id,
+              expectedSku: row.sku,
+              expectedQty: row.variant_qty,
               mismatchType: "unexpected_found",
               varianceType: "unexpected_item",
               requiresApproval: 1,
-              varianceNotes: `No bin assignment. System shows: ${row.sku ?? "unknown SKU"} qty ${row.variant_qty}`,
+              varianceNotes: "Not assigned to this bin",
               status: "pending",
             });
           }
