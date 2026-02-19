@@ -692,6 +692,7 @@ export class DatabaseStorage implements IStorage {
 
   async addProductToLocation(data: {
     productId: number;
+    productVariantId?: number | null;
     warehouseLocationId: number;
     sku?: string | null;
     shopifyVariantId?: number | null;
@@ -712,6 +713,7 @@ export class DatabaseStorage implements IStorage {
       const existing = existingByProduct[0];
       const result = await db.update(productLocations)
         .set({
+          productVariantId: data.productVariantId ?? existing.productVariantId,
           warehouseLocationId: data.warehouseLocationId,
           sku: data.sku?.toUpperCase() || existing.sku,
           shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
@@ -738,6 +740,7 @@ export class DatabaseStorage implements IStorage {
         const result = await db.update(productLocations)
           .set({
             productId: data.productId,
+            productVariantId: data.productVariantId ?? existing.productVariantId,
             warehouseLocationId: data.warehouseLocationId,
             shopifyVariantId: data.shopifyVariantId || existing.shopifyVariantId,
             name: data.name || existing.name,
@@ -762,6 +765,7 @@ export class DatabaseStorage implements IStorage {
 
     const result = await db.insert(productLocations).values({
       productId: data.productId,
+      productVariantId: data.productVariantId || null,
       warehouseLocationId: data.warehouseLocationId,
       sku: data.sku?.toUpperCase() || null,
       shopifyVariantId: data.shopifyVariantId || null,

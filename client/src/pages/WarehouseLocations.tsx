@@ -216,11 +216,11 @@ export default function WarehouseLocations() {
   }, [productSearchResults, productsInBin]);
 
   const assignProductMutation = useMutation({
-    mutationFn: async ({ locationId, productId }: { locationId: number; productId: number }) => {
+    mutationFn: async ({ locationId, productId, productVariantId }: { locationId: number; productId?: number; productVariantId?: number }) => {
       const res = await fetch(`/api/warehouse/locations/${locationId}/products`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productId, locationType: "pick", isPrimary: 1 }),
+        body: JSON.stringify({ productId, productVariantId, locationType: "pick", isPrimary: 1 }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -1631,7 +1631,7 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                 <ScrollArea className="h-48 border rounded-md mt-2">
                   <div className="p-2 space-y-2">
                     {inventoryInBin.map((inv) => {
-                      const isAssigned = productsInBin.some(p => p.productId === inv.productId);
+                      const isAssigned = productsInBin.some(p => p.sku === inv.sku);
                       return (
                         <div key={inv.id} className="flex items-center justify-between bg-muted/50 rounded px-3 py-2">
                           <div className="flex items-center gap-3">
@@ -1650,14 +1650,14 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                               <div className="font-bold text-sm">{inv.qty}</div>
                               <div className="text-xs text-muted-foreground">on hand</div>
                             </div>
-                            {canEdit && !isAssigned && inv.productId && assigningToLocation && (
+                            {canEdit && !isAssigned && inv.variantId && assigningToLocation && (
                               <Button
                                 variant="outline"
                                 size="sm"
                                 className="h-8 text-xs shrink-0"
                                 onClick={() => assignProductMutation.mutate({
                                   locationId: assigningToLocation.id,
-                                  productId: inv.productId!,
+                                  productVariantId: inv.variantId,
                                 })}
                                 disabled={assignProductMutation.isPending}
                                 title="Assign this SKU to this bin"

@@ -4012,17 +4012,17 @@ export async function registerRoutes(
     }
   });
 
-  // Assign a product to a bin (add location) - for bin-centric assignment
+  // Assign a product/variant to a bin (add location) - for bin-centric assignment
   app.post("/api/warehouse/locations/:id/products", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const warehouseLocationId = parseInt(req.params.id);
       if (isNaN(warehouseLocationId)) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
-      
-      const { productId, isPrimary } = req.body;
-      if (!productId) {
-        return res.status(400).json({ error: "productId is required" });
+
+      const { productId, productVariantId, isPrimary } = req.body;
+      if (!productId && !productVariantId) {
+        return res.status(400).json({ error: "productId or productVariantId is required" });
       }
 
       // Get warehouse location details
@@ -4035,26 +4035,48 @@ export async function registerRoutes(
         return res.status(400).json({ error: `Location ${warehouseLocation.code} is not pickable` });
       }
 
-      // Get product details
-      const product = await storage.getProductById(productId);
-      if (!product) {
-        return res.status(404).json({ error: "Product not found" });
+      let finalProductId = productId;
+      let finalVariantId = productVariantId;
+      let assignmentSku: string | null = null;
+      let assignmentName: string;
+      let shopifyVariantId: number | null = null;
+
+      // If variant is provided, use variant-specific data
+      if (productVariantId) {
+        const variant = await storage.getProductVariantById(productVariantId);
+        if (!variant) {
+          return res.status(404).json({ error: "Product variant not found" });
+        }
+        finalProductId = variant.productId;
+        assignmentSku = variant.sku;
+        assignmentName = variant.name || variant.sku || "Unknown Variant";
+        shopifyVariantId = variant.shopifyVariantId ? Number(variant.shopifyVariantId) : null;
+      } else {
+        // Product-level assignment (original behavior)
+        const product = await storage.getProductById(productId!);
+        if (!product) {
+          return res.status(404).json({ error: "Product not found" });
+        }
+        assignmentSku = product.sku || null;
+        assignmentName = product.title || product.name;
+        shopifyVariantId = product.shopifyProductId ? Number(product.shopifyProductId) : null;
       }
 
       const productLocation = await storage.addProductToLocation({
-        productId,
+        productId: finalProductId!,
+        productVariantId: finalVariantId || null,
         warehouseLocationId,
-        sku: product.sku || null,
-        shopifyVariantId: product.shopifyProductId ? Number(product.shopifyProductId) : null,
-        name: product.title || product.name,
+        sku: assignmentSku,
+        shopifyVariantId,
+        name: assignmentName,
         location: warehouseLocation.code,
         zone: warehouseLocation.zone || warehouseLocation.code.split("-")[0] || "A",
         isPrimary: isPrimary ?? 1,
       });
 
       // Auto-sync pick queue for this SKU (fire-and-forget)
-      if (product.sku) {
-        syncPickQueueForSku(product.sku).catch(() => {});
+      if (assignmentSku) {
+        syncPickQueueForSku(assignmentSku).catch(() => {});
       }
 
       res.status(201).json(productLocation);
