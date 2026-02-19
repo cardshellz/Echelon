@@ -334,11 +334,11 @@ export default function BinAssignments() {
               {([
                 ["sku", "SKU", "w-[140px]", ""],
                 ["productName", "Product", "", ""],
-                ["variantName", "Variant", "w-[120px]", ""],
-                ["assignedLocationCode", "Pick Location", "w-[220px]", ""],
-                ["zone", "Zone", "w-[80px]", ""],
+                ["variantName", "Variant", "", ""],
+                ["assignedLocationCode", "Pick Location", "w-[110px]", ""],
+                ["zone", "Zone", "w-[60px]", ""],
                 ["isPrimary", "Primary", "w-[80px]", "text-center"],
-                ["currentQty", "Qty", "w-[80px]", "text-right"],
+                ["currentQty", "Qty", "w-[60px]", "text-right"],
               ] as [SortKey, string, string, string][]).map(([key, label, width, align]) => (
                 <TableHead key={key} className={cn(width, "cursor-pointer select-none", align)} onClick={() => toggleSort(key)}>
                   <span className="inline-flex items-center gap-1">
@@ -370,8 +370,8 @@ export default function BinAssignments() {
             ) : sortedAssignments.map((a) => (
               <TableRow key={a.productVariantId}>
                 <TableCell className="font-mono text-xs">{a.sku || "-"}</TableCell>
-                <TableCell className="truncate max-w-[250px]">{a.productName}</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{a.variantName}</TableCell>
+                <TableCell>{a.productName}</TableCell>
+                <TableCell className="text-sm text-muted-foreground whitespace-nowrap">{a.variantName}</TableCell>
                 <TableCell>
                   {editingVariantId === a.productVariantId ? (
                     <LocationPicker
