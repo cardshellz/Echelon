@@ -3626,16 +3626,17 @@ export async function registerRoutes(
     try {
       const locations = await storage.getAllWarehouseLocations();
 
-      // Enrich with primary SKU from product_locations
-      const primarySkuResult = await db.execute(sql`
-        SELECT warehouse_location_id, sku
+      // Enrich with all assigned SKUs from product_locations
+      const assignedSkusResult = await db.execute(sql`
+        SELECT warehouse_location_id, STRING_AGG(sku, ', ' ORDER BY is_primary DESC, sku) as skus
         FROM product_locations
-        WHERE is_primary = 1
+        WHERE sku IS NOT NULL
+        GROUP BY warehouse_location_id
       `);
       const primarySkuMap = new Map<number, string>();
-      for (const row of primarySkuResult.rows as any[]) {
-        if (row.warehouse_location_id && row.sku) {
-          primarySkuMap.set(row.warehouse_location_id, row.sku);
+      for (const row of assignedSkusResult.rows as any[]) {
+        if (row.warehouse_location_id && row.skus) {
+          primarySkuMap.set(row.warehouse_location_id, row.skus);
         }
       }
 
