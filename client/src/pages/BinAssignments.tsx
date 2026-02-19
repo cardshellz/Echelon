@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
-import { MapPin, Search, Upload, Download, FileDown, Trash2, ChevronsUpDown, Check, X } from "lucide-react";
+import { MapPin, Search, Upload, Download, FileDown, Trash2, ChevronsUpDown, Check, X, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type BinAssignment = {
@@ -54,6 +54,20 @@ export default function BinAssignments() {
   const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [zoneFilter, setZoneFilter] = useState("");
 
+  // Sort state
+  type SortKey = "sku" | "productName" | "variantName" | "assignedLocationCode" | "zone" | "isPrimary" | "currentQty";
+  const [sortKey, setSortKey] = useState<SortKey>("sku");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
   // Import dialog
   const [importOpen, setImportOpen] = useState(false);
   const [csvData, setCsvData] = useState("");
@@ -96,6 +110,20 @@ export default function BinAssignments() {
   const pickLocations = useMemo(() => {
     return locations.filter(l => l.isPickable === 1);
   }, [locations]);
+
+  // Sorted assignments
+  const sortedAssignments = useMemo(() => {
+    return [...assignments].sort((a, b) => {
+      const mul = sortDir === "asc" ? 1 : -1;
+      const valA = a[sortKey];
+      const valB = b[sortKey];
+      if (valA == null && valB == null) return 0;
+      if (valA == null) return 1;
+      if (valB == null) return -1;
+      if (typeof valA === "number" && typeof valB === "number") return (valA - valB) * mul;
+      return String(valA).localeCompare(String(valB)) * mul;
+    });
+  }, [assignments, sortKey, sortDir]);
 
   // Mutations
   const assignMutation = useMutation({
@@ -303,13 +331,26 @@ export default function BinAssignments() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[140px]">SKU</TableHead>
-              <TableHead>Product</TableHead>
-              <TableHead className="w-[120px]">Variant</TableHead>
-              <TableHead className="w-[220px]">Pick Location</TableHead>
-              <TableHead className="w-[80px]">Zone</TableHead>
-              <TableHead className="w-[80px] text-center">Primary</TableHead>
-              <TableHead className="w-[80px] text-right">Qty</TableHead>
+              {([
+                ["sku", "SKU", "w-[140px]", ""],
+                ["productName", "Product", "", ""],
+                ["variantName", "Variant", "w-[120px]", ""],
+                ["assignedLocationCode", "Pick Location", "w-[220px]", ""],
+                ["zone", "Zone", "w-[80px]", ""],
+                ["isPrimary", "Primary", "w-[80px]", "text-center"],
+                ["currentQty", "Qty", "w-[80px]", "text-right"],
+              ] as [SortKey, string, string, string][]).map(([key, label, width, align]) => (
+                <TableHead key={key} className={cn(width, "cursor-pointer select-none", align)} onClick={() => toggleSort(key)}>
+                  <span className="inline-flex items-center gap-1">
+                    {label}
+                    {sortKey === key ? (
+                      sortDir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+                    ) : (
+                      <ArrowUpDown className="h-3 w-3 opacity-30" />
+                    )}
+                  </span>
+                </TableHead>
+              ))}
               <TableHead className="w-[50px]" />
             </TableRow>
           </TableHeader>
@@ -326,7 +367,7 @@ export default function BinAssignments() {
                   No variants found
                 </TableCell>
               </TableRow>
-            ) : assignments.map((a) => (
+            ) : sortedAssignments.map((a) => (
               <TableRow key={a.productVariantId}>
                 <TableCell className="font-mono text-xs">{a.sku || "-"}</TableCell>
                 <TableCell className="truncate max-w-[250px]">{a.productName}</TableCell>

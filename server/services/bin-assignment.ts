@@ -100,7 +100,7 @@ export class BinAssignmentService {
         pv.id AS product_variant_id,
         p.id AS product_id,
         COALESCE(pv.sku, p.sku) AS sku,
-        COALESCE(p.title, p.name) AS product_name,
+        p.name AS product_name,
         pv.name AS variant_name,
         pv.units_per_variant,
         pl.id AS product_location_id,
