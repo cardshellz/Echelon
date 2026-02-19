@@ -487,6 +487,11 @@ async function syncOrderUpdate(shopifyOrderId: string) {
         UPDATE orders SET warehouse_status = 'shipped'
         WHERE id = ${orderId}
       `);
+      await db.execute(sql`
+        UPDATE order_items SET status = 'completed'
+        WHERE order_id = ${orderId}
+          AND status NOT IN ('completed', 'short')
+      `);
       console.log(`[ORDER SYNC] Transitioned order ${orderId} to shipped (was ${prevStatus}, Shopify says fulfilled)`);
     }
 

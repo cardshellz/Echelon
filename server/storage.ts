@@ -1280,13 +1280,22 @@ export class DatabaseStorage implements IStorage {
     if (status === "completed" || status === "ready_to_ship") {
       updates.completedAt = new Date();
     }
-    
+
     const result = await db
       .update(orders)
       .set(updates)
       .where(eq(orders.id, orderId))
       .returning();
-    
+
+    // Close out any open items when order reaches a terminal state
+    if (status === "shipped" || status === "completed" || status === "cancelled") {
+      await db.execute(sql`
+        UPDATE order_items SET status = 'completed'
+        WHERE order_id = ${orderId}
+          AND status NOT IN ('completed', 'short')
+      `);
+    }
+
     return result[0] || null;
   }
 
