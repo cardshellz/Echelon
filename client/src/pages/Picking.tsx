@@ -1012,66 +1012,50 @@ export default function Picking() {
   
   // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && manualInputRef.current) {
+    // Don't steal focus when any dialog is open — let dialogs own their focus
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && manualInputRef.current) {
       manualInputRef.current.focus();
     }
-  }, [view, shortPickOpen, multiQtyOpen]);
-  
-  // Auto-focus on mount and after any interaction
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen]);
+
+  // Focus scan input on mount only — do NOT re-focus on every click/touch.
+  // The global window keydown handler captures scanner input regardless of focus,
+  // so there's no need to aggressively keep the input focused. Removing the
+  // click/touchend re-focus lets users dismiss the keyboard normally.
   useEffect(() => {
     if (view === "picking") {
-      // Refocus on click/touch on the document
-      const handleInteraction = () => {
-        if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
-        focusTimeoutRef.current = setTimeout(maintainFocus, 100);
-      };
-      
-      document.addEventListener("click", handleInteraction);
-      document.addEventListener("touchend", handleInteraction);
-      
-      // Prevent buttons from stealing focus - this keeps keyboard from popping up
-      const preventBlur = (e: Event) => {
-        const target = e.target as HTMLElement;
-        if (target.closest('button, [role="button"]')) {
-          e.preventDefault();
-        }
-      };
-      document.addEventListener("mousedown", preventBlur);
-      document.addEventListener("touchstart", preventBlur);
-      
+      setTimeout(maintainFocus, 100);
       return () => {
-        document.removeEventListener("click", handleInteraction);
-        document.removeEventListener("touchend", handleInteraction);
-        document.removeEventListener("mousedown", preventBlur);
-        document.removeEventListener("touchstart", preventBlur);
         if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
       };
     }
   }, [view, maintainFocus]);
-  
-  // Refocus after dialogs close
+
+  // Refocus after dialogs close (but not bin count — it has its own focus)
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen) {
+    if (!shortPickOpen && !multiQtyOpen && !binCountOpen) {
       setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, maintainFocus]);
-  
-  // Prevent other inputs from stealing focus in picking mode
+  }, [shortPickOpen, multiQtyOpen, binCountOpen, maintainFocus]);
+
+  // Prevent other inputs from stealing focus — but allow dialog inputs when a dialog is open
   useEffect(() => {
     if (view === "picking") {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
-        // Allow focus on scan input
+        // If a dialog is open, let its inputs have focus normally
+        if (shortPickOpen || multiQtyOpen || binCountOpen) return;
+        // Otherwise redirect any stray input focus back to the scan input
         if (target !== manualInputRef.current && target.tagName === "INPUT") {
           e.preventDefault();
           maintainFocus();
         }
       };
-      
+
       document.addEventListener("focusin", handleFocusIn);
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
-  }, [view, maintainFocus]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, maintainFocus]);
   
   // Auto-scroll to keep first pending item visible after each pick
   useEffect(() => {
@@ -1098,7 +1082,7 @@ export default function Picking() {
   // Global scanner capture - works with readOnly input to suppress keyboard
   // Captures all keystrokes and builds buffer, processes on Enter
   useEffect(() => {
-    if (view !== "picking" || shortPickOpen || multiQtyOpen) {
+    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen) {
       return;
     }
     
@@ -1160,7 +1144,7 @@ export default function Picking() {
         clearTimeout(scanBufferTimeoutRef.current);
       }
     };
-  }, [view, shortPickOpen, multiQtyOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen]);
   
   // Claim error state
   const [claimError, setClaimError] = useState<string | null>(null);
@@ -1379,11 +1363,11 @@ export default function Picking() {
     const newPicked = currentItem.picked + qty;
     const newStatus: ItemStatus = newPicked >= currentItem.qty ? "completed" : "in_progress";
     
-    // Sync with API if this is a real order item
+    // Sync with API if this is a real order item (all modes)
     const isRealItem = !isNaN(currentItem.id) && ordersFromApi.length > 0;
-    if (isRealItem && pickingMode === "single") {
-      updateItemMutation.mutate({ 
-        itemId: currentItem.id, 
+    if (isRealItem) {
+      updateItemMutation.mutate({
+        itemId: currentItem.id,
         status: newStatus, 
         pickedQuantity: newPicked,
         pickMethod: "scan"
@@ -1468,11 +1452,11 @@ export default function Picking() {
     
     const shortQty = parseInt(shortPickQty) || 0;
     
-    // Sync with API if this is a real order item
+    // Sync with API if this is a real order item (all modes)
     const isRealItem = !isNaN(targetItem.id) && ordersFromApi.length > 0;
-    if (isRealItem && pickingMode === "single") {
-      updateItemMutation.mutate({ 
-        itemId: targetItem.id, 
+    if (isRealItem) {
+      updateItemMutation.mutate({
+        itemId: targetItem.id,
         status: "short" as ItemStatus, 
         pickedQuantity: shortQty,
         shortReason: shortPickReason || undefined,
@@ -1679,11 +1663,11 @@ export default function Picking() {
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 2000);
     
-    // Sync with API for single mode
+    // Sync with API (all modes)
     const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem && pickingMode === "single") {
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
+    if (isRealItem) {
+      updateItemMutation.mutate({
+        itemId: item.id,
         status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
         pickedQuantity: newPicked,
         pickMethod: "scan"
@@ -1761,13 +1745,13 @@ export default function Picking() {
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 2000);
     
-    // Sync with API if this is a real order item
+    // Sync with API (all modes)
     const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem && pickingMode === "single") {
+    if (isRealItem) {
       console.log("[PICK] Sending API update for item:", item.id);
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
-        status: "completed" as ItemStatus, 
+      updateItemMutation.mutate({
+        itemId: item.id,
+        status: "completed" as ItemStatus,
         pickedQuantity: qty,
         pickMethod: "pick_all"
       });
@@ -1896,12 +1880,12 @@ export default function Picking() {
     playSound("error");
     triggerHaptic("medium");
     
-    // Sync with API if this is a real order item
+    // Sync with API (all modes)
     const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem && pickingMode === "single") {
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
-        status: "short" as ItemStatus, 
+    if (isRealItem) {
+      updateItemMutation.mutate({
+        itemId: item.id,
+        status: "short" as ItemStatus,
         pickedQuantity: 0,
         pickMethod: "short"
       });
@@ -4299,7 +4283,6 @@ export default function Picking() {
               onChange={(e) => setBinCountQty(e.target.value)}
               min={0}
               className="w-full h-14 text-xl text-center font-bold"
-              autoFocus
               onKeyDown={(e) => {
                 if (e.key === "Enter" && binCountQty !== "" && binCountContext?.locationId) {
                   binCountMutation.mutate({
