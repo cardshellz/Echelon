@@ -8948,6 +8948,290 @@ export async function registerRoutes(
     }
   });
 
+  // --- Channel Sync Monitoring ---
+
+  app.get("/api/channel-sync/status", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const channelId = req.query.channelId ? parseInt(req.query.channelId as string) : undefined;
+      const status = await channelSync.getLastSyncStatus(channelId);
+      res.json(status);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get sync status" });
+    }
+  });
+
+  app.get("/api/channel-sync/log", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const log = await channelSync.getSyncLog({
+        channelId: req.query.channelId ? parseInt(req.query.channelId as string) : undefined,
+        productId: req.query.productId ? parseInt(req.query.productId as string) : undefined,
+        status: req.query.status as string | undefined,
+        limit: req.query.limit ? parseInt(req.query.limit as string) : 100,
+        offset: req.query.offset ? parseInt(req.query.offset as string) : 0,
+      });
+      res.json(log);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get sync log" });
+    }
+  });
+
+  app.get("/api/channel-sync/divergence", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const divergence = await channelSync.getDivergence();
+      res.json(divergence);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get divergence" });
+    }
+  });
+
+  // --- Channel Product Allocation (product-level rules per channel) ---
+
+  app.get("/api/channel-product-allocation", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelProductAllocation: cpa } = await import("@shared/schema");
+      const rows = await db.select().from(cpa);
+      res.json(rows);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get allocations" });
+    }
+  });
+
+  app.get("/api/channel-product-allocation/:channelId/:productId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelProductAllocation: cpa } = await import("@shared/schema");
+      const { and, eq } = await import("drizzle-orm");
+      const channelId = parseInt(req.params.channelId);
+      const productId = parseInt(req.params.productId);
+      const [row] = await db.select().from(cpa).where(
+        and(eq(cpa.channelId, channelId), eq(cpa.productId, productId))
+      ).limit(1);
+      res.json(row || null);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to get allocation" });
+    }
+  });
+
+  app.put("/api/channel-product-allocation", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { channelProductAllocation: cpa } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const { channelId, productId, minAtpBase, maxAtpBase, isListed, notes } = req.body;
+
+      if (!channelId || !productId) {
+        return res.status(400).json({ error: "channelId and productId are required" });
+      }
+
+      // Upsert
+      const [existing] = await db.select().from(cpa).where(
+        and(eq(cpa.channelId, channelId), eq(cpa.productId, productId))
+      ).limit(1);
+
+      if (existing) {
+        const [updated] = await db.update(cpa).set({
+          minAtpBase: minAtpBase ?? null,
+          maxAtpBase: maxAtpBase ?? null,
+          isListed: isListed ?? 1,
+          notes: notes ?? null,
+          updatedAt: new Date(),
+        }).where(eq(cpa.id, existing.id)).returning();
+        res.json(updated);
+      } else {
+        const [created] = await db.insert(cpa).values({
+          channelId,
+          productId,
+          minAtpBase: minAtpBase ?? null,
+          maxAtpBase: maxAtpBase ?? null,
+          isListed: isListed ?? 1,
+          notes: notes ?? null,
+        }).returning();
+        res.json(created);
+      }
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to save allocation" });
+    }
+  });
+
+  app.delete("/api/channel-product-allocation/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { channelProductAllocation: cpa } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const id = parseInt(req.params.id);
+      await db.delete(cpa).where(eq(cpa.id, id));
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to delete allocation" });
+    }
+  });
+
+  // --- Product-level allocation data for ProductDetail Channels tab ---
+
+  app.get("/api/products/:productId/allocation", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv } = await import("@shared/schema");
+      const { eq, and, inArray } = await import("drizzle-orm");
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
+
+      const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
+      const variants = await db.select().from(pv).where(eq(pv.productId, productId));
+      const variantIds = variants.map((v: any) => v.id);
+
+      // Product-level allocation rules per channel
+      const productAllocs = await db.select().from(cpa).where(eq(cpa.productId, productId));
+
+      // Variant-level reservations for this product's variants
+      const variantReservations = variantIds.length > 0
+        ? await db.select().from(cr).where(inArray(cr.productVariantId, variantIds))
+        : [];
+
+      // Feed data for this product's variants
+      const feeds = variantIds.length > 0
+        ? await db.select({
+            id: cf.id,
+            channelId: cf.channelId,
+            productVariantId: cf.productVariantId,
+            lastSyncedQty: cf.lastSyncedQty,
+            lastSyncedAt: cf.lastSyncedAt,
+            isActive: cf.isActive,
+          }).from(cf).where(inArray(cf.productVariantId, variantIds))
+        : [];
+
+      // ATP data
+      const { inventoryAtp } = req.app.locals.services;
+      const atpBase = await inventoryAtp.getAtpBase(productId);
+      const variantAtp = await inventoryAtp.getAtpPerVariant(productId);
+
+      res.json({
+        channels: activeChannels,
+        variants: variants.map((v: any) => ({
+          id: v.id,
+          sku: v.sku,
+          name: v.name,
+          unitsPerVariant: v.unitsPerVariant,
+          atpUnits: variantAtp.find((va: any) => va.productVariantId === v.id)?.atpUnits ?? 0,
+        })),
+        atpBase,
+        productAllocations: productAllocs,
+        variantReservations,
+        feeds,
+      });
+    } catch (error: any) {
+      console.error("Error fetching product allocation:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch product allocation" });
+    }
+  });
+
+  // --- Channel Allocation View (grid data for UI) ---
+
+  app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelSync, inventoryAtp } = req.app.locals.services;
+      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p } = await import("@shared/schema");
+      const { eq, and, inArray } = await import("drizzle-orm");
+
+      // Get all active channels
+      const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
+
+      // Get all active feeds with variant + product info
+      const feeds = await db.select({
+        feedId: cf.id,
+        channelId: cf.channelId,
+        channelType: cf.channelType,
+        productVariantId: cf.productVariantId,
+        lastSyncedQty: cf.lastSyncedQty,
+        lastSyncedAt: cf.lastSyncedAt,
+      }).from(cf).where(eq(cf.isActive, 1));
+
+      // Get all variants that have feeds
+      const feedVariantIds = Array.from(new Set(feeds.map((f: any) => f.productVariantId)));
+      if (feedVariantIds.length === 0) {
+        return res.json({ channels: activeChannels, rows: [] });
+      }
+
+      const variants = await db.select().from(pv).where(inArray(pv.id, feedVariantIds));
+      const productIds = Array.from(new Set(variants.map((v: any) => v.productId)));
+      const prods = await db.select().from(p).where(inArray(p.id, productIds));
+
+      // Load all allocation rules
+      const productAllocs = await db.select().from(cpa);
+      const variantReservations = await db.select().from(cr).where(inArray(cr.productVariantId, feedVariantIds));
+
+      // Batch ATP
+      const atpMap = new Map<number, number>();
+      for (const pid of productIds) {
+        const atpBase = await inventoryAtp.getAtpBase(pid);
+        atpMap.set(pid, atpBase);
+      }
+
+      const variantAtpMap = new Map<number, any>();
+      for (const pid of productIds) {
+        const variantAtp = await inventoryAtp.getAtpPerVariant(pid);
+        for (const v of variantAtp) {
+          variantAtpMap.set(v.productVariantId, v);
+        }
+      }
+
+      // Build grid rows
+      const rows = variants.map((v: any) => {
+        const prod = prods.find((p: any) => p.id === v.productId);
+        const vatpInfo = variantAtpMap.get(v.id);
+        const atpBase = atpMap.get(v.productId) ?? 0;
+
+        const channelData: Record<number, any> = {};
+        for (const ch of activeChannels) {
+          const feed = feeds.find((f: any) => f.channelId === ch.id && f.productVariantId === v.id);
+          const prodAlloc = productAllocs.find((pa: any) => pa.channelId === ch.id && pa.productId === v.productId);
+          const varRes = variantReservations.find((r: any) => (r as any).channelId === ch.id && (r as any).productVariantId === v.id);
+
+          channelData[ch.id] = {
+            hasFeed: !!feed,
+            lastSyncedQty: feed?.lastSyncedQty ?? null,
+            lastSyncedAt: feed?.lastSyncedAt ?? null,
+            productFloor: prodAlloc?.minAtpBase ?? null,
+            productCap: prodAlloc?.maxAtpBase ?? null,
+            isListed: prodAlloc?.isListed ?? 1,
+            variantFloor: (varRes as any)?.minStockBase ?? null,
+            variantCap: (varRes as any)?.maxStockBase ?? null,
+            effectiveAtp: vatpInfo?.atpUnits ?? 0,
+          };
+
+          // Compute effective ATP with overrides
+          let effective = vatpInfo?.atpUnits ?? 0;
+          if (prodAlloc?.isListed === 0) effective = 0;
+          else if (prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) effective = 0;
+          else {
+            if ((varRes as any)?.minStockBase != null && (varRes as any).minStockBase > 0 && effective < (varRes as any).minStockBase) effective = 0;
+            if ((varRes as any)?.maxStockBase != null && effective > 0) {
+              const maxUnits = Math.floor((varRes as any).maxStockBase / (vatpInfo?.unitsPerVariant ?? 1));
+              effective = Math.min(effective, maxUnits);
+            }
+          }
+          channelData[ch.id].effectiveAtp = Math.max(effective, 0);
+        }
+
+        return {
+          productVariantId: v.id,
+          productId: v.productId,
+          sku: v.sku || prod?.sku || "",
+          productName: prod?.name || "",
+          variantName: v.name || "",
+          unitsPerVariant: v.unitsPerVariant,
+          atpBase,
+          atpUnits: vatpInfo?.atpUnits ?? 0,
+          channels: channelData,
+        };
+      });
+
+      res.json({ channels: activeChannels, rows });
+    } catch (error: any) {
+      console.error("Error building allocation grid:", error);
+      res.status(500).json({ error: error.message || "Failed to build allocation grid" });
+    }
+  });
+
   // --- External Inventory Sync (3PL / Channel pull) ---
 
   app.post("/api/warehouses/:id/sync-inventory", requirePermission("inventory", "adjust"), async (req, res) => {

@@ -28,6 +28,7 @@ import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
 import BinAssignments from "@/pages/BinAssignments";
+import ChannelAllocation from "@/pages/ChannelAllocation";
 import Returns from "@/pages/Returns";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
@@ -134,6 +135,9 @@ function Router() {
         </Route>
         <Route path="/channels/reserves">
           <ProtectedRoute component={ChannelsPage} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/channel-allocation">
+          <ProtectedRoute component={ChannelAllocation} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/catalog">
           <ProtectedRoute component={CatalogPage} allowedRoles={["admin", "lead"]} />

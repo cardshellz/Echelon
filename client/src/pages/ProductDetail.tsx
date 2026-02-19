@@ -34,7 +34,12 @@ import {
   Clock,
   Loader2,
   MapPin,
+  RefreshCw,
+  ShieldCheck,
+  ShieldOff,
 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { cn } from "@/lib/utils";
 import { Link } from "wouter";
 
 const HIERARCHY_TYPES = [
@@ -97,6 +102,212 @@ interface ProductDetailData {
 
 interface Settings {
   [key: string]: string;
+}
+
+// --- Inline edit row for product-level channel allocation ---
+function ProductChannelRow({
+  channel,
+  alloc,
+  productId,
+  onSave,
+  isSaving,
+}: {
+  channel: { id: number; name: string; provider: string };
+  alloc: { id: number; channelId: number; productId: number; minAtpBase: number | null; maxAtpBase: number | null; isListed: number } | null;
+  productId: number;
+  onSave: (data: { channelId: number; productId: number; minAtpBase: number | null; maxAtpBase: number | null; isListed: number }) => void;
+  isSaving: boolean;
+}) {
+  const [floor, setFloor] = useState(alloc?.minAtpBase != null ? String(alloc.minAtpBase) : "");
+  const [cap, setCap] = useState(alloc?.maxAtpBase != null ? String(alloc.maxAtpBase) : "");
+  const [listed, setListed] = useState(alloc?.isListed ?? 1);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setFloor(alloc?.minAtpBase != null ? String(alloc.minAtpBase) : "");
+    setCap(alloc?.maxAtpBase != null ? String(alloc.maxAtpBase) : "");
+    setListed(alloc?.isListed ?? 1);
+    setDirty(false);
+  }, [alloc]);
+
+  return (
+    <TableRow>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <Globe className="h-4 w-4 text-muted-foreground" />
+          <span className="font-medium text-sm">{channel.name}</span>
+          <Badge variant="outline" className="text-[10px]">{channel.provider}</Badge>
+        </div>
+      </TableCell>
+      <TableCell className="text-center">
+        <button
+          className={cn(
+            "inline-flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors",
+            listed ? "text-green-600 hover:bg-green-50 dark:hover:bg-green-950" : "text-red-500 hover:bg-red-50 dark:hover:bg-red-950"
+          )}
+          onClick={() => { setListed(listed ? 0 : 1); setDirty(true); }}
+        >
+          {listed ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldOff className="h-3.5 w-3.5" />}
+          {listed ? "Yes" : "No"}
+        </button>
+      </TableCell>
+      <TableCell className="text-right">
+        <Input
+          type="number"
+          min={0}
+          placeholder="—"
+          value={floor}
+          onChange={(e) => { setFloor(e.target.value); setDirty(true); }}
+          className="w-24 h-8 text-right ml-auto"
+          autoComplete="off"
+        />
+      </TableCell>
+      <TableCell className="text-right">
+        <Input
+          type="number"
+          min={0}
+          placeholder="—"
+          value={cap}
+          onChange={(e) => { setCap(e.target.value); setDirty(true); }}
+          className="w-24 h-8 text-right ml-auto"
+          autoComplete="off"
+        />
+      </TableCell>
+      <TableCell>
+        {dirty && (
+          <Button
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => {
+              onSave({
+                channelId: channel.id,
+                productId,
+                minAtpBase: floor === "" ? null : parseInt(floor, 10),
+                maxAtpBase: cap === "" ? null : parseInt(cap, 10),
+                isListed: listed,
+              });
+              setDirty(false);
+            }}
+            disabled={isSaving}
+          >
+            {isSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+          </Button>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+// --- Inline popover cell for variant-level channel allocation ---
+function VariantChannelCell({
+  channelId,
+  variantId,
+  effectiveAtp,
+  feed,
+  reservation,
+  isFresh,
+  isStale,
+  onSave,
+  isSaving,
+}: {
+  channelId: number;
+  variantId: number;
+  effectiveAtp: number;
+  feed: { lastSyncedQty: number; lastSyncedAt: string | null } | null;
+  reservation: { minStockBase: number | null; maxStockBase: number | null } | null;
+  isFresh: boolean;
+  isStale: boolean;
+  onSave: (data: { channelId: number; productVariantId: number; minStockBase: number | null; maxStockBase: number | null }) => void;
+  isSaving: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [floor, setFloor] = useState(reservation?.minStockBase != null ? String(reservation.minStockBase) : "");
+  const [cap, setCap] = useState(reservation?.maxStockBase != null ? String(reservation.maxStockBase) : "");
+
+  const colorClass = !feed
+    ? "text-muted-foreground"
+    : effectiveAtp === 0 && (reservation?.minStockBase != null && reservation.minStockBase > 0)
+      ? "text-red-500"
+      : isFresh
+        ? "text-green-600 dark:text-green-400"
+        : isStale
+          ? "text-amber-600 dark:text-amber-400"
+          : "text-foreground";
+
+  const hasOverride = reservation?.minStockBase != null || reservation?.maxStockBase != null;
+
+  return (
+    <Popover open={open} onOpenChange={(o) => {
+      setOpen(o);
+      if (o) {
+        setFloor(reservation?.minStockBase != null ? String(reservation.minStockBase) : "");
+        setCap(reservation?.maxStockBase != null ? String(reservation.maxStockBase) : "");
+      }
+    }}>
+      <PopoverTrigger asChild>
+        <button className={cn("w-full text-center px-2 py-1.5 rounded hover:bg-muted/50 transition-colors text-sm", colorClass)}>
+          {!feed ? (
+            <span>&mdash;</span>
+          ) : (
+            <span className="flex items-center justify-center gap-1">
+              <span className="tabular-nums">{effectiveAtp.toLocaleString()}</span>
+              {hasOverride && <span className="text-[10px] text-muted-foreground">*</span>}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-56 p-3" align="start">
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Variant Floor (base units)</label>
+            <Input
+              type="number"
+              min={0}
+              placeholder="No floor"
+              value={floor}
+              onChange={(e) => setFloor(e.target.value)}
+              className="h-8"
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Max Cap (base units)</label>
+            <Input
+              type="number"
+              min={0}
+              placeholder="No cap"
+              value={cap}
+              onChange={(e) => setCap(e.target.value)}
+              className="h-8"
+              autoComplete="off"
+            />
+          </div>
+          <Button
+            className="w-full"
+            size="sm"
+            onClick={() => {
+              onSave({
+                channelId,
+                productVariantId: variantId,
+                minStockBase: floor === "" ? null : parseInt(floor, 10),
+                maxStockBase: cap === "" ? null : parseInt(cap, 10),
+              });
+              setOpen(false);
+            }}
+            disabled={isSaving}
+          >
+            {isSaving ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+            Save
+          </Button>
+          {feed?.lastSyncedAt && (
+            <p className="text-[10px] text-muted-foreground text-center">
+              Last synced: {new Date(feed.lastSyncedAt).toLocaleString()}
+            </p>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 export default function ProductDetail() {
@@ -335,6 +546,90 @@ export default function ProductDetail() {
     },
     onError: () => {
       toast({ title: "Failed to push product", variant: "destructive" });
+    },
+  });
+
+  // --- Channel allocation query ---
+  interface AllocationChannel { id: number; name: string; provider: string; status: string; }
+  interface AllocationVariant { id: number; sku: string; name: string; unitsPerVariant: number; atpUnits: number; }
+  interface ProductAllocation { id: number; channelId: number; productId: number; minAtpBase: number | null; maxAtpBase: number | null; isListed: number; }
+  interface VariantReservation { id: number; channelId: number; productVariantId: number; minStockBase: number | null; maxStockBase: number | null; }
+  interface FeedData { id: number; channelId: number; productVariantId: number; lastSyncedQty: number; lastSyncedAt: string | null; isActive: number; }
+  interface AllocationData {
+    channels: AllocationChannel[];
+    variants: AllocationVariant[];
+    atpBase: number;
+    productAllocations: ProductAllocation[];
+    variantReservations: VariantReservation[];
+    feeds: FeedData[];
+  }
+
+  const { data: allocationData, isLoading: allocationLoading } = useQuery<AllocationData>({
+    queryKey: [`/api/products/${product?.productId}/allocation`],
+    queryFn: async () => {
+      const res = await fetch(`/api/products/${product?.productId}/allocation`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch allocation");
+      return res.json();
+    },
+    enabled: !!product?.productId && activeTab === "channels",
+  });
+
+  const syncInventoryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/channel-sync/product/${product?.productId}`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to sync inventory");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${product?.productId}/allocation`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] });
+      toast({ title: "Inventory synced to channels" });
+    },
+    onError: () => {
+      toast({ title: "Failed to sync inventory", variant: "destructive" });
+    },
+  });
+
+  const saveProductAllocMutation = useMutation({
+    mutationFn: async (data: { channelId: number; productId: number; minAtpBase: number | null; maxAtpBase: number | null; isListed: number }) => {
+      const res = await fetch("/api/channel-product-allocation", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to save allocation");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${product?.productId}/allocation`] });
+      toast({ title: "Product allocation updated" });
+    },
+    onError: () => {
+      toast({ title: "Failed to update allocation", variant: "destructive" });
+    },
+  });
+
+  const saveVariantReservationMutation = useMutation({
+    mutationFn: async (data: { channelId: number; productVariantId: number; minStockBase: number | null; maxStockBase: number | null }) => {
+      const res = await fetch("/api/channel-reservations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Failed to save reservation");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${product?.productId}/allocation`] });
+      toast({ title: "Variant allocation updated" });
+    },
+    onError: () => {
+      toast({ title: "Failed to update variant allocation", variant: "destructive" });
     },
   });
 
@@ -958,15 +1253,27 @@ export default function ProductDetail() {
             </TabsContent>
 
             {/* ===== CHANNELS TAB ===== */}
-            <TabsContent value="channels" className="mt-4">
-              <Card>
-                <CardHeader className="p-3 md:p-6 flex flex-row items-center justify-between">
-                  <div>
-                    <CardTitle className="text-base md:text-lg">Channel Sync Status</CardTitle>
-                    <CardDescription className="text-xs md:text-sm">
-                      Push product data to sales channels
-                    </CardDescription>
-                  </div>
+            <TabsContent value="channels" className="mt-4 space-y-4">
+              {/* Action buttons row */}
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Product ATP: <span className="font-medium text-foreground">{allocationData?.atpBase?.toLocaleString() ?? "—"}</span> base units
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => syncInventoryMutation.mutate()}
+                    disabled={syncInventoryMutation.isPending}
+                    className="min-h-[44px]"
+                  >
+                    {syncInventoryMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4 mr-1" />
+                    )}
+                    Sync Inventory
+                  </Button>
                   <Button
                     size="sm"
                     onClick={() => pushToChannelMutation.mutate({})}
@@ -978,98 +1285,225 @@ export default function ProductDetail() {
                     ) : (
                       <Send className="h-4 w-4 mr-1" />
                     )}
-                    Push to All
+                    Push Product
                   </Button>
-                </CardHeader>
-                <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
-                  {channelStatusLoading ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-50" />
-                      <p className="text-sm">Loading channels...</p>
-                    </div>
-                  ) : channelStatuses && channelStatuses.length > 0 ? (
-                    <div className="space-y-3">
-                      {channelStatuses.map((cs) => (
-                        <div key={cs.channelId} className="border rounded-lg p-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-2">
-                              <Globe className="h-4 w-4 text-muted-foreground" />
-                              <span className="font-medium text-sm">{cs.channelName}</span>
-                              <Badge variant="outline" className="text-[10px]">
-                                {cs.provider}
-                              </Badge>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              {cs.listings.length > 0 ? (
-                                (() => {
-                                  const hasError = cs.listings.some((l) => l.syncStatus === "error");
-                                  const allSynced = cs.listings.every((l) => l.syncStatus === "synced");
-                                  return hasError ? (
-                                    <Badge variant="destructive" className="text-[10px]">
-                                      <AlertCircle className="h-3 w-3 mr-1" />
-                                      Error
-                                    </Badge>
-                                  ) : allSynced ? (
-                                    <Badge variant="default" className="text-[10px] bg-green-600">
-                                      <CheckCircle2 className="h-3 w-3 mr-1" />
-                                      Synced
-                                    </Badge>
-                                  ) : (
-                                    <Badge variant="secondary" className="text-[10px]">
-                                      <Clock className="h-3 w-3 mr-1" />
-                                      Pending
-                                    </Badge>
-                                  );
-                                })()
-                              ) : (
-                                <Badge variant="secondary" className="text-[10px]">Not Listed</Badge>
-                              )}
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-8 text-xs"
-                                onClick={() => pushToChannelMutation.mutate({ channelId: cs.channelId })}
-                                disabled={pushToChannelMutation.isPending}
-                              >
-                                <Send className="h-3 w-3 mr-1" />
-                                Push
-                              </Button>
-                            </div>
-                          </div>
-                          {cs.listings.length > 0 && (
-                            <div className="text-xs text-muted-foreground space-y-1 mt-2 border-t pt-2">
-                              {cs.listings.map((l, i) => (
-                                <div key={i} className="flex items-center justify-between">
-                                  <span className="font-mono">
-                                    {l.externalProductId ? `#${l.externalProductId}` : "—"}
-                                    {l.externalVariantId ? ` / v${l.externalVariantId}` : ""}
-                                  </span>
-                                  <span>
-                                    {l.lastSyncedAt
-                                      ? new Date(l.lastSyncedAt).toLocaleDateString()
-                                      : "Never synced"}
-                                  </span>
-                                </div>
-                              ))}
-                              {cs.listings.some((l) => l.syncError) && (
-                                <p className="text-destructive mt-1">
-                                  {cs.listings.find((l) => l.syncError)?.syncError}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Globe className="h-10 w-10 md:h-12 md:w-12 mx-auto mb-2 opacity-50" />
+                </div>
+              </div>
+
+              {allocationLoading ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-50" />
+                  <p className="text-sm">Loading channels...</p>
+                </div>
+              ) : !allocationData || allocationData.channels.length === 0 ? (
+                <Card>
+                  <CardContent className="py-8">
+                    <div className="text-center text-muted-foreground">
+                      <Globe className="h-10 w-10 mx-auto mb-2 opacity-50" />
                       <p className="text-sm">No sales channels configured.</p>
                       <p className="text-xs">Set up channels in Settings to push product data.</p>
                     </div>
+                  </CardContent>
+                </Card>
+              ) : (
+                <>
+                  {/* Product-level allocation per channel */}
+                  <Card>
+                    <CardHeader className="p-3 md:p-6">
+                      <CardTitle className="text-base md:text-lg">Product Rules</CardTitle>
+                      <CardDescription className="text-xs md:text-sm">
+                        Product-level floor, cap, and listing controls per channel
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Channel</TableHead>
+                            <TableHead className="text-center">Listed</TableHead>
+                            <TableHead className="text-right">Floor (base)</TableHead>
+                            <TableHead className="text-right">Cap (base)</TableHead>
+                            <TableHead className="w-[80px]"></TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {allocationData.channels.map((ch) => {
+                            const alloc = allocationData.productAllocations.find((a) => a.channelId === ch.id);
+                            return (
+                              <ProductChannelRow
+                                key={ch.id}
+                                channel={ch}
+                                alloc={alloc ?? null}
+                                productId={product!.productId}
+                                onSave={(data) => saveProductAllocMutation.mutate(data)}
+                                isSaving={saveProductAllocMutation.isPending}
+                              />
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </CardContent>
+                  </Card>
+
+                  {/* Variant allocation per channel */}
+                  <Card>
+                    <CardHeader className="p-3 md:p-6">
+                      <CardTitle className="text-base md:text-lg">Variant Allocation</CardTitle>
+                      <CardDescription className="text-xs md:text-sm">
+                        Per-variant floor and cap overrides, sync status by channel
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="p-2 md:p-6 pt-0 md:pt-0">
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="min-w-[100px]">SKU</TableHead>
+                              <TableHead className="min-w-[100px]">Variant</TableHead>
+                              <TableHead className="text-right min-w-[60px]">ATP</TableHead>
+                              {allocationData.channels.map((ch) => (
+                                <TableHead key={ch.id} className="text-center min-w-[160px]">
+                                  {ch.name}
+                                </TableHead>
+                              ))}
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {allocationData.variants.map((v) => (
+                              <TableRow key={v.id}>
+                                <TableCell className="font-mono text-sm">{v.sku}</TableCell>
+                                <TableCell className="text-sm text-muted-foreground">{v.name}</TableCell>
+                                <TableCell className="text-right font-medium tabular-nums">{v.atpUnits.toLocaleString()}</TableCell>
+                                {allocationData.channels.map((ch) => {
+                                  const res = allocationData.variantReservations.find(
+                                    (r) => r.channelId === ch.id && r.productVariantId === v.id
+                                  );
+                                  const feed = allocationData.feeds.find(
+                                    (f) => f.channelId === ch.id && f.productVariantId === v.id
+                                  );
+                                  const prodAlloc = allocationData.productAllocations.find((a) => a.channelId === ch.id);
+
+                                  // Compute effective ATP for display
+                                  let effective = v.atpUnits;
+                                  if (prodAlloc?.isListed === 0) effective = 0;
+                                  else if (prodAlloc?.minAtpBase != null && allocationData.atpBase < prodAlloc.minAtpBase) effective = 0;
+                                  else {
+                                    if (res?.minStockBase != null && res.minStockBase > 0 && effective < res.minStockBase) effective = 0;
+                                    if (res?.maxStockBase != null && effective > 0) {
+                                      const maxUnits = Math.floor(res.maxStockBase / v.unitsPerVariant);
+                                      effective = Math.min(effective, maxUnits);
+                                    }
+                                  }
+                                  effective = Math.max(effective, 0);
+
+                                  const syncAge = feed?.lastSyncedAt ? Date.now() - new Date(feed.lastSyncedAt).getTime() : null;
+                                  const isFresh = syncAge != null && syncAge <= 5 * 60 * 1000;
+                                  const isStale = syncAge != null && syncAge > 5 * 60 * 1000;
+
+                                  return (
+                                    <TableCell key={ch.id} className="p-0">
+                                      <VariantChannelCell
+                                        channelId={ch.id}
+                                        variantId={v.id}
+                                        effectiveAtp={effective}
+                                        feed={feed ?? null}
+                                        reservation={res ?? null}
+                                        isFresh={isFresh}
+                                        isStale={isStale}
+                                        onSave={(data) => saveVariantReservationMutation.mutate(data)}
+                                        isSaving={saveVariantReservationMutation.isPending}
+                                      />
+                                    </TableCell>
+                                  );
+                                })}
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Channel sync status (existing push/listing info) */}
+                  {channelStatuses && channelStatuses.length > 0 && (
+                    <Card>
+                      <CardHeader className="p-3 md:p-6">
+                        <CardTitle className="text-base md:text-lg">Listing Status</CardTitle>
+                        <CardDescription className="text-xs md:text-sm">
+                          External listing IDs and push status
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+                        <div className="space-y-3">
+                          {channelStatuses.map((cs) => (
+                            <div key={cs.channelId} className="border rounded-lg p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2">
+                                  <Globe className="h-4 w-4 text-muted-foreground" />
+                                  <span className="font-medium text-sm">{cs.channelName}</span>
+                                  <Badge variant="outline" className="text-[10px]">{cs.provider}</Badge>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  {cs.listings.length > 0 ? (
+                                    (() => {
+                                      const hasError = cs.listings.some((l) => l.syncStatus === "error");
+                                      const allSynced = cs.listings.every((l) => l.syncStatus === "synced");
+                                      return hasError ? (
+                                        <Badge variant="destructive" className="text-[10px]">
+                                          <AlertCircle className="h-3 w-3 mr-1" />Error
+                                        </Badge>
+                                      ) : allSynced ? (
+                                        <Badge variant="default" className="text-[10px] bg-green-600">
+                                          <CheckCircle2 className="h-3 w-3 mr-1" />Synced
+                                        </Badge>
+                                      ) : (
+                                        <Badge variant="secondary" className="text-[10px]">
+                                          <Clock className="h-3 w-3 mr-1" />Pending
+                                        </Badge>
+                                      );
+                                    })()
+                                  ) : (
+                                    <Badge variant="secondary" className="text-[10px]">Not Listed</Badge>
+                                  )}
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 text-xs"
+                                    onClick={() => pushToChannelMutation.mutate({ channelId: cs.channelId })}
+                                    disabled={pushToChannelMutation.isPending}
+                                  >
+                                    <Send className="h-3 w-3 mr-1" />Push
+                                  </Button>
+                                </div>
+                              </div>
+                              {cs.listings.length > 0 && (
+                                <div className="text-xs text-muted-foreground space-y-1 mt-2 border-t pt-2">
+                                  {cs.listings.map((l, i) => (
+                                    <div key={i} className="flex items-center justify-between">
+                                      <span className="font-mono">
+                                        {l.externalProductId ? `#${l.externalProductId}` : "—"}
+                                        {l.externalVariantId ? ` / v${l.externalVariantId}` : ""}
+                                      </span>
+                                      <span>
+                                        {l.lastSyncedAt ? new Date(l.lastSyncedAt).toLocaleDateString() : "Never synced"}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  {cs.listings.some((l) => l.syncError) && (
+                                    <p className="text-destructive mt-1">
+                                      {cs.listings.find((l) => l.syncError)?.syncError}
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
                   )}
-                </CardContent>
-              </Card>
+                </>
+              )}
             </TabsContent>
 
             {/* ===== VARIANTS TAB ===== */}

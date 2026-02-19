@@ -1030,6 +1030,50 @@ export const insertChannelReservationSchema = createInsertSchema(channelReservat
 export type InsertChannelReservation = z.infer<typeof insertChannelReservationSchema>;
 export type ChannelReservation = typeof channelReservations.$inferSelect;
 
+// Channel product allocation - product-level rules per channel
+export const channelProductAllocation = pgTable("channel_product_allocation", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  minAtpBase: integer("min_atp_base"), // Product floor: push 0 for all variants when product ATP < this (base units)
+  maxAtpBase: integer("max_atp_base"), // Product cap: limit all variants when product ATP > this (base units)
+  isListed: integer("is_listed").notNull().default(1), // 0 = hard block, never list on this channel
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("channel_product_alloc_channel_product_idx").on(table.channelId, table.productId),
+]);
+
+export const insertChannelProductAllocationSchema = createInsertSchema(channelProductAllocation).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelProductAllocation = z.infer<typeof insertChannelProductAllocationSchema>;
+export type ChannelProductAllocation = typeof channelProductAllocation.$inferSelect;
+
+// Channel sync log - audit trail for every inventory push to a channel
+export const channelSyncLog = pgTable("channel_sync_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productId: integer("product_id").references(() => products.id),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
+  channelId: integer("channel_id").references(() => channels.id),
+  channelFeedId: integer("channel_feed_id").references(() => channelFeeds.id),
+  atpBase: integer("atp_base").notNull(), // ATP in base units at time of sync
+  pushedQty: integer("pushed_qty").notNull(), // What was actually pushed (after floors/caps)
+  previousQty: integer("previous_qty"), // What was synced last time
+  status: varchar("status", { length: 20 }).notNull(), // success, error, skipped, floor_triggered
+  errorMessage: text("error_message"),
+  responseCode: integer("response_code"),
+  durationMs: integer("duration_ms"),
+  triggeredBy: varchar("triggered_by", { length: 30 }), // reserve, pick, receive, adjust, manual, scheduled
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type ChannelSyncLogEntry = typeof channelSyncLog.$inferSelect;
+
 // ============================================
 // CATALOG / LISTING MANAGEMENT
 // ============================================

@@ -3,6 +3,8 @@ import {
   channelFeeds,
   channelConnections,
   channelReservations,
+  channelProductAllocation,
+  channelSyncLog,
   channels,
   productVariants,
   products,
@@ -11,6 +13,8 @@ import {
 import type {
   ChannelFeed,
   ChannelConnection,
+  ChannelReservation,
+  ChannelProductAllocation,
   Channel,
   ProductVariant,
   Product,
@@ -26,6 +30,7 @@ type DrizzleDb = {
 };
 
 type InventoryAtpService = {
+  getAtpBase: (productId: number) => Promise<number>;
   getAtpPerVariant: (productId: number) => Promise<Array<{
     productVariantId: number;
     sku: string;
@@ -44,9 +49,6 @@ type InventoryAtpService = {
   }>>;
 };
 
-/**
- * Result of syncing a single product's inventory to all active channels.
- */
 export interface SyncResult {
   productId: number;
   synced: number;
@@ -55,48 +57,39 @@ export interface SyncResult {
     productVariantId: number;
     channelVariantId: string;
     pushedQty: number;
+    atpBase: number;
+    status: string;
   }>;
 }
 
 /**
  * Channel sync service for the Echelon WMS.
  *
- * Pushes fungible ATP (Available-to-Promise) quantities to external sales
- * channels (Shopify, future Amazon/eBay). This is a ONE-WAY PUSH only --
- * channels never write back to Echelon inventory.
+ * Pushes effective ATP to external sales channels. The effective ATP for
+ * each variant on each channel is: base ATP → apply product floor →
+ * apply variant floor → apply max cap → push result. Always pushes the
+ * accurate number on every sync.
  *
- * The service reads ATP from the InventoryService, then for each variant
- * with an active `channel_feeds` entry, pushes the quantity to the
- * corresponding channel API.
- *
- * Design principles:
- * - Receives `db` and `atpService` via constructor -- no global singletons.
- * - Rate-limits Shopify API calls with configurable delays.
- * - Records last-synced state on `channel_feeds` for monitoring.
- * - Extensible: new channel providers can be added by extending
- *   the `pushToChannel` method.
+ * Shopify is the only live provider. Other configured providers (ebay,
+ * amazon, etsy, manual) get stub adapters that log computed ATP and
+ * update channel_feeds without calling external APIs.
  */
 class ChannelSyncService {
+  /** Debounce map: productId → timeout handle */
+  private pendingSyncs = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly DEBOUNCE_MS = 2000;
+  private readonly MAX_RETRIES = 3;
+
   constructor(
     private readonly db: DrizzleDb,
     private readonly atpService: InventoryAtpService,
   ) {}
 
   // ---------------------------------------------------------------------------
-  // 1. SYNC PRODUCT -- push ATP for a single product to all active channels
+  // 1. SYNC PRODUCT — compute effective ATP and push to all active channels
   // ---------------------------------------------------------------------------
 
-  /**
-   * Calculate fungible ATP for every variant of the given product, then push
-   * the quantity to each active channel feed entry.
-   *
-   * For Shopify channels, this calls the Inventory Levels `set.json` REST API
-   * endpoint. Other channel providers can be added in the future.
-   *
-   * @param productId  The internal product ID to sync.
-   * @returns A `SyncResult` with counts of synced feeds and any errors.
-   */
-  async syncProduct(productId: number): Promise<SyncResult> {
+  async syncProduct(productId: number, triggeredBy?: string): Promise<SyncResult> {
     const result: SyncResult = {
       productId,
       synced: 0,
@@ -104,7 +97,6 @@ class ChannelSyncService {
       variants: [],
     };
 
-    // Get the product and its variants
     const [product] = await this.db
       .select()
       .from(products)
@@ -116,86 +108,154 @@ class ChannelSyncService {
       return result;
     }
 
-    // Calculate fungible ATP for all variants of this product
+    // Get fungible ATP for all variants
     const variantAtp = await this.atpService.getAtpPerVariant(productId);
-    const atpByVariantId = new Map(
-      variantAtp.map((v) => [v.productVariantId, v]),
-    );
-
+    const atpByVariantId = new Map(variantAtp.map((v) => [v.productVariantId, v]));
     const variantIds = variantAtp.map((v) => v.productVariantId);
-    if (variantIds.length === 0) {
-      return result;
-    }
+    if (variantIds.length === 0) return result;
 
-    // Get active channel feeds for these variants
+    // Global ATP in base units (shared pool)
+    const atpBase = variantAtp.length > 0 ? variantAtp[0].atpBase : 0;
+
+    // Load active channel feeds for these variants
     const feeds: ChannelFeed[] = await this.db
       .select()
       .from(channelFeeds)
-      .where(
-        and(
-          inArray(channelFeeds.productVariantId, variantIds),
-          eq(channelFeeds.isActive, 1),
-        ),
-      );
+      .where(and(
+        inArray(channelFeeds.productVariantId, variantIds),
+        eq(channelFeeds.isActive, 1),
+      ));
 
-    if (feeds.length === 0) {
-      return result;
-    }
+    if (feeds.length === 0) return result;
 
-    // Load channel reservation caps for per-channel stock limits
-    const reservationCaps = await this.db
+    // Load allocation rules
+    const channelIds = Array.from(new Set(feeds.map((f) => f.channelId).filter(Boolean))) as number[];
+
+    // Product-level allocation rules
+    const productAllocations: ChannelProductAllocation[] = channelIds.length > 0
+      ? await this.db
+          .select()
+          .from(channelProductAllocation)
+          .where(and(
+            eq(channelProductAllocation.productId, productId),
+            inArray(channelProductAllocation.channelId, channelIds),
+          ))
+      : [];
+    const productAllocMap = new Map(
+      productAllocations.map((pa) => [pa.channelId, pa]),
+    );
+
+    // Variant-level reservation rules (floor + cap)
+    const reservations: ChannelReservation[] = await this.db
       .select()
       .from(channelReservations)
       .where(inArray(channelReservations.productVariantId, variantIds));
-
-    const capLookup = new Map<string, number>();
-    for (const cr of reservationCaps) {
-      if ((cr as any).maxStockBase != null) {
-        capLookup.set(`${(cr as any).channelId}:${(cr as any).productVariantId}`, (cr as any).maxStockBase);
+    const reservationMap = new Map<string, ChannelReservation>();
+    for (const r of reservations) {
+      if ((r as any).channelId) {
+        reservationMap.set(`${(r as any).channelId}:${(r as any).productVariantId}`, r);
       }
     }
 
     // Push each feed
     for (const feed of feeds) {
       const atp = atpByVariantId.get(feed.productVariantId);
-      let atpUnits = atp?.atpUnits ?? 0;
       const unitsPerVariant = atp?.unitsPerVariant ?? 1;
+      let effectiveAtp = atp?.atpUnits ?? 0;
+      let status = "success";
 
-      // Apply maxStockBase cap if configured for this channel+variant
+      // --- Apply channel overrides ---
       if (feed.channelId) {
-        const maxBase = capLookup.get(`${feed.channelId}:${feed.productVariantId}`);
-        if (maxBase != null) {
-          const maxVariantUnits = Math.floor(maxBase / unitsPerVariant);
-          atpUnits = Math.min(atpUnits, maxVariantUnits);
+        // 1. Product-level: isListed check
+        const prodAlloc = productAllocMap.get(feed.channelId);
+        if (prodAlloc && prodAlloc.isListed === 0) {
+          effectiveAtp = 0;
+          status = "unlisted";
+        }
+
+        // 2. Product-level: floor check
+        if (status !== "unlisted" && prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
+          effectiveAtp = 0;
+          status = "product_floor";
+        }
+
+        // 3. Variant-level rules
+        if (status === "success") {
+          const reservation = reservationMap.get(`${feed.channelId}:${feed.productVariantId}`);
+          if (reservation) {
+            // Variant floor
+            if (reservation.minStockBase != null && reservation.minStockBase > 0 && effectiveAtp < reservation.minStockBase) {
+              effectiveAtp = 0;
+              status = "variant_floor";
+            }
+            // Max cap
+            if (reservation.maxStockBase != null && effectiveAtp > 0) {
+              const maxUnits = Math.floor(reservation.maxStockBase / unitsPerVariant);
+              effectiveAtp = Math.min(effectiveAtp, maxUnits);
+            }
+          }
         }
       }
 
-      try {
-        await this.pushToChannel(feed, atpUnits);
+      // Ensure non-negative
+      effectiveAtp = Math.max(effectiveAtp, 0);
 
-        // Update the feed's sync state
+      const previousQty = (feed as any).lastSyncedQty ?? null;
+      const startTime = Date.now();
+
+      try {
+        await this.pushWithRetry(feed, effectiveAtp);
+
+        // Update feed sync state
         await this.db
           .update(channelFeeds)
           .set({
-            lastSyncedQty: atpUnits,
+            lastSyncedQty: effectiveAtp,
             lastSyncedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(channelFeeds.id, feed.id));
 
+        // Log sync
+        await this.logSync({
+          productId,
+          productVariantId: feed.productVariantId,
+          channelId: feed.channelId,
+          channelFeedId: feed.id,
+          atpBase,
+          pushedQty: effectiveAtp,
+          previousQty,
+          status,
+          durationMs: Date.now() - startTime,
+          triggeredBy: triggeredBy ?? null,
+        });
+
         result.synced += 1;
         result.variants.push({
           productVariantId: feed.productVariantId,
           channelVariantId: feed.channelVariantId,
-          pushedQty: atpUnits,
+          pushedQty: effectiveAtp,
+          atpBase,
+          status,
         });
       } catch (err: any) {
-        const message =
-          `Failed to sync variant ${feed.productVariantId} ` +
-          `to channel ${feed.channelType}/${feed.channelVariantId}: ` +
-          `${err.message ?? err}`;
+        const message = `Failed to sync variant ${feed.productVariantId} to ${feed.channelType}/${feed.channelVariantId}: ${err.message ?? err}`;
         result.errors.push(message);
         console.error(`[ChannelSync] ${message}`);
+
+        await this.logSync({
+          productId,
+          productVariantId: feed.productVariantId,
+          channelId: feed.channelId,
+          channelFeedId: feed.id,
+          atpBase,
+          pushedQty: effectiveAtp,
+          previousQty,
+          status: "error",
+          errorMessage: err.message ?? String(err),
+          durationMs: Date.now() - startTime,
+          triggeredBy: triggeredBy ?? null,
+        });
       }
     }
 
@@ -203,39 +263,19 @@ class ChannelSyncService {
   }
 
   // ---------------------------------------------------------------------------
-  // 2. SYNC ALL PRODUCTS -- batch sync with rate limiting
+  // 2. SYNC ALL PRODUCTS — batch sync with rate limiting
   // ---------------------------------------------------------------------------
 
-  /**
-   * Sync inventory for all products (or all products on a specific channel).
-   *
-   * Iterates through every product that has at least one active channel feed
-   * and calls `syncProduct` for each. Introduces a 300ms delay between
-   * Shopify API calls to respect rate limits.
-   *
-   * @param channelId  Optional -- limit the sync to feeds for a specific
-   *                   channel (by channel type, e.g., "shopify").
-   * @returns Aggregate counts of total products attempted, synced, and errors.
-   */
   async syncAllProducts(
     channelId?: number,
   ): Promise<{ total: number; synced: number; errors: string[] }> {
     const aggregated = { total: 0, synced: 0, errors: [] as string[] };
 
-    // Get all active feeds (optionally filtered by channel)
-    let feedQuery = this.db
-      .select({
-        productVariantId: channelFeeds.productVariantId,
-      })
+    const allActiveFeeds = await this.db
+      .select({ productVariantId: channelFeeds.productVariantId })
       .from(channelFeeds)
       .where(eq(channelFeeds.isActive, 1));
 
-    // If channelId is specified, join to product_variants to filter
-    // channel feeds by a specific channel record. For now, we filter
-    // by looking at the channel_feeds table and cross-referencing.
-    const allActiveFeeds = await feedQuery;
-
-    // Resolve unique product IDs from variant IDs
     const variantIds: number[] = Array.from(new Set(allActiveFeeds.map((f: any) => f.productVariantId as number)));
     if (variantIds.length === 0) return aggregated;
 
@@ -244,11 +284,8 @@ class ChannelSyncService {
       .from(productVariants)
       .where(inArray(productVariants.id, variantIds));
 
-    const productIds = Array.from(new Set(variantRows.map((v) => v.productId)));
+    let productIds = Array.from(new Set(variantRows.map((v) => v.productId)));
 
-    // If channelId is provided, further filter to products that have feeds
-    // associated with that channel
-    let filteredProductIds = productIds;
     if (channelId != null) {
       const [channel] = await this.db
         .select()
@@ -261,34 +298,25 @@ class ChannelSyncService {
         return aggregated;
       }
 
-      // Filter feeds by channel type matching this channel's provider
-      const channelFedsForProvider: ChannelFeed[] = await this.db
+      const channelFeedsForProvider: ChannelFeed[] = await this.db
         .select()
         .from(channelFeeds)
-        .where(
-          and(
-            eq(channelFeeds.isActive, 1),
-            eq(channelFeeds.channelType, channel.provider),
-          ),
-        );
+        .where(and(
+          eq(channelFeeds.isActive, 1),
+          eq(channelFeeds.channelType, channel.provider),
+        ));
 
-      const channelVariantIds = new Set(
-        channelFedsForProvider.map((f) => f.productVariantId),
-      );
-      const channelVariantRows = variantRows.filter((v) =>
-        channelVariantIds.has(v.id),
-      );
-      filteredProductIds = Array.from(new Set(channelVariantRows.map((v) => v.productId)));
+      const channelVariantIds = new Set(channelFeedsForProvider.map((f) => f.productVariantId));
+      const channelVariantRows = variantRows.filter((v) => channelVariantIds.has(v.id));
+      productIds = Array.from(new Set(channelVariantRows.map((v) => v.productId)));
     }
 
-    aggregated.total = filteredProductIds.length;
+    aggregated.total = productIds.length;
 
-    for (const productId of filteredProductIds) {
-      const syncResult = await this.syncProduct(productId);
+    for (const productId of productIds) {
+      const syncResult = await this.syncProduct(productId, "manual");
       aggregated.synced += syncResult.synced;
       aggregated.errors.push(...syncResult.errors);
-
-      // Rate limit: 300ms delay between products to respect Shopify API limits
       await this.delay(300);
     }
 
@@ -296,24 +324,18 @@ class ChannelSyncService {
   }
 
   // ---------------------------------------------------------------------------
-  // 3. QUEUE SYNC AFTER INVENTORY CHANGE -- reactive trigger
+  // 3. DEBOUNCED SYNC AFTER INVENTORY CHANGE
   // ---------------------------------------------------------------------------
 
   /**
-   * Trigger a sync for the product that owns the given variant. Called after
-   * any inventory mutation (receive, pick, adjustment, transfer) so that
-   * channel quantities stay current.
-   *
-   * For now this calls `syncProduct` directly. In the future this can be
-   * replaced with an async job queue (e.g., BullMQ, pg-boss) for better
-   * throughput and retry handling.
-   *
-   * @param productVariantId  The variant whose inventory just changed.
+   * Debounced trigger for channel sync after an inventory mutation.
+   * Collapses rapid changes to the same product into a single sync
+   * after a 2-second quiet window.
    */
   async queueSyncAfterInventoryChange(
     productVariantId: number,
+    triggeredBy?: string,
   ): Promise<void> {
-    // Find which product this variant belongs to
     const [variant] = await this.db
       .select()
       .from(productVariants)
@@ -321,92 +343,81 @@ class ChannelSyncService {
       .limit(1);
 
     if (!variant) {
-      console.warn(
-        `[ChannelSync] Cannot queue sync: variant ${productVariantId} not found`,
-      );
+      console.warn(`[ChannelSync] Cannot queue sync: variant ${productVariantId} not found`);
       return;
     }
 
-    // Check if this variant has any active feeds before triggering a sync
+    // Check if this variant has any active feeds
     const [feed] = await this.db
       .select()
       .from(channelFeeds)
-      .where(
-        and(
-          eq(channelFeeds.productVariantId, productVariantId),
-          eq(channelFeeds.isActive, 1),
-        ),
-      )
+      .where(and(
+        eq(channelFeeds.productVariantId, productVariantId),
+        eq(channelFeeds.isActive, 1),
+      ))
       .limit(1);
 
-    if (!feed) {
-      // No active feeds for this variant -- nothing to sync
-      return;
-    }
+    if (!feed) return; // No active feeds — nothing to sync
 
-    try {
-      await this.syncProduct(variant.productId);
-    } catch (err: any) {
-      console.error(
-        `[ChannelSync] Failed to sync product ${variant.productId} ` +
-        `after inventory change on variant ${productVariantId}: ${err.message}`,
-      );
-    }
+    const productId = variant.productId;
+
+    // Clear existing debounce timer for this product
+    const existing = this.pendingSyncs.get(productId);
+    if (existing) clearTimeout(existing);
+
+    // Set new debounce timer
+    const timeout = setTimeout(async () => {
+      this.pendingSyncs.delete(productId);
+      try {
+        await this.syncProduct(productId, triggeredBy ?? "inventory_change");
+      } catch (err: any) {
+        console.error(
+          `[ChannelSync] Debounced sync failed for product ${productId}: ${err.message}`,
+        );
+      }
+    }, this.DEBOUNCE_MS);
+
+    this.pendingSyncs.set(productId, timeout);
   }
 
   // ---------------------------------------------------------------------------
-  // 4. GET LAST SYNC STATUS -- monitoring endpoint
+  // 4. SYNC STATUS — monitoring
   // ---------------------------------------------------------------------------
 
-  /**
-   * Return the last sync status for all active channel feeds, optionally
-   * filtered by channel ID. Useful for admin monitoring dashboards.
-   *
-   * @param channelId  Optional -- filter to a specific channel.
-   * @returns Array of sync status records with variant IDs, channel IDs,
-   *          last synced quantities, and timestamps.
-   */
   async getLastSyncStatus(
     channelId?: number,
-  ): Promise<
-    Array<{
-      productVariantId: number;
-      channelVariantId: string;
-      lastSyncedQty: number;
-      lastSyncedAt: Date | null;
-    }>
-  > {
+  ): Promise<Array<{
+    productVariantId: number;
+    channelVariantId: string;
+    channelId: number | null;
+    channelType: string;
+    lastSyncedQty: number;
+    lastSyncedAt: Date | null;
+  }>> {
     let query;
 
     if (channelId != null) {
-      // Look up the channel to get its provider type
-      const [channel] = await this.db
-        .select()
-        .from(channels)
-        .where(eq(channels.id, channelId))
-        .limit(1);
-
-      if (!channel) return [];
-
       query = this.db
         .select({
           productVariantId: channelFeeds.productVariantId,
           channelVariantId: channelFeeds.channelVariantId,
+          channelId: channelFeeds.channelId,
+          channelType: channelFeeds.channelType,
           lastSyncedQty: channelFeeds.lastSyncedQty,
           lastSyncedAt: channelFeeds.lastSyncedAt,
         })
         .from(channelFeeds)
-        .where(
-          and(
-            eq(channelFeeds.isActive, 1),
-            eq(channelFeeds.channelType, channel.provider),
-          ),
-        );
+        .where(and(
+          eq(channelFeeds.isActive, 1),
+          eq(channelFeeds.channelId, channelId),
+        ));
     } else {
       query = this.db
         .select({
           productVariantId: channelFeeds.productVariantId,
           channelVariantId: channelFeeds.channelVariantId,
+          channelId: channelFeeds.channelId,
+          channelType: channelFeeds.channelType,
           lastSyncedQty: channelFeeds.lastSyncedQty,
           lastSyncedAt: channelFeeds.lastSyncedAt,
         })
@@ -415,13 +426,92 @@ class ChannelSyncService {
     }
 
     const rows = await query;
-
     return rows.map((row: any) => ({
       productVariantId: row.productVariantId,
       channelVariantId: row.channelVariantId,
+      channelId: row.channelId ?? null,
+      channelType: row.channelType,
       lastSyncedQty: row.lastSyncedQty ?? 0,
       lastSyncedAt: row.lastSyncedAt ?? null,
     }));
+  }
+
+  /**
+   * Get sync log entries for monitoring/audit.
+   */
+  async getSyncLog(opts?: {
+    channelId?: number;
+    productId?: number;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<Array<any>> {
+    const conditions = [];
+    if (opts?.channelId) conditions.push(eq(channelSyncLog.channelId, opts.channelId));
+    if (opts?.productId) conditions.push(eq(channelSyncLog.productId, opts.productId));
+    if (opts?.status) conditions.push(eq(channelSyncLog.status, opts.status));
+
+    const rows = await this.db
+      .select()
+      .from(channelSyncLog)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(sql`${channelSyncLog.createdAt} DESC`)
+      .limit(opts?.limit ?? 100)
+      .offset(opts?.offset ?? 0);
+
+    return rows;
+  }
+
+  /**
+   * Find channel feeds where lastSyncedQty differs from current ATP.
+   * Indicates stale inventory on channels.
+   */
+  async getDivergence(): Promise<Array<{
+    productVariantId: number;
+    channelId: number | null;
+    channelType: string;
+    lastSyncedQty: number;
+    currentAtpUnits: number;
+    lastSyncedAt: Date | null;
+  }>> {
+    const feeds: ChannelFeed[] = await this.db
+      .select()
+      .from(channelFeeds)
+      .where(eq(channelFeeds.isActive, 1));
+
+    const divergent: Array<any> = [];
+    const productCache = new Map<number, Array<any>>();
+
+    for (const feed of feeds) {
+      // Resolve product for this variant
+      const [variant] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, feed.productVariantId))
+        .limit(1);
+      if (!variant) continue;
+
+      // Cache ATP per product
+      if (!productCache.has(variant.productId)) {
+        productCache.set(variant.productId, await this.atpService.getAtpPerVariant(variant.productId));
+      }
+      const variantAtp = productCache.get(variant.productId)!;
+      const atp = variantAtp.find((v) => v.productVariantId === feed.productVariantId);
+      const currentAtpUnits = atp?.atpUnits ?? 0;
+
+      if ((feed as any).lastSyncedQty !== currentAtpUnits) {
+        divergent.push({
+          productVariantId: feed.productVariantId,
+          channelId: feed.channelId,
+          channelType: feed.channelType,
+          lastSyncedQty: (feed as any).lastSyncedQty ?? 0,
+          currentAtpUnits,
+          lastSyncedAt: (feed as any).lastSyncedAt ?? null,
+        });
+      }
+    }
+
+    return divergent;
   }
 
   // ---------------------------------------------------------------------------
@@ -429,59 +519,51 @@ class ChannelSyncService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Push an ATP quantity to the appropriate channel API based on the feed's
-   * channel type. Currently supports Shopify; other providers can be added
-   * as additional cases.
-   *
-   * @param feed      The channel feed entry describing which external variant to update.
-   * @param atpUnits  The available-to-promise quantity to push.
-   * @throws On API errors or missing configuration.
+   * Push with exponential backoff retry.
    */
-  private async pushToChannel(
-    feed: ChannelFeed,
-    atpUnits: number,
-  ): Promise<void> {
+  private async pushWithRetry(feed: ChannelFeed, atpUnits: number): Promise<void> {
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
+      try {
+        await this.pushToChannel(feed, atpUnits);
+        return;
+      } catch (err) {
+        if (attempt === this.MAX_RETRIES) throw err;
+        const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+        console.warn(`[ChannelSync] Push attempt ${attempt} failed, retrying in ${delayMs}ms`);
+        await this.delay(delayMs);
+      }
+    }
+  }
+
+  /**
+   * Route push to the appropriate channel adapter.
+   * Shopify: live push. Others: stub (log + update feed state).
+   */
+  private async pushToChannel(feed: ChannelFeed, atpUnits: number): Promise<void> {
     switch (feed.channelType) {
       case "shopify":
         await this.pushToShopify(feed, atpUnits);
         break;
 
-      case "amazon":
       case "ebay":
-        // Future: implement marketplace-specific push logic
-        console.warn(
-          `[ChannelSync] Channel type "${feed.channelType}" not yet implemented`,
+      case "amazon":
+        // Stub: log computed ATP, don't call external API
+        console.log(
+          `[ChannelSync] STUB ${feed.channelType}: would push ${atpUnits} units ` +
+          `for variant ${feed.productVariantId} (feed ${feed.id})`,
         );
         break;
 
+      case "wholesale":
+        // Manual/wholesale channels — no push, just record
+        break;
+
       default:
-        console.warn(
-          `[ChannelSync] Unknown channel type "${feed.channelType}" for feed ${feed.id}`,
-        );
+        console.warn(`[ChannelSync] Unknown channel type "${feed.channelType}" for feed ${feed.id}`);
     }
   }
 
-  /**
-   * Push inventory quantity to Shopify via the Inventory Levels `set.json`
-   * REST API endpoint.
-   *
-   * Reads credentials from the channel's `channel_connections` record
-   * (per-channel, not env vars). Supports multiple Shopify locations:
-   * queries all warehouses with a `shopify_location_id` configured and
-   * pushes that warehouse's ATP to the corresponding Shopify location.
-   * Falls back to `SHOPIFY_LOCATION_ID` env var with global ATP if no
-   * warehouses are configured.
-   *
-   * @param feed      The channel feed with `channelVariantId` containing the
-   *                  Shopify inventory item ID.
-   * @param atpUnits  The global ATP quantity (used as fallback).
-   * @throws On missing credentials or Shopify API errors.
-   */
-  private async pushToShopify(
-    feed: ChannelFeed,
-    atpUnits: number,
-  ): Promise<void> {
-    // Read credentials from the channel's stored connection
+  private async pushToShopify(feed: ChannelFeed, atpUnits: number): Promise<void> {
     if (!feed.channelId) {
       throw new Error(`Feed ${feed.id} has no channelId — cannot resolve Shopify credentials`);
     }
@@ -493,11 +575,7 @@ class ChannelSyncService {
     if (!conn?.shopDomain || !conn?.accessToken) {
       throw new Error(`Channel ${feed.channelId} has no Shopify credentials configured`);
     }
-    const shopifyDomain = conn.shopDomain;
-    const accessToken = conn.accessToken;
 
-    // Resolve the Shopify inventory_item_id and product_id from product_variants
-    // (channelVariantId stores the Shopify variant ID, NOT the inventory item ID)
     const [variantRow] = await this.db
       .select({
         productId: productVariants.productId,
@@ -509,69 +587,53 @@ class ChannelSyncService {
 
     if (!variantRow?.shopifyInventoryItemId) {
       throw new Error(
-        `Variant ${feed.productVariantId} has no shopifyInventoryItemId — ` +
-        `run Shopify product sync first to populate it`,
+        `Variant ${feed.productVariantId} has no shopifyInventoryItemId — run Shopify product sync first`,
       );
     }
-    const shopifyInventoryItemId = variantRow.shopifyInventoryItemId;
 
-    // Look up managed warehouses with Shopify location IDs configured
-    // Only push for internal-source warehouses (Echelon is truth).
-    // External warehouses (3PL/channel/integration) manage their own Shopify inventory.
     const warehouseRows: Warehouse[] = await this.db
       .select()
       .from(warehouses)
-      .where(
-        and(
-          eq(warehouses.isActive, 1),
-          sql`${warehouses.shopifyLocationId} IS NOT NULL`,
-          sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
-        ),
-      );
+      .where(and(
+        eq(warehouses.isActive, 1),
+        sql`${warehouses.shopifyLocationId} IS NOT NULL`,
+        sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
+      ));
 
     if (warehouseRows.length > 0) {
-      // Multi-warehouse mode: push per-warehouse ATP to each Shopify location
       for (const wh of warehouseRows) {
         const warehouseAtp = await this.atpService.getAtpPerVariantByWarehouse(
           variantRow.productId,
           wh.id,
         );
-        const variantAtp = warehouseAtp.find(
-          (v) => v.productVariantId === feed.productVariantId,
-        );
+        const variantAtp = warehouseAtp.find((v) => v.productVariantId === feed.productVariantId);
         const qty = variantAtp?.atpUnits ?? 0;
 
         await this.pushToShopifyLocation(
-          shopifyDomain,
-          accessToken,
-          shopifyInventoryItemId,
+          conn.shopDomain,
+          conn.accessToken,
+          variantRow.shopifyInventoryItemId,
           wh.shopifyLocationId!,
           qty,
         );
       }
     } else {
-      // Fallback: single location from env var (backward compatible)
       const shopifyLocationId = process.env.SHOPIFY_LOCATION_ID;
       if (!shopifyLocationId) {
         throw new Error(
-          "No warehouses with shopify_location_id configured and " +
-          "SHOPIFY_LOCATION_ID environment variable is not set",
+          "No warehouses with shopify_location_id configured and SHOPIFY_LOCATION_ID env var not set",
         );
       }
-
       await this.pushToShopifyLocation(
-        shopifyDomain,
-        accessToken,
-        shopifyInventoryItemId,
+        conn.shopDomain,
+        conn.accessToken,
+        variantRow.shopifyInventoryItemId,
         shopifyLocationId,
         atpUnits,
       );
     }
   }
 
-  /**
-   * Push a single inventory level to a specific Shopify location.
-   */
   private async pushToShopifyLocation(
     shopifyDomain: string,
     accessToken: string,
@@ -596,20 +658,52 @@ class ChannelSyncService {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(
-        `Shopify API error ${response.status} for location ${shopifyLocationId}: ${body}`,
-      );
+      throw new Error(`Shopify API error ${response.status} for location ${shopifyLocationId}: ${body}`);
     }
 
     console.log(
-      `[ChannelSync] Pushed ${available} units to Shopify ` +
-      `location=${shopifyLocationId} for inventory_item_id=${inventoryItemId}`,
+      `[ChannelSync] Pushed ${available} to Shopify location=${shopifyLocationId} item=${inventoryItemId}`,
     );
   }
 
   /**
-   * Async delay utility for rate limiting between API calls.
+   * Write a sync log entry.
    */
+  private async logSync(entry: {
+    productId: number;
+    productVariantId: number;
+    channelId: number | null;
+    channelFeedId: number;
+    atpBase: number;
+    pushedQty: number;
+    previousQty: number | null;
+    status: string;
+    errorMessage?: string;
+    responseCode?: number;
+    durationMs: number;
+    triggeredBy: string | null;
+  }): Promise<void> {
+    try {
+      await this.db.insert(channelSyncLog).values({
+        productId: entry.productId,
+        productVariantId: entry.productVariantId,
+        channelId: entry.channelId,
+        channelFeedId: entry.channelFeedId,
+        atpBase: entry.atpBase,
+        pushedQty: entry.pushedQty,
+        previousQty: entry.previousQty,
+        status: entry.status,
+        errorMessage: entry.errorMessage ?? null,
+        responseCode: entry.responseCode ?? null,
+        durationMs: entry.durationMs,
+        triggeredBy: entry.triggeredBy,
+      });
+    } catch (err: any) {
+      // Don't let logging failures break the sync
+      console.warn(`[ChannelSync] Failed to write sync log: ${err.message}`);
+    }
+  }
+
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -619,20 +713,6 @@ class ChannelSyncService {
 // Factory
 // ---------------------------------------------------------------------------
 
-/**
- * Create a new `ChannelSyncService` bound to the supplied Drizzle
- * database instance and ATP service.
- *
- * ```ts
- * import { db } from "../db";
- * import { createInventoryAtpService } from "./services/inventory-atp";
- * import { createChannelSyncService } from "./services/channel-sync";
- *
- * const atp = createInventoryAtpService(db);
- * const channelSync = createChannelSyncService(db, atp);
- * await channelSync.syncProduct(42);
- * ```
- */
 export function createChannelSyncService(db: any, atpService: any) {
   return new ChannelSyncService(db, atpService);
 }
