@@ -454,7 +454,6 @@ class CycleCountService {
         LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
         WHERE il.warehouse_location_id = ${location.id}
-          AND il.variant_qty > 0
       `);
 
       if (result.rows.length > 0) {
