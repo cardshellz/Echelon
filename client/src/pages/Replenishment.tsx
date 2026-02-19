@@ -1173,6 +1173,18 @@ export default function Replenishment() {
     }
   };
 
+  const formatRelativeTime = (dateStr: string | null | undefined) => {
+    if (!dateStr) return "-";
+    const ms = Date.now() - new Date(dateStr).getTime();
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case "pending":
@@ -1396,6 +1408,7 @@ export default function Replenishment() {
                       <TableHead className="text-xs hidden md:table-cell">Product</TableHead>
                       <TableHead className="text-xs">Qty</TableHead>
                       <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Created</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Mode</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Trigger</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Method</TableHead>
@@ -1450,6 +1463,7 @@ export default function Replenishment() {
                             </div>
                           )}
                         </TableCell>
+                        <TableCell className="hidden md:table-cell py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getModeBadge(task.executionMode)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getTriggerBadge(task.triggeredBy)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">
