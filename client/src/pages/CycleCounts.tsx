@@ -126,7 +126,8 @@ export default function CycleCounts() {
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(new Set());
   const [bulkApproveForm, setBulkApproveForm] = useState({ reasonCode: "", notes: "" });
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
-  const [newCountForm, setNewCountForm] = useState({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
+  const defaultCountName = () => new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" }) + " Cycle Count";
+  const [newCountForm, setNewCountForm] = useState({ name: defaultCountName(), description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
     { value: "pick", label: "Pick" },
     { value: "reserve", label: "Reserve" },
@@ -228,7 +229,7 @@ export default function CycleCounts() {
       toast({ title: "Cycle count created" });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       setCreateDialogOpen(false);
-      setNewCountForm({ name: "", description: "", zoneFilter: "", warehouseId: "", locationTypes: [], binTypes: [] });
+      setNewCountForm({ name: defaultCountName(), description: "", zoneFilter: "", warehouseId: "", locationTypes: [], binTypes: [] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
