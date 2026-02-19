@@ -454,6 +454,46 @@ class ReplenishmentService {
       activeTaskKeys.add(key); // Prevent duplicates within this run
     }
 
+    // --- 7. Sweep existing pending tasks and auto-execute if settings now allow ---
+    const pendingTasks = activeTasks.filter((t) => t.status === "pending");
+    for (const task of pendingTasks) {
+      const rule = task.pickProductVariantId != null
+        ? ruleByPickVariant.get(task.pickProductVariantId)
+        : undefined;
+      const variant = task.pickProductVariantId != null
+        ? variantMap.get(task.pickProductVariantId)
+        : undefined;
+      const location = task.toLocationId != null
+        ? pickLocationMap.get(task.toLocationId)
+        : undefined;
+      const tierDefault = variant && location
+        ? this.findTierDefault(tierDefaults, variant.hierarchyLevel, location.warehouseId ?? undefined)
+        : undefined;
+
+      const { shouldAutoExecute } = this.resolveAutoExecute(
+        rule?.autoReplen ?? null,
+        tierDefault?.autoReplen ?? null,
+        whSettings,
+        task.qtyTargetUnits ?? 0,
+      );
+
+      if (shouldAutoExecute) {
+        try {
+          await this.executeTask(task.id, "system:auto-replen");
+        } catch (autoErr: any) {
+          console.warn(`[Replen] Auto-execute sweep failed for task ${task.id}:`, autoErr?.message);
+          try {
+            await this.db.update(replenTasks).set({
+              status: "blocked",
+              notes: `${task.notes || ""}\nAuto-replen sweep failed: ${autoErr?.message || "unknown error"}`,
+            }).where(eq(replenTasks.id, task.id));
+          } catch (updateErr: any) {
+            console.error(`[Replen] CRITICAL: Failed to mark task ${task.id} as blocked:`, updateErr?.message);
+          }
+        }
+      }
+    }
+
     return newTasks;
   }
 
