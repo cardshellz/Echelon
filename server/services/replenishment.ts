@@ -984,12 +984,22 @@ class ReplenishmentService {
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
 
     // Re-resolve with actual qtyTargetUnits (matters for hybrid mode)
+    console.log(`[Replen DEBUG] resolveAutoExecute inputs:`, {
+      ruleAutoReplen: rule?.autoReplen ?? null,
+      tierDefaultAutoReplen: tierDefault?.autoReplen ?? null,
+      tierDefaultId: tierDefault?.id ?? null,
+      whSettingsId: whSettings?.id ?? null,
+      whReplenMode: whSettings?.replenMode ?? null,
+      locationWarehouseId: location.warehouseId,
+      qtyTargetUnits,
+    });
     const execDecision = this.resolveAutoExecute(
       rule?.autoReplen ?? null,
       tierDefault?.autoReplen ?? null,
       whSettings,
       qtyTargetUnits,
     );
+    console.log(`[Replen DEBUG] execDecision:`, execDecision);
 
     // Create the task — persist replenMethod and resolved execution mode
     const [task] = await this.db
@@ -1016,19 +1026,26 @@ class ReplenishmentService {
       .returning();
 
     // Unified auto-execute: immediately execute if resolved decision says so
+    console.log(`[Replen DEBUG] Task ${task.id} shouldAutoExecute=${execDecision.shouldAutoExecute}, executionMode=${execDecision.executionMode}`);
     if (execDecision.shouldAutoExecute) {
       try {
+        console.log(`[Replen DEBUG] Calling executeTask(${task.id})...`);
         await this.executeTask(task.id, "system:auto-replen");
+        console.log(`[Replen DEBUG] executeTask(${task.id}) completed successfully`);
       } catch (autoErr: any) {
         console.warn(`[Replen] Auto-replen after pick failed for task ${task.id}:`, autoErr?.message);
         // Mark as blocked so it doesn't prevent future task creation (dedup skips blocked)
-        await this.db
-          .update(replenTasks)
-          .set({
-            status: "blocked",
-            notes: `${taskNotes}\nAuto-replen failed: ${autoErr?.message || "unknown error"}`,
-          })
-          .where(eq(replenTasks.id, task.id));
+        try {
+          await this.db
+            .update(replenTasks)
+            .set({
+              status: "blocked",
+              notes: `${taskNotes}\nAuto-replen failed: ${autoErr?.message || "unknown error"}`,
+            })
+            .where(eq(replenTasks.id, task.id));
+        } catch (updateErr: any) {
+          console.error(`[Replen] CRITICAL: Failed to mark task ${task.id} as blocked:`, updateErr?.message);
+        }
       }
     }
 
