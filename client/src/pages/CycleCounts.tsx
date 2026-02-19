@@ -782,7 +782,9 @@ export default function CycleCounts() {
     
     // Get current bin group and items
     const currentBinGroup = binGroups[currentBinIndex];
-    const currentBinItems = currentBinGroup?.items || [];
+    const currentBinItems = [...(currentBinGroup?.items || [])].sort((a, b) =>
+      (a.mismatchType === "unexpected_found" ? 1 : 0) - (b.mismatchType === "unexpected_found" ? 1 : 0)
+    );
     // For backwards compatibility, currentItem is the first item in the bin
     const currentItem = currentBinItems[0];
     
