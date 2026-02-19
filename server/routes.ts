@@ -8675,7 +8675,7 @@ export async function registerRoutes(
   app.post("/api/inventory/break", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { breakAssembly } = req.app.locals.services;
-      const { sourceVariantId, targetVariantId, sourceQty, warehouseLocationId } = req.body;
+      const { sourceVariantId, targetVariantId, sourceQty, warehouseLocationId, targetLocationId } = req.body;
       const userId = req.session.user?.id;
 
       if (!sourceVariantId || !targetVariantId || !sourceQty || !warehouseLocationId) {
@@ -8687,6 +8687,7 @@ export async function registerRoutes(
         targetVariantId,
         sourceQty,
         warehouseLocationId,
+        targetLocationId: targetLocationId || undefined,
         userId,
       });
 

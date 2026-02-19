@@ -445,6 +445,21 @@ class CycleCountService {
         product_id: number | null;
         sku: string | null;
       }>(sql`
+        -- Assigned bins: always include even if qty=0 (verify the assignment)
+        SELECT
+          pv.id as product_variant_id,
+          COALESCE(il.variant_qty, 0) as variant_qty,
+          pv.product_id as product_id,
+          pv.sku as sku
+        FROM product_locations pl
+        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
+        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+          AND il.warehouse_location_id = ${location.id}
+        WHERE pl.warehouse_location_id = ${location.id}
+
+        UNION
+
+        -- Unassigned bins with stock > 0: include (discovered stock)
         SELECT
           il.product_variant_id,
           il.variant_qty,
@@ -454,6 +469,13 @@ class CycleCountService {
         LEFT JOIN product_variants pv ON il.product_variant_id = pv.id
         LEFT JOIN products p ON pv.product_id = p.id
         WHERE il.warehouse_location_id = ${location.id}
+          AND il.variant_qty > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM product_locations pl2
+            JOIN product_variants pv2 ON UPPER(pv2.sku) = UPPER(pl2.sku)
+            WHERE pl2.warehouse_location_id = ${location.id}
+              AND pv2.id = il.product_variant_id
+          )
       `);
 
       if (result.rows.length > 0) {

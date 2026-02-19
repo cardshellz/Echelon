@@ -1,8 +1,10 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import {
   productVariants,
   inventoryLevels,
   inventoryTransactions,
+  productLocations,
+  warehouseLocations,
   type ProductVariant,
   type InventoryLevel,
   type InsertInventoryTransaction,
@@ -82,7 +84,8 @@ class BreakAssemblyService {
   async breakVariant(params: {
     sourceVariantId: number;
     targetVariantId: number;
-    warehouseLocationId: number;
+    warehouseLocationId: number;    // source (case) location
+    targetLocationId?: number;      // destination pick bin — auto-resolved from bin assignment if omitted
     sourceQty: number;
     userId?: string;
     notes?: string;
@@ -110,6 +113,25 @@ class BreakAssemblyService {
       targetVariant.unitsPerVariant
     );
 
+    // Resolve destination: explicit > bin assignment > fall back to source
+    let resolvedTargetLocationId: number = params.targetLocationId ?? warehouseLocationId;
+    if (!params.targetLocationId) {
+      const assignment = await this.db
+        .select({ warehouseLocationId: productLocations.warehouseLocationId })
+        .from(productLocations)
+        .innerJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
+        .where(
+          and(
+            eq(sql`UPPER(${productLocations.sku})`, targetVariant.sku?.toUpperCase() ?? ""),
+            eq(warehouseLocations.isPickable, 1)
+          )
+        )
+        .limit(1);
+      if (assignment[0]?.warehouseLocationId) {
+        resolvedTargetLocationId = assignment[0].warehouseLocationId;
+      }
+    }
+
     // ----- Execute inside a transaction -----
     const batchId = this.generateBatchId("break");
 
@@ -124,13 +146,13 @@ class BreakAssemblyService {
         );
       }
 
-      // Decrement source variant
+      // Decrement source variant at source location
       await this.adjustWithinTx(tx, sourceLevel.id, {
         variantQty: -sourceQty,
       });
 
-      // Increment target variant (upsert if no level row exists yet)
-      const targetLevel = await this.fetchLevel(tx, targetVariantId, warehouseLocationId);
+      // Increment target variant at destination (pick) location
+      const targetLevel = await this.fetchLevel(tx, targetVariantId, resolvedTargetLocationId);
       if (targetLevel) {
         await this.adjustWithinTx(tx, targetLevel.id, {
           variantQty: targetQty,
@@ -138,7 +160,7 @@ class BreakAssemblyService {
       } else {
         await this.insertLevel(tx, {
           productVariantId: targetVariantId,
-          warehouseLocationId,
+          warehouseLocationId: resolvedTargetLocationId,
           variantQty: targetQty,
           reservedQty: 0,
           pickedQty: 0,
@@ -146,6 +168,8 @@ class BreakAssemblyService {
           backorderQty: 0,
         });
       }
+
+      const noteText = notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`;
 
       // Log both sides of the conversion
       await this.logTx(tx, {
@@ -158,7 +182,7 @@ class BreakAssemblyService {
         batchId,
         sourceState: "on_hand",
         targetState: "on_hand",
-        notes: notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`,
+        notes: noteText,
         userId,
         isImplicit: 0,
       });
@@ -166,7 +190,7 @@ class BreakAssemblyService {
       const targetQtyBefore = targetLevel?.variantQty ?? 0;
       await this.logTx(tx, {
         productVariantId: targetVariantId,
-        toLocationId: warehouseLocationId,
+        toLocationId: resolvedTargetLocationId,
         transactionType: "break",
         variantQtyDelta: targetQty,
         variantQtyBefore: targetQtyBefore,
@@ -174,7 +198,7 @@ class BreakAssemblyService {
         batchId,
         sourceState: "on_hand",
         targetState: "on_hand",
-        notes: notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`,
+        notes: noteText,
         userId,
         isImplicit: 0,
       });
