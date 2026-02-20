@@ -2,6 +2,7 @@ import { eq, and, sql } from "drizzle-orm";
 import {
   inventoryLevels,
   inventoryTransactions,
+  productLocations,
   productVariants,
   warehouseLocations,
 } from "@shared/schema";
@@ -452,6 +453,39 @@ export class InventoryCoreService {
         notes: params.reason,
         userId: params.userId ?? null,
       });
+
+      // Clean up zombie records: if all buckets are zero and the variant
+      // is NOT assigned to this bin, delete the inventory_levels row.
+      const afterQty = level.variantQty + params.qtyDelta;
+      if (afterQty <= 0) {
+        const [current] = await tx
+          .select()
+          .from(inventoryLevels)
+          .where(eq(inventoryLevels.id, level.id))
+          .limit(1);
+        if (
+          current &&
+          current.variantQty === 0 &&
+          current.reservedQty === 0 &&
+          current.pickedQty === 0 &&
+          (current.packedQty ?? 0) === 0 &&
+          (current.backorderQty ?? 0) === 0
+        ) {
+          const [assignment] = await tx
+            .select({ id: productLocations.id })
+            .from(productLocations)
+            .where(
+              and(
+                eq(productLocations.productVariantId, params.productVariantId),
+                eq(productLocations.warehouseLocationId, params.warehouseLocationId),
+              ),
+            )
+            .limit(1);
+          if (!assignment) {
+            await tx.delete(inventoryLevels).where(eq(inventoryLevels.id, level.id));
+          }
+        }
+      }
     });
   }
 
