@@ -255,6 +255,7 @@ class CycleCountService {
 
     // Apply inventory adjustment if item has a variant and non-zero variance
     if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
+      console.log(`[CYCLE COUNT] Adjusting inventory: variant=${item.productVariantId} loc=${item.warehouseLocationId} delta=${item.varianceQty} sku=${item.expectedSku || item.countedSku}`);
       await this.inventoryCore.adjustInventory({
         productVariantId: item.productVariantId,
         warehouseLocationId: item.warehouseLocationId,
@@ -264,12 +265,15 @@ class CycleCountService {
         userId: approvedBy,
         allowNegative: true,
       });
+      console.log(`[CYCLE COUNT] Adjustment applied successfully`);
       adjustment = {
         sku: item.expectedSku || item.countedSku,
         type: item.mismatchType || item.varianceType,
         qtyChange: item.varianceQty,
         locationId: item.warehouseLocationId,
       };
+    } else {
+      console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} varianceQty=${item.varianceQty} (type: ${typeof item.varianceQty}) sku=${item.expectedSku || item.countedSku}`);
     }
 
     // Mark as approved
@@ -904,6 +908,7 @@ class CycleCountService {
         if (!item.varianceType) { skipped++; continue; }
 
         // Approve primary item
+        console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
         const adj = await this.approveItemCore(item, reasonCode, notes, approvedBy);
         if (adj) { allAdjustments.push(adj); adjustmentCount++; }
         approved++;
