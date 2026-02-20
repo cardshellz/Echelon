@@ -512,6 +512,7 @@ export default function CycleCounts() {
     switch (type) {
       case "quantity_over": return <Badge className="bg-emerald-100 text-emerald-700">+Over</Badge>;
       case "quantity_under": return <Badge className="bg-rose-100 text-rose-700">-Shortage</Badge>;
+      case "stray_removed": return <Badge className="bg-green-100 text-green-700">Stray Removed</Badge>;
       case "unexpected_sku": return <Badge variant="destructive">Wrong SKU</Badge>;
       case "unexpected_item": return <Badge className="bg-amber-100 text-amber-700">Unexpected</Badge>;
       default: return <Badge variant="outline">{type}</Badge>;
@@ -2239,6 +2240,7 @@ export default function CycleCounts() {
               const varianceTypeLabels: Record<string, string> = {
                 quantity_under: "Shortage",
                 quantity_over: "Overage",
+                stray_removed: "Stray Removed",
                 unexpected_sku: "Wrong SKU",
                 unexpected_item: "Unexpected Item",
                 other: "Other",

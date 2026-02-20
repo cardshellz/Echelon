@@ -155,7 +155,6 @@ export class OperationsDashboardService {
         wl.location_type,
         wl.bin_type,
         wl.is_pickable,
-        wl.pick_sequence,
         wl.warehouse_id,
         wl.capacity_cubic_mm,
         w.code as warehouse_code,
@@ -167,7 +166,7 @@ export class OperationsDashboardService {
       LEFT JOIN inventory_levels il ON il.warehouse_location_id = wl.id
       WHERE 1=1 ${whFilter} ${zoneFilter} ${ltFilter} ${btFilter} ${searchFilter} ${hasInvFilter}
       GROUP BY wl.id, wl.code, wl.zone, wl.location_type, wl.bin_type, wl.is_pickable,
-               wl.pick_sequence, wl.warehouse_id, wl.capacity_cubic_mm, w.code
+               wl.warehouse_id, wl.capacity_cubic_mm, w.code
       ORDER BY ${orderClause}
       LIMIT ${pageSize} OFFSET ${offset}
     `);
@@ -209,7 +208,6 @@ export class OperationsDashboardService {
         locationType: b.location_type,
         binType: b.bin_type,
         isPickable: b.is_pickable,
-        pickSequence: b.pick_sequence,
         warehouseId: b.warehouse_id,
         warehouseCode: b.warehouse_code,
         capacityCubicMm: b.capacity_cubic_mm ? parseInt(b.capacity_cubic_mm) : null,

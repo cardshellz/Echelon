@@ -6,6 +6,7 @@ import {
   productVariants,
   warehouseLocations,
   warehouses,
+  productLocations,
 } from "@shared/schema";
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -119,8 +120,8 @@ class ReservationService {
         const unitsNeeded = item.quantity;
 
         // 3. Find the best location to reserve from
-        //    Prefer pick locations with sufficient available stock,
-        //    ordered by pick_sequence for walk-path efficiency.
+        //    Prefer locations with sufficient available stock,
+        //    ordered by location hierarchy (zone/aisle/bay/level/bin).
         //    Scoped to the order's assigned warehouse if set.
         const locationFilters = [
           eq(inventoryLevels.productVariantId, variant.id),
@@ -137,8 +138,21 @@ class ReservationService {
             warehouseLocations,
             eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
           )
+          .innerJoin(
+            productLocations,
+            and(
+              eq(productLocations.productVariantId, inventoryLevels.productVariantId),
+              eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
+            ),
+          )
           .where(and(...locationFilters))
-          .orderBy(warehouseLocations.pickSequence);
+          .orderBy(
+            warehouseLocations.zone,
+            warehouseLocations.aisle,
+            warehouseLocations.bay,
+            warehouseLocations.level,
+            warehouseLocations.bin,
+          );
 
         if (levels.length === 0) {
           result.failed.push({
@@ -346,6 +360,211 @@ class ReservationService {
         console.warn(`[ChannelSync] Post-release sync failed for variant ${vid}:`, err),
       );
     }
+
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // REALLOCATE ORPHANED RESERVATIONS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When a cycle count zeros out inventory at a location but reserved_qty > 0,
+   * we have "orphaned" reservations that can never be fulfilled from that bin.
+   *
+   * This method:
+   *  1. Detects excess reserved_qty at the given location for the variant.
+   *  2. Force-releases the excess via adjustLevel + unreserve transaction.
+   *  3. Finds affected orders via reserve transactions at this location.
+   *  4. Attempts to re-reserve each affected order at an alternative assigned bin.
+   *
+   * Non-fatal: if re-reservation fails, orders stay partially unreserved for
+   * manual attention (logged as warnings).
+   */
+  async reallocateOrphaned(
+    productVariantId: number,
+    warehouseLocationId: number,
+    userId?: string,
+  ): Promise<{ released: number; reallocated: number; failed: number }> {
+    const result = { released: 0, reallocated: 0, failed: 0 };
+
+    // 1. Get the inventory level at this location
+    const [level] = await this.db
+      .select()
+      .from(inventoryLevels)
+      .where(
+        and(
+          eq(inventoryLevels.productVariantId, productVariantId),
+          eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+        ),
+      )
+      .limit(1);
+
+    if (!level) return result;
+
+    // If reserved_qty <= variant_qty, nothing orphaned
+    const currentQty = Math.max(0, level.variantQty);
+    if (level.reservedQty <= currentQty) return result;
+
+    const excess = level.reservedQty - currentQty;
+    console.log(
+      `[RESERVATION] Orphaned reservation detected: variant=${productVariantId} ` +
+        `loc=${warehouseLocationId} reserved=${level.reservedQty} onHand=${level.variantQty} excess=${excess}`,
+    );
+
+    // 2. Force-release the excess reserved qty
+    await this.inventoryCore.adjustLevel(level.id, { reservedQty: -excess });
+
+    // Log unreserve transaction
+    const { inventoryTransactions } = await import("@shared/schema");
+    await this.db.insert(inventoryTransactions).values({
+      productVariantId,
+      fromLocationId: warehouseLocationId,
+      transactionType: "unreserve",
+      variantQtyDelta: -excess,
+      notes: `Orphaned reservation released: cycle count zeroed inventory at this location`,
+      userId: userId || null,
+    });
+    result.released = excess;
+
+    // 3. Find affected orders: distinct orders that had reserves at this location
+    const reserveTxns = await this.db
+      .select({
+        orderId: inventoryTransactions.orderId,
+      })
+      .from(inventoryTransactions)
+      .where(
+        and(
+          eq(inventoryTransactions.productVariantId, productVariantId),
+          eq(inventoryTransactions.toLocationId, warehouseLocationId),
+          eq(inventoryTransactions.transactionType, "reserve"),
+        ),
+      );
+
+    const affectedOrderIds = [...new Set(
+      reserveTxns.map((t: any) => t.orderId).filter(Boolean),
+    )];
+
+    if (affectedOrderIds.length === 0) {
+      console.log(`[RESERVATION] No affected orders found for re-allocation`);
+      return result;
+    }
+
+    console.log(
+      `[RESERVATION] Attempting re-allocation for ${affectedOrderIds.length} order(s)`,
+    );
+
+    // 4. For each order, try to re-reserve from an alternative assigned bin
+    for (const orderId of affectedOrderIds) {
+      try {
+        // Check if order is still unfulfilled
+        const [order] = await this.db
+          .select()
+          .from(orders)
+          .where(eq(orders.id, orderId))
+          .limit(1);
+
+        if (!order || order.warehouseStatus === "cancelled" || order.warehouseStatus === "shipped") {
+          continue;
+        }
+
+        // Find the order item(s) for this variant
+        const items = await this.db
+          .select()
+          .from(orderItems)
+          .where(eq(orderItems.orderId, orderId));
+
+        const [variant] = await this.db
+          .select()
+          .from(productVariants)
+          .where(eq(productVariants.id, productVariantId))
+          .limit(1);
+
+        if (!variant) continue;
+
+        for (const item of items) {
+          if (item.sku !== variant.sku) continue;
+
+          // Try to reserve at an alternative assigned location
+          // (reserveOrder for full order would re-check all items;
+          //  here we just need the one variant at an alternative location)
+          const locationFilters = [
+            eq(inventoryLevels.productVariantId, productVariantId),
+            sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
+            // Exclude the location we just zeroed out
+            sql`${inventoryLevels.warehouseLocationId} != ${warehouseLocationId}`,
+          ];
+
+          const altLevels = await this.db
+            .select()
+            .from(inventoryLevels)
+            .innerJoin(
+              warehouseLocations,
+              eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+            )
+            .innerJoin(
+              productLocations,
+              and(
+                eq(productLocations.productVariantId, inventoryLevels.productVariantId),
+                eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
+              ),
+            )
+            .where(and(...locationFilters))
+            .orderBy(
+              warehouseLocations.zone,
+              warehouseLocations.aisle,
+              warehouseLocations.bay,
+              warehouseLocations.level,
+              warehouseLocations.bin,
+            );
+
+          if (altLevels.length > 0) {
+            const alt = altLevels[0];
+            const available =
+              alt.inventory_levels.variantQty -
+              alt.inventory_levels.reservedQty -
+              alt.inventory_levels.pickedQty;
+            const toReserve = Math.min(item.quantity, available);
+
+            const reserved = await this.inventoryCore.reserveForOrder({
+              productVariantId,
+              warehouseLocationId: alt.inventory_levels.warehouseLocationId,
+              qty: toReserve,
+              orderId,
+              orderItemId: item.id,
+              userId,
+            });
+
+            if (reserved) {
+              result.reallocated++;
+              console.log(
+                `[RESERVATION] Re-allocated order ${orderId} item ${item.id} → ` +
+                  `location ${alt.warehouse_locations.code} (${toReserve} units)`,
+              );
+            } else {
+              result.failed++;
+            }
+          } else {
+            result.failed++;
+            console.warn(
+              `[RESERVATION] No alternative assigned bin with stock for variant ${productVariantId} ` +
+                `(order ${orderId}) — order stays partially unreserved`,
+            );
+          }
+        }
+      } catch (err) {
+        result.failed++;
+        console.error(
+          `[RESERVATION] Re-allocation failed for order ${orderId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    // Fire channel sync after reallocation
+    this.channelSync.queueSyncAfterInventoryChange(productVariantId).catch((err: any) =>
+      console.warn(`[ChannelSync] Post-reallocation sync failed for variant ${productVariantId}:`, err),
+    );
 
     return result;
   }

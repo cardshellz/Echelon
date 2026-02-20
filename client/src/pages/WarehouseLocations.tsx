@@ -39,7 +39,6 @@ interface WarehouseLocation {
   bin: string | null;
   locationType: string;
   isPickable: number;
-  pickSequence: number | null;
   parentLocationId: number | null;
   capacityCubicMm: number | null;
   maxWeightG: number | null;
@@ -106,7 +105,6 @@ export default function WarehouseLocations() {
     name: "",
     locationType: "bin",
     isPickable: 1,
-    pickSequence: "",
     warehouseId: "",
   });
   const [newZone, setNewZone] = useState({
@@ -436,7 +434,6 @@ export default function WarehouseLocations() {
       name: "",
       locationType: "bin",
       isPickable: 1,
-      pickSequence: "",
       warehouseId: "",
     });
   };
@@ -452,7 +449,6 @@ export default function WarehouseLocations() {
     if (newLocation.level) data.level = newLocation.level.toUpperCase();
     if (newLocation.bin) data.bin = newLocation.bin;
     if (newLocation.name) data.name = newLocation.name;
-    if (newLocation.pickSequence) data.pickSequence = parseInt(newLocation.pickSequence);
     if (newLocation.warehouseId) data.warehouseId = parseInt(newLocation.warehouseId);
     
     createLocationMutation.mutate(data);
@@ -469,7 +465,6 @@ export default function WarehouseLocations() {
       level: editingLocation.level?.trim()?.toUpperCase() || null,
       bin: editingLocation.bin?.trim() || null,
       name: editingLocation.name?.trim() || null,
-      pickSequence: editingLocation.pickSequence || null,
       warehouseId: editingLocation.warehouseId || null,
     };
     
@@ -561,7 +556,7 @@ export default function WarehouseLocations() {
   };
 
   const downloadTemplate = () => {
-    const template = "zone,aisle,bay,level,bin,name,location_type,bin_type,is_pickable,pick_sequence,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,pick,bin,1,1,\nBULK,B,02,B,,Bulk B2,reserve,pallet,0,,\nFWD,F,01,,,Floor Pallet F1,pick,pallet,1,,";
+    const template = "zone,aisle,bay,level,bin,name,location_type,bin_type,is_pickable,warehouse_id\nFWD,A,01,A,1,Forward Pick A1,pick,bin,1,\nBULK,B,02,B,,Bulk B2,reserve,pallet,0,\nFWD,F,01,,,Floor Pallet F1,pick,pallet,1,";
     const blob = new Blob([template], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -800,7 +795,6 @@ export default function WarehouseLocations() {
                   <TableHead>Level</TableHead>
                   <TableHead>Bin</TableHead>
                   <TableHead>Type</TableHead>
-                  <TableHead>Pick Seq</TableHead>
                   {canEdit && <TableHead className="w-[120px]"></TableHead>}
                 </TableRow>
               </TableHeader>
@@ -840,7 +834,6 @@ export default function WarehouseLocations() {
                       <TableCell>
                         <Badge variant="outline">{loc.locationType.replace('_', ' ')}</Badge>
                       </TableCell>
-                      <TableCell>{loc.pickSequence ?? '-'}</TableCell>
                       {canEdit && (
                         <TableCell>
                           <div className="flex gap-1">
@@ -1087,18 +1080,6 @@ export default function WarehouseLocations() {
                   />
                 </div>
 
-                <div>
-                  <Label className="text-xs">Pick Sequence</Label>
-                  <Input
-                    type="number"
-                    placeholder="Auto"
-                    value={newLocation.pickSequence}
-                    onChange={(e) => setNewLocation({ ...newLocation, pickSequence: e.target.value })}
-                    className="h-11"
-                    autoComplete="off"
-                    data-testid="input-location-sequence"
-                  />
-                </div>
               </div>
             </details>
 
@@ -1260,19 +1241,6 @@ export default function WarehouseLocations() {
                     />
                   </div>
 
-                  <div>
-                    <Label className="text-xs">Pick Sequence</Label>
-                    <Input
-                      type="number"
-                      value={editingLocation.pickSequence ?? ""}
-                      onChange={(e) => setEditingLocation({ 
-                        ...editingLocation, 
-                        pickSequence: e.target.value ? parseInt(e.target.value) : null 
-                      })}
-                      className="h-11"
-                      autoComplete="off"
-                    />
-                  </div>
                 </div>
               </details>
 
@@ -1466,9 +1434,9 @@ export default function WarehouseLocations() {
                 <Label className="text-xs">CSV Data</Label>
                 <Textarea
                   className="font-mono text-xs h-32 md:h-48"
-                  placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable,pick_sequence
-FWD,A,01,A,1,Forward Pick A1,bin,1,1
-BULK,B,02,B,,Bulk B2,pallet,0,"
+                  placeholder="zone,aisle,bay,level,bin,name,location_type,is_pickable
+FWD,A,01,A,1,Forward Pick A1,bin,1
+BULK,B,02,B,,Bulk B2,pallet,0"
                   value={csvData}
                   onChange={(e) => setCsvData(e.target.value)}
                   data-testid="textarea-csv-data"
@@ -1487,7 +1455,6 @@ BULK,B,02,B,,Bulk B2,pallet,0,"
                   <li><code>name</code> - Friendly name (optional)</li>
                   <li><code>location_type</code> - bin, shelf, pallet, carton_flow, floor</li>
                   <li><code>is_pickable</code> - 1 or 0</li>
-                  <li><code>pick_sequence</code> - Picking order (optional)</li>
                   <li><code>warehouse_id</code> - Warehouse ID (optional)</li>
                 </ul>
               </div>

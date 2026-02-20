@@ -3658,7 +3658,7 @@ export async function registerRoutes(
       const locations = await storage.getAllWarehouseLocations();
       
       const csvRows = [
-        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "pick_sequence", "width_mm", "height_mm", "depth_mm"].join(",")
+        ["code", "zone", "aisle", "bay", "level", "bin", "name", "location_type", "is_pickable", "width_mm", "height_mm", "depth_mm"].join(",")
       ];
       
       for (const loc of locations) {
@@ -3672,7 +3672,6 @@ export async function registerRoutes(
           `"${(loc.name || "").replace(/"/g, '""')}"`,
           loc.locationType || "",
           loc.isPickable ?? 1,
-          loc.pickSequence ?? "",
           loc.widthMm ?? "",
           loc.heightMm ?? "",
           loc.depthMm ?? ""
@@ -3893,10 +3892,7 @@ export async function registerRoutes(
             isPickable: loc.isPickable !== undefined || loc.is_pickable !== undefined 
               ? parseInt(loc.isPickable ?? loc.is_pickable) 
               : (existing?.isPickable ?? 1),
-            pickSequence: loc.pickSequence || loc.pick_sequence 
-              ? parseInt(loc.pickSequence || loc.pick_sequence) 
-              : (existing?.pickSequence ?? null),
-            widthMm: loc.widthMm || loc.width_mm 
+            widthMm: loc.widthMm || loc.width_mm
               ? parseInt(loc.widthMm || loc.width_mm) 
               : (existing?.widthMm ?? null),
             heightMm: loc.heightMm || loc.height_mm 

@@ -73,8 +73,8 @@ export function createServices(db: any) {
   const slaMonitor = createSLAMonitorService(db);
   const orderCombining = createOrderCombiningService(db);
 
-  // Depends on inventoryCore + channelSync + replenishment + storage
-  const cycleCount = createCycleCountService(db, inventoryCore, channelSync, replenishment, storage);
+  // Depends on inventoryCore + channelSync + replenishment + storage + reservation
+  const cycleCount = createCycleCountService(db, inventoryCore, channelSync, replenishment, storage, reservation);
 
   // Standalone (read-only analytics)
   const operationsDashboard = createOperationsDashboardService(db);

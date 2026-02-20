@@ -442,8 +442,7 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   locationType: varchar("location_type", { length: 30 }).notNull().default("pick"), // pick, reserve, receiving, staging
   binType: varchar("bin_type", { length: 30 }).notNull().default("bin"), // bin, shelf, pallet, carton_flow, floor
   isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
-  pickSequence: integer("pick_sequence"), // Walk order for optimized picking (null = not sequenced)
-  
+
   // Replenishment chain
   parentLocationId: integer("parent_location_id"), // Specific location that feeds this one (optional)
   replenSourceType: varchar("replen_source_type", { length: 30 }), // Location type that feeds this: reserve, case_pick, pallet_pick

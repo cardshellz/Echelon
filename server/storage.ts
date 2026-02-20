@@ -617,7 +617,7 @@ export class DatabaseStorage implements IStorage {
           ELSE 3
         END,
         wl.is_pickable DESC,
-        wl.pick_sequence ASC NULLS LAST,
+        wl.zone ASC, wl.aisle ASC, wl.bay ASC, wl.level ASC, wl.bin ASC,
         il.variant_qty DESC
       LIMIT 1
     `);

@@ -49,7 +49,6 @@ interface Bin {
   locationType: string;
   binType: string;
   isPickable: number;
-  pickSequence: number | null;
   warehouseId: number | null;
   warehouseCode: string | null;
   capacityCubicMm: number | null;

@@ -50,6 +50,10 @@ type Replenishment = {
   checkAndTriggerAfterPick(variantId: number, locationId: number): Promise<any>;
 };
 
+type Reservation = {
+  reallocateOrphaned(productVariantId: number, warehouseLocationId: number, userId?: string): Promise<any>;
+};
+
 type Storage = {
   // Cycle counts
   getAllCycleCounts(): Promise<CycleCount[]>;
@@ -132,6 +136,7 @@ class CycleCountService {
     private channelSync: ChannelSync,
     private replenishment: Replenishment,
     private storage: Storage,
+    private reservation: Reservation | null = null,
   ) {}
 
   // =========================================================================
@@ -157,7 +162,8 @@ class CycleCountService {
     }
 
     // UNEXPECTED_FOUND or standalone UNEXPECTED_ITEM: new SKU lives here → create assignment
-    if (item.mismatchType === "unexpected_found" ||
+    // Guard: only create assignment if the item was actually counted with qty > 0
+    if ((item.mismatchType === "unexpected_found" && (item.countedQty ?? 0) > 0) ||
         (item.varianceType === "unexpected_item" && !item.mismatchType)) {
       if (!item.productId) return;
       const existing = await this.storage.getProductLocationByComposite(item.productId, item.warehouseLocationId);
@@ -272,6 +278,29 @@ class CycleCountService {
         qtyChange: item.varianceQty,
         locationId: item.warehouseLocationId,
       };
+
+      // After negative adjustments, check for orphaned reservations and re-allocate
+      if (item.varianceQty < 0 && this.reservation) {
+        try {
+          const realloc = await this.reservation.reallocateOrphaned(
+            item.productVariantId,
+            item.warehouseLocationId,
+            approvedBy,
+          );
+          if (realloc.released > 0) {
+            console.log(
+              `[CYCLE COUNT] Orphaned reservation cleanup: released=${realloc.released} ` +
+                `reallocated=${realloc.reallocated} failed=${realloc.failed}`,
+            );
+          }
+        } catch (err) {
+          // Non-fatal — inventory adjustment already succeeded
+          console.warn(
+            `[CYCLE COUNT] Orphaned reservation re-allocation failed (non-fatal):`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
     } else {
       console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} varianceQty=${item.varianceQty} (type: ${typeof item.varianceQty}) sku=${item.expectedSku || item.countedSku}`);
     }
@@ -667,7 +696,10 @@ class CycleCountService {
 
     } else {
       // Normal count (same SKU or empty bin)
-      if (varianceQty > 0) varianceType = "quantity_over";
+      if (item.mismatchType === "unexpected_found" && countedQty === 0) {
+        // Stray SKU counted to zero — product was removed from unassigned bin
+        varianceType = "stray_removed";
+      } else if (varianceQty > 0) varianceType = "quantity_over";
       else if (varianceQty < 0) varianceType = "quantity_under";
 
       // Configurable tolerance and threshold
@@ -1110,8 +1142,9 @@ export function createCycleCountService(
   channelSync: ChannelSync,
   replenishment: Replenishment,
   storage: Storage,
+  reservation?: Reservation | null,
 ) {
-  return new CycleCountService(db, inventoryCore, channelSync, replenishment, storage);
+  return new CycleCountService(db, inventoryCore, channelSync, replenishment, storage, reservation ?? null);
 }
 
 export type { CycleCountService };
