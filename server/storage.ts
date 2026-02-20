@@ -2038,44 +2038,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createProductVariant(variant: InsertProductVariant): Promise<ProductVariant> {
-    // Auto-resolve parentVariantId if not provided: find the next-higher
-    // hierarchy variant in the same product (e.g., pack→case)
-    if (variant.parentVariantId == null && variant.productId) {
-      const [parent] = await db
-        .select()
-        .from(productVariants)
-        .where(
-          and(
-            eq(productVariants.productId, variant.productId),
-            sql`${productVariants.hierarchyLevel} > ${variant.hierarchyLevel ?? 1}`,
-          ),
-        )
-        .orderBy(productVariants.hierarchyLevel)
-        .limit(1);
-      if (parent) {
-        variant = { ...variant, parentVariantId: parent.id };
-      }
-    }
-
+    // parentVariantId must be set explicitly via UI, CSV, or API.
+    // No auto-resolution — variants with null parentVariantId are flagged
+    // in the UI as "needs config" until assigned.
     const result = await db.insert(productVariants).values(variant).returning();
-    const created = result[0];
-
-    // If this is a higher-level variant, backfill parentVariantId on existing
-    // lower-level siblings that don't have a parent yet
-    if (created.productId && created.hierarchyLevel > 1) {
-      await db
-        .update(productVariants)
-        .set({ parentVariantId: created.id })
-        .where(
-          and(
-            eq(productVariants.productId, created.productId),
-            sql`${productVariants.hierarchyLevel} < ${created.hierarchyLevel}`,
-            isNull(productVariants.parentVariantId),
-          ),
-        );
-    }
-
-    return created;
+    return result[0];
   }
 
   async updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null> {

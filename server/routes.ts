@@ -3621,6 +3621,65 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk update parentVariantId via sku → parent_sku mapping
+  app.post("/api/product-variants/bulk-parent", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const rows: { sku: string; parent_sku: string }[] = req.body.rows;
+      if (!Array.isArray(rows)) {
+        return res.status(400).json({ error: "rows array required" });
+      }
+
+      // Build SKU → variant lookup
+      const allVariants = await storage.getAllProductVariants();
+      const skuMap = new Map<string, typeof allVariants[0]>();
+      for (const v of allVariants) {
+        if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
+      }
+
+      let updated = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+
+      for (const row of rows) {
+        const sku = row.sku?.trim().toUpperCase();
+        if (!sku) { skipped++; continue; }
+
+        const variant = skuMap.get(sku);
+        if (!variant) {
+          errors.push(`SKU not found: ${row.sku}`);
+          continue;
+        }
+
+        const parentSku = row.parent_sku?.trim().toUpperCase();
+        if (!parentSku) {
+          // Clear parent (set to base variant)
+          await storage.updateProductVariant(variant.id, { parentVariantId: null } as any);
+          updated++;
+          continue;
+        }
+
+        const parentVariant = skuMap.get(parentSku);
+        if (!parentVariant) {
+          errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
+          continue;
+        }
+
+        if (parentVariant.productId !== variant.productId) {
+          errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
+          continue;
+        }
+
+        await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id });
+        updated++;
+      }
+
+      res.json({ updated, skipped, errors, total: rows.length });
+    } catch (error) {
+      console.error("Error bulk updating parent variants:", error);
+      res.status(500).json({ error: "Failed to bulk update parent variants" });
+    }
+  });
+
   // Warehouse Locations (hierarchical)
   app.get("/api/warehouse/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -6779,6 +6838,8 @@ export async function registerRoutes(
           pv.sku as variant_sku,
           pv.name as variant_name,
           pv.units_per_variant,
+          pv.parent_variant_id,
+          pv.hierarchy_level,
           p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
@@ -6791,7 +6852,7 @@ export async function registerRoutes(
         LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.id, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku
         ORDER BY pv.sku
       `);
       
@@ -6801,6 +6862,8 @@ export async function registerRoutes(
         sku: row.variant_sku,
         name: row.variant_name,
         unitsPerVariant: row.units_per_variant || 1,
+        parentVariantId: row.parent_variant_id || null,
+        hierarchyLevel: row.hierarchy_level || 1,
         baseSku: row.base_sku,
         productId: row.product_id,
         variantQty: parseInt(row.total_variant_qty) || 0,

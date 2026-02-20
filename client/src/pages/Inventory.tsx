@@ -132,6 +132,8 @@ interface VariantLevel {
   sku: string;
   name: string;
   unitsPerVariant: number;
+  parentVariantId: number | null;
+  hierarchyLevel: number;
   baseSku: string | null;
   variantQty: number;
   reservedQty: number;
@@ -485,14 +487,32 @@ export default function Inventory() {
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
-  // BaseSkus where any variant has stock (expandable to show fungible pool)
-  const fungibleBaseSkus = useMemo(() => {
-    const result = new Set<string>();
+  // Build variantId→VariantLevel map for parent chain walking
+  const variantMap = useMemo(() => {
+    const m = new Map<number, VariantLevel>();
+    for (const v of variantLevels) m.set(v.variantId, v);
+    return m;
+  }, [variantLevels]);
+
+  // Variants that have ancestors with stock (expandable to show fungible pool)
+  const hasFungibleAncestors = useMemo(() => {
+    const result = new Set<number>();
     for (const v of variantLevels) {
-      if (v.baseSku && v.variantQty > 0) result.add(v.baseSku);
+      // Walk up the parent chain looking for ancestors with stock
+      let current: VariantLevel | undefined = v;
+      while (current?.parentVariantId) {
+        const parent = variantMap.get(current.parentVariantId);
+        if (parent && parent.variantQty > 0) {
+          result.add(v.variantId);
+          break;
+        }
+        current = parent;
+      }
+      // Also check: does this variant have children with stock pointing to it?
+      // (not needed for "ancestors only" display — we show ancestors OF the current variant)
     }
     return result;
-  }, [variantLevels]);
+  }, [variantLevels, variantMap]);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -848,7 +868,7 @@ export default function Inventory() {
                       {sortedVariantLevels.map((level) => (
                         <React.Fragment key={level.variantId}>
                           {(() => {
-                            const canExpand = level.locationCount > 0 || (level.baseSku ? fungibleBaseSkus.has(level.baseSku) : false);
+                            const canExpand = level.locationCount > 0 || hasFungibleAncestors.has(level.variantId);
                             return (
                           <>
                           <TableRow
@@ -899,12 +919,19 @@ export default function Inventory() {
                                   });
                                 }}
                               />
-                              {/* Sibling variants in the fungible pool */}
+                              {/* Ancestor variants in the fungible pool (larger variants that can break down into this one) */}
                               {(() => {
-                                const siblings = level.baseSku
-                                  ? variantLevels.filter(v => v.baseSku === level.baseSku && v.variantId !== level.variantId && v.variantQty > 0)
-                                  : [];
-                                if (siblings.length === 0) return null;
+                                // Walk up the parent chain to find ancestors with stock
+                                const ancestors: VariantLevel[] = [];
+                                let current: VariantLevel | undefined = level;
+                                while (current?.parentVariantId) {
+                                  const parent = variantMap.get(current.parentVariantId);
+                                  if (parent && parent.variantQty > 0) {
+                                    ancestors.push(parent);
+                                  }
+                                  current = parent;
+                                }
+                                if (ancestors.length === 0) return null;
                                 return (
                                   <>
                                     <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
@@ -913,14 +940,14 @@ export default function Inventory() {
                                         Fungible pool — convertible via case break
                                       </TableCell>
                                     </TableRow>
-                                    {siblings.map(sib => (
-                                      <TableRow key={sib.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
-                                        <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{sib.sku}</TableCell>
-                                        <TableCell className="text-xs text-muted-foreground">{sib.name}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.variantQty.toLocaleString()}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{sib.reservedQty.toLocaleString()}</TableCell>
+                                    {ancestors.map(anc => (
+                                      <TableRow key={anc.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
+                                        <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{anc.sku}</TableCell>
+                                        <TableCell className="text-xs text-muted-foreground">{anc.name}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.variantQty.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.reservedQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                                          {Math.floor((sib.variantQty - sib.reservedQty - sib.pickedQty) * sib.unitsPerVariant / level.unitsPerVariant).toLocaleString()}
+                                          {Math.floor((anc.variantQty - anc.reservedQty - anc.pickedQty) * anc.unitsPerVariant / level.unitsPerVariant).toLocaleString()}
                                         </TableCell>
                                         {canEdit && <TableCell></TableCell>}
                                       </TableRow>

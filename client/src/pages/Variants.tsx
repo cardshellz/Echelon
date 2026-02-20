@@ -9,12 +9,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { 
-  Package, 
-  Search, 
+import {
+  Package,
+  Search,
   Link as LinkIcon,
   Plus,
-  Filter
+  Filter,
+  Download,
+  Upload,
+  AlertTriangle
 } from "lucide-react";
 
 interface Product {
@@ -33,6 +36,7 @@ interface ProductVariant {
   name: string;
   unitsPerVariant: number;
   hierarchyLevel: number;
+  parentVariantId: number | null;
   barcode: string | null;
   shopifyVariantId: string | null;
   isActive: boolean;
@@ -155,6 +159,76 @@ export default function Variants() {
     },
   });
 
+  const [csvUploading, setCsvUploading] = useState(false);
+
+  const bulkParentMutation = useMutation({
+    mutationFn: async (rows: { sku: string; parent_sku: string }[]) => {
+      const res = await fetch("/api/product-variants/bulk-parent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      if (!res.ok) throw new Error("Failed to update parent assignments");
+      return res.json();
+    },
+    onSuccess: (data: { updated: number; skipped: number; errors: string[]; total: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      const errMsg = data.errors.length > 0 ? ` Errors: ${data.errors.slice(0, 3).join(", ")}${data.errors.length > 3 ? "..." : ""}` : "";
+      toast({ title: `Updated ${data.updated} of ${data.total} variants.${errMsg}` });
+      setCsvUploading(false);
+    },
+    onError: () => {
+      toast({ title: "Failed to update parent assignments", variant: "destructive" });
+      setCsvUploading(false);
+    },
+  });
+
+  const handleCsvExport = () => {
+    const skuMap = new Map<number, string>();
+    for (const v of allVariants) {
+      if (v.sku) skuMap.set(v.id, v.sku);
+    }
+    const header = "sku,parent_sku";
+    const rows = allVariants
+      .filter((v) => v.sku)
+      .map((v) => {
+        const parentSku = v.parentVariantId ? skuMap.get(v.parentVariantId) || "" : "";
+        return `${v.sku},${parentSku}`;
+      });
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "variant-parents.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCsvImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCsvUploading(true);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (lines.length < 2) {
+        toast({ title: "CSV must have header + data rows", variant: "destructive" });
+        setCsvUploading(false);
+        return;
+      }
+      const rows = lines.slice(1).map((line) => {
+        const [sku, parent_sku] = line.split(",").map((s) => s.trim());
+        return { sku, parent_sku };
+      });
+      bulkParentMutation.mutate(rows);
+    };
+    reader.readAsText(file);
+    // Reset input so same file can be re-selected
+    e.target.value = "";
+  };
+
   const filteredVariants = allVariants.filter(variant => {
     const matchesSearch = searchQuery === "" || 
       variant.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -186,10 +260,16 @@ export default function Variants() {
     }
   };
 
+  const variantSkuMap = new Map<number, string>();
+  for (const v of allVariants) {
+    if (v.sku) variantSkuMap.set(v.id, v.sku);
+  }
+
   const stats = {
     total: allVariants.length,
     linked: allVariants.filter(v => v.productId).length,
     unlinked: allVariants.filter(v => !v.productId).length,
+    needsConfig: allVariants.filter(v => !v.parentVariantId && v.hierarchyLevel > 1).length,
   };
 
   return (
@@ -204,13 +284,28 @@ export default function Variants() {
             Manage sellable SKUs and link them to products
           </p>
         </div>
-        <Button onClick={() => setCreateDialogOpen(true)} className="min-h-[44px] w-full md:w-auto" data-testid="btn-add-variant">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Variant
-        </Button>
+        <div className="flex gap-2 w-full md:w-auto">
+          <Button variant="outline" onClick={handleCsvExport} className="min-h-[44px]" title="Export parent assignments CSV">
+            <Download className="h-4 w-4 mr-1" />
+            <span className="hidden md:inline">Export</span>
+          </Button>
+          <label>
+            <Button variant="outline" className="min-h-[44px] cursor-pointer" asChild disabled={csvUploading}>
+              <span>
+                <Upload className="h-4 w-4 mr-1" />
+                <span className="hidden md:inline">{csvUploading ? "Importing..." : "Import"}</span>
+              </span>
+            </Button>
+            <input type="file" accept=".csv" className="hidden" onChange={handleCsvImport} />
+          </label>
+          <Button onClick={() => setCreateDialogOpen(true)} className="min-h-[44px] flex-1 md:flex-initial" data-testid="btn-add-variant">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Variant
+          </Button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 md:gap-4">
+      <div className="grid grid-cols-4 gap-2 md:gap-4">
         <Card>
           <CardContent className="p-2 md:p-4">
             <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
@@ -227,6 +322,12 @@ export default function Variants() {
           <CardContent className="p-2 md:p-4">
             <div className="text-xl md:text-2xl font-bold text-amber-600">{stats.unlinked}</div>
             <div className="text-xs md:text-sm text-muted-foreground">Unlinked</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-2 md:p-4">
+            <div className="text-xl md:text-2xl font-bold text-yellow-600">{stats.needsConfig}</div>
+            <div className="text-xs md:text-sm text-muted-foreground">Needs Config</div>
           </CardContent>
         </Card>
       </div>
@@ -328,19 +429,35 @@ export default function Variants() {
                   <TableHead>Name</TableHead>
                   <TableHead>Units</TableHead>
                   <TableHead>Type</TableHead>
+                  <TableHead>Breaks Into</TableHead>
                   <TableHead>Linked Product</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filteredVariants.map((variant) => (
+                {filteredVariants.map((variant) => {
+                  const parentSku = variant.parentVariantId ? variantSkuMap.get(variant.parentVariantId) : null;
+                  const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                  return (
                   <TableRow key={variant.id} data-testid={`variant-row-${variant.id}`}>
                     <TableCell className="font-mono text-sm">{variant.sku || '-'}</TableCell>
                     <TableCell>{variant.name}</TableCell>
                     <TableCell>{variant.unitsPerVariant}</TableCell>
                     <TableCell>
                       <Badge variant="outline">{getHierarchyLabel(variant.hierarchyLevel)}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      {parentSku ? (
+                        <span className="font-mono text-xs">{parentSku}</span>
+                      ) : needsConfig ? (
+                        <Badge variant="outline" className="text-xs bg-yellow-50 text-yellow-700 border-yellow-300">
+                          <AlertTriangle className="h-3 w-3 mr-1" />
+                          Needs config
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">Base</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       {variant.productId ? (
@@ -374,7 +491,8 @@ export default function Variants() {
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </Card>

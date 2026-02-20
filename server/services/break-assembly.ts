@@ -107,6 +107,14 @@ class BreakAssemblyService {
       );
     }
 
+    // Enforce direct parent-child: target's parentVariantId must point to source
+    if (targetVariant.parentVariantId !== sourceVariant.id) {
+      throw new Error(
+        `Cannot break: "${targetVariant.sku ?? targetVariant.name}" is not a direct child of ` +
+        `"${sourceVariant.sku ?? sourceVariant.name}". Only direct parent→child breaks are allowed.`
+      );
+    }
+
     const { targetQty, baseUnits } = this.calculateConversion(
       sourceQty,
       sourceVariant.unitsPerVariant,
@@ -237,6 +245,14 @@ class BreakAssemblyService {
       throw new Error(
         `Cannot assemble: source variant "${sourceVariant.name}" (${sourceVariant.unitsPerVariant} units) ` +
         `must have FEWER units per variant than target "${targetVariant.name}" (${targetVariant.unitsPerVariant} units).`
+      );
+    }
+
+    // Enforce direct parent-child: source's parentVariantId must point to target
+    if (sourceVariant.parentVariantId !== targetVariant.id) {
+      throw new Error(
+        `Cannot assemble: "${sourceVariant.sku ?? sourceVariant.name}" is not a direct child of ` +
+        `"${targetVariant.sku ?? targetVariant.name}". Only direct child→parent assembly is allowed.`
       );
     }
 
@@ -389,6 +405,19 @@ class BreakAssemblyService {
         };
       }
 
+      // Enforce direct parent-child relationship
+      if (targetVariant.parentVariantId !== sourceVariant.id) {
+        return {
+          sourceVariantSku: baseSku(sourceVariant),
+          targetVariantSku: baseSku(targetVariant),
+          sourceQtyToRemove: 0,
+          targetQtyToAdd: 0,
+          baseUnitsInvolved: 0,
+          isValid: false,
+          validationError: `"${baseSku(targetVariant)}" is not a direct child of "${baseSku(sourceVariant)}". Only direct parent→child breaks are allowed.`,
+        };
+      }
+
       const baseUnits = qty * sourceVariant.unitsPerVariant;
       const targetQty = baseUnits / targetVariant.unitsPerVariant;
 
@@ -423,6 +452,19 @@ class BreakAssemblyService {
           baseUnitsInvolved: 0,
           isValid: false,
           validationError: `Source (${sourceVariant.unitsPerVariant} units) must have fewer units per variant than target (${targetVariant.unitsPerVariant} units) for an assemble operation.`,
+        };
+      }
+
+      // Enforce direct parent-child relationship
+      if (sourceVariant.parentVariantId !== targetVariant.id) {
+        return {
+          sourceVariantSku: baseSku(sourceVariant),
+          targetVariantSku: baseSku(targetVariant),
+          sourceQtyToRemove: 0,
+          targetQtyToAdd: 0,
+          baseUnitsInvolved: 0,
+          isValid: false,
+          validationError: `"${baseSku(sourceVariant)}" is not a direct child of "${baseSku(targetVariant)}". Only direct child→parent assembly is allowed.`,
         };
       }
 
@@ -486,15 +528,14 @@ class BreakAssemblyService {
       // Only include variants that have stock
       if (currentQty <= 0) continue;
 
-      // Find smaller variants this can break into
+      // Find direct children this can break into (parentVariantId must point to this variant)
       const canBreakInto: BreakableVariantInfo["canBreakInto"] = [];
       for (const target of allVariants) {
         if (target.id === variant.id) continue;
-        if (target.unitsPerVariant >= variant.unitsPerVariant) continue;
+        if (target.parentVariantId !== variant.id) continue;
 
-        // Check divisibility
         const ratio = variant.unitsPerVariant / target.unitsPerVariant;
-        if (!Number.isInteger(ratio)) continue;
+        if (!Number.isInteger(ratio) || ratio <= 0) continue;
 
         canBreakInto.push({
           targetVariant: target,

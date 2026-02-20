@@ -65,6 +65,7 @@ interface ProductVariantRow {
   barcode: string | null;
   imageUrl: string | null;
   hierarchyLevel: number;
+  parentVariantId: number | null;
 }
 
 interface ProductDetailData {
@@ -642,6 +643,7 @@ export default function ProductDetail() {
     sku: "",
     name: "",
     barcode: "",
+    parentVariantId: null as number | null,
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -700,6 +702,7 @@ export default function ProductDetail() {
       sku: computeAutoSku(defaultLevel, defaultUnits),
       name: computeAutoName(defaultLevel, defaultUnits),
       barcode: "",
+      parentVariantId: null,
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
@@ -714,6 +717,7 @@ export default function ProductDetail() {
       sku: variant.sku || "",
       name: variant.name,
       barcode: variant.barcode || "",
+      parentVariantId: variant.parentVariantId,
     });
     setVariantDialogOpen(true);
   }, []);
@@ -730,6 +734,7 @@ export default function ProductDetail() {
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
           barcode: data.barcode || null,
+          parentVariantId: data.parentVariantId,
         }),
       });
       if (!res.ok) throw new Error("Failed to create variant");
@@ -756,6 +761,7 @@ export default function ProductDetail() {
           unitsPerVariant: data.unitsPerVariant,
           hierarchyLevel: data.hierarchyLevel,
           barcode: data.barcode || null,
+          parentVariantId: data.parentVariantId,
         }),
       });
       if (!res.ok) throw new Error("Failed to update variant");
@@ -1526,7 +1532,12 @@ export default function ProductDetail() {
                     <>
                       {/* Mobile cards */}
                       <div className="md:hidden space-y-2">
-                        {sortedVariants.map((variant) => (
+                        {sortedVariants.map((variant) => {
+                          const parentVariant = variant.parentVariantId
+                            ? sortedVariants.find((v) => v.id === variant.parentVariantId)
+                            : null;
+                          const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                          return (
                           <div
                             key={variant.id}
                             className="border rounded-lg p-3"
@@ -1534,13 +1545,20 @@ export default function ProductDetail() {
                           >
                             <div className="flex items-center justify-between mb-2">
                               <span className="font-mono text-sm text-primary">{variant.sku}</span>
-                              <Badge variant="outline" className="text-xs">
-                                {getHierarchyLabel(variant.hierarchyLevel)}
-                              </Badge>
+                              <div className="flex items-center gap-1.5">
+                                {needsConfig && (
+                                  <Badge variant="outline" className="text-[10px] bg-yellow-50 text-yellow-700 border-yellow-300">
+                                    Needs config
+                                  </Badge>
+                                )}
+                                <Badge variant="outline" className="text-xs">
+                                  {getHierarchyLabel(variant.hierarchyLevel)}
+                                </Badge>
+                              </div>
                             </div>
                             <p className="text-sm mb-2">{variant.name}</p>
                             <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>Units: {variant.unitsPerVariant}</span>
+                              <span>Units: {variant.unitsPerVariant}{parentVariant ? ` → ${parentVariant.sku}` : ""}</span>
                               <span className="font-mono">{variant.barcode || "No barcode"}</span>
                             </div>
                             <div className="flex justify-end gap-2 mt-2">
@@ -1562,7 +1580,8 @@ export default function ProductDetail() {
                               </Button>
                             </div>
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                       {/* Desktop table */}
                       <div className="hidden md:block">
@@ -1573,12 +1592,18 @@ export default function ProductDetail() {
                               <TableHead>Name</TableHead>
                               <TableHead>Type</TableHead>
                               <TableHead>Units</TableHead>
+                              <TableHead>Breaks Into</TableHead>
                               <TableHead>Barcode</TableHead>
                               <TableHead className="w-[80px]"></TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {sortedVariants.map((variant) => (
+                            {sortedVariants.map((variant) => {
+                              const parentVariant = variant.parentVariantId
+                                ? sortedVariants.find((v) => v.id === variant.parentVariantId)
+                                : null;
+                              const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                              return (
                               <TableRow
                                 key={variant.id}
                                 data-testid={`variant-row-${variant.id}`}
@@ -1591,6 +1616,17 @@ export default function ProductDetail() {
                                   </Badge>
                                 </TableCell>
                                 <TableCell>{variant.unitsPerVariant}</TableCell>
+                                <TableCell>
+                                  {parentVariant ? (
+                                    <span className="font-mono text-xs">{parentVariant.sku || parentVariant.name}</span>
+                                  ) : needsConfig ? (
+                                    <Badge variant="outline" className="text-xs bg-yellow-50 text-yellow-700 border-yellow-300">
+                                      Needs config
+                                    </Badge>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">Base</span>
+                                  )}
+                                </TableCell>
                                 <TableCell className="font-mono text-sm">
                                   {variant.barcode || "-"}
                                 </TableCell>
@@ -1615,7 +1651,8 @@ export default function ProductDetail() {
                                   </div>
                                 </TableCell>
                               </TableRow>
-                            ))}
+                              );
+                            })}
                           </TableBody>
                         </Table>
                       </div>
@@ -1814,6 +1851,31 @@ export default function ProductDetail() {
                 placeholder="Optional"
                 className="h-11"
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Breaks Into (Parent Variant)</Label>
+              <Select
+                value={variantForm.parentVariantId ? String(variantForm.parentVariantId) : "none"}
+                onValueChange={(v) => setVariantForm((prev) => ({ ...prev, parentVariantId: v === "none" ? null : parseInt(v) }))}
+              >
+                <SelectTrigger className="h-11">
+                  <SelectValue placeholder="None (base variant)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None (base variant)</SelectItem>
+                  {sortedVariants
+                    .filter((v) => v.id !== editingVariant?.id && v.unitsPerVariant < variantForm.unitsPerVariant)
+                    .map((v) => (
+                      <SelectItem key={v.id} value={String(v.id)}>
+                        {v.sku || v.name} ({v.unitsPerVariant} units)
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Which smaller variant does this break down into?
+              </p>
             </div>
           </div>
           <DialogFooter className="gap-2">
