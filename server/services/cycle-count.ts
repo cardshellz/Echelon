@@ -403,7 +403,7 @@ class CycleCountService {
     return { skuSummaries };
   }
 
-  async create(data: { name: string; description?: string; warehouseId?: number; zoneFilter?: string; locationTypeFilter?: string; binTypeFilter?: string }, createdBy?: string) {
+  async create(data: { name: string; description?: string; warehouseId?: number; zoneFilter?: string; aisleFilter?: string; locationTypeFilter?: string; binTypeFilter?: string }, createdBy?: string) {
     if (!data.name) throw new CycleCountError("Name is required");
 
     return this.storage.createCycleCount({
@@ -411,11 +411,12 @@ class CycleCountService {
       description: data.description,
       warehouseId: data.warehouseId || null,
       zoneFilter: data.zoneFilter || null,
+      aisleFilter: data.aisleFilter || null,
       locationTypeFilter: data.locationTypeFilter || null,
       binTypeFilter: data.binTypeFilter || null,
       status: "draft",
       createdBy,
-    });
+    } as any);
   }
 
   async initialize(id: number) {
@@ -427,6 +428,9 @@ class CycleCountService {
     let locations = await this.storage.getAllWarehouseLocations();
     if (cycleCount.zoneFilter) {
       locations = locations.filter((l: any) => l.zone === cycleCount.zoneFilter);
+    }
+    if ((cycleCount as any).aisleFilter) {
+      locations = locations.filter((l: any) => l.aisle === (cycleCount as any).aisleFilter);
     }
     if (cycleCount.warehouseId) {
       locations = locations.filter((l: any) => l.warehouseId === cycleCount.warehouseId);

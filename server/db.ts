@@ -129,6 +129,9 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked channel_product_allocation and channel_sync_log tables");
 
+    // Add aisle_filter column to cycle_counts if missing
+    await client.query(`ALTER TABLE cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
+
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
       DELETE FROM inventory_levels il

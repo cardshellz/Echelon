@@ -1370,6 +1370,7 @@ export const cycleCounts = pgTable("cycle_counts", {
   status: varchar("status", { length: 20 }).notNull().default("draft"),
   warehouseId: integer("warehouse_id").references(() => warehouses.id),
   zoneFilter: varchar("zone_filter", { length: 20 }), // Optional: limit to specific zone
+  aisleFilter: varchar("aisle_filter", { length: 20 }), // Optional: limit to specific aisle (e.g., "A", "01")
   locationTypeFilter: text("location_type_filter"), // Optional: comma-separated list of location types to include
   binTypeFilter: text("bin_type_filter"), // Optional: comma-separated list of bin types to include (bin, pallet, carton_flow, etc.)
   assignedTo: varchar("assigned_to", { length: 100 }), // User assigned to count

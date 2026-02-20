@@ -63,6 +63,7 @@ interface CycleCount {
   status: string;
   warehouseId: number | null;
   zoneFilter: string | null;
+  aisleFilter: string | null;
   assignedTo: string | null;
   totalBins: number;
   countedBins: number;
@@ -127,7 +128,7 @@ export default function CycleCounts() {
   const [bulkApproveForm, setBulkApproveForm] = useState({ reasonCode: "", notes: "" });
   const [selectedItem, setSelectedItem] = useState<CycleCountItem | null>(null);
   const defaultCountName = () => { const d = new Date(); return `${d.toLocaleDateString("en-US", { month: "long" })} ${d.getDate()} ${d.getFullYear()} Cycle Count`; };
-  const [newCountForm, setNewCountForm] = useState({ name: defaultCountName(), description: "", zoneFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
+  const [newCountForm, setNewCountForm] = useState({ name: defaultCountName(), description: "", zoneFilter: "", aisleFilter: "", warehouseId: "", locationTypes: [] as string[], binTypes: [] as string[] });
   const locationTypeOptions = [
     { value: "pick", label: "Pick" },
     { value: "reserve", label: "Reserve" },
@@ -215,7 +216,7 @@ export default function CycleCounts() {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (data: { name: string; description?: string; zoneFilter?: string; warehouseId?: number; locationTypeFilter?: string; binTypeFilter?: string }) => {
+    mutationFn: async (data: { name: string; description?: string; zoneFilter?: string; aisleFilter?: string; warehouseId?: number; locationTypeFilter?: string; binTypeFilter?: string }) => {
       const res = await fetch("/api/cycle-counts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -229,7 +230,7 @@ export default function CycleCounts() {
       toast({ title: "Cycle count created" });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       setCreateDialogOpen(false);
-      setNewCountForm({ name: defaultCountName(), description: "", zoneFilter: "", warehouseId: "", locationTypes: [], binTypes: [] });
+      setNewCountForm({ name: defaultCountName(), description: "", zoneFilter: "", aisleFilter: "", warehouseId: "", locationTypes: [], binTypes: [] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
@@ -2650,6 +2651,18 @@ export default function CycleCounts() {
             </details>
             <details className="text-sm">
               <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                Aisle Filter (optional)
+              </summary>
+              <Input
+                value={newCountForm.aisleFilter}
+                onChange={(e) => setNewCountForm({ ...newCountForm, aisleFilter: e.target.value })}
+                placeholder="e.g., G to count only aisle G"
+                className="mt-2 h-10"
+                data-testid="input-aisle-filter"
+              />
+            </details>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                 Location Purpose
               </summary>
               <div className="grid grid-cols-2 gap-2 mt-2">
@@ -2709,6 +2722,7 @@ export default function CycleCounts() {
                 name: newCountForm.name,
                 description: newCountForm.description || undefined,
                 zoneFilter: newCountForm.zoneFilter || undefined,
+                aisleFilter: newCountForm.aisleFilter || undefined,
                 warehouseId: newCountForm.warehouseId ? parseInt(newCountForm.warehouseId) : undefined,
                 locationTypeFilter: newCountForm.locationTypes.length > 0 ? newCountForm.locationTypes.join(",") : undefined,
                 binTypeFilter: newCountForm.binTypes.length > 0 ? newCountForm.binTypes.join(",") : undefined,
