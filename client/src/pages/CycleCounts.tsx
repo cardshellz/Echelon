@@ -658,6 +658,9 @@ export default function CycleCounts() {
     enabled: debouncedMobileSkuSearch.length >= 2 && mobileSkuDropdownOpen,
   });
   
+  // Quick-action state: tracks which shortcut button was last clicked per item
+  const [quickActions, setQuickActions] = useState<Record<number, "matches" | "empty">>({});
+
   // Wrong SKU search state (tracks which item has wrong SKU mode open)
   const [wrongSkuItemId, setWrongSkuItemId] = useState<number | null>(null);
   const [wrongSkuSearch, setWrongSkuSearch] = useState("");
@@ -972,13 +975,14 @@ export default function CycleCounts() {
                     <>
                       <div className="text-xs text-muted-foreground text-center mb-2">Count what you see</div>
                       <div className="flex items-center gap-2">
-                        <Button 
-                          variant="outline" 
+                        <Button
+                          variant="outline"
                           size="sm"
                           className="h-10 w-10 text-lg shrink-0"
                           onClick={() => {
                             const current = parseInt((document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value || "0");
                             (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(Math.max(0, current - 1));
+                            setQuickActions(prev => { const next = { ...prev }; delete next[binItem.id]; return next; });
                           }}
                         >
                           -
@@ -991,38 +995,44 @@ export default function CycleCounts() {
                           className="h-10 text-lg text-center font-mono flex-1 min-w-0"
                           placeholder="0"
                           data-testid={`input-count-${binItem.id}`}
+                          onChange={() => setQuickActions(prev => { const next = { ...prev }; delete next[binItem.id]; return next; })}
                         />
-                        <Button 
-                          variant="outline" 
+                        <Button
+                          variant="outline"
                           size="sm"
                           className="h-10 w-10 text-lg shrink-0"
                           onClick={() => {
                             const current = parseInt((document.getElementById(`count-${binItem.id}`) as HTMLInputElement)?.value || "0");
                             (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(current + 1);
+                            setQuickActions(prev => { const next = { ...prev }; delete next[binItem.id]; return next; });
                           }}
                         >
                           +
                         </Button>
                       </div>
                       <div className="flex gap-2 mt-2">
-                        <Button 
-                          variant="secondary" 
+                        <Button
+                          variant={quickActions[binItem.id] === "matches" ? "default" : "secondary"}
                           size="sm"
-                          className="flex-1 h-8 text-xs"
+                          className={`flex-1 h-8 text-xs ${quickActions[binItem.id] === "matches" ? "bg-green-600 hover:bg-green-700 text-white" : ""}`}
                           onClick={() => {
                             (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = String(binItem.expectedQty);
+                            setQuickActions(prev => ({ ...prev, [binItem.id]: "matches" }));
                           }}
                         >
+                          {quickActions[binItem.id] === "matches" && <Check className="h-3 w-3 mr-1" />}
                           {binItem.mismatchType === "unexpected_found" ? `Confirm system (${binItem.expectedQty})` : `Matches (${binItem.expectedQty})`}
                         </Button>
-                        <Button 
-                          variant="outline" 
+                        <Button
+                          variant={quickActions[binItem.id] === "empty" ? "default" : "outline"}
                           size="sm"
-                          className="h-8 text-xs"
+                          className={`h-8 text-xs ${quickActions[binItem.id] === "empty" ? "bg-orange-500 hover:bg-orange-600 text-white" : ""}`}
                           onClick={() => {
                             (document.getElementById(`count-${binItem.id}`) as HTMLInputElement).value = "0";
+                            setQuickActions(prev => ({ ...prev, [binItem.id]: "empty" }));
                           }}
                         >
+                          {quickActions[binItem.id] === "empty" && <Check className="h-3 w-3 mr-1" />}
                           Empty
                         </Button>
                         <Button 
@@ -1795,20 +1805,22 @@ export default function CycleCounts() {
                   </Button>
                 </div>
                 <div className="flex gap-1 mt-1">
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant={countForm.countedQty === "0" ? "default" : "outline"}
                     size="sm"
-                    className="flex-1 h-8 text-xs"
+                    className={`flex-1 h-8 text-xs ${countForm.countedQty === "0" ? "bg-orange-500 hover:bg-orange-600 text-white" : ""}`}
                     onClick={() => setCountForm({ ...countForm, countedQty: "0" })}
                   >
+                    {countForm.countedQty === "0" && <Check className="h-3 w-3 mr-1" />}
                     Empty
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant={countForm.countedQty === String(selectedItem?.expectedQty || 0) && countForm.countedQty !== "0" ? "default" : "outline"}
                     size="sm"
-                    className="flex-1 h-8 text-xs"
+                    className={`flex-1 h-8 text-xs ${countForm.countedQty === String(selectedItem?.expectedQty || 0) && countForm.countedQty !== "0" ? "bg-green-600 hover:bg-green-700 text-white" : ""}`}
                     onClick={() => setCountForm({ ...countForm, countedQty: String(selectedItem?.expectedQty || 0) })}
                   >
+                    {countForm.countedQty === String(selectedItem?.expectedQty || 0) && countForm.countedQty !== "0" && <Check className="h-3 w-3 mr-1" />}
                     Same as Expected
                   </Button>
                 </div>
