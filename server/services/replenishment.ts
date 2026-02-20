@@ -864,6 +864,19 @@ class ReplenishmentService {
 
     if (!location || location.locationType !== "pick") return null;
 
+    // Only replenish variants that are assigned to this pick location
+    const [assignment] = await this.db
+      .select({ id: productLocations.id })
+      .from(productLocations)
+      .where(
+        and(
+          eq(productLocations.productVariantId, productVariantId),
+          eq(productLocations.warehouseLocationId, warehouseLocationId),
+        ),
+      )
+      .limit(1);
+    if (!assignment) return null;
+
     // Get variant for hierarchy level
     const [variant] = await this.db
       .select()
@@ -1166,6 +1179,14 @@ class ReplenishmentService {
     const inventoryByVariantAndType = this.buildInventoryIndex(allLevels, locationMap);
 
     // --- 4. Find all pick locations below threshold ---
+    // Build assignment set for quick lookup — only replenish assigned bins
+    const assignedSet = new Set<string>();
+    for (const pl of allProductLocs) {
+      if ((pl as any).productVariantId && (pl as any).warehouseLocationId) {
+        assignedSet.add(`${(pl as any).warehouseLocationId}:${(pl as any).productVariantId}`);
+      }
+    }
+
     const pickLocationsNeedingReplen = new Map<number, Array<{
       locationId: number;
       variantId: number;
@@ -1181,6 +1202,9 @@ class ReplenishmentService {
 
       const variant = variantMap.get(level.productVariantId);
       if (!variant || !variant.productId) continue;
+
+      // Skip stray inventory — only replenish variants assigned to this bin
+      if (!assignedSet.has(`${level.warehouseLocationId}:${level.productVariantId}`)) continue;
 
       seenPickLocVariant.add(`${level.warehouseLocationId}:${level.productVariantId}`);
       const arr = pickLocationsNeedingReplen.get(variant.productId) ?? [];
