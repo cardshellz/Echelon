@@ -178,11 +178,12 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
           SELECT pl.image_url FROM product_locations pl
           WHERE UPPER(pl.sku) = ${item.sku.toUpperCase()} AND pl.image_url IS NOT NULL
           UNION ALL
-          SELECT COALESCE(pv.image_url, p.image_url) as image_url
+          SELECT pa.url as image_url
           FROM product_variants pv
           LEFT JOIN products p ON pv.product_id = p.id
+          LEFT JOIN product_assets pa ON pa.product_id = p.id AND pa.is_primary = 1
           WHERE UPPER(pv.sku) = ${item.sku.toUpperCase()}
-            AND COALESCE(pv.image_url, p.image_url) IS NOT NULL
+            AND pa.url IS NOT NULL
         ) sub
         LIMIT 1
       `);
