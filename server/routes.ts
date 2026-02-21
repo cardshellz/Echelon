@@ -6873,22 +6873,14 @@ export async function registerRoutes(
         variantQty: parseInt(row.total_variant_qty) || 0,
         reservedQty: parseInt(row.total_reserved_qty) || 0,
         pickedQty: parseInt(row.total_picked_qty) || 0,
-        available: 0, // fungible ATP: all variants pooled, expressed in this variant's units
+        available: 0, // this variant's own available (physical - reserved), fungible total computed client-side
         locationCount: parseInt(row.location_count) || 0,
         pickableQty: parseInt(row.pickable_variant_qty) || 0,
       }));
 
-      // Fungible ATP from inventory-atp service (accounts for reserved+picked+packed across all variants of a product)
-      const { atp } = app.locals.services as any;
-      const productIds = Array.from(new Set(levels.filter(l => l.productId != null).map(l => l.productId as number)));
-      const atpMap: Map<number, number> = productIds.length > 0 ? await atp.getBulkAtp(productIds) : new Map();
-
+      // Available = physical - reserved (matches location-level math so everything adds up)
       for (const lv of levels) {
-        if (lv.productId != null && atpMap.has(lv.productId)) {
-          lv.available = Math.floor(atpMap.get(lv.productId)! / lv.unitsPerVariant);
-        } else {
-          lv.available = lv.variantQty - lv.reservedQty - lv.pickedQty;
-        }
+        lv.available = lv.variantQty - lv.reservedQty;
       }
 
       res.json(levels);

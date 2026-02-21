@@ -540,7 +540,7 @@ export default function Inventory() {
   // Summary bar stats — product-level counts from purchasing reorder analysis
   const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
-  const oosCount = variantLevels.filter(v => v.available <= 0).length;
+  const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
 
   // Build variantId→VariantLevel map + parentId→children map for fungible pool
   const variantMap = useMemo(() => {
@@ -565,7 +565,6 @@ export default function Inventory() {
   const hasFungibleDescendants = useMemo(() => {
     const result = new Set<number>();
     for (const v of variantLevels) {
-      // BFS down the children tree looking for descendants with stock
       const queue = childrenMap.get(v.variantId) || [];
       for (const child of queue) {
         if (child.variantQty > 0) {
@@ -573,6 +572,30 @@ export default function Inventory() {
           break;
         }
       }
+    }
+    return result;
+  }, [variantLevels, childrenMap]);
+
+  // Fungible available: own available + sum of descendant available (converted to this variant's units)
+  // This is the number shown in the Available column — math adds up to bin-level rows
+  const fungibleAvailable = useMemo(() => {
+    const result = new Map<number, number>();
+    for (const v of variantLevels) {
+      let total = v.available; // own: physical - reserved
+      // BFS descendants
+      const queue = [...(childrenMap.get(v.variantId) || [])];
+      const visited = new Set<number>();
+      while (queue.length > 0) {
+        const child = queue.shift()!;
+        if (visited.has(child.variantId)) continue;
+        visited.add(child.variantId);
+        if (child.variantQty > 0) {
+          total += Math.floor(Math.max(0, child.available) * child.unitsPerVariant / v.unitsPerVariant);
+        }
+        const grandchildren = childrenMap.get(child.variantId) || [];
+        queue.push(...grandchildren);
+      }
+      if (total !== v.available) result.set(v.variantId, total);
     }
     return result;
   }, [variantLevels, childrenMap]);
@@ -594,7 +617,7 @@ export default function Inventory() {
     .filter(v =>
       stockFilter === "order_now" ? (v.baseSku && orderNowSkus.has(v.baseSku)) :
       stockFilter === "order_soon" ? (v.baseSku && orderSoonSkus.has(v.baseSku)) :
-      stockFilter === "oos" ? v.available <= 0 :
+      stockFilter === "oos" ? (fungibleAvailable.get(v.variantId) ?? v.available) <= 0 :
       true
     )
     .sort((a, b) => {
@@ -604,7 +627,7 @@ export default function Inventory() {
         case "name": aVal = a.name || ""; bVal = b.name || ""; break;
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
         case "reserved": aVal = a.reservedQty; bVal = b.reservedQty; break;
-        case "available": aVal = a.available; bVal = b.available; break;
+        case "available": aVal = fungibleAvailable.get(a.variantId) ?? a.available; bVal = fungibleAvailable.get(b.variantId) ?? b.available; break;
         default: aVal = a.sku || ""; bVal = b.sku || "";
       }
       if (typeof aVal === "string") {
@@ -882,7 +905,7 @@ export default function Inventory() {
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
                           <div className="text-muted-foreground">Available</div>
-                          <div className="font-mono font-bold text-green-600">{level.available.toLocaleString()}</div>
+                          <div className="font-mono font-bold text-green-600">{(fungibleAvailable.get(level.variantId) ?? level.available).toLocaleString()}</div>
                         </div>
                       </div>
                     </div>
@@ -962,7 +985,7 @@ export default function Inventory() {
                             <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{level.available.toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{(fungibleAvailable.get(level.variantId) ?? level.available).toLocaleString()}</TableCell>
                             {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
