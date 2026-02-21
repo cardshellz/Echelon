@@ -2048,12 +2048,34 @@ export default function ProductDetail() {
                   ) : (
                     <CircleCheck className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
                   )}
-                  <div>
+                  <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium">Inventory</p>
                     {archiveDeps.dependencies.inventory.totalQty > 0 ? (
-                      <p className="text-xs text-muted-foreground">
-                        {archiveDeps.dependencies.inventory.variants.length} variant{archiveDeps.dependencies.inventory.variants.length !== 1 ? "s" : ""} with on-hand inventory ({archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units across {archiveDeps.dependencies.inventory.bins} bin{archiveDeps.dependencies.inventory.bins !== 1 ? "s" : ""})
-                      </p>
+                      <>
+                        <p className="text-xs text-muted-foreground mb-1.5">
+                          {archiveDeps.dependencies.inventory.variants.length} variant{archiveDeps.dependencies.inventory.variants.length !== 1 ? "s" : ""} with on-hand inventory ({archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units across {archiveDeps.dependencies.inventory.bins} bin{archiveDeps.dependencies.inventory.bins !== 1 ? "s" : ""})
+                        </p>
+                        <div className="rounded border overflow-hidden">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-muted/50">
+                                <th className="text-left py-1 px-2 font-medium">SKU</th>
+                                <th className="text-left py-1 px-2 font-medium">Bin</th>
+                                <th className="text-right py-1 px-2 font-medium">Qty</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {archiveDeps.dependencies.inventory.inventoryDetails.map((d, i) => (
+                                <tr key={i} className={i > 0 ? "border-t" : ""}>
+                                  <td className="py-1 px-2 font-mono">{d.sku}</td>
+                                  <td className="py-1 px-2 font-mono">{d.locationCode}</td>
+                                  <td className="py-1 px-2 text-right">{d.variantQty}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
                     ) : (
                       <p className="text-xs text-muted-foreground">No on-hand inventory</p>
                     )}
