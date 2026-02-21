@@ -1,23 +1,25 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
   Package,
   Search,
   Link as LinkIcon,
   Plus,
-  Filter,
   Download,
   Upload,
-  AlertTriangle
+  AlertTriangle,
+  ShieldAlert,
+  Pencil,
+  Trash2
 } from "lucide-react";
 
 interface Product {
@@ -65,6 +67,12 @@ export default function Variants() {
     sku: "",
     baseUnit: "piece",
   });
+  const [skuConflict, setSkuConflict] = useState<{
+    open: boolean;
+    conflictVariant: { id: number; sku: string; productId: number; productName: string | null } | null;
+    action: "rename" | "deactivate" | null;
+    newSku: string;
+  }>({ open: false, conflictVariant: null, action: null, newSku: "" });
 
   const { data: products = [] } = useQuery<Product[]>({
     queryKey: ["/api/products"],
@@ -89,6 +97,16 @@ export default function Variants() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ productId }),
       });
+      if (res.status === 409) {
+        const body = await res.json();
+        setSkuConflict({
+          open: true,
+          conflictVariant: body.conflictVariant,
+          action: null,
+          newSku: "",
+        });
+        throw new Error("SKU_CONFLICT");
+      }
       if (!res.ok) throw new Error("Failed to link variant");
       return res.json();
     },
@@ -100,7 +118,8 @@ export default function Variants() {
       setSelectedVariant(null);
       setSelectedProductId("");
     },
-    onError: () => {
+    onError: (error) => {
+      if (error.message === "SKU_CONFLICT") return;
       toast({ title: "Failed to link variant", variant: "destructive" });
     },
   });
@@ -118,6 +137,16 @@ export default function Variants() {
           barcode: data.barcode || null,
         }),
       });
+      if (res.status === 409) {
+        const body = await res.json();
+        setSkuConflict({
+          open: true,
+          conflictVariant: body.conflictVariant,
+          action: null,
+          newSku: "",
+        });
+        throw new Error("SKU_CONFLICT");
+      }
       if (!res.ok) throw new Error("Failed to create variant");
       return res.json();
     },
@@ -128,7 +157,8 @@ export default function Variants() {
       setCreateDialogOpen(false);
       setNewVariant({ productId: "", sku: "", name: "", unitsPerVariant: 1, hierarchyLevel: 1, barcode: "" });
     },
-    onError: () => {
+    onError: (error) => {
+      if (error.message === "SKU_CONFLICT") return; // handled by conflict dialog
       toast({ title: "Failed to create variant", variant: "destructive" });
     },
   });
@@ -156,6 +186,29 @@ export default function Variants() {
     },
     onError: () => {
       toast({ title: "Failed to create product", variant: "destructive" });
+    },
+  });
+
+  const deactivateVariantMutation = useMutation({
+    mutationFn: async (variantId: number) => {
+      const res = await fetch(`/api/product-variants/${variantId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: false }),
+      });
+      if (!res.ok) throw new Error("Failed to deactivate variant");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
+      toast({ title: "Conflicting variant deactivated" });
+      // Now retry the original create
+      setSkuConflict(prev => ({ ...prev, open: false }));
+      createVariantMutation.mutate(newVariant);
+    },
+    onError: () => {
+      toast({ title: "Failed to deactivate variant", variant: "destructive" });
     },
   });
 
@@ -676,6 +729,103 @@ export default function Variants() {
               className="min-h-[44px]"
             >
               {createVariantMutation.isPending ? "Creating..." : "Create Variant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* SKU Conflict Resolution Dialog */}
+      <Dialog open={skuConflict.open} onOpenChange={(open) => setSkuConflict(prev => ({ ...prev, open }))}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-600">
+              <ShieldAlert className="h-5 w-5" />
+              SKU Conflict
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <p className="text-sm text-muted-foreground">
+              The SKU <span className="font-mono font-medium text-foreground">{skuConflict.conflictVariant?.sku}</span> is already in use by another active variant.
+            </p>
+            {skuConflict.conflictVariant && (
+              <div className="rounded-md border p-3 bg-muted/30 space-y-1">
+                <div className="text-xs text-muted-foreground">Existing variant</div>
+                <div className="text-sm font-mono">{skuConflict.conflictVariant.sku}</div>
+                <div className="text-sm">
+                  <span className="text-muted-foreground">Product: </span>
+                  {skuConflict.conflictVariant.productName || "Unknown"} (ID: {skuConflict.conflictVariant.productId})
+                </div>
+                <div className="text-xs text-muted-foreground">Variant ID: {skuConflict.conflictVariant.id}</div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <p className="text-sm font-medium">How would you like to resolve this?</p>
+
+              {/* Option 1: Rename SKU */}
+              <div className="rounded-md border p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <Pencil className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-sm font-medium">Use a different SKU</span>
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={skuConflict.newSku}
+                    onChange={(e) => setSkuConflict(prev => ({ ...prev, newSku: e.target.value }))}
+                    placeholder="Enter corrected SKU"
+                    className="h-9 font-mono text-sm"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="min-h-[36px]"
+                    disabled={!skuConflict.newSku.trim() || createVariantMutation.isPending}
+                    onClick={() => {
+                      const updated = { ...newVariant, sku: skuConflict.newSku.trim() };
+                      setNewVariant(updated);
+                      setSkuConflict(prev => ({ ...prev, open: false }));
+                      createVariantMutation.mutate(updated);
+                    }}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              </div>
+
+              {/* Option 2: Deactivate old */}
+              <div className="rounded-md border p-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">Deactivate existing & retry</span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="min-h-[36px]"
+                    disabled={deactivateVariantMutation.isPending || !skuConflict.conflictVariant}
+                    onClick={() => {
+                      if (skuConflict.conflictVariant) {
+                        deactivateVariantMutation.mutate(skuConflict.conflictVariant.id);
+                      }
+                    }}
+                  >
+                    {deactivateVariantMutation.isPending ? "Deactivating..." : "Deactivate"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Marks the existing variant as inactive and retries creating yours.
+                </p>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSkuConflict(prev => ({ ...prev, open: false }))} className="min-h-[44px]">
+              Cancel
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -208,6 +208,7 @@ export interface IStorage {
   getAllProductVariants(): Promise<ProductVariant[]>;
   getProductVariantById(id: number): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
+  getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
   getProductVariantsByProductId(productId: number): Promise<ProductVariant[]>;
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
@@ -2028,6 +2029,13 @@ export class DatabaseStorage implements IStorage {
   async getProductVariantBySku(sku: string): Promise<ProductVariant | undefined> {
     const result = await db.select().from(productVariants)
       .where(sql`UPPER(${productVariants.sku}) = ${sku.trim().toUpperCase()}`);
+    return result[0];
+  }
+
+  async getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined> {
+    const upperSku = sku.trim().toUpperCase();
+    const result = await db.select().from(productVariants)
+      .where(sql`UPPER(${productVariants.sku}) = ${upperSku} AND ${productVariants.isActive} = true${excludeId ? sql` AND ${productVariants.id} != ${excludeId}` : sql``}`);
     return result[0];
   }
 

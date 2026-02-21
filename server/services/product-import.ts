@@ -300,6 +300,11 @@ export function createProductImportService() {
         let variant = await storage.getProductVariantBySku(v.sku);
 
         if (variant) {
+          // Guard: don't silently reassign variant to different product
+          if (variant.productId !== product.id) {
+            console.warn(`[PRODUCT IMPORT] SKU conflict: ${v.sku} exists on product_id=${variant.productId} but import wants product_id=${product.id} — skipping update`);
+            continue;
+          }
           await storage.updateProductVariant(variant.id, {
             name: v.name,
             unitsPerVariant: v.unitsPerVariant,
@@ -354,6 +359,10 @@ export function createProductImportService() {
       let variant = await storage.getProductVariantBySku(sv.sku);
 
       if (variant) {
+        if (variant.productId !== product.id) {
+          console.warn(`[PRODUCT IMPORT] SKU conflict: ${sv.sku} exists on product_id=${variant.productId} but import wants product_id=${product.id} — skipping update`);
+          continue;
+        }
         await storage.updateProductVariant(variant.id, {
           name: 'Each',
           unitsPerVariant: 1,

@@ -3582,6 +3582,17 @@ export async function registerRoutes(
   app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
+      // Check for SKU conflict with existing active variants
+      if (req.body.sku) {
+        const conflict = await storage.getActiveVariantBySku(req.body.sku);
+        if (conflict) {
+          const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
+          return res.status(409).json({
+            error: "SKU already exists",
+            conflictVariant: { id: conflict.id, sku: conflict.sku, productId: conflict.productId, productName: conflictProduct?.name || null },
+          });
+        }
+      }
       const variant = await storage.createProductVariant({
         ...req.body,
         productId,
@@ -3596,6 +3607,17 @@ export async function registerRoutes(
   app.put("/api/product-variants/:id", requirePermission("inventory", "update"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      // Check for SKU conflict when SKU is being changed
+      if (req.body.sku) {
+        const conflict = await storage.getActiveVariantBySku(req.body.sku, id);
+        if (conflict) {
+          const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
+          return res.status(409).json({
+            error: "SKU already exists",
+            conflictVariant: { id: conflict.id, sku: conflict.sku, productId: conflict.productId, productName: conflictProduct?.name || null },
+          });
+        }
+      }
       const variant = await storage.updateProductVariant(id, req.body);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
@@ -3604,6 +3626,57 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error updating variant:", error);
       res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  // Merge source variant's inventory into target variant, then deactivate source
+  app.post("/api/product-variants/:id/merge", requirePermission("inventory", "update"), async (req, res) => {
+    try {
+      const targetId = parseInt(req.params.id);
+      const sourceId = parseInt(req.body.sourceVariantId);
+      if (!sourceId || sourceId === targetId) {
+        return res.status(400).json({ error: "Invalid source variant" });
+      }
+
+      const target = await storage.getProductVariantById(targetId);
+      const source = await storage.getProductVariantById(sourceId);
+      if (!target) return res.status(404).json({ error: "Target variant not found" });
+      if (!source) return res.status(404).json({ error: "Source variant not found" });
+
+      // Move inventory_levels from source to target
+      const movedInventory = await db.update(inventoryLevels)
+        .set({ productVariantId: targetId, updatedAt: new Date() })
+        .where(eq(inventoryLevels.productVariantId, sourceId))
+        .returning();
+
+      // Move product_locations from source to target
+      const movedLocations = await db.update(productLocations)
+        .set({ productVariantId: targetId, updatedAt: new Date() })
+        .where(eq(productLocations.productVariantId, sourceId))
+        .returning();
+
+      // Log audit transaction
+      await db.insert(inventoryTransactions).values({
+        productVariantId: targetId,
+        transactionType: "adjustment",
+        quantityChange: 0,
+        reason: `Merged from variant ${source.sku || source.id} (id=${sourceId}): ${movedInventory.length} inventory records, ${movedLocations.length} location assignments`,
+      });
+
+      // Deactivate source variant
+      await storage.updateProductVariant(sourceId, { isActive: false } as any);
+
+      console.log(`[VARIANT MERGE] ${source.sku} (id=${sourceId}) → ${target.sku} (id=${targetId}): ${movedInventory.length} inventory, ${movedLocations.length} locations`);
+
+      res.json({
+        ok: true,
+        movedInventoryCount: movedInventory.length,
+        movedLocationCount: movedLocations.length,
+        deactivatedVariantId: sourceId,
+      });
+    } catch (error) {
+      console.error("Error merging variants:", error);
+      res.status(500).json({ error: "Failed to merge variants" });
     }
   });
 
@@ -6879,11 +6952,22 @@ export async function registerRoutes(
       }));
 
       // Available = physical - reserved (matches location-level math so everything adds up)
+      // Detect duplicate SKUs (same SKU on multiple active variants)
+      const skuCounts = new Map<string, number>();
       for (const lv of levels) {
         lv.available = lv.variantQty - lv.reservedQty;
+        if (lv.sku) {
+          const upper = lv.sku.toUpperCase();
+          skuCounts.set(upper, (skuCounts.get(upper) || 0) + 1);
+        }
       }
 
-      res.json(levels);
+      const result = levels.map(lv => ({
+        ...lv,
+        isDuplicate: lv.sku ? (skuCounts.get(lv.sku.toUpperCase()) || 0) > 1 : false,
+      }));
+
+      res.json(result);
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
       res.status(500).json({ error: "Failed to fetch inventory levels" });

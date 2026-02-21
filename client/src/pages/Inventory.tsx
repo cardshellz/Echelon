@@ -135,12 +135,14 @@ interface VariantLevel {
   parentVariantId: number | null;
   hierarchyLevel: number;
   baseSku: string | null;
+  productId: number | null;
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
   available: number;     // fungible ATP: all variants pooled, in this variant's units
   locationCount: number;
   pickableQty: number;
+  isDuplicate: boolean;
 }
 
 interface VariantLocationLevel {
@@ -412,7 +414,7 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
-  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos">("all");
+  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray">("all");
   const [purchasingFilter, setPurchasingFilter] = useState("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
@@ -598,6 +600,8 @@ export default function Inventory() {
   const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
   const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
+  const duplicateCount = variantLevels.filter(v => v.isDuplicate).length;
+  const strayCount = variantLevels.filter(v => !v.productId).length;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -617,6 +621,8 @@ export default function Inventory() {
       stockFilter === "order_now" ? (v.baseSku && orderNowSkus.has(v.baseSku)) :
       stockFilter === "order_soon" ? (v.baseSku && orderSoonSkus.has(v.baseSku)) :
       stockFilter === "oos" ? (fungibleAvailable.get(v.variantId) ?? v.available) <= 0 :
+      stockFilter === "duplicates" ? v.isDuplicate :
+      stockFilter === "stray" ? !v.productId :
       true
     )
     .sort((a, b) => {
@@ -822,6 +828,28 @@ export default function Inventory() {
                 >
                   {oosCount} out of stock
                 </button>
+                {duplicateCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "duplicates" ? "underline font-semibold" : ""} text-red-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "duplicates" ? "all" : "duplicates")}
+                    >
+                      {duplicateCount} duplicate SKUs
+                    </button>
+                  </>
+                )}
+                {strayCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "stray" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "stray" ? "all" : "stray")}
+                    >
+                      {strayCount} no product
+                    </button>
+                  </>
+                )}
                 {locationHealth && (
                   <>
                     <span className="text-muted-foreground/40">·</span>
@@ -886,7 +914,19 @@ export default function Inventory() {
                     <div key={level.variantId} className="rounded-md border bg-card p-4">
                       <div className="flex items-start justify-between mb-2">
                         <div>
-                          <div className="font-mono font-medium text-primary text-sm">{level.sku}</div>
+                          <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
+                            {level.sku}
+                            {level.isDuplicate && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                DUPLICATE SKU
+                              </span>
+                            )}
+                            {!level.productId && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                NO PRODUCT
+                              </span>
+                            )}
+                          </div>
                           <div className="text-sm font-medium mt-1">{level.name}</div>
                         </div>
                         {level.locationCount > 0 && (
@@ -979,6 +1019,16 @@ export default function Inventory() {
                                     <ChevronRight className="h-4 w-4 text-muted-foreground" />
                                 )}
                                 {level.sku}
+                                {level.isDuplicate && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
+                                    DUPLICATE SKU
+                                  </span>
+                                )}
+                                {!level.productId && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
+                                    NO PRODUCT
+                                  </span>
+                                )}
                               </div>
                             </TableCell>
                             <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
