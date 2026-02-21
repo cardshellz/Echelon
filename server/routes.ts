@@ -3456,6 +3456,7 @@ export async function registerRoutes(
     try {
       const id = parseInt(req.params.id);
       const force = req.body?.force === true;
+      const transferToVariantId = req.body?.transferToVariantId ? parseInt(req.body.transferToVariantId) : null;
 
       const product = await storage.getProductById(id);
       if (!product) {
@@ -3465,24 +3466,43 @@ export async function registerRoutes(
       const variants = await storage.getProductVariantsByProductId(id);
       const variantIds = variants.map(v => v.id);
 
-      // Pre-flight dependency check
+      // Pre-flight dependency check with per-level detail
       let totalInventory = 0;
+      let totalReserved = 0;
       let inventoryBins = 0;
-      const variantInventory: { variantId: number; sku: string | null; totalQty: number; bins: number }[] = [];
+      const variantInventory: { variantId: number; sku: string | null; totalQty: number; bins: number; reservedQty: number }[] = [];
+      const inventoryDetails: { variantId: number; sku: string | null; warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[] = [];
       for (const v of variants) {
         const levels = await storage.getInventoryLevelsByVariantId(v.id);
         const qty = levels.reduce((sum, l) => sum + l.variantQty, 0);
+        const reserved = levels.reduce((sum, l) => sum + l.reservedQty, 0);
         const bins = levels.filter(l => l.variantQty !== 0).length;
         totalInventory += qty;
+        totalReserved += reserved;
         inventoryBins += bins;
         if (qty > 0) {
-          variantInventory.push({ variantId: v.id, sku: v.sku, totalQty: qty, bins });
+          variantInventory.push({ variantId: v.id, sku: v.sku, totalQty: qty, bins, reservedQty: reserved });
+        }
+        // Collect per-level details for transfer preview
+        for (const level of levels) {
+          if (level.variantQty > 0) {
+            // Get location code
+            const [loc] = await db.select({ code: warehouseLocations.code }).from(warehouseLocations).where(eq(warehouseLocations.id, level.warehouseLocationId)).limit(1);
+            inventoryDetails.push({
+              variantId: v.id,
+              sku: v.sku,
+              warehouseLocationId: level.warehouseLocationId,
+              locationCode: loc?.code ?? `LOC-${level.warehouseLocationId}`,
+              variantQty: level.variantQty,
+              reservedQty: level.reservedQty,
+            });
+          }
         }
       }
 
       const pendingShipments = await storage.getPendingShipmentItemsByVariantIds(variantIds);
 
-      // Count active channel feeds & replen rules (quick check via storage)
+      // Count active channel feeds
       let activeFeeds = 0;
       for (const v of variants) {
         const feeds = await storage.getChannelFeedsByProductVariantId(v.id);
@@ -3491,7 +3511,7 @@ export async function registerRoutes(
 
       // Build dependency report
       const dependencies = {
-        inventory: { totalQty: totalInventory, bins: inventoryBins, variants: variantInventory },
+        inventory: { totalQty: totalInventory, bins: inventoryBins, variants: variantInventory, hasReserved: totalReserved > 0, inventoryDetails },
         shipments: { pending: pendingShipments.length, items: pendingShipments.slice(0, 10) },
         channelFeeds: { active: activeFeeds },
         variants: { total: variants.length, active: variants.filter(v => v.isActive).length },
@@ -3505,24 +3525,74 @@ export async function registerRoutes(
 
       // Execute archive
       let inventoryCleared = 0;
+      let inventoryTransferred = 0;
       let binAssignmentsCleared = 0;
       let channelFeedsDeactivated = 0;
+      const userId = (req as any).user?.username || "system";
+
+      // SKU correction transfer — move inventory to target variant before archive
+      if (transferToVariantId) {
+        const targetVariant = await storage.getProductVariantById(transferToVariantId);
+        if (!targetVariant || !targetVariant.isActive) {
+          return res.status(400).json({ error: "Target variant not found or inactive" });
+        }
+
+        const { inventoryCore } = req.app.locals.services as any;
+        const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+        for (const v of variants) {
+          const levels = await storage.getInventoryLevelsByVariantId(v.id);
+          for (const level of levels) {
+            if (level.variantQty > 0) {
+              if (level.reservedQty > 0) {
+                return res.status(400).json({
+                  error: `Cannot transfer: variant ${v.sku} has ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
+                });
+              }
+
+              await inventoryCore.skuCorrectionTransfer({
+                sourceVariantId: v.id,
+                targetVariantId: transferToVariantId,
+                warehouseLocationId: level.warehouseLocationId,
+                qty: level.variantQty,
+                batchId,
+                userId,
+                notes: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer)`,
+              });
+              inventoryTransferred += level.variantQty;
+            }
+          }
+        }
+
+        // Sync target variant inventory to channels
+        const { channelSync } = req.app.locals.services as any;
+        if (channelSync) {
+          channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
+            console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
+          );
+        }
+
+        console.log(`[ARCHIVE] SKU correction: transferred ${inventoryTransferred} units to variant ${targetVariant.sku} (batch: ${batchId})`);
+      }
 
       for (const v of variants) {
-        // Log adjustment transactions for any non-zero inventory being zeroed
-        if (force) {
+        // Log adjustment transactions for any non-zero inventory being zeroed (only if no transfer)
+        if (!transferToVariantId) {
           const levels = await storage.getInventoryLevelsByVariantId(v.id);
           for (const level of levels) {
             if (level.variantQty !== 0) {
               await storage.createInventoryTransaction({
-                warehouseLocationId: level.warehouseLocationId,
                 productVariantId: v.id,
+                fromLocationId: level.warehouseLocationId,
                 transactionType: "adjustment",
-                qty: -level.variantQty,
-                previousQty: level.variantQty,
-                newQty: 0,
-                reason: "Product archived",
-                performedBy: (req as any).user?.username || "system",
+                variantQtyDelta: -level.variantQty,
+                variantQtyBefore: level.variantQty,
+                variantQtyAfter: 0,
+                sourceState: "on_hand",
+                targetState: "on_hand",
+                referenceType: "manual",
+                notes: "Product archived — inventory zeroed",
+                userId,
               });
             }
           }
@@ -3550,6 +3620,7 @@ export async function registerRoutes(
           product: { id: product.id, sku: product.sku, name: product.name },
           variants: variants.length,
           inventoryCleared,
+          inventoryTransferred,
           binAssignmentsCleared,
           channelFeedsDeactivated,
           replenDeactivated,

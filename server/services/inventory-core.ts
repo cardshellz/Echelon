@@ -726,6 +726,138 @@ export class InventoryCoreService {
     });
   }
 
+  /**
+   * Cross-variant inventory transfer for SKU corrections.
+   * Moves qty from sourceVariant to targetVariant at the same location.
+   * Creates two audit transactions with a shared batchId.
+   */
+  async skuCorrectionTransfer(params: {
+    sourceVariantId: number;
+    targetVariantId: number;
+    warehouseLocationId: number;
+    qty: number;
+    batchId: string;
+    userId?: string;
+    notes?: string;
+  }): Promise<void> {
+    if (params.qty <= 0) {
+      throw new Error("qty must be a positive integer");
+    }
+
+    await this.db.transaction(async (tx: any) => {
+      const svc = this.withTx(tx);
+
+      // --- SOURCE (atomic guarded decrement) ---
+      const sourceLevel = await svc.getLevel(
+        params.sourceVariantId,
+        params.warehouseLocationId,
+      );
+
+      if (!sourceLevel) {
+        throw new Error(
+          `No inventory level for variant ${params.sourceVariantId} ` +
+            `at location ${params.warehouseLocationId}`,
+        );
+      }
+
+      if (sourceLevel.variantQty < params.qty) {
+        throw new Error(
+          `Insufficient on-hand at source: need ${params.qty}, ` +
+            `have ${sourceLevel.variantQty}`,
+        );
+      }
+
+      if (sourceLevel.reservedQty > 0) {
+        throw new Error(
+          `Cannot transfer: variant has ${sourceLevel.reservedQty} reserved units at location ${params.warehouseLocationId}`,
+        );
+      }
+
+      const [decremented] = await tx
+        .update(inventoryLevels)
+        .set({
+          variantQty: sql`${inventoryLevels.variantQty} - ${params.qty}`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(inventoryLevels.id, sourceLevel.id),
+            sql`${inventoryLevels.variantQty} >= ${params.qty}`,
+          ),
+        )
+        .returning();
+
+      if (!decremented) {
+        throw new Error(
+          `SKU correction failed: insufficient stock at source (concurrent claim).`,
+        );
+      }
+
+      // --- DESTINATION ---
+      const destLevel = await svc.upsertLevel(
+        params.targetVariantId,
+        params.warehouseLocationId,
+      );
+
+      await svc.adjustLevel(destLevel.id, {
+        variantQty: params.qty,
+      });
+
+      // --- AUDIT (two entries: source decrement + dest increment) ---
+      await svc.logTransaction({
+        productVariantId: params.sourceVariantId,
+        fromLocationId: params.warehouseLocationId,
+        toLocationId: params.warehouseLocationId,
+        transactionType: "sku_correction",
+        variantQtyDelta: -params.qty,
+        variantQtyBefore: sourceLevel.variantQty,
+        variantQtyAfter: decremented.variantQty,
+        batchId: params.batchId,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "sku_correction",
+        notes: params.notes ?? null,
+        userId: params.userId ?? null,
+      });
+
+      const updatedDest = await svc.getLevel(params.targetVariantId, params.warehouseLocationId);
+      await svc.logTransaction({
+        productVariantId: params.targetVariantId,
+        fromLocationId: params.warehouseLocationId,
+        toLocationId: params.warehouseLocationId,
+        transactionType: "sku_correction",
+        variantQtyDelta: params.qty,
+        variantQtyBefore: destLevel.variantQty,
+        variantQtyAfter: updatedDest?.variantQty ?? destLevel.variantQty + params.qty,
+        batchId: params.batchId,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "sku_correction",
+        notes: params.notes ?? null,
+        userId: params.userId ?? null,
+      });
+
+      // Zombie cleanup: if source level all-zeroes, remove it
+      if (decremented.variantQty === 0) {
+        const [current] = await tx
+          .select()
+          .from(inventoryLevels)
+          .where(eq(inventoryLevels.id, sourceLevel.id))
+          .limit(1);
+        if (
+          current &&
+          current.variantQty === 0 &&
+          current.reservedQty === 0 &&
+          current.pickedQty === 0 &&
+          (current.packedQty ?? 0) === 0 &&
+          (current.backorderQty ?? 0) === 0
+        ) {
+          await tx.delete(inventoryLevels).where(eq(inventoryLevels.id, sourceLevel.id));
+        }
+      }
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // AUDIT TRAIL
   // ---------------------------------------------------------------------------

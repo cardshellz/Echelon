@@ -40,8 +40,12 @@ import {
   Archive,
   CircleCheck,
   CircleAlert,
+  ArrowRightLeft,
+  ChevronsUpDown,
+  Check,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
 
@@ -325,13 +329,21 @@ export default function ProductDetail() {
   const [archiveDeps, setArchiveDeps] = useState<{
     blocked: boolean;
     dependencies: {
-      inventory: { totalQty: number; bins: number; variants: { variantId: number; sku: string | null; totalQty: number; bins: number }[] };
+      inventory: {
+        totalQty: number; bins: number; hasReserved: boolean;
+        variants: { variantId: number; sku: string | null; totalQty: number; bins: number; reservedQty: number }[];
+        inventoryDetails: { variantId: number; sku: string | null; warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[];
+      };
       shipments: { pending: number };
       channelFeeds: { active: number };
       variants: { total: number; active: number };
     };
   } | null>(null);
   const [archiveScanning, setArchiveScanning] = useState(false);
+  const [transferMode, setTransferMode] = useState(false);
+  const [transferTargetVariant, setTransferTargetVariant] = useState<{ id: number; sku: string; name: string; unitsPerVariant: number } | null>(null);
+  const [variantSearchOpen, setVariantSearchOpen] = useState(false);
+  const [variantSearchQuery, setVariantSearchQuery] = useState("");
 
   // --- Product data ---
   const { data: product, isLoading, error } = useQuery<ProductDetailData>({
@@ -465,6 +477,23 @@ export default function ProductDetail() {
     },
   });
 
+  // --- Archive: variant search for SKU correction transfer ---
+  const variantSearchResults = useQuery<{ sku: string; name: string; productVariantId: number; productId: number; unitsPerVariant: number }[]>({
+    queryKey: ["/api/inventory/skus/search", variantSearchQuery],
+    queryFn: async () => {
+      if (!variantSearchQuery || variantSearchQuery.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(variantSearchQuery)}&limit=20`);
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: variantSearchQuery.length >= 2,
+  });
+
+  // Filter out variants belonging to the product being archived
+  const filteredSearchResults = (variantSearchResults.data ?? []).filter(
+    (v) => v.productId !== product?.productId
+  );
+
   // --- Archive ---
   const scanArchiveDeps = useCallback(async () => {
     if (!product?.productId) return;
@@ -490,12 +519,19 @@ export default function ProductDetail() {
 
   const archiveMutation = useMutation({
     mutationFn: async () => {
+      const body: Record<string, any> = { force: true };
+      if (transferMode && transferTargetVariant) {
+        body.transferToVariantId = transferTargetVariant.id;
+      }
       const res = await fetch(`/api/products/${product?.productId}/archive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: true }),
+        body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error("Failed to archive product");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to archive product");
+      }
       return res.json();
     },
     onSuccess: (data) => {
@@ -503,12 +539,17 @@ export default function ProductDetail() {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
-      toast({ title: `Archived: ${data.archived.variants} variants, ${data.archived.inventoryCleared} inventory rows cleared` });
+      const msg = data.archived.inventoryTransferred > 0
+        ? `Archived: transferred ${data.archived.inventoryTransferred} units, ${data.archived.variants} variants deactivated`
+        : `Archived: ${data.archived.variants} variants, ${data.archived.inventoryCleared} inventory rows cleared`;
+      toast({ title: msg });
       setArchiveDialogOpen(false);
       setArchiveDeps(null);
+      setTransferMode(false);
+      setTransferTargetVariant(null);
     },
-    onError: () => {
-      toast({ title: "Failed to archive product", variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: err.message || "Failed to archive product", variant: "destructive" });
     },
   });
 
@@ -1977,8 +2018,11 @@ export default function ProductDetail() {
       </Dialog>
 
       {/* Archive Product Dialog */}
-      <Dialog open={archiveDialogOpen} onOpenChange={(open) => { setArchiveDialogOpen(open); if (!open) setArchiveDeps(null); }}>
-        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+      <Dialog open={archiveDialogOpen} onOpenChange={(open) => {
+        setArchiveDialogOpen(open);
+        if (!open) { setArchiveDeps(null); setTransferMode(false); setTransferTargetVariant(null); setVariantSearchQuery(""); }
+      }}>
+        <DialogContent className={cn("max-h-[90vh] overflow-y-auto p-4", transferMode ? "max-w-lg" : "max-w-md")}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Archive className="h-5 w-5" />
@@ -2008,7 +2052,7 @@ export default function ProductDetail() {
                     <p className="text-sm font-medium">Inventory</p>
                     {archiveDeps.dependencies.inventory.totalQty > 0 ? (
                       <p className="text-xs text-muted-foreground">
-                        {archiveDeps.dependencies.inventory.variants.length} variant{archiveDeps.dependencies.inventory.variants.length !== 1 ? "s" : ""} with on-hand inventory ({archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units across {archiveDeps.dependencies.inventory.bins} bins)
+                        {archiveDeps.dependencies.inventory.variants.length} variant{archiveDeps.dependencies.inventory.variants.length !== 1 ? "s" : ""} with on-hand inventory ({archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units across {archiveDeps.dependencies.inventory.bins} bin{archiveDeps.dependencies.inventory.bins !== 1 ? "s" : ""})
                       </p>
                     ) : (
                       <p className="text-xs text-muted-foreground">No on-hand inventory</p>
@@ -2061,9 +2105,130 @@ export default function ProductDetail() {
                   </div>
                 </div>
 
-                {archiveDeps.blocked && (
-                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
-                    This product has on-hand inventory or pending shipments. Force-archiving will zero out all inventory and log adjustment transactions.
+                {/* Action options when blocked by inventory */}
+                {archiveDeps.blocked && archiveDeps.dependencies.inventory.totalQty > 0 && (
+                  <div className="space-y-3 pt-1">
+                    {archiveDeps.dependencies.inventory.hasReserved && (
+                      <p className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400 p-2 rounded">
+                        Some inventory has reserved units (allocated to orders). Fulfill or cancel those orders before transferring.
+                      </p>
+                    )}
+
+                    <div className="flex gap-2">
+                      <Button
+                        variant={transferMode ? "default" : "outline"}
+                        size="sm"
+                        className="flex-1 h-9"
+                        disabled={archiveDeps.dependencies.inventory.hasReserved}
+                        onClick={() => setTransferMode(true)}
+                      >
+                        <ArrowRightLeft className="h-3.5 w-3.5 mr-1.5" />
+                        Transfer & Archive
+                      </Button>
+                      <Button
+                        variant={!transferMode ? "outline" : "ghost"}
+                        size="sm"
+                        className="flex-1 h-9"
+                        onClick={() => { setTransferMode(false); setTransferTargetVariant(null); }}
+                      >
+                        <Archive className="h-3.5 w-3.5 mr-1.5" />
+                        Force Archive
+                      </Button>
+                    </div>
+
+                    {transferMode ? (
+                      <div className="space-y-3">
+                        <div>
+                          <Label className="text-xs font-medium mb-1.5 block">Transfer inventory to</Label>
+                          <Popover open={variantSearchOpen} onOpenChange={setVariantSearchOpen}>
+                            <PopoverTrigger asChild>
+                              <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
+                                {transferTargetVariant ? (
+                                  <span className="font-mono text-sm">{transferTargetVariant.sku}</span>
+                                ) : (
+                                  <span className="text-muted-foreground">Search for target SKU...</span>
+                                )}
+                                <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50 ml-2" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                              <Command shouldFilter={false}>
+                                <CommandInput
+                                  placeholder="Search SKU or name..."
+                                  value={variantSearchQuery}
+                                  onValueChange={setVariantSearchQuery}
+                                />
+                                <CommandList>
+                                  <CommandEmpty>{variantSearchQuery.length < 2 ? "Type to search..." : "No variants found"}</CommandEmpty>
+                                  <CommandGroup>
+                                    {filteredSearchResults.slice(0, 50).map((v) => (
+                                      <CommandItem
+                                        key={v.productVariantId}
+                                        value={String(v.productVariantId)}
+                                        onSelect={() => {
+                                          setTransferTargetVariant({ id: v.productVariantId, sku: v.sku, name: v.name, unitsPerVariant: v.unitsPerVariant });
+                                          setVariantSearchOpen(false);
+                                        }}
+                                      >
+                                        <Check className={cn("h-4 w-4 mr-2", transferTargetVariant?.id === v.productVariantId ? "opacity-100" : "opacity-0")} />
+                                        <div className="flex flex-col">
+                                          <span className="font-mono text-sm">{v.sku}</span>
+                                          <span className="text-xs text-muted-foreground truncate">{v.name}</span>
+                                        </div>
+                                      </CommandItem>
+                                    ))}
+                                  </CommandGroup>
+                                </CommandList>
+                              </Command>
+                            </PopoverContent>
+                          </Popover>
+                        </div>
+
+                        {/* Transfer preview */}
+                        {transferTargetVariant && (
+                          <div className="space-y-2">
+                            <div className="rounded-md border overflow-hidden">
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="bg-muted/50">
+                                    <th className="text-left py-1.5 px-2 font-medium">From SKU</th>
+                                    <th className="text-left py-1.5 px-2 font-medium">Bin</th>
+                                    <th className="text-right py-1.5 px-2 font-medium">Qty</th>
+                                    <th className="text-center py-1.5 px-2 font-medium"></th>
+                                    <th className="text-left py-1.5 px-2 font-medium">To SKU</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {archiveDeps.dependencies.inventory.inventoryDetails.map((d, i) => (
+                                    <tr key={i} className="border-t">
+                                      <td className="py-1.5 px-2 font-mono">{d.sku}</td>
+                                      <td className="py-1.5 px-2 font-mono">{d.locationCode}</td>
+                                      <td className="py-1.5 px-2 text-right">{d.variantQty}</td>
+                                      <td className="py-1.5 px-2 text-center text-muted-foreground">→</td>
+                                      <td className="py-1.5 px-2 font-mono text-green-600 dark:text-green-400">{transferTargetVariant.sku}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units will be transferred, then the product will be archived.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
+                        Force-archiving will zero out all inventory and log adjustment transactions. Units will not be transferred.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Simple blocked message for shipments-only blocking (no inventory) */}
+                {archiveDeps.blocked && archiveDeps.dependencies.inventory.totalQty === 0 && (
+                  <p className="text-xs text-red-600 bg-red-50 dark:bg-red-900/20 dark:text-red-400 p-2 rounded">
+                    This product has pending shipments. Complete or cancel them before archiving.
                   </p>
                 )}
               </div>
@@ -2077,11 +2242,18 @@ export default function ProductDetail() {
               <Button
                 variant="destructive"
                 onClick={() => archiveMutation.mutate()}
-                disabled={archiveMutation.isPending || archiveScanning}
+                disabled={
+                  archiveMutation.isPending ||
+                  archiveScanning ||
+                  (archiveDeps.blocked && archiveDeps.dependencies.shipments.pending > 0 && archiveDeps.dependencies.inventory.totalQty === 0) ||
+                  (transferMode && !transferTargetVariant)
+                }
                 className="min-h-[44px]"
               >
                 {archiveMutation.isPending ? (
                   <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Archiving...</>
+                ) : transferMode && transferTargetVariant ? (
+                  <><ArrowRightLeft className="h-4 w-4 mr-2" />Transfer & Archive</>
                 ) : archiveDeps.blocked ? (
                   <><Archive className="h-4 w-4 mr-2" />Force Archive</>
                 ) : (
