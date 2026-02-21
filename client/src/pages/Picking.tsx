@@ -4253,7 +4253,9 @@ export default function Picking() {
                   )}
                 </div>
                 <div className="text-xs">
-                  System shows: <span className="font-medium">{binCountContext.systemQtyAfter}</span>
+                  Expected: <span className="font-medium">{binCountContext.systemQtyAfter}</span>
+                  {binCountContext.replen.autoExecuted && <span className="text-blue-600"> (after pick + replen)</span>}
+                  {!binCountContext.replen.autoExecuted && <span className="text-muted-foreground"> (after pick)</span>}
                 </div>
                 {!binCountContext.deducted && (
                   <div className="text-xs text-amber-600 font-medium">
@@ -4275,7 +4277,7 @@ export default function Picking() {
           </DialogHeader>
 
           <div className="py-4 space-y-3">
-            <label className="text-sm font-medium">How many are in the bin?</label>
+            <label className="text-sm font-medium">Count what's left in the bin after picking complete</label>
             <Input
               type="number"
               inputMode="numeric"
