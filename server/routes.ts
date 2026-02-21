@@ -3864,6 +3864,143 @@ export async function registerRoutes(
     }
   });
 
+  // Archive variant — soft-delete with dependency cleanup (mirrors product archive)
+  app.post("/api/product-variants/:id/archive", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const force = req.body?.force === true;
+      const transferToVariantId = req.body?.transferToVariantId ? parseInt(req.body.transferToVariantId) : null;
+
+      const variant = await storage.getProductVariantById(id);
+      if (!variant) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+
+      // Dependency scan
+      const levels = await storage.getInventoryLevelsByVariantId(id);
+      const totalQty = levels.reduce((sum, l) => sum + l.variantQty, 0);
+      const totalReserved = levels.reduce((sum, l) => sum + l.reservedQty, 0);
+      const bins = levels.filter(l => l.variantQty > 0).length;
+
+      const inventoryDetails: { warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[] = [];
+      for (const level of levels) {
+        if (level.variantQty > 0) {
+          const [loc] = await db.select({ code: warehouseLocations.code }).from(warehouseLocations).where(eq(warehouseLocations.id, level.warehouseLocationId)).limit(1);
+          inventoryDetails.push({
+            warehouseLocationId: level.warehouseLocationId,
+            locationCode: loc?.code ?? `LOC-${level.warehouseLocationId}`,
+            variantQty: level.variantQty,
+            reservedQty: level.reservedQty,
+          });
+        }
+      }
+
+      const pendingShipments = await storage.getPendingShipmentItemsByVariantIds([id]);
+      const feeds = await storage.getChannelFeedsByProductVariantId(id);
+      const activeFeeds = feeds.filter((f: any) => f.isActive === 1).length;
+
+      const dependencies = {
+        inventory: { totalQty, bins, hasReserved: totalReserved > 0, inventoryDetails },
+        shipments: { pending: pendingShipments.length },
+        channelFeeds: { active: activeFeeds },
+      };
+
+      const hasBlockers = totalQty > 0 || pendingShipments.length > 0;
+
+      if (hasBlockers && !force) {
+        return res.json({ blocked: true, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
+      }
+
+      // Execute archive
+      let inventoryCleared = 0;
+      let inventoryTransferred = 0;
+      let binAssignmentsCleared = 0;
+      let channelFeedsDeactivated = 0;
+      const userId = (req as any).user?.username || "system";
+
+      // SKU correction transfer
+      if (transferToVariantId) {
+        const targetVariant = await storage.getProductVariantById(transferToVariantId);
+        if (!targetVariant || !targetVariant.isActive) {
+          return res.status(400).json({ error: "Target variant not found or inactive" });
+        }
+
+        const { inventoryCore } = req.app.locals.services as any;
+        const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+        for (const level of levels) {
+          if (level.variantQty > 0) {
+            if (level.reservedQty > 0) {
+              return res.status(400).json({
+                error: `Cannot transfer: ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
+              });
+            }
+            await inventoryCore.skuCorrectionTransfer({
+              sourceVariantId: id,
+              targetVariantId: transferToVariantId,
+              warehouseLocationId: level.warehouseLocationId,
+              qty: level.variantQty,
+              batchId,
+              userId,
+              notes: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer)`,
+            });
+            inventoryTransferred += level.variantQty;
+          }
+        }
+
+        const { channelSync } = req.app.locals.services as any;
+        if (channelSync) {
+          channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
+            console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
+          );
+        }
+        console.log(`[ARCHIVE-VARIANT] SKU correction: transferred ${inventoryTransferred} units from ${variant.sku} to ${targetVariant.sku} (batch: ${batchId})`);
+      }
+
+      // Zero remaining inventory (only if no transfer)
+      if (!transferToVariantId) {
+        for (const level of levels) {
+          if (level.variantQty !== 0) {
+            await storage.createInventoryTransaction({
+              productVariantId: id,
+              fromLocationId: level.warehouseLocationId,
+              transactionType: "adjustment",
+              variantQtyDelta: -level.variantQty,
+              variantQtyBefore: level.variantQty,
+              variantQtyAfter: 0,
+              sourceState: "on_hand",
+              targetState: "on_hand",
+              referenceType: "manual",
+              notes: "Variant archived — inventory zeroed",
+              userId,
+            });
+          }
+        }
+      }
+
+      inventoryCleared = await storage.deleteInventoryLevelsByVariantId(id);
+      binAssignmentsCleared = await storage.deleteProductLocationsByVariantId(id);
+      channelFeedsDeactivated = await storage.deactivateChannelFeedsByVariantId(id);
+      await storage.updateProductVariant(id, { isActive: false });
+
+      console.log(`[ARCHIVE-VARIANT] Variant ${id} (${variant.sku}) archived: ${inventoryCleared} inventory rows, ${binAssignmentsCleared} bin assignments, ${channelFeedsDeactivated} feeds`);
+
+      res.json({
+        success: true,
+        archived: {
+          variant: { id: variant.id, sku: variant.sku, name: variant.name },
+          inventoryCleared,
+          inventoryTransferred,
+          binAssignmentsCleared,
+          channelFeedsDeactivated,
+        },
+      });
+    } catch (error) {
+      console.error("Error archiving variant:", error);
+      res.status(500).json({ error: "Failed to archive variant" });
+    }
+  });
+
   app.delete("/api/product-variants/:id", requirePermission("inventory", "delete"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);

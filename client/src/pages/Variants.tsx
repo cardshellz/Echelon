@@ -204,24 +204,24 @@ export default function Variants() {
 
   const deactivateVariantMutation = useMutation({
     mutationFn: async (variantId: number) => {
-      const res = await fetch(`/api/product-variants/${variantId}`, {
-        method: "PUT",
+      const res = await fetch(`/api/product-variants/${variantId}/archive`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ isActive: false }),
+        body: JSON.stringify({ force: true }),
       });
-      if (!res.ok) throw new Error("Failed to deactivate variant");
+      if (!res.ok) throw new Error("Failed to archive variant");
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
-      toast({ title: "Conflicting variant deactivated" });
+      toast({ title: "Conflicting variant archived" });
       // Now retry the original create
       setSkuConflict(prev => ({ ...prev, open: false }));
       createVariantMutation.mutate(newVariant);
     },
     onError: () => {
-      toast({ title: "Failed to deactivate variant", variant: "destructive" });
+      toast({ title: "Failed to archive variant", variant: "destructive" });
     },
   });
 
@@ -882,11 +882,11 @@ export default function Variants() {
                       }
                     }}
                   >
-                    {deactivateVariantMutation.isPending ? "Deactivating..." : "Deactivate"}
+                    {deactivateVariantMutation.isPending ? "Archiving..." : "Archive & Retry"}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Marks the existing variant as inactive and retries creating yours.
+                  Archives the existing variant (cleans up inventory, feeds, bins) and retries creating yours.
                 </p>
               </div>
             </div>
