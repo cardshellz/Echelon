@@ -537,11 +537,6 @@ export default function Inventory() {
     },
   });
 
-  // Summary bar stats — product-level counts from purchasing reorder analysis
-  const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
-  const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
-  const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
-
   // Build variantId→VariantLevel map + parentId→children map for fungible pool
   const variantMap = useMemo(() => {
     const m = new Map<number, VariantLevel>();
@@ -599,6 +594,11 @@ export default function Inventory() {
     }
     return result;
   }, [variantLevels, childrenMap]);
+
+  // Summary bar stats — product-level counts from purchasing reorder analysis
+  const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
+  const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
+  const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
