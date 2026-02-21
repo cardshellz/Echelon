@@ -3452,7 +3452,7 @@ export async function registerRoutes(
   });
 
   // Archive product — soft-delete with dependency cleanup
-  app.post("/api/products/:id/archive", requirePermission("inventory", "delete"), async (req, res) => {
+  app.post("/api/products/:id/archive", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const force = req.body?.force === true;

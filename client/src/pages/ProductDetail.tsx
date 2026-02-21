@@ -475,6 +475,10 @@ export default function ProductDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force: false }),
       });
+      if (!res.ok) {
+        toast({ title: `Archive scan failed: ${res.status} ${res.statusText}`, variant: "destructive" });
+        return;
+      }
       const data = await res.json();
       setArchiveDeps(data);
     } catch {
