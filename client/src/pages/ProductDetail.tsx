@@ -37,6 +37,9 @@ import {
   RefreshCw,
   ShieldCheck,
   ShieldOff,
+  Archive,
+  CircleCheck,
+  CircleAlert,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -318,6 +321,17 @@ export default function ProductDetail() {
   const queryClient = useQueryClient();
   const productId = params?.id ? parseInt(params.id) : null;
   const [activeTab, setActiveTab] = useState("overview");
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [archiveDeps, setArchiveDeps] = useState<{
+    blocked: boolean;
+    dependencies: {
+      inventory: { totalQty: number; bins: number; variants: { variantId: number; sku: string | null; totalQty: number; bins: number }[] };
+      shipments: { pending: number };
+      channelFeeds: { active: number };
+      variants: { total: number; active: number };
+    };
+  } | null>(null);
+  const [archiveScanning, setArchiveScanning] = useState(false);
 
   // --- Product data ---
   const { data: product, isLoading, error } = useQuery<ProductDetailData>({
@@ -448,6 +462,49 @@ export default function ProductDetail() {
     },
     onError: () => {
       toast({ title: "Failed to update product", variant: "destructive" });
+    },
+  });
+
+  // --- Archive ---
+  const scanArchiveDeps = useCallback(async () => {
+    if (!product?.productId) return;
+    setArchiveScanning(true);
+    try {
+      const res = await fetch(`/api/products/${product.productId}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: false }),
+      });
+      const data = await res.json();
+      setArchiveDeps(data);
+    } catch {
+      toast({ title: "Failed to scan dependencies", variant: "destructive" });
+    } finally {
+      setArchiveScanning(false);
+    }
+  }, [product?.productId, toast]);
+
+  const archiveMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/products/${product?.productId}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+      });
+      if (!res.ok) throw new Error("Failed to archive product");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
+      toast({ title: `Archived: ${data.archived.variants} variants, ${data.archived.inventoryCleared} inventory rows cleared` });
+      setArchiveDialogOpen(false);
+      setArchiveDeps(null);
+    },
+    onError: () => {
+      toast({ title: "Failed to archive product", variant: "destructive" });
     },
   });
 
@@ -869,8 +926,19 @@ export default function ProductDetail() {
             </Button>
           )}
           <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
-            {product.isActive ? "Active" : "Inactive"}
+            {product.status === "archived" ? "Archived" : product.isActive ? "Active" : "Inactive"}
           </Badge>
+          {product.isActive && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-h-[44px] text-muted-foreground"
+              onClick={() => { setArchiveDialogOpen(true); scanArchiveDeps(); }}
+            >
+              <Archive className="h-4 w-4 mr-2" />
+              Archive
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1900,6 +1968,123 @@ export default function ProductDetail() {
                   ? "Creating..."
                   : "Create Variant"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Archive Product Dialog */}
+      <Dialog open={archiveDialogOpen} onOpenChange={(open) => { setArchiveDialogOpen(open); if (!open) setArchiveDeps(null); }}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Archive className="h-5 w-5" />
+              Archive Product
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <p className="text-sm text-muted-foreground">
+              Archiving <span className="font-mono font-medium text-foreground">{product?.sku}</span> will deactivate the product and all its variants, clear bin assignments, and deactivate channel feeds and replen rules.
+            </p>
+
+            {archiveScanning ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4 justify-center">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Scanning dependencies...
+              </div>
+            ) : archiveDeps ? (
+              <div className="space-y-2">
+                {/* Inventory */}
+                <div className="flex items-start gap-2 rounded-md border p-3">
+                  {archiveDeps.dependencies.inventory.totalQty > 0 ? (
+                    <CircleAlert className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
+                  ) : (
+                    <CircleCheck className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">Inventory</p>
+                    {archiveDeps.dependencies.inventory.totalQty > 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        {archiveDeps.dependencies.inventory.variants.length} variant{archiveDeps.dependencies.inventory.variants.length !== 1 ? "s" : ""} with on-hand inventory ({archiveDeps.dependencies.inventory.totalQty.toLocaleString()} units across {archiveDeps.dependencies.inventory.bins} bins)
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No on-hand inventory</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Shipments */}
+                <div className="flex items-start gap-2 rounded-md border p-3">
+                  {archiveDeps.dependencies.shipments.pending > 0 ? (
+                    <CircleAlert className="h-4 w-4 text-red-500 mt-0.5 shrink-0" />
+                  ) : (
+                    <CircleCheck className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">Shipments</p>
+                    <p className="text-xs text-muted-foreground">
+                      {archiveDeps.dependencies.shipments.pending > 0
+                        ? `${archiveDeps.dependencies.shipments.pending} in-flight shipment items`
+                        : "No pending shipments"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Channel Feeds */}
+                <div className="flex items-start gap-2 rounded-md border p-3">
+                  {archiveDeps.dependencies.channelFeeds.active > 0 ? (
+                    <CircleAlert className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
+                  ) : (
+                    <CircleCheck className="h-4 w-4 text-green-500 mt-0.5 shrink-0" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">Channel Feeds</p>
+                    <p className="text-xs text-muted-foreground">
+                      {archiveDeps.dependencies.channelFeeds.active > 0
+                        ? `${archiveDeps.dependencies.channelFeeds.active} active Shopify feed mappings will be deactivated`
+                        : "No active channel feeds"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Variants */}
+                <div className="flex items-start gap-2 rounded-md border p-3">
+                  <CircleCheck className="h-4 w-4 text-blue-500 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium">Variants</p>
+                    <p className="text-xs text-muted-foreground">
+                      {archiveDeps.dependencies.variants.active} active variant{archiveDeps.dependencies.variants.active !== 1 ? "s" : ""} will be deactivated
+                    </p>
+                  </div>
+                </div>
+
+                {archiveDeps.blocked && (
+                  <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
+                    This product has on-hand inventory or pending shipments. Force-archiving will zero out all inventory and log adjustment transactions.
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setArchiveDialogOpen(false)} className="min-h-[44px]">
+              Cancel
+            </Button>
+            {archiveDeps && (
+              <Button
+                variant="destructive"
+                onClick={() => archiveMutation.mutate()}
+                disabled={archiveMutation.isPending || archiveScanning}
+                className="min-h-[44px]"
+              >
+                {archiveMutation.isPending ? (
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Archiving...</>
+                ) : archiveDeps.blocked ? (
+                  <><Archive className="h-4 w-4 mr-2" />Force Archive</>
+                ) : (
+                  <><Archive className="h-4 w-4 mr-2" />Archive Product</>
+                )}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

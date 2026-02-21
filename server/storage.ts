@@ -107,6 +107,8 @@ import {
   locationReplenConfig,
   replenTasks,
   warehouseSettings,
+  shipments,
+  shipmentItems,
   generateLocationCode,
   echelonSettings
 } from "@shared/schema";
@@ -196,7 +198,7 @@ export interface IStorage {
   deleteWarehouseLocation(id: number): Promise<boolean>;
   
   // Products
-  getAllProducts(): Promise<Product[]>;
+  getAllProducts(includeInactive?: boolean): Promise<Product[]>;
   getProductById(id: number): Promise<Product | undefined>;
   getProductBySku(sku: string): Promise<Product | undefined>;
   getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
@@ -205,7 +207,7 @@ export interface IStorage {
   deleteProduct(id: number): Promise<boolean>;
 
   // Product Variants
-  getAllProductVariants(): Promise<ProductVariant[]>;
+  getAllProductVariants(includeInactive?: boolean): Promise<ProductVariant[]>;
   getProductVariantById(id: number): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
   getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
@@ -213,6 +215,15 @@ export interface IStorage {
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
+
+  // Archive helpers
+  getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
+  deleteInventoryLevelsByVariantId(variantId: number): Promise<number>;
+  deleteProductLocationsByVariantId(variantId: number): Promise<number>;
+  deactivateChannelFeedsByVariantId(variantId: number): Promise<number>;
+  deactivateReplenRulesByProductId(productId: number): Promise<number>;
+  cancelReplenTasksByProductId(productId: number): Promise<number>;
+  getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]>;
 
   // Product Assets
   getProductAssetsByProductId(productId: number): Promise<ProductAsset[]>;
@@ -1981,8 +1992,11 @@ export class DatabaseStorage implements IStorage {
   // ============================================================================
   // Products (Master Catalog - NEW)
   // ============================================================================
-  async getAllProducts(): Promise<Product[]> {
-    return await db.select().from(products).orderBy(asc(products.name));
+  async getAllProducts(includeInactive = false): Promise<Product[]> {
+    if (includeInactive) {
+      return await db.select().from(products).orderBy(asc(products.name));
+    }
+    return await db.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name));
   }
 
   async getProductById(id: number): Promise<Product | undefined> {
@@ -2017,8 +2031,11 @@ export class DatabaseStorage implements IStorage {
   // ============================================================================
   // Product Variants (Sellable SKUs - NEW)
   // ============================================================================
-  async getAllProductVariants(): Promise<ProductVariant[]> {
-    return await db.select().from(productVariants).orderBy(asc(productVariants.sku));
+  async getAllProductVariants(includeInactive = false): Promise<ProductVariant[]> {
+    if (includeInactive) {
+      return await db.select().from(productVariants).orderBy(asc(productVariants.sku));
+    }
+    return await db.select().from(productVariants).where(eq(productVariants.isActive, true)).orderBy(asc(productVariants.sku));
   }
 
   async getProductVariantById(id: number): Promise<ProductVariant | undefined> {
@@ -2066,6 +2083,65 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
+  // ---------------------------------------------------------------------------
+  // Archive helpers
+  // ---------------------------------------------------------------------------
+
+  async getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]> {
+    return db.select().from(inventoryLevels).where(eq(inventoryLevels.productVariantId, variantId));
+  }
+
+  async deleteInventoryLevelsByVariantId(variantId: number): Promise<number> {
+    const result = await db.delete(inventoryLevels).where(eq(inventoryLevels.productVariantId, variantId)).returning();
+    return result.length;
+  }
+
+  async deleteProductLocationsByVariantId(variantId: number): Promise<number> {
+    const result = await db.delete(productLocations).where(eq(productLocations.productVariantId, variantId)).returning();
+    return result.length;
+  }
+
+  async deactivateChannelFeedsByVariantId(variantId: number): Promise<number> {
+    const result = await db.update(channelFeeds)
+      .set({ isActive: 0, updatedAt: new Date() })
+      .where(and(eq(channelFeeds.productVariantId, variantId), eq(channelFeeds.isActive, 1)))
+      .returning();
+    return result.length;
+  }
+
+  async deactivateReplenRulesByProductId(productId: number): Promise<number> {
+    const result = await db.update(replenRules)
+      .set({ isActive: 0 })
+      .where(and(eq(replenRules.productId, productId), eq(replenRules.isActive, 1)))
+      .returning();
+    return result.length;
+  }
+
+  async cancelReplenTasksByProductId(productId: number): Promise<number> {
+    const result = await db.update(replenTasks)
+      .set({ status: "cancelled", completedAt: new Date() })
+      .where(and(eq(replenTasks.productId, productId), inArray(replenTasks.status, ["pending", "assigned", "in_progress"])))
+      .returning();
+    return result.length;
+  }
+
+  async getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]> {
+    if (variantIds.length === 0) return [];
+    const result = await db.select({
+      id: shipmentItems.id,
+      shipmentId: shipmentItems.shipmentId,
+      productVariantId: shipmentItems.productVariantId,
+      qty: shipmentItems.qty,
+      status: shipments.status,
+    })
+      .from(shipmentItems)
+      .innerJoin(shipments, eq(shipmentItems.shipmentId, shipments.id))
+      .where(and(
+        inArray(shipmentItems.productVariantId, variantIds),
+        inArray(shipments.status, ["pending", "packed"]),
+      ));
+    return result;
+  }
 
   async getAllProductsWithLocations(): Promise<{
     id: number;

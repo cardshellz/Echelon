@@ -58,6 +58,7 @@ interface Product {
   brand: string | null;
   imageUrl: string | null;
   shopifyProductId: string | null;
+  status: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -82,8 +83,15 @@ export default function Products() {
     baseUnit: "piece",
   });
 
+  const includeInactive = statusFilter === "all" || statusFilter === "inactive" || statusFilter === "archived";
   const { data: products = [], isLoading, refetch } = useQuery<Product[]>({
-    queryKey: ["/api/products"],
+    queryKey: ["/api/products", { includeInactive }],
+    queryFn: async () => {
+      const url = includeInactive ? "/api/products?includeInactive=true" : "/api/products";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to fetch products");
+      return res.json();
+    },
   });
 
   const syncMutation = useMutation({
@@ -138,9 +146,10 @@ export default function Products() {
       product.sku?.toLowerCase().includes(searchQuery.toLowerCase()) ||
       product.variants?.some(v => v.sku?.toLowerCase().includes(searchQuery.toLowerCase()));
     
-    const matchesStatus = statusFilter === "all" || 
+    const matchesStatus = statusFilter === "all" ||
       (statusFilter === "active" && product.isActive) ||
-      (statusFilter === "inactive" && !product.isActive);
+      (statusFilter === "inactive" && !product.isActive) ||
+      (statusFilter === "archived" && product.status === "archived");
     
     const matchesCategory = categoryFilter === "all" || 
       product.category === categoryFilter;
@@ -235,6 +244,7 @@ export default function Products() {
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="active">Active</SelectItem>
               <SelectItem value="inactive">Inactive</SelectItem>
+              <SelectItem value="archived">Archived</SelectItem>
             </SelectContent>
           </Select>
           {categories.length > 0 && (

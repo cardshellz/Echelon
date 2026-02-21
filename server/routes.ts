@@ -3352,8 +3352,9 @@ export async function registerRoutes(
   // ============================================================================
   app.get("/api/products", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const allProducts = await storage.getAllProducts();
-      const allVariants = await storage.getAllProductVariants();
+      const includeInactive = req.query.includeInactive === "true";
+      const allProducts = await storage.getAllProducts(includeInactive);
+      const allVariants = await storage.getAllProductVariants(includeInactive);
 
       // Bulk-fetch primary images (one query instead of N)
       const primaryAssets = await db.select()
@@ -3447,6 +3448,117 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error updating product:", error);
       res.status(500).json({ error: "Failed to update product" });
+    }
+  });
+
+  // Archive product — soft-delete with dependency cleanup
+  app.post("/api/products/:id/archive", requirePermission("inventory", "delete"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const force = req.body?.force === true;
+
+      const product = await storage.getProductById(id);
+      if (!product) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      const variants = await storage.getProductVariantsByProductId(id);
+      const variantIds = variants.map(v => v.id);
+
+      // Pre-flight dependency check
+      let totalInventory = 0;
+      let inventoryBins = 0;
+      const variantInventory: { variantId: number; sku: string | null; totalQty: number; bins: number }[] = [];
+      for (const v of variants) {
+        const levels = await storage.getInventoryLevelsByVariantId(v.id);
+        const qty = levels.reduce((sum, l) => sum + l.variantQty, 0);
+        const bins = levels.filter(l => l.variantQty !== 0).length;
+        totalInventory += qty;
+        inventoryBins += bins;
+        if (qty > 0) {
+          variantInventory.push({ variantId: v.id, sku: v.sku, totalQty: qty, bins });
+        }
+      }
+
+      const pendingShipments = await storage.getPendingShipmentItemsByVariantIds(variantIds);
+
+      // Count active channel feeds & replen rules (quick check via storage)
+      let activeFeeds = 0;
+      for (const v of variants) {
+        const feeds = await storage.getChannelFeedsByProductVariantId(v.id);
+        activeFeeds += feeds.filter((f: any) => f.isActive === 1).length;
+      }
+
+      // Build dependency report
+      const dependencies = {
+        inventory: { totalQty: totalInventory, bins: inventoryBins, variants: variantInventory },
+        shipments: { pending: pendingShipments.length, items: pendingShipments.slice(0, 10) },
+        channelFeeds: { active: activeFeeds },
+        variants: { total: variants.length, active: variants.filter(v => v.isActive).length },
+      };
+
+      const hasBlockers = totalInventory > 0 || pendingShipments.length > 0;
+
+      if (hasBlockers && !force) {
+        return res.json({ blocked: true, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
+      }
+
+      // Execute archive
+      let inventoryCleared = 0;
+      let binAssignmentsCleared = 0;
+      let channelFeedsDeactivated = 0;
+
+      for (const v of variants) {
+        // Log adjustment transactions for any non-zero inventory being zeroed
+        if (force) {
+          const levels = await storage.getInventoryLevelsByVariantId(v.id);
+          for (const level of levels) {
+            if (level.variantQty !== 0) {
+              await storage.createInventoryTransaction({
+                warehouseLocationId: level.warehouseLocationId,
+                productVariantId: v.id,
+                transactionType: "adjustment",
+                qty: -level.variantQty,
+                previousQty: level.variantQty,
+                newQty: 0,
+                reason: "Product archived",
+                performedBy: (req as any).user?.username || "system",
+              });
+            }
+          }
+        }
+
+        inventoryCleared += await storage.deleteInventoryLevelsByVariantId(v.id);
+        binAssignmentsCleared += await storage.deleteProductLocationsByVariantId(v.id);
+        channelFeedsDeactivated += await storage.deactivateChannelFeedsByVariantId(v.id);
+
+        // Deactivate variant
+        await storage.updateProductVariant(v.id, { isActive: false });
+      }
+
+      const replenDeactivated = await storage.deactivateReplenRulesByProductId(id);
+      const replenTasksCancelled = await storage.cancelReplenTasksByProductId(id);
+
+      // Archive the product
+      await storage.updateProduct(id, { isActive: false, status: "archived" });
+
+      console.log(`[ARCHIVE] Product ${id} (${product.sku}) archived: ${variants.length} variants, ${inventoryCleared} inventory rows, ${binAssignmentsCleared} bin assignments, ${channelFeedsDeactivated} feeds, ${replenDeactivated} replen rules, ${replenTasksCancelled} replen tasks`);
+
+      res.json({
+        success: true,
+        archived: {
+          product: { id: product.id, sku: product.sku, name: product.name },
+          variants: variants.length,
+          inventoryCleared,
+          binAssignmentsCleared,
+          channelFeedsDeactivated,
+          replenDeactivated,
+          replenTasksCancelled,
+        },
+      });
+    } catch (error) {
+      console.error("Error archiving product:", error);
+      res.status(500).json({ error: "Failed to archive product" });
     }
   });
 
@@ -3560,7 +3672,8 @@ export async function registerRoutes(
   // ============================================================================
   app.get("/api/product-variants", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const variants = await storage.getAllProductVariants();
+      const includeInactive = req.query.includeInactive === "true";
+      const variants = await storage.getAllProductVariants(includeInactive);
       res.json(variants);
     } catch (error) {
       console.error("Error fetching all variants:", error);

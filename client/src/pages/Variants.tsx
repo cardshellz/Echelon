@@ -95,7 +95,12 @@ export default function Variants() {
   });
 
   const { data: allVariants = [], isLoading } = useQuery<ProductVariant[]>({
-    queryKey: ["/api/product-variants"],
+    queryKey: ["/api/product-variants", { includeInactive: true }],
+    queryFn: async () => {
+      const res = await fetch("/api/product-variants?includeInactive=true");
+      if (!res.ok) throw new Error("Failed to fetch variants");
+      return res.json();
+    },
   });
 
   const linkMutation = useMutation({
