@@ -9,6 +9,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import {
   Package,
   Search,
@@ -19,7 +21,9 @@ import {
   AlertTriangle,
   ShieldAlert,
   Pencil,
-  Trash2
+  Trash2,
+  ChevronsUpDown,
+  Check
 } from "lucide-react";
 
 interface Product {
@@ -54,6 +58,10 @@ export default function Variants() {
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [createProductDialogOpen, setCreateProductDialogOpen] = useState(false);
+  const [linkProductOpen, setLinkProductOpen] = useState(false);
+  const [linkProductSearch, setLinkProductSearch] = useState("");
+  const [createProductPickerOpen, setCreateProductPickerOpen] = useState(false);
+  const [createProductSearch, setCreateProductSearch] = useState("");
   const [newVariant, setNewVariant] = useState({
     productId: "",
     sku: "",
@@ -568,19 +576,48 @@ export default function Variants() {
               <p className="text-sm text-muted-foreground">{selectedVariant?.name}</p>
             </div>
             <div>
-              <Label htmlFor="product-select" className="text-sm">Select Product</Label>
-              <Select value={selectedProductId} onValueChange={setSelectedProductId}>
-                <SelectTrigger id="product-select" className="mt-1 h-11">
-                  <SelectValue placeholder="Choose a product..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {products.map((product) => (
-                    <SelectItem key={product.id} value={product.id.toString()}>
-                      {product.sku ? `${product.sku} - ` : ''}{product.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label className="text-sm">Select Product</Label>
+              <Popover open={linkProductOpen} onOpenChange={setLinkProductOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal mt-1">
+                    {selectedProductId
+                      ? (() => { const p = products.find(p => p.id.toString() === selectedProductId); return p ? `${p.sku ? p.sku + ' - ' : ''}${p.name}` : 'Choose a product...'; })()
+                      : "Choose a product..."}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command shouldFilter={false}>
+                    <CommandInput placeholder="Search products..." value={linkProductSearch} onValueChange={setLinkProductSearch} />
+                    <CommandList>
+                      <CommandEmpty>No products found.</CommandEmpty>
+                      <CommandGroup>
+                        {products
+                          .filter(p => {
+                            const q = linkProductSearch.toLowerCase();
+                            return !q || (p.sku || '').toLowerCase().includes(q) || p.name.toLowerCase().includes(q);
+                          })
+                          .slice(0, 50)
+                          .map((product) => (
+                            <CommandItem
+                              key={product.id}
+                              value={product.id.toString()}
+                              onSelect={() => {
+                                setSelectedProductId(product.id.toString());
+                                setLinkProductOpen(false);
+                                setLinkProductSearch("");
+                              }}
+                            >
+                              <Check className={`mr-2 h-4 w-4 ${selectedProductId === product.id.toString() ? "opacity-100" : "opacity-0"}`} />
+                              <span className="font-mono text-xs mr-2">{product.sku || '-'}</span>
+                              <span className="truncate">{product.name}</span>
+                            </CommandItem>
+                          ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
           <DialogFooter className="gap-2">
@@ -614,23 +651,49 @@ export default function Variants() {
             <div className="space-y-2">
               <Label className="text-sm">Parent Product *</Label>
               <div className="flex gap-2">
-                <Select 
-                  value={newVariant.productId} 
-                  onValueChange={(val) => setNewVariant({ ...newVariant, productId: val })}
-                >
-                  <SelectTrigger className="flex-1 h-11">
-                    <SelectValue placeholder="Select a product..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {products.map((product) => (
-                      <SelectItem key={product.id} value={product.id.toString()}>
-                        {product.sku ? `${product.sku} - ` : ''}{product.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button 
-                  variant="outline" 
+                <Popover open={createProductPickerOpen} onOpenChange={setCreateProductPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" role="combobox" className="flex-1 justify-between h-10 font-normal">
+                      {newVariant.productId
+                        ? (() => { const p = products.find(p => p.id.toString() === newVariant.productId); return p ? `${p.sku ? p.sku + ' - ' : ''}${p.name}` : 'Select a product...'; })()
+                        : "Select a product..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search products..." value={createProductSearch} onValueChange={setCreateProductSearch} />
+                      <CommandList>
+                        <CommandEmpty>No products found.</CommandEmpty>
+                        <CommandGroup>
+                          {products
+                            .filter(p => {
+                              const q = createProductSearch.toLowerCase();
+                              return !q || (p.sku || '').toLowerCase().includes(q) || p.name.toLowerCase().includes(q);
+                            })
+                            .slice(0, 50)
+                            .map((product) => (
+                              <CommandItem
+                                key={product.id}
+                                value={product.id.toString()}
+                                onSelect={() => {
+                                  setNewVariant({ ...newVariant, productId: product.id.toString() });
+                                  setCreateProductPickerOpen(false);
+                                  setCreateProductSearch("");
+                                }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${newVariant.productId === product.id.toString() ? "opacity-100" : "opacity-0"}`} />
+                                <span className="font-mono text-xs mr-2">{product.sku || '-'}</span>
+                                <span className="truncate">{product.name}</span>
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="outline"
                   size="icon"
                   className="min-h-[44px] min-w-[44px]"
                   onClick={() => setCreateProductDialogOpen(true)}
