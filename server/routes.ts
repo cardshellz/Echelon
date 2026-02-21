@@ -6873,21 +6873,25 @@ export async function registerRoutes(
         variantQty: parseInt(row.total_variant_qty) || 0,
         reservedQty: parseInt(row.total_reserved_qty) || 0,
         pickedQty: parseInt(row.total_picked_qty) || 0,
-        available: 0, // set below from fungible ATP
+        available: 0, // per-variant available (own stock only)
+        totalAtp: 0, // product-level fungible ATP (all variants pooled)
         locationCount: parseInt(row.location_count) || 0,
         pickableQty: parseInt(row.pickable_variant_qty) || 0,
       }));
 
-      // Use inventory-atp service for fungible ATP (accounts for reserved+picked+packed)
+      // Use inventory-atp service for fungible ATP (accounts for reserved+picked+packed across all variants)
       const { atp } = app.locals.services as any;
       const productIds = Array.from(new Set(levels.filter(l => l.productId != null).map(l => l.productId as number)));
       const atpMap: Map<number, number> = productIds.length > 0 ? await atp.getBulkAtp(productIds) : new Map();
 
       for (const lv of levels) {
+        // Per-variant available: just this variant's own stock
+        lv.available = Math.max(0, lv.variantQty - lv.reservedQty - lv.pickedQty);
+        // Total ATP: product-level fungible pool expressed in this variant's units
         if (lv.productId != null && atpMap.has(lv.productId)) {
-          lv.available = Math.floor(atpMap.get(lv.productId)! / lv.unitsPerVariant);
+          lv.totalAtp = Math.floor(atpMap.get(lv.productId)! / lv.unitsPerVariant);
         } else {
-          lv.available = lv.variantQty - lv.reservedQty - lv.pickedQty;
+          lv.totalAtp = lv.available;
         }
       }
 
