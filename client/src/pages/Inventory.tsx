@@ -487,32 +487,40 @@ export default function Inventory() {
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
   const oosCount = variantLevels.filter(v => v.available <= 0).length;
 
-  // Build variantId→VariantLevel map for parent chain walking
+  // Build variantId→VariantLevel map + parentId→children map for fungible pool
   const variantMap = useMemo(() => {
     const m = new Map<number, VariantLevel>();
     for (const v of variantLevels) m.set(v.variantId, v);
     return m;
   }, [variantLevels]);
 
-  // Variants that have ancestors with stock (expandable to show fungible pool)
-  const hasFungibleAncestors = useMemo(() => {
+  const childrenMap = useMemo(() => {
+    const m = new Map<number, VariantLevel[]>();
+    for (const v of variantLevels) {
+      if (v.parentVariantId) {
+        const arr = m.get(v.parentVariantId) || [];
+        arr.push(v);
+        m.set(v.parentVariantId, arr);
+      }
+    }
+    return m;
+  }, [variantLevels]);
+
+  // Variants that have descendants with stock (larger variants that can break down into this one)
+  const hasFungibleDescendants = useMemo(() => {
     const result = new Set<number>();
     for (const v of variantLevels) {
-      // Walk up the parent chain looking for ancestors with stock
-      const visited = new Set<number>();
-      let current: VariantLevel | undefined = v;
-      while (current?.parentVariantId && !visited.has(current.parentVariantId)) {
-        visited.add(current.parentVariantId);
-        const parent = variantMap.get(current.parentVariantId);
-        if (parent && parent.variantQty > 0) {
+      // BFS down the children tree looking for descendants with stock
+      const queue = childrenMap.get(v.variantId) || [];
+      for (const child of queue) {
+        if (child.variantQty > 0) {
           result.add(v.variantId);
           break;
         }
-        current = parent;
       }
     }
     return result;
-  }, [variantLevels, variantMap]);
+  }, [variantLevels, childrenMap]);
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -868,7 +876,7 @@ export default function Inventory() {
                       {sortedVariantLevels.map((level) => (
                         <React.Fragment key={level.variantId}>
                           {(() => {
-                            const canExpand = level.locationCount > 0 || hasFungibleAncestors.has(level.variantId);
+                            const canExpand = level.locationCount > 0 || hasFungibleDescendants.has(level.variantId);
                             return (
                           <>
                           <TableRow
@@ -919,21 +927,21 @@ export default function Inventory() {
                                   });
                                 }}
                               />
-                              {/* Ancestor variants in the fungible pool (larger variants that can break down into this one) */}
+                              {/* Descendant variants in the fungible pool (larger variants that can break down into this one) */}
                               {(() => {
-                                // Walk up the parent chain to find ancestors with stock
-                                const ancestors: VariantLevel[] = [];
+                                // Collect descendants (children, grandchildren) with stock
+                                const descendants: VariantLevel[] = [];
+                                const queue = [...(childrenMap.get(level.variantId) || [])];
                                 const visited = new Set<number>();
-                                let current: VariantLevel | undefined = level;
-                                while (current?.parentVariantId && !visited.has(current.parentVariantId)) {
-                                  visited.add(current.parentVariantId);
-                                  const parent = variantMap.get(current.parentVariantId);
-                                  if (parent && parent.variantQty > 0) {
-                                    ancestors.push(parent);
-                                  }
-                                  current = parent;
+                                while (queue.length > 0) {
+                                  const child = queue.shift()!;
+                                  if (visited.has(child.variantId)) continue;
+                                  visited.add(child.variantId);
+                                  if (child.variantQty > 0) descendants.push(child);
+                                  const grandchildren = childrenMap.get(child.variantId) || [];
+                                  queue.push(...grandchildren);
                                 }
-                                if (ancestors.length === 0) return null;
+                                if (descendants.length === 0) return null;
                                 return (
                                   <>
                                     <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
@@ -942,7 +950,7 @@ export default function Inventory() {
                                         Fungible pool — convertible via case break
                                       </TableCell>
                                     </TableRow>
-                                    {ancestors.map(anc => (
+                                    {descendants.map(anc => (
                                       <TableRow key={anc.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
                                         <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{anc.sku}</TableCell>
                                         <TableCell className="text-xs text-muted-foreground">{anc.name}</TableCell>
