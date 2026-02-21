@@ -499,8 +499,10 @@ export default function Inventory() {
     const result = new Set<number>();
     for (const v of variantLevels) {
       // Walk up the parent chain looking for ancestors with stock
+      const visited = new Set<number>();
       let current: VariantLevel | undefined = v;
-      while (current?.parentVariantId) {
+      while (current?.parentVariantId && !visited.has(current.parentVariantId)) {
+        visited.add(current.parentVariantId);
         const parent = variantMap.get(current.parentVariantId);
         if (parent && parent.variantQty > 0) {
           result.add(v.variantId);
@@ -508,8 +510,6 @@ export default function Inventory() {
         }
         current = parent;
       }
-      // Also check: does this variant have children with stock pointing to it?
-      // (not needed for "ancestors only" display — we show ancestors OF the current variant)
     }
     return result;
   }, [variantLevels, variantMap]);
@@ -923,8 +923,10 @@ export default function Inventory() {
                               {(() => {
                                 // Walk up the parent chain to find ancestors with stock
                                 const ancestors: VariantLevel[] = [];
+                                const visited = new Set<number>();
                                 let current: VariantLevel | undefined = level;
-                                while (current?.parentVariantId) {
+                                while (current?.parentVariantId && !visited.has(current.parentVariantId)) {
+                                  visited.add(current.parentVariantId);
                                   const parent = variantMap.get(current.parentVariantId);
                                   if (parent && parent.variantQty > 0) {
                                     ancestors.push(parent);

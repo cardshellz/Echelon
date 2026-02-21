@@ -79,6 +79,20 @@ async function main() {
     // The smallest variant is the base (parentVariantId = null)
     const base = productVariants[0];
 
+    // Clear stale parentVariantId on base variant (old auto-resolution may have set it)
+    if (base.parent_variant_id != null) {
+      console.log(
+        `  ${base.sku} (base) — clearing stale parentVariantId (was: variant_id=${base.parent_variant_id})`
+      );
+      if (!DRY_RUN) {
+        await client.query(
+          `UPDATE product_variants SET parent_variant_id = NULL, updated_at = NOW() WHERE id = $1`,
+          [base.id]
+        );
+      }
+      totalUpdated++;
+    }
+
     for (let i = 1; i < productVariants.length; i++) {
       const variant = productVariants[i];
 
