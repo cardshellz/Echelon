@@ -951,7 +951,7 @@ export default function Inventory() {
                                       </TableCell>
                                     </TableRow>
                                     {descendants.map(anc => {
-                                      const converted = Math.floor(Math.max(0, anc.available) * anc.unitsPerVariant / level.unitsPerVariant);
+                                      const converted = Math.floor(Math.max(0, anc.variantQty - anc.reservedQty) * anc.unitsPerVariant / level.unitsPerVariant);
                                       return (
                                       <TableRow key={anc.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
                                         <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{anc.sku}</TableCell>
