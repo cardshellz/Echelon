@@ -273,6 +273,12 @@ class PickingService {
           inventoryCtx.replen.autoExecuted = replenTask.status === "completed";
           inventoryCtx.replen.stockout = replenTask.status === "blocked";
           inventoryCtx.binCountNeeded = true;
+
+          // If replen auto-executed, re-read inventory to show actual post-replen quantity
+          if (replenTask.status === "completed") {
+            const updatedLevel = await this.inventoryCore.getLevel(deductResult.productVariantId, deductResult.locationId);
+            inventoryCtx.systemQtyAfter = updatedLevel?.variantQty ?? 0;
+          }
         }
 
       } else if (!deductResult.success) {
