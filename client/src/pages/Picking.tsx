@@ -1418,8 +1418,8 @@ export default function Picking() {
     setScanInput("");
     setMultiQtyOpen(false);
     setPickQty(1);
-    
-    if (orderCompleted) {
+
+    if (orderCompleted && !binCountOpen) {
       setTimeout(() => {
         if (pickingMode === "batch") {
           setActiveBatchId(null);
