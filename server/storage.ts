@@ -600,9 +600,38 @@ export class DatabaseStorage implements IStorage {
     barcode: string | null;
     imageUrl: string | null;
   } | undefined> {
-    // Look up product variant by SKU, then find any inventory level for that variant
-    // barcode and image_url are on product_variants / products
-    // Priority: pick first, then reserve, then by pick sequence, then by quantity
+    // PRIORITY 1: Check product_locations for assigned bin (respects manual bin assignments)
+    const assigned = await db.execute<{
+      location_code: string;
+      zone: string | null;
+      barcode: string | null;
+      image_url: string | null;
+    }>(sql`
+      SELECT
+        pl.location as location_code,
+        pl.zone,
+        pl.barcode,
+        pl.image_url
+      FROM product_locations pl
+      WHERE UPPER(pl.sku) = ${sku.toUpperCase()}
+        AND pl.is_primary = 1
+        AND pl.status = 'active'
+      ORDER BY pl.updated_at DESC
+      LIMIT 1
+    `);
+
+    if (assigned.rows.length > 0) {
+      const row = assigned.rows[0];
+      return {
+        location: row.location_code,
+        zone: row.zone || "U",
+        barcode: row.barcode,
+        imageUrl: row.image_url,
+      };
+    }
+
+    // PRIORITY 2 (Fallback): If no explicit assignment, find location by inventory
+    // Useful for SKUs not yet assigned but have stock somewhere
     const result = await db.execute<{
       location_code: string;
       zone: string | null;
@@ -633,46 +662,15 @@ export class DatabaseStorage implements IStorage {
         il.variant_qty DESC
       LIMIT 1
     `);
-    
-    if (result.rows.length > 0) {
-      const row = result.rows[0];
-      return {
-        location: row.location_code,
-        zone: row.zone || "U",
-        barcode: row.barcode,
-        imageUrl: row.image_url,
-      };
-    }
 
-    // Fallback: if no inventory with qty > 0, check product_locations for assigned bin
-    // This covers the case where a SKU is assigned to a bin but has no physical stock yet
-    const fallback = await db.execute<{
-      location_code: string;
-      zone: string | null;
-      barcode: string | null;
-      image_url: string | null;
-    }>(sql`
-      SELECT
-        pl.location as location_code,
-        pl.zone,
-        pl.barcode,
-        pl.image_url
-      FROM product_locations pl
-      WHERE UPPER(pl.sku) = ${sku.toUpperCase()}
-        AND pl.is_primary = 1
-        AND pl.status = 'active'
-      ORDER BY pl.updated_at DESC
-      LIMIT 1
-    `);
+    if (result.rows.length === 0) return undefined;
 
-    if (fallback.rows.length === 0) return undefined;
-
-    const fbRow = fallback.rows[0];
+    const row = result.rows[0];
     return {
-      location: fbRow.location_code,
-      zone: fbRow.zone || "U",
-      barcode: fbRow.barcode,
-      imageUrl: fbRow.image_url,
+      location: row.location_code,
+      zone: row.zone || "U",
+      barcode: row.barcode,
+      imageUrl: row.image_url,
     };
   }
 
