@@ -138,8 +138,7 @@ interface VariantLevel {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
-  available: number;     // per-variant: own stock only (onHand - reserved - picked)
-  totalAtp: number;      // product-level fungible ATP (all variants pooled, in this variant's units)
+  available: number;     // fungible ATP: all variants pooled, in this variant's units
   locationCount: number;
   pickableQty: number;
 }
@@ -173,7 +172,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   if (isLoading) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={canEdit ? 7 : 6} className="py-2 pl-8">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8">
           <RefreshCw className="h-4 w-4 animate-spin inline mr-2" />
           Loading locations...
         </TableCell>
@@ -184,7 +183,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   if (isError) {
     return (
       <TableRow className="bg-red-50 dark:bg-red-900/10">
-        <TableCell colSpan={canEdit ? 7 : 6} className="py-2 pl-8 text-red-600 text-sm">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8 text-red-600 text-sm">
           <AlertTriangle className="h-4 w-4 inline mr-2" />
           Failed to load location data
         </TableCell>
@@ -195,7 +194,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   if (locationLevels.length === 0) {
     return (
       <TableRow className="bg-muted/20">
-        <TableCell colSpan={canEdit ? 7 : 6} className="py-2 pl-8 text-muted-foreground text-sm">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-2 pl-8 text-muted-foreground text-sm">
           No stock at any location
         </TableCell>
       </TableRow>
@@ -231,7 +230,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
             <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
             <TableCell className="text-right font-mono text-xs">{locLevel.reservedQty || 0}</TableCell>
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
-            <TableCell></TableCell>
             {canEdit && (
               <TableCell className="text-right">
                 <Button
@@ -253,6 +251,61 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
                 </Button>
               </TableCell>
             )}
+          </TableRow>
+        );
+      })}
+    </>
+  );
+}
+
+// Per-bin breakdown for a single descendant variant in the fungible pool
+function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses }: {
+  variantId: number;
+  sku: string;
+  parentUnitsPerVariant: number;
+  childUnitsPerVariant: number;
+  canEdit: boolean;
+  warehouses: Warehouse[];
+}) {
+  const { data: locationLevels = [], isLoading } = useQuery<VariantLocationLevel[]>({
+    queryKey: [`/api/inventory/variants/${variantId}/locations`],
+  });
+
+  if (isLoading) {
+    return (
+      <TableRow className="bg-blue-50/20 dark:bg-blue-900/5">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-1 pl-16 text-xs text-muted-foreground">
+          <RefreshCw className="h-3 w-3 animate-spin inline mr-1" /> Loading...
+        </TableCell>
+      </TableRow>
+    );
+  }
+
+  const ratio = childUnitsPerVariant / parentUnitsPerVariant;
+  return (
+    <>
+      {locationLevels.filter(l => l.variantQty > 0).map((locLevel) => {
+        const locAvail = Math.max(0, locLevel.variantQty - locLevel.reservedQty);
+        const converted = Math.floor(locAvail * ratio);
+        const locType = locLevel.location?.locationType || "";
+        return (
+          <TableRow key={locLevel.id} className="bg-blue-50/20 dark:bg-blue-900/5 text-xs">
+            <TableCell className="pl-16">
+              <div className="flex items-center gap-1.5">
+                <MapPin className="h-3 w-3 text-blue-400 shrink-0" />
+                <span className="font-mono">{locLevel.location?.code || "?"}</span>
+                <span className="text-[10px] px-1 py-0.5 rounded-sm bg-muted text-muted-foreground">
+                  {locType.replace("_", " ")}
+                </span>
+              </div>
+            </TableCell>
+            <TableCell className="text-xs text-muted-foreground"></TableCell>
+            <TableCell className="text-right font-mono text-muted-foreground">{locLevel.variantQty}</TableCell>
+            <TableCell className="text-right font-mono text-muted-foreground">{locLevel.reservedQty || 0}</TableCell>
+            <TableCell className="text-right font-mono text-blue-600">
+              {converted.toLocaleString()} <span className="text-[10px] opacity-60">{sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
+            </TableCell>
+            {canEdit && <TableCell></TableCell>}
           </TableRow>
         );
       })}
@@ -552,7 +605,6 @@ export default function Inventory() {
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
         case "reserved": aVal = a.reservedQty; bVal = b.reservedQty; break;
         case "available": aVal = a.available; bVal = b.available; break;
-        case "totalAtp": aVal = a.totalAtp; bVal = b.totalAtp; break;
         default: aVal = a.sku || ""; bVal = b.sku || "";
       }
       if (typeof aVal === "string") {
@@ -832,12 +884,6 @@ export default function Inventory() {
                           <div className="text-muted-foreground">Available</div>
                           <div className="font-mono font-bold text-green-600">{level.available.toLocaleString()}</div>
                         </div>
-                        {level.totalAtp !== level.available && (
-                          <div className="bg-muted/30 p-2 rounded">
-                            <div className="text-muted-foreground">Total ATP</div>
-                            <div className="font-mono font-bold text-blue-600">{level.totalAtp.toLocaleString()}</div>
-                          </div>
-                        )}
                       </div>
                     </div>
                   ))}
@@ -876,12 +922,6 @@ export default function Inventory() {
                           <div className="flex items-center justify-end gap-1">
                             Available
                             {sortField === "available" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
-                          </div>
-                        </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("totalAtp")}>
-                          <div className="flex items-center justify-end gap-1">
-                            Total ATP
-                            {sortField === "totalAtp" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
                         {canEdit && <TableHead className="w-[80px]"></TableHead>}
@@ -923,9 +963,6 @@ export default function Inventory() {
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono font-medium text-green-600">{level.available.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-blue-600">
-                              {level.totalAtp !== level.available ? level.totalAtp.toLocaleString() : <span className="text-muted-foreground">—</span>}
-                            </TableCell>
                             {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
@@ -963,27 +1000,34 @@ export default function Inventory() {
                                 return (
                                   <>
                                     <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
-                                      <TableCell colSpan={canEdit ? 7 : 6} className="py-1.5 pl-8 text-xs text-muted-foreground">
+                                      <TableCell colSpan={canEdit ? 6 : 5} className="py-1.5 pl-8 text-xs text-muted-foreground">
                                         <Boxes className="h-3 w-3 inline mr-1.5" />
                                         Fungible pool — convertible via case break
                                       </TableCell>
                                     </TableRow>
-                                    {descendants.map(anc => {
-                                      const converted = Math.floor(anc.available * anc.unitsPerVariant / level.unitsPerVariant);
-                                      return (
-                                      <TableRow key={anc.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
-                                        <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{anc.sku}</TableCell>
-                                        <TableCell className="text-xs text-muted-foreground">{anc.name}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.variantQty.toLocaleString()}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.reservedQty.toLocaleString()}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.available.toLocaleString()}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-blue-600">
-                                          {converted.toLocaleString()} <span className="text-[10px] opacity-60">{level.sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
-                                        </TableCell>
-                                        {canEdit && <TableCell></TableCell>}
-                                      </TableRow>
-                                      );
-                                    })}
+                                    {descendants.map(desc => (
+                                      <React.Fragment key={desc.variantId}>
+                                        <TableRow className="bg-blue-50/30 dark:bg-blue-900/5">
+                                          <TableCell colSpan={2} className="pl-10 font-mono text-xs font-medium text-blue-700 dark:text-blue-400 py-1">
+                                            {desc.sku} <span className="font-normal text-muted-foreground ml-1">{desc.name}</span>
+                                          </TableCell>
+                                          <TableCell className="text-right font-mono text-xs text-muted-foreground">{desc.variantQty.toLocaleString()}</TableCell>
+                                          <TableCell className="text-right font-mono text-xs text-muted-foreground">{desc.reservedQty.toLocaleString()}</TableCell>
+                                          <TableCell className="text-right font-mono text-xs text-blue-600">
+                                            {Math.floor(Math.max(0, desc.variantQty - desc.reservedQty) * desc.unitsPerVariant / level.unitsPerVariant).toLocaleString()} <span className="text-[10px] opacity-60">{level.sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
+                                          </TableCell>
+                                          {canEdit && <TableCell></TableCell>}
+                                        </TableRow>
+                                        <FungibleLocationRows
+                                          variantId={desc.variantId}
+                                          sku={level.sku}
+                                          parentUnitsPerVariant={level.unitsPerVariant}
+                                          childUnitsPerVariant={desc.unitsPerVariant}
+                                          canEdit={canEdit}
+                                          warehouses={warehouses}
+                                        />
+                                      </React.Fragment>
+                                    ))}
                                   </>
                                 );
                               })()}
