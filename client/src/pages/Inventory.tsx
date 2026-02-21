@@ -950,18 +950,21 @@ export default function Inventory() {
                                         Fungible pool — convertible via case break
                                       </TableCell>
                                     </TableRow>
-                                    {descendants.map(anc => (
+                                    {descendants.map(anc => {
+                                      const converted = Math.floor(Math.max(0, anc.available) * anc.unitsPerVariant / level.unitsPerVariant);
+                                      return (
                                       <TableRow key={anc.variantId} className="bg-blue-50/30 dark:bg-blue-900/5 text-sm">
                                         <TableCell className="pl-8 font-mono text-xs text-muted-foreground">{anc.sku}</TableCell>
                                         <TableCell className="text-xs text-muted-foreground">{anc.name}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.variantQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">{anc.reservedQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                                          {Math.floor((anc.variantQty - anc.reservedQty - anc.pickedQty) * anc.unitsPerVariant / level.unitsPerVariant).toLocaleString()}
+                                          {converted.toLocaleString()} <span className="text-[10px] opacity-60">{level.sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
                                         </TableCell>
                                         {canEdit && <TableCell></TableCell>}
                                       </TableRow>
-                                    ))}
+                                      );
+                                    })}
                                   </>
                                 );
                               })()}
