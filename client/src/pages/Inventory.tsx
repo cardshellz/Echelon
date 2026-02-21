@@ -284,9 +284,10 @@ function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnit
   const ratio = childUnitsPerVariant / parentUnitsPerVariant;
   return (
     <>
-      {locationLevels.filter(l => l.variantQty > 0).map((locLevel) => {
-        const locAvail = Math.max(0, locLevel.variantQty - locLevel.reservedQty);
+      {locationLevels.map((locLevel) => {
+        const locAvail = locLevel.variantQty - locLevel.reservedQty;
         const converted = Math.floor(locAvail * ratio);
+        const isNegative = converted < 0;
         const locType = locLevel.location?.locationType || "";
         return (
           <TableRow key={locLevel.id} className="bg-blue-50/20 dark:bg-blue-900/5 text-xs">
@@ -300,9 +301,9 @@ function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnit
               </div>
             </TableCell>
             <TableCell className="text-xs text-muted-foreground"></TableCell>
-            <TableCell className="text-right font-mono text-muted-foreground">{locLevel.variantQty}</TableCell>
+            <TableCell className={`text-right font-mono ${locLevel.variantQty < 0 ? "text-red-500" : "text-muted-foreground"}`}>{locLevel.variantQty}</TableCell>
             <TableCell className="text-right font-mono text-muted-foreground">{locLevel.reservedQty || 0}</TableCell>
-            <TableCell className="text-right font-mono text-blue-600">
+            <TableCell className={`text-right font-mono ${isNegative ? "text-red-500" : "text-blue-600"}`}>
               {converted.toLocaleString()} <span className="text-[10px] opacity-60">{sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
             </TableCell>
             {canEdit && <TableCell></TableCell>}
@@ -562,7 +563,7 @@ export default function Inventory() {
     for (const v of variantLevels) {
       const queue = childrenMap.get(v.variantId) || [];
       for (const child of queue) {
-        if (child.variantQty > 0) {
+        if (child.locationCount > 0 || child.variantQty !== 0) {
           result.add(v.variantId);
           break;
         }
@@ -577,16 +578,14 @@ export default function Inventory() {
     const result = new Map<number, number>();
     for (const v of variantLevels) {
       let total = v.available; // own: physical - reserved
-      // BFS descendants
+      // BFS descendants — no clipping, raw math so bins add up to header
       const queue = [...(childrenMap.get(v.variantId) || [])];
       const visited = new Set<number>();
       while (queue.length > 0) {
         const child = queue.shift()!;
         if (visited.has(child.variantId)) continue;
         visited.add(child.variantId);
-        if (child.variantQty > 0) {
-          total += Math.floor(Math.max(0, child.available) * child.unitsPerVariant / v.unitsPerVariant);
-        }
+        total += Math.floor(child.available * child.unitsPerVariant / v.unitsPerVariant);
         const grandchildren = childrenMap.get(child.variantId) || [];
         queue.push(...grandchildren);
       }
@@ -1007,7 +1006,7 @@ export default function Inventory() {
                               />
                               {/* Descendant variants in the fungible pool (larger variants that can break down into this one) */}
                               {(() => {
-                                // Collect descendants (children, grandchildren) with stock
+                                // Collect descendants (children, grandchildren) with any inventory records
                                 const descendants: VariantLevel[] = [];
                                 const queue = [...(childrenMap.get(level.variantId) || [])];
                                 const visited = new Set<number>();
@@ -1015,7 +1014,7 @@ export default function Inventory() {
                                   const child = queue.shift()!;
                                   if (visited.has(child.variantId)) continue;
                                   visited.add(child.variantId);
-                                  if (child.variantQty > 0) descendants.push(child);
+                                  if (child.locationCount > 0 || child.variantQty !== 0) descendants.push(child);
                                   const grandchildren = childrenMap.get(child.variantId) || [];
                                   queue.push(...grandchildren);
                                 }
@@ -1031,15 +1030,9 @@ export default function Inventory() {
                                     {descendants.map(desc => (
                                       <React.Fragment key={desc.variantId}>
                                         <TableRow className="bg-blue-50/30 dark:bg-blue-900/5">
-                                          <TableCell colSpan={2} className="pl-10 font-mono text-xs font-medium text-blue-700 dark:text-blue-400 py-1">
+                                          <TableCell colSpan={canEdit ? 6 : 5} className="pl-10 font-mono text-xs font-medium text-blue-700 dark:text-blue-400 py-1">
                                             {desc.sku} <span className="font-normal text-muted-foreground ml-1">{desc.name}</span>
                                           </TableCell>
-                                          <TableCell className="text-right font-mono text-xs text-muted-foreground">{desc.variantQty.toLocaleString()}</TableCell>
-                                          <TableCell className="text-right font-mono text-xs text-muted-foreground">{desc.reservedQty.toLocaleString()}</TableCell>
-                                          <TableCell className="text-right font-mono text-xs text-blue-600">
-                                            {Math.floor(Math.max(0, desc.variantQty - desc.reservedQty) * desc.unitsPerVariant / level.unitsPerVariant).toLocaleString()} <span className="text-[10px] opacity-60">{level.sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
-                                          </TableCell>
-                                          {canEdit && <TableCell></TableCell>}
                                         </TableRow>
                                         <FungibleLocationRows
                                           variantId={desc.variantId}
