@@ -3379,7 +3379,7 @@ export async function registerRoutes(
       const productsWithData = allProducts.map(p => ({
         ...p,
         baseSku: p.sku,
-        name: p.title || p.name,
+        name: p.name, // Use internal name, not Shopify title
         active: p.status === "active" ? 1 : 0,
         imageUrl: primaryImageByProductId.get(p.id) || null,
         variantCount: variantsByProductId.get(p.id)?.length || 0,
