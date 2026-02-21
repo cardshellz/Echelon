@@ -6804,6 +6804,8 @@ export async function registerRoutes(
         variant_sku: string;
         variant_name: string;
         units_per_variant: number;
+        parent_variant_id: number | null;
+        hierarchy_level: number;
         product_id: number | null;
         base_sku: string | null;
         total_variant_qty: string;
@@ -6817,6 +6819,8 @@ export async function registerRoutes(
           pv.sku as variant_sku,
           pv.name as variant_name,
           pv.units_per_variant,
+          pv.parent_variant_id,
+          pv.hierarchy_level,
           p.id as product_id,
           p.sku as base_sku,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
@@ -6830,7 +6834,7 @@ export async function registerRoutes(
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE pv.is_active = true
           AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, p.id, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku
         ORDER BY pv.sku
       ` : sql`
         SELECT
