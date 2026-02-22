@@ -1119,7 +1119,7 @@ export default function Inventory() {
                   <Table>
                     <TableHeader className="bg-muted/40 sticky top-0 z-10">
                       <TableRow>
-                        <TableHead className="w-[180px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
+                        <TableHead className="min-w-[220px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
                           <div className="flex items-center gap-1">
                             SKU
                             {sortField === "sku" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
@@ -1178,53 +1178,61 @@ export default function Inventory() {
                               <div className="flex items-center gap-1">
                                 {canExpand && (
                                   expandedVariants.has(level.variantId) ?
-                                    <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
-                                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                    <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
+                                    <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
                                 )}
-                                {level.sku}
-                                {level.isDuplicate && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
-                                    DUPLICATE SKU
-                                  </span>
-                                )}
-                                {!level.productId && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
-                                    NO PRODUCT
-                                  </span>
-                                )}
-                                {level.negativeQty && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
-                                    NEGATIVE
-                                  </span>
-                                )}
-                                {level.overReserved && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
-                                    OVER-RESERVED
-                                  </span>
-                                )}
-                                {level.noBin && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
-                                    NO BIN
-                                  </span>
-                                )}
-                                {level.noReplen && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
-                                    NO REPLEN
-                                  </span>
-                                )}
-                                {level.noCaseBreak && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
-                                    NO CASE BREAK
-                                  </span>
-                                )}
-                                {level.noBarcode && (
-                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 ml-1 whitespace-nowrap">
-                                    NO BARCODE
-                                  </span>
-                                )}
+                                <div className="min-w-0">
+                                  <div className="whitespace-nowrap">{level.sku}</div>
+                                  {(level.isDuplicate || !level.productId || level.negativeQty || level.overReserved || level.noBin || level.noReplen || level.noCaseBreak || level.noBarcode) && (
+                                    <div className="flex flex-wrap gap-0.5 mt-0.5">
+                                      {level.isDuplicate && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                          DUPLICATE SKU
+                                        </span>
+                                      )}
+                                      {!level.productId && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                          NO PRODUCT
+                                        </span>
+                                      )}
+                                      {level.negativeQty && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                          NEGATIVE
+                                        </span>
+                                      )}
+                                      {level.overReserved && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                          OVER-RESERVED
+                                        </span>
+                                      )}
+                                      {level.noBin && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                          NO BIN
+                                        </span>
+                                      )}
+                                      {level.noReplen && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                          NO REPLEN
+                                        </span>
+                                      )}
+                                      {level.noCaseBreak && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                          NO CASE BREAK
+                                        </span>
+                                      )}
+                                      {level.noBarcode && (
+                                        <span className="text-[10px] px-1 py-0.5 rounded-sm bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 whitespace-nowrap">
+                                          NO BARCODE
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             </TableCell>
-                            <TableCell className="truncate max-w-[200px]">{level.name}</TableCell>
+                            <TableCell className="max-w-[300px]">
+                              <div className="truncate">{level.name}</div>
+                            </TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono font-medium text-green-600">{(fungibleAvailable.get(level.variantId) ?? level.available).toLocaleString()}</TableCell>
