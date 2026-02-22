@@ -136,6 +136,10 @@ type PickInventoryContext = {
     taskStatus: string | null;
     autoExecuted: boolean;
     stockout: boolean;
+    sourceLocationCode: string | null;
+    sourceVariantSku: string | null;
+    sourceVariantName: string | null;
+    qtyToMove: number | null;
   };
 };
 
@@ -4268,9 +4272,34 @@ export default function Picking() {
                     System inventory may be out of sync
                   </div>
                 )}
-                {binCountContext.replen.autoExecuted && (
-                  <div className="text-xs text-blue-600 font-medium">
-                    Replenished from reserve
+                {binCountContext.replen.triggered && !binCountContext.replen.stockout && (
+                  <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-1">
+                    {binCountContext.replen.autoExecuted ? (
+                      <>
+                        <div className="font-medium text-blue-700">System Replenished:</div>
+                        <div className="text-blue-600">
+                          Moved {binCountContext.replen.qtyToMove} units
+                          {binCountContext.replen.sourceLocationCode && ` from ${binCountContext.replen.sourceLocationCode}`}
+                        </div>
+                        {binCountContext.replen.sourceVariantName && binCountContext.replen.sourceVariantName !== binCountContext.sku && (
+                          <div className="text-blue-600">Source: {binCountContext.replen.sourceVariantName}</div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="font-medium text-amber-700">Replen Needed:</div>
+                        {binCountContext.replen.sourceLocationCode && (
+                          <div className="text-amber-600">Go to: <span className="font-mono font-bold">{binCountContext.replen.sourceLocationCode}</span></div>
+                        )}
+                        <div className="text-amber-600">
+                          Bring {binCountContext.replen.qtyToMove} units
+                          {binCountContext.replen.sourceVariantSku && ` of ${binCountContext.replen.sourceVariantSku}`}
+                        </div>
+                        {binCountContext.replen.sourceVariantName && binCountContext.replen.sourceVariantName !== binCountContext.replen.sourceVariantSku && (
+                          <div className="text-amber-600 text-[10px]">({binCountContext.replen.sourceVariantName})</div>
+                        )}
+                      </>
+                    )}
                   </div>
                 )}
                 {binCountContext.replen.stockout && (
@@ -4283,7 +4312,11 @@ export default function Picking() {
           </DialogHeader>
 
           <div className="py-4 space-y-3">
-            <label className="text-sm font-medium">Count what's left in the bin after picking complete</label>
+            <label className="text-sm font-medium">
+              {binCountContext?.replen.triggered && !binCountContext.replen.autoExecuted
+                ? "Complete replen above, then count the bin"
+                : "Count what's left in the bin after picking complete"}
+            </label>
             <Input
               type="number"
               inputMode="numeric"

@@ -92,6 +92,10 @@ export type PickInventoryContext = {
     taskStatus: string | null;
     autoExecuted: boolean;
     stockout: boolean;
+    sourceLocationCode: string | null;
+    sourceVariantSku: string | null;
+    sourceVariantName: string | null;
+    qtyToMove: number | null;
   };
 };
 
@@ -244,6 +248,10 @@ class PickingService {
         taskStatus: null,
         autoExecuted: false,
         stockout: false,
+        sourceLocationCode: null,
+        sourceVariantSku: null,
+        sourceVariantName: null,
+        qtyToMove: null,
       },
     };
 
@@ -273,6 +281,21 @@ class PickingService {
           inventoryCtx.replen.autoExecuted = replenTask.status === "completed";
           inventoryCtx.replen.stockout = replenTask.status === "blocked";
           inventoryCtx.binCountNeeded = true;
+
+          // Populate replen guidance info for picker
+          if (replenTask.fromLocationId) {
+            const allLocs = await this.storage.getAllWarehouseLocations();
+            const sourceLoc = allLocs.find(l => l.id === replenTask.fromLocationId);
+            inventoryCtx.replen.sourceLocationCode = sourceLoc?.code || null;
+          }
+          if (replenTask.sourceProductVariantId) {
+            const sourceVariant = await this.storage.getProductVariantById(replenTask.sourceProductVariantId);
+            if (sourceVariant) {
+              inventoryCtx.replen.sourceVariantSku = sourceVariant.sku;
+              inventoryCtx.replen.sourceVariantName = sourceVariant.name || sourceVariant.sku;
+            }
+          }
+          inventoryCtx.replen.qtyToMove = replenTask.qtyTargetUnits || replenTask.qtySourceUnits || null;
 
           // If replen auto-executed, re-read inventory to show actual post-replen quantity
           if (replenTask.status === "completed") {
