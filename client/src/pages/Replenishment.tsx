@@ -54,7 +54,8 @@ import {
   Save,
   Search,
   ChevronsUpDown,
-  Check
+  Check,
+  XCircle
 } from "lucide-react";
 
 interface WarehouseLocation {
@@ -1482,6 +1483,20 @@ export default function Replenishment() {
                                   <span className="hidden sm:inline">Exception</span>
                                 </Button>
                               </>
+                            )}
+                            {["pending", "assigned", "in_progress", "blocked"].includes(task.status) && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="min-h-[36px] text-xs text-muted-foreground hover:text-destructive"
+                                onClick={() => updateTaskMutation.mutate({
+                                  id: task.id,
+                                  data: { status: "cancelled" }
+                                })}
+                              >
+                                <XCircle className="w-3 h-3 sm:mr-1" />
+                                <span className="hidden sm:inline">Cancel</span>
+                              </Button>
                             )}
                           </div>
                         </TableCell>
