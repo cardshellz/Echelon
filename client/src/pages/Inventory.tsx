@@ -57,6 +57,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 
@@ -179,6 +185,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
 }) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
+  const { toast } = useToast();
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [`/api/inventory/variants/${variantId}/locations`],
   });
@@ -191,6 +198,26 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inventory/variants/${variantId}/locations`] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+    },
+  });
+
+  const assignHereMutation = useMutation({
+    mutationFn: async (warehouseLocationId: number) => {
+      const res = await fetch("/api/bin-assignments", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productVariantId: variantId, warehouseLocationId }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      return res.json();
+    },
+    onSuccess: (_data, _vars) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inventory/variants/${variantId}/locations`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+      toast({ title: `${sku} assigned to bin` });
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message || "Failed to assign", variant: "destructive" });
     },
   });
 
@@ -263,19 +290,35 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
             {canEdit && (
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
-                  {!locLevel.isAssigned && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-xs px-2 text-amber-600 hover:text-amber-700"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`/bin-assignments?search=${encodeURIComponent(sku)}`);
-                      }}
-                    >
-                      <MapPin className="h-3 w-3 mr-1" />
-                      Assign
-                    </Button>
+                  {!locLevel.isAssigned && locLevel.location && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs px-2 text-amber-600 hover:text-amber-700"
+                          disabled={assignHereMutation.isPending}
+                        >
+                          <MapPin className="h-3 w-3 mr-1" />
+                          Assign
+                          <ChevronDown className="h-3 w-3 ml-0.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                        <DropdownMenuItem
+                          onClick={() => assignHereMutation.mutate(locLevel.location!.id)}
+                        >
+                          <MapPin className="h-3 w-3 mr-2" />
+                          Assign to {locLevel.location.code}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => navigate(`/bin-assignments?search=${encodeURIComponent(sku)}`)}
+                        >
+                          <ArrowLeftRight className="h-3 w-3 mr-2" />
+                          Assign to other bin...
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                   {locLevel.variantQty === 0 && !locLevel.reservedQty && !locLevel.isAssigned ? (
                     <Button
