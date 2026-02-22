@@ -1348,13 +1348,19 @@ class ReplenishmentService {
 
         for (const tierDefault of sortedTierDefaults) {
           if (tierDefault.hierarchyLevel !== pickLoc.hierarchyLevel) continue;
-          // Walk parentVariantId first, fall back to tier default sourceHierarchyLevel
+          // Primary: find variant at the tier default's source hierarchy level
+          const sourceByLevel = prodVariants.get(tierDefault.sourceHierarchyLevel);
+          if (sourceByLevel) {
+            matchedDefault = tierDefault;
+            sourceVariant = sourceByLevel;
+            break;
+          }
+          // Fallback: use parentVariantId only if it points to a HIGHER hierarchy level
           const parentId = pickVariant.parentVariantId;
           const parentVar = parentId ? variantMap.get(parentId) : null;
-          const sourceVar = parentVar ?? prodVariants.get(tierDefault.sourceHierarchyLevel);
-          if (sourceVar) {
+          if (parentVar && parentVar.hierarchyLevel > pickLoc.hierarchyLevel) {
             matchedDefault = tierDefault;
-            sourceVariant = sourceVar;
+            sourceVariant = parentVar;
             break;
           }
         }
@@ -2026,42 +2032,54 @@ class ReplenishmentService {
     priority: number;
     autoReplen: number;
   }): Promise<ReplenTask | null> {
-    // Load the intermediate variant (immediate parent of pick variant)
+    // Load the intermediate variant (the source we couldn't find stock for)
     const [intermediateVariant] = await this.db
       .select()
       .from(productVariants)
       .where(eq(productVariants.id, opts.sourceVariantId))
       .limit(1);
-    if (!intermediateVariant?.parentVariantId) return null; // No further parent to cascade from
+    if (!intermediateVariant?.productId) return null;
 
-    const grandparentVariantId = intermediateVariant.parentVariantId;
+    // Find the tier default for the intermediate variant's level to determine ITS source
+    const cascadeTierDefault = await this.findTierDefaultForVariant(
+      intermediateVariant.hierarchyLevel,
+      opts.warehouseId,
+    );
+    if (!cascadeTierDefault) return null;
+    if (cascadeTierDefault.sourceHierarchyLevel <= intermediateVariant.hierarchyLevel) return null;
 
-    // Find stock at the grandparent level
+    // Find the grandparent variant by tier default's source hierarchy level
+    const grandparentVariants = await this.db
+      .select()
+      .from(productVariants)
+      .where(
+        and(
+          eq(productVariants.productId, intermediateVariant.productId),
+          eq(productVariants.hierarchyLevel, cascadeTierDefault.sourceHierarchyLevel),
+          eq(productVariants.isActive, true),
+        ),
+      )
+      .limit(1);
+    const grandparentVariant = grandparentVariants[0];
+    if (!grandparentVariant) return null; // No variant at the cascade source level
+
+    const grandparentVariantId = grandparentVariant.id;
+
+    // Find stock at the grandparent level using the CASCADE tier default's source location type
+    const cascadeSourceLocationType = cascadeTierDefault.sourceLocationType;
     const cascadeSourceLocation = await this.findSourceLocation(
       grandparentVariantId,
       opts.warehouseId,
-      opts.sourceLocationType,
+      cascadeSourceLocationType,
       null, // no parent location hint for cascade
       opts.sourcePriority,
     );
     if (!cascadeSourceLocation) return null; // No stock at grandparent either
 
-    // Load the grandparent variant for qty calculations
-    const [grandparentVariant] = await this.db
-      .select()
-      .from(productVariants)
-      .where(eq(productVariants.id, grandparentVariantId))
-      .limit(1);
-    if (!grandparentVariant) return null;
-
-    // Look up tier default for the intermediate level (for its own replenMethod/autoReplen)
-    const cascadeTierDefault = await this.findTierDefaultForVariant(
-      intermediateVariant.hierarchyLevel,
-      opts.warehouseId,
-    );
-    const cascadeReplenMethod = cascadeTierDefault?.replenMethod ?? "case_break";
-    const cascadeAutoReplen = cascadeTierDefault?.autoReplen ?? 0;
-    const cascadePriority = cascadeTierDefault?.priority ?? opts.priority;
+    // Resolve cascade replen settings from the intermediate variant's tier default
+    const cascadeReplenMethod = cascadeTierDefault.replenMethod ?? "case_break";
+    const cascadeAutoReplen = cascadeTierDefault.autoReplen ?? 0;
+    const cascadePriority = cascadeTierDefault.priority ?? opts.priority;
 
     // Calculate upstream qty: 1 grandparent unit → N intermediate units
     const cascadeQtySource = 1;
@@ -2161,35 +2179,37 @@ class ReplenishmentService {
     tierDefault: ReplenTierDefault | null,
     productVariantsCache?: Map<number, ProductVariant[]>,
   ): Promise<number | null> {
-    // Strategy 1: Walk parentVariantId (per-product packaging hierarchy)
-    // This respects the actual product structure: Pack→Box→Case→Pallet
-    if (pickVariant.parentVariantId) {
-      return pickVariant.parentVariantId;
-    }
-
-    // Strategy 2: Fall back to tier default sourceHierarchyLevel (legacy/products without parentVariantId)
     if (!tierDefault) return null;
     if (tierDefault.sourceHierarchyLevel === pickVariant.hierarchyLevel) return null;
 
+    // Load siblings for this product
     let siblings: ProductVariant[];
     if (productVariantsCache && pickVariant.productId) {
       siblings = productVariantsCache.get(pickVariant.productId) ?? [];
     } else {
-      siblings = await this.db
-        .select()
-        .from(productVariants)
-        .where(
-          and(
-            eq(productVariants.productId, pickVariant.productId),
-            eq(productVariants.hierarchyLevel, tierDefault.sourceHierarchyLevel),
-          ),
-        );
+      siblings = pickVariant.productId
+        ? await this.db
+            .select()
+            .from(productVariants)
+            .where(eq(productVariants.productId, pickVariant.productId))
+        : [];
     }
 
-    const sourceVariant = siblings.find(
-      (v) => v.hierarchyLevel === tierDefault.sourceHierarchyLevel,
+    // Primary: find variant at the tier default's source hierarchy level
+    const sourceByLevel = siblings.find(
+      (v) => v.hierarchyLevel === tierDefault.sourceHierarchyLevel && v.isActive,
     );
-    return sourceVariant?.id ?? null;
+    if (sourceByLevel) return sourceByLevel.id;
+
+    // Fallback: use parentVariantId only if it points to a HIGHER hierarchy level
+    if (pickVariant.parentVariantId) {
+      const parentVar = siblings.find((v) => v.id === pickVariant.parentVariantId);
+      if (parentVar && parentVar.hierarchyLevel > pickVariant.hierarchyLevel) {
+        return parentVar.id;
+      }
+    }
+
+    return null;
   }
 
   // ---------------------------------------------------------------------------
