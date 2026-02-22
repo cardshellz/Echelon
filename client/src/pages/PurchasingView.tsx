@@ -226,8 +226,13 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-xs mt-3">
                     <div className="bg-muted/30 p-2 rounded">
-                      <div className="text-muted-foreground">Pieces</div>
-                      <div className="font-mono font-bold">{item.totalOnHand.toLocaleString()}</div>
+                      <div className="text-muted-foreground">On Hand</div>
+                      <div className="font-mono font-bold">
+                        {item.orderUomUnits > 1
+                          ? <>{Math.floor(item.totalOnHand / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.totalOnHand / item.orderUomUnits) !== 1 ? "s" : ""}</>
+                          : item.totalOnHand.toLocaleString()}
+                      </div>
+                      {item.orderUomUnits > 1 && <div className="text-[10px] text-muted-foreground font-mono">{item.totalOnHand.toLocaleString()} pcs</div>}
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
                       <div className="text-muted-foreground">Days Supply</div>
@@ -235,7 +240,14 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                     </div>
                     <div className="bg-muted/30 p-2 rounded">
                       <div className="text-muted-foreground">{data?.lookbackDays ?? ""}d Usage</div>
-                      <div className="font-mono font-bold">{item.periodUsage > 0 ? item.periodUsage.toLocaleString() : "—"}</div>
+                      <div className="font-mono font-bold">
+                        {item.periodUsage > 0
+                          ? item.orderUomUnits > 1
+                            ? <>{Math.floor(item.periodUsage / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.periodUsage / item.orderUomUnits) !== 1 ? "s" : ""}</>
+                            : item.periodUsage.toLocaleString()
+                          : "—"}
+                      </div>
+                      {item.periodUsage > 0 && item.orderUomUnits > 1 && <div className="text-[10px] text-muted-foreground font-mono">{item.periodUsage.toLocaleString()} pcs</div>}
                     </div>
                   </div>
                   {item.suggestedOrderQty > 0 && (
@@ -261,7 +273,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                     <div className="flex items-center gap-1">Product <SortIcon field="name" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onHand")}>
-                    <div className="flex items-center justify-end gap-1">On Hand (pcs) <SortIcon field="onHand" /></div>
+                    <div className="flex items-center justify-end gap-1">On Hand <SortIcon field="onHand" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
                     <div className="flex items-center justify-end gap-1">{data?.lookbackDays ?? ""}d Usage <SortIcon field="usage" /></div>
@@ -287,15 +299,42 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                     <TableRow key={item.productId}>
                       <TableCell className="font-mono font-medium text-primary">{item.sku}</TableCell>
                       <TableCell className="truncate max-w-[200px]">{item.productName}</TableCell>
-                      <TableCell className="text-right font-mono font-bold">{item.totalOnHand.toLocaleString()}</TableCell>
+                      <TableCell className="text-right font-mono font-bold">
+                        {item.orderUomUnits > 1 ? (
+                          <div>
+                            <span>{Math.floor(item.totalOnHand / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.totalOnHand / item.orderUomUnits) !== 1 ? "s" : ""}</span>
+                            <div className="text-[10px] text-muted-foreground font-normal">{item.totalOnHand.toLocaleString()} pcs</div>
+                          </div>
+                        ) : (
+                          <span>{item.totalOnHand.toLocaleString()}</span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {item.periodUsage > 0 ? item.periodUsage.toLocaleString() : "—"}
+                        {item.periodUsage > 0 ? (
+                          item.orderUomUnits > 1 ? (
+                            <div>
+                              <span>{Math.floor(item.periodUsage / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.floor(item.periodUsage / item.orderUomUnits) !== 1 ? "s" : ""}</span>
+                              <div className="text-[10px]">{item.periodUsage.toLocaleString()} pcs</div>
+                            </div>
+                          ) : (
+                            <span>{item.periodUsage.toLocaleString()}</span>
+                          )
+                        ) : "—"}
                       </TableCell>
                       <TableCell className={`text-right font-mono ${dosColor(item)}`}>
                         {formatDos(item.daysOfSupply)}
                       </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
-                        {item.reorderPoint > 0 ? item.reorderPoint.toLocaleString() : "—"}
+                        {item.reorderPoint > 0 ? (
+                          item.orderUomUnits > 1 ? (
+                            <div>
+                              <span>{Math.ceil(item.reorderPoint / item.orderUomUnits).toLocaleString()} {item.orderUomLabel.toLowerCase()}{Math.ceil(item.reorderPoint / item.orderUomUnits) !== 1 ? "s" : ""}</span>
+                              <div className="text-[10px]">{item.reorderPoint.toLocaleString()} pcs</div>
+                            </div>
+                          ) : (
+                            <span>{item.reorderPoint.toLocaleString()}</span>
+                          )
+                        ) : "—"}
                       </TableCell>
                       <TableCell className="text-right font-mono">
                         {item.suggestedOrderQty > 0 ? (
@@ -329,7 +368,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
           {filtered.length > 0 && (
             <div className="text-xs text-muted-foreground shrink-0 pt-2">
               Showing {filtered.length} of {data?.items.length ?? 0} products
-              {" · "}Order qty rounded up to ordering UOM
+              {" · "}Quantities shown in ordering UOM where available
             </div>
           )}
         </div>
