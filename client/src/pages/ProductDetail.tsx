@@ -738,6 +738,7 @@ export default function ProductDetail() {
   // --- Variant dialog state ---
   const [variantDialogOpen, setVariantDialogOpen] = useState(false);
   const [editingVariant, setEditingVariant] = useState<ProductVariantRow | null>(null);
+  const [unitsInputRaw, setUnitsInputRaw] = useState<string | null>(null);
   const [variantForm, setVariantForm] = useState({
     hierarchyLevel: 1,
     unitsPerVariant: 1,
@@ -2002,10 +2003,17 @@ export default function ProductDetail() {
               <Input
                 type="text"
                 inputMode="numeric"
-                value={variantForm.unitsPerVariant}
+                value={unitsInputRaw ?? variantForm.unitsPerVariant}
                 onChange={(e) => {
                   const val = e.target.value.replace(/[^0-9]/g, "");
-                  handleUnitsChange(parseInt(val) || 1);
+                  setUnitsInputRaw(val);
+                  const num = parseInt(val);
+                  if (num > 0) handleUnitsChange(num);
+                }}
+                onBlur={() => {
+                  const num = parseInt(unitsInputRaw ?? "") || 1;
+                  setUnitsInputRaw(null);
+                  handleUnitsChange(num);
                 }}
                 className="h-11"
               />
