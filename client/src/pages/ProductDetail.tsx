@@ -969,7 +969,7 @@ export default function ProductDetail() {
 
   // --- Sorted variants ---
   const sortedVariants = product?.variants
-    ? [...product.variants].sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
+    ? [...product.variants].filter(v => v.isActive !== false).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
     : [];
 
   // --- Render ---
