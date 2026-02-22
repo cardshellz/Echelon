@@ -7202,11 +7202,14 @@ export async function registerRoutes(
         hierarchy_level: number;
         product_id: number | null;
         base_sku: string | null;
+        barcode: string | null;
         total_variant_qty: string;
         total_reserved_qty: string;
         total_picked_qty: string;
         location_count: string;
         pickable_variant_qty: string;
+        bin_count: string;
+        has_replen_rule: string;
       }>(warehouseId ? sql`
         SELECT
           pv.id as variant_id,
@@ -7217,18 +7220,23 @@ export async function registerRoutes(
           pv.hierarchy_level,
           p.id as product_id,
           p.sku as base_sku,
+          pv.barcode,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
           COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
+          COUNT(DISTINCT pl.id) as bin_count,
+          MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1 ELSE 0 END) as has_replen_rule
         FROM product_variants pv
         LEFT JOIN products p ON pv.product_id = p.id
         LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+        LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
         WHERE pv.is_active = true
           AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku, pv.barcode
         ORDER BY pv.sku
       ` : sql`
         SELECT
@@ -7240,37 +7248,61 @@ export async function registerRoutes(
           pv.hierarchy_level,
           p.id as product_id,
           p.sku as base_sku,
+          pv.barcode,
           COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
           COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
           COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
           COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty
+          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
+          COUNT(DISTINCT pl.id) as bin_count,
+          MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1 ELSE 0 END) as has_replen_rule
         FROM product_variants pv
         LEFT JOIN products p ON pv.product_id = p.id
         LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+        LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
         WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku, pv.barcode
         ORDER BY pv.sku
       `);
       
       // Build per-variant rows
-      const levels = inventoryResult.rows.map(row => ({
-        variantId: row.variant_id,
-        sku: row.variant_sku,
-        name: row.variant_name,
-        unitsPerVariant: row.units_per_variant || 1,
-        parentVariantId: row.parent_variant_id || null,
-        hierarchyLevel: row.hierarchy_level || 1,
-        baseSku: row.base_sku,
-        productId: row.product_id,
-        variantQty: parseInt(row.total_variant_qty) || 0,
-        reservedQty: parseInt(row.total_reserved_qty) || 0,
-        pickedQty: parseInt(row.total_picked_qty) || 0,
-        available: 0, // this variant's own available (physical - reserved), fungible total computed client-side
-        locationCount: parseInt(row.location_count) || 0,
-        pickableQty: parseInt(row.pickable_variant_qty) || 0,
-      }));
+      const levels = inventoryResult.rows.map(row => {
+        const variantQty = parseInt(row.total_variant_qty) || 0;
+        const reservedQty = parseInt(row.total_reserved_qty) || 0;
+        const binCount = parseInt(row.bin_count) || 0;
+        const hasReplenRule = parseInt(row.has_replen_rule) === 1;
+        const hierarchyLevel = row.hierarchy_level || 1;
+        const parentVariantId = row.parent_variant_id || null;
+        const barcode = row.barcode || null;
+
+        return {
+          variantId: row.variant_id,
+          sku: row.variant_sku,
+          name: row.variant_name,
+          unitsPerVariant: row.units_per_variant || 1,
+          parentVariantId,
+          hierarchyLevel,
+          baseSku: row.base_sku,
+          productId: row.product_id,
+          barcode,
+          variantQty,
+          reservedQty,
+          pickedQty: parseInt(row.total_picked_qty) || 0,
+          available: 0,
+          locationCount: parseInt(row.location_count) || 0,
+          pickableQty: parseInt(row.pickable_variant_qty) || 0,
+          binCount,
+          // Data quality flags
+          noBin: variantQty > 0 && binCount === 0,
+          noCaseBreak: hierarchyLevel >= 2 && !parentVariantId,
+          noBarcode: !barcode,
+          noReplen: binCount > 0 && !hasReplenRule,
+          overReserved: reservedQty > variantQty,
+          negativeQty: variantQty < 0,
+        };
+      });
 
       // Available = physical - reserved (matches location-level math so everything adds up)
       // Detect duplicate SKUs (same SKU on multiple active variants)

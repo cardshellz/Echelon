@@ -143,6 +143,14 @@ interface VariantLevel {
   locationCount: number;
   pickableQty: number;
   isDuplicate: boolean;
+  barcode: string | null;
+  binCount: number;
+  noBin: boolean;
+  noCaseBreak: boolean;
+  noBarcode: boolean;
+  noReplen: boolean;
+  overReserved: boolean;
+  negativeQty: boolean;
 }
 
 interface VariantLocationLevel {
@@ -414,7 +422,7 @@ export default function Inventory() {
   const [sortField, setSortField] = useState<string>("sku");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
-  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray">("all");
+  const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray" | "no_bin" | "no_case_break" | "no_barcode" | "no_replen" | "over_reserved" | "negative_qty">("all");
   const [purchasingFilter, setPurchasingFilter] = useState("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
@@ -602,6 +610,13 @@ export default function Inventory() {
   const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
   const duplicateCount = variantLevels.filter(v => v.isDuplicate).length;
   const strayCount = variantLevels.filter(v => !v.productId).length;
+  const noBinCount = variantLevels.filter(v => v.noBin).length;
+  const noCaseBreakCount = variantLevels.filter(v => v.noCaseBreak).length;
+  const noBarcodeCount = variantLevels.filter(v => v.noBarcode).length;
+  const noReplenCount = variantLevels.filter(v => v.noReplen).length;
+  const overReservedCount = variantLevels.filter(v => v.overReserved).length;
+  const negativeQtyCount = variantLevels.filter(v => v.negativeQty).length;
+  const issueCount = noBinCount + noCaseBreakCount + noReplenCount + overReservedCount + negativeQtyCount;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -623,6 +638,12 @@ export default function Inventory() {
       stockFilter === "oos" ? (fungibleAvailable.get(v.variantId) ?? v.available) <= 0 :
       stockFilter === "duplicates" ? v.isDuplicate :
       stockFilter === "stray" ? !v.productId :
+      stockFilter === "no_bin" ? v.noBin :
+      stockFilter === "no_case_break" ? v.noCaseBreak :
+      stockFilter === "no_barcode" ? v.noBarcode :
+      stockFilter === "no_replen" ? v.noReplen :
+      stockFilter === "over_reserved" ? v.overReserved :
+      stockFilter === "negative_qty" ? v.negativeQty :
       true
     )
     .sort((a, b) => {
@@ -850,6 +871,72 @@ export default function Inventory() {
                     </button>
                   </>
                 )}
+                {negativeQtyCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "negative_qty" ? "underline font-semibold" : ""} text-red-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "negative_qty" ? "all" : "negative_qty")}
+                    >
+                      {negativeQtyCount} negative
+                    </button>
+                  </>
+                )}
+                {overReservedCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "over_reserved" ? "underline font-semibold" : ""} text-red-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "over_reserved" ? "all" : "over_reserved")}
+                    >
+                      {overReservedCount} over-reserved
+                    </button>
+                  </>
+                )}
+                {noBinCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "no_bin" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "no_bin" ? "all" : "no_bin")}
+                    >
+                      {noBinCount} no bin
+                    </button>
+                  </>
+                )}
+                {noReplenCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "no_replen" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "no_replen" ? "all" : "no_replen")}
+                    >
+                      {noReplenCount} no replen
+                    </button>
+                  </>
+                )}
+                {noCaseBreakCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "no_case_break" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "no_case_break" ? "all" : "no_case_break")}
+                    >
+                      {noCaseBreakCount} no case break
+                    </button>
+                  </>
+                )}
+                {noBarcodeCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${stockFilter === "no_barcode" ? "underline font-semibold" : ""} text-muted-foreground font-medium`}
+                      onClick={() => setStockFilter(stockFilter === "no_barcode" ? "all" : "no_barcode")}
+                    >
+                      {noBarcodeCount} no barcode
+                    </button>
+                  </>
+                )}
                 {locationHealth && (
                   <>
                     <span className="text-muted-foreground/40">·</span>
@@ -924,6 +1011,36 @@ export default function Inventory() {
                             {!level.productId && (
                               <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
                                 NO PRODUCT
+                              </span>
+                            )}
+                            {level.negativeQty && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                NEGATIVE
+                              </span>
+                            )}
+                            {level.overReserved && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 whitespace-nowrap">
+                                OVER-RESERVED
+                              </span>
+                            )}
+                            {level.noBin && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                NO BIN
+                              </span>
+                            )}
+                            {level.noReplen && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                NO REPLEN
+                              </span>
+                            )}
+                            {level.noCaseBreak && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                NO CASE BREAK
+                              </span>
+                            )}
+                            {level.noBarcode && (
+                              <span className="text-[10px] px-1 py-0.5 rounded-sm bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 whitespace-nowrap">
+                                NO BARCODE
                               </span>
                             )}
                           </div>
@@ -1027,6 +1144,36 @@ export default function Inventory() {
                                 {!level.productId && (
                                   <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
                                     NO PRODUCT
+                                  </span>
+                                )}
+                                {level.negativeQty && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
+                                    NEGATIVE
+                                  </span>
+                                )}
+                                {level.overReserved && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 ml-1 whitespace-nowrap">
+                                    OVER-RESERVED
+                                  </span>
+                                )}
+                                {level.noBin && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
+                                    NO BIN
+                                  </span>
+                                )}
+                                {level.noReplen && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
+                                    NO REPLEN
+                                  </span>
+                                )}
+                                {level.noCaseBreak && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 ml-1 whitespace-nowrap">
+                                    NO CASE BREAK
+                                  </span>
+                                )}
+                                {level.noBarcode && (
+                                  <span className="text-[10px] px-1 py-0.5 rounded-sm bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 ml-1 whitespace-nowrap">
+                                    NO BARCODE
                                   </span>
                                 )}
                               </div>
