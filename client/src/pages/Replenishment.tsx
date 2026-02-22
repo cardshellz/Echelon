@@ -213,6 +213,7 @@ interface LocationReplenConfig {
   variant?: { id: number; sku: string | null; name: string };
 }
 
+// Location function types (must match schema: pick, reserve, receiving, staging)
 const LOCATION_TYPES = [
   { value: "pick", label: "Pick" },
   { value: "reserve", label: "Reserve" },

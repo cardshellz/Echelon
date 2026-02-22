@@ -38,6 +38,7 @@ interface WarehouseLocation {
   level: string | null;
   bin: string | null;
   locationType: string;
+  binType: string;
   isPickable: number;
   parentLocationId: number | null;
   capacityCubicMm: number | null;
@@ -55,31 +56,29 @@ interface Warehouse {
   code: string;
 }
 
+// Location function types (pick, reserve, receiving, staging)
 const LOCATION_TYPES = [
-  { value: "bin", label: "Bin (Eaches Pick)" },
-  { value: "pallet", label: "Pallet (Case Pick)" },
-  { value: "carton_flow", label: "Carton Flow" },
-  { value: "shelf", label: "Shelf" },
-  { value: "floor", label: "Floor" },
+  { value: "pick", label: "Pick" },
+  { value: "reserve", label: "Reserve" },
   { value: "receiving", label: "Receiving" },
-  { value: "putaway_staging", label: "Putaway Staging" },
-  { value: "packing", label: "Packing" },
-  { value: "shipping_lane", label: "Shipping Lane" },
   { value: "staging", label: "Staging" },
-  { value: "returns", label: "Returns" },
-  { value: "quarantine", label: "Quarantine" },
-  { value: "crossdock", label: "Crossdock" },
-  { value: "hazmat", label: "Hazmat" },
-  { value: "cold_storage", label: "Cold Storage" },
-  { value: "secure", label: "Secure" },
+];
+
+// Bin form factor types (bin, shelf, pallet, carton_flow, floor)
+const BIN_TYPES = [
+  { value: "bin", label: "Bin" },
+  { value: "shelf", label: "Shelf" },
+  { value: "pallet", label: "Pallet" },
+  { value: "carton_flow", label: "Carton Flow" },
+  { value: "floor", label: "Floor" },
 ];
 
 const DEFAULT_ZONES = [
   { code: "RCV", name: "Receiving Dock", locationType: "receiving" },
-  { code: "BULK", name: "Bulk Reserve", locationType: "pallet" },
-  { code: "FWD", name: "Forward Pick", locationType: "bin" },
-  { code: "PACK", name: "Packing Station", locationType: "packing" },
-  { code: "SHIP", name: "Shipping Lane", locationType: "shipping_lane" },
+  { code: "BULK", name: "Bulk Reserve", locationType: "reserve" },
+  { code: "FWD", name: "Forward Pick", locationType: "pick" },
+  { code: "PACK", name: "Packing Station", locationType: "staging" },
+  { code: "SHIP", name: "Shipping Lane", locationType: "staging" },
 ];
 
 export default function WarehouseLocations() {
@@ -103,7 +102,8 @@ export default function WarehouseLocations() {
     level: "",
     bin: "",
     name: "",
-    locationType: "bin",
+    locationType: "pick",
+    binType: "bin",
     isPickable: 1,
     warehouseId: "",
   });
@@ -111,7 +111,7 @@ export default function WarehouseLocations() {
     code: "",
     name: "",
     description: "",
-    locationType: "bin",
+    locationType: "pick",
     isPickable: 1,
   });
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all");
@@ -458,6 +458,7 @@ export default function WarehouseLocations() {
     if (!editingLocation) return;
     const data: any = {
       locationType: editingLocation.locationType,
+      binType: editingLocation.binType,
       isPickable: editingLocation.isPickable,
       zone: editingLocation.zone?.trim()?.toUpperCase() || null,
       aisle: editingLocation.aisle?.trim()?.toUpperCase() || null,
@@ -467,7 +468,7 @@ export default function WarehouseLocations() {
       name: editingLocation.name?.trim() || null,
       warehouseId: editingLocation.warehouseId || null,
     };
-    
+
     updateLocationMutation.mutate({ id: editingLocation.id, data });
   };
 
@@ -1184,7 +1185,7 @@ export default function WarehouseLocations() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3">
                 <div>
                   <Label className="text-xs">Warehouse</Label>
                   <Select
@@ -1204,8 +1205,11 @@ export default function WarehouseLocations() {
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-xs">Location Type</Label>
+                  <Label className="text-xs">Location Type (Function)</Label>
                   <Select
                     value={editingLocation.locationType}
                     onValueChange={(v) => setEditingLocation({ ...editingLocation, locationType: v })}
@@ -1215,6 +1219,22 @@ export default function WarehouseLocations() {
                     </SelectTrigger>
                     <SelectContent>
                       {LOCATION_TYPES.map((t) => (
+                        <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs">Bin Type (Form Factor)</Label>
+                  <Select
+                    value={editingLocation.binType}
+                    onValueChange={(v) => setEditingLocation({ ...editingLocation, binType: v })}
+                  >
+                    <SelectTrigger className="h-11">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BIN_TYPES.map((t) => (
                         <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
                       ))}
                     </SelectContent>
@@ -1248,14 +1268,14 @@ export default function WarehouseLocations() {
                 <Checkbox
                   id="edit-is-pickable"
                   checked={editingLocation.isPickable === 1}
-                  onCheckedChange={(checked) => setEditingLocation({ 
-                    ...editingLocation, 
-                    isPickable: checked ? 1 : 0 
+                  onCheckedChange={(checked) => setEditingLocation({
+                    ...editingLocation,
+                    isPickable: checked ? 1 : 0
                   })}
                   data-testid="checkbox-edit-location-pickable"
                 />
                 <Label htmlFor="edit-is-pickable" className="text-xs md:text-sm font-normal cursor-pointer">
-                  Forward Pick Location (direct picker access)
+                  Is Pickable (contributes to available-to-promise)
                 </Label>
               </div>
             </div>
