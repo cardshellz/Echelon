@@ -3519,8 +3519,8 @@ export async function registerRoutes(
 
       const hasBlockers = totalInventory > 0 || pendingShipments.length > 0;
 
-      if (hasBlockers && !force) {
-        return res.json({ blocked: true, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
+      if (!force) {
+        return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
       }
 
       // Execute archive
@@ -3907,8 +3907,8 @@ export async function registerRoutes(
 
       const hasBlockers = totalQty > 0 || pendingShipments.length > 0;
 
-      if (hasBlockers && !force) {
-        return res.json({ blocked: true, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
+      if (!force) {
+        return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
       }
 
       // Execute archive
