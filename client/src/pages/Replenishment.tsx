@@ -1366,13 +1366,14 @@ export default function Replenishment() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="text-xs">Created</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Source</TableHead>
                       <TableHead className="text-xs">From</TableHead>
                       <TableHead className="hidden sm:table-cell"></TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Pick</TableHead>
                       <TableHead className="text-xs">To</TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Product</TableHead>
                       <TableHead className="text-xs">Qty</TableHead>
                       <TableHead className="text-xs">Status</TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Created</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Mode</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Trigger</TableHead>
                       <TableHead className="text-xs hidden lg:table-cell">Method</TableHead>
@@ -1383,6 +1384,15 @@ export default function Replenishment() {
                   <TableBody>
                     {filteredTasks.map((task) => (
                       <TableRow key={task.id} data-testid={`row-task-${task.id}`}>
+                        <TableCell className="py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
+                        <TableCell className="hidden md:table-cell py-2">
+                          <div className="text-xs sm:text-sm">
+                            {task.sourceVariant?.sku || task.product?.sku || "-"}
+                            {task.sourceVariant && (
+                              <div className="text-[10px] text-muted-foreground">{uomLabel(task.sourceVariant.hierarchyLevel)}</div>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell className="py-2">
                           <div className="font-mono text-xs sm:text-sm">
                             {task.fromLocation?.code || `LOC-${task.fromLocationId}`}
@@ -1391,19 +1401,17 @@ export default function Replenishment() {
                         <TableCell className="hidden sm:table-cell py-2">
                           <ArrowRight className="w-4 h-4 text-muted-foreground" />
                         </TableCell>
+                        <TableCell className="hidden md:table-cell py-2">
+                          <div className="text-xs sm:text-sm">
+                            {task.pickVariant?.sku || task.product?.sku || "-"}
+                            {task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId && (
+                              <div className="text-[10px] text-muted-foreground">{uomLabel(task.pickVariant.hierarchyLevel)}</div>
+                            )}
+                          </div>
+                        </TableCell>
                         <TableCell className="py-2">
                           <div className="font-mono text-xs sm:text-sm">
                             {task.toLocation?.code || `LOC-${task.toLocationId}`}
-                          </div>
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell py-2">
-                          <div className="text-xs sm:text-sm">
-                            {task.pickVariant?.sku || task.sourceVariant?.sku || task.product?.sku || task.product?.title || "-"}
-                            {task.replenMethod === "case_break" && task.sourceVariant && task.pickVariant && task.sourceProductVariantId !== task.pickProductVariantId && (
-                              <div className="text-[10px] text-muted-foreground">
-                                from {task.sourceVariant.sku} ({uomLabel(task.sourceVariant.hierarchyLevel)})
-                              </div>
-                            )}
                           </div>
                         </TableCell>
                         <TableCell className="py-2">
@@ -1427,7 +1435,6 @@ export default function Replenishment() {
                             </div>
                           )}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell py-2 text-xs text-muted-foreground">{formatRelativeTime(task.createdAt)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getModeBadge(task.executionMode)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">{getTriggerBadge(task.triggeredBy)}</TableCell>
                         <TableCell className="hidden lg:table-cell py-2">
