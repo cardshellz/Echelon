@@ -7271,6 +7271,7 @@ export async function registerRoutes(
         pickable_variant_qty: string;
         bin_count: string;
         has_replen_rule: string;
+        is_base_unit: boolean;
       }>(warehouseId ? sql`
         SELECT
           pv.id as variant_id,
@@ -7279,6 +7280,7 @@ export async function registerRoutes(
           pv.units_per_variant,
           pv.parent_variant_id,
           pv.hierarchy_level,
+          pv.is_base_unit,
           p.id as product_id,
           p.sku as base_sku,
           pv.barcode,
@@ -7300,7 +7302,7 @@ export async function registerRoutes(
         LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
         WHERE pv.is_active = true
           AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku, pv.barcode
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
         ORDER BY pv.sku
       ` : sql`
         SELECT
@@ -7310,6 +7312,7 @@ export async function registerRoutes(
           pv.units_per_variant,
           pv.parent_variant_id,
           pv.hierarchy_level,
+          pv.is_base_unit,
           p.id as product_id,
           p.sku as base_sku,
           pv.barcode,
@@ -7330,7 +7333,7 @@ export async function registerRoutes(
         LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
         LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
         WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, p.id, p.sku, pv.barcode
+        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
         ORDER BY pv.sku
       `);
       
@@ -7343,6 +7346,7 @@ export async function registerRoutes(
         const hierarchyLevel = row.hierarchy_level || 1;
         const parentVariantId = row.parent_variant_id || null;
         const barcode = row.barcode || null;
+        const isBaseUnit = row.is_base_unit === true;
 
         return {
           variantId: row.variant_id,
@@ -7351,6 +7355,7 @@ export async function registerRoutes(
           unitsPerVariant: row.units_per_variant || 1,
           parentVariantId,
           hierarchyLevel,
+          isBaseUnit,
           baseSku: row.base_sku,
           productId: row.product_id,
           barcode,
@@ -7363,7 +7368,7 @@ export async function registerRoutes(
           binCount,
           // Data quality flags
           noBin: variantQty > 0 && binCount === 0,
-          noCaseBreak: hierarchyLevel >= 2 && !parentVariantId,
+          noCaseBreak: hierarchyLevel >= 2 && !parentVariantId && !isBaseUnit,
           noBarcode: !barcode,
           noReplen: binCount > 0 && !hasReplenRule,
           overReserved: reservedQty > variantQty,

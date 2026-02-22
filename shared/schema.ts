@@ -516,6 +516,7 @@ export const productVariants = pgTable("product_variants", {
   unitsPerVariant: integer("units_per_variant").notNull().default(1),
   hierarchyLevel: integer("hierarchy_level").notNull().default(1),
   parentVariantId: integer("parent_variant_id"),
+  isBaseUnit: boolean("is_base_unit").notNull().default(false),
   barcode: varchar("barcode", { length: 100 }),
   weightGrams: integer("weight_grams"),
   lengthMm: integer("length_mm"),

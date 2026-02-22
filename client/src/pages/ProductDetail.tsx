@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft,
@@ -72,6 +73,7 @@ interface ProductVariantRow {
   imageUrl: string | null;
   hierarchyLevel: number;
   parentVariantId: number | null;
+  isBaseUnit: boolean;
 }
 
 interface ProductDetailData {
@@ -746,6 +748,7 @@ export default function ProductDetail() {
     name: "",
     barcode: "",
     parentVariantId: null as number | null,
+    isBaseUnit: false,
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
@@ -805,6 +808,7 @@ export default function ProductDetail() {
       name: computeAutoName(defaultLevel, defaultUnits),
       barcode: "",
       parentVariantId: null,
+      isBaseUnit: false,
     });
     setVariantDialogOpen(true);
   }, [computeAutoSku, computeAutoName]);
@@ -820,6 +824,7 @@ export default function ProductDetail() {
       name: variant.name,
       barcode: variant.barcode || "",
       parentVariantId: variant.parentVariantId,
+      isBaseUnit: variant.isBaseUnit ?? false,
     });
     setVariantDialogOpen(true);
   }, []);
@@ -837,6 +842,7 @@ export default function ProductDetail() {
           hierarchyLevel: data.hierarchyLevel,
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
+          isBaseUnit: data.isBaseUnit,
         }),
       });
       if (!res.ok) throw new Error("Failed to create variant");
@@ -864,6 +870,7 @@ export default function ProductDetail() {
           hierarchyLevel: data.hierarchyLevel,
           barcode: data.barcode || null,
           parentVariantId: data.parentVariantId,
+          isBaseUnit: data.isBaseUnit,
         }),
       });
       if (!res.ok) throw new Error("Failed to update variant");
@@ -1717,7 +1724,7 @@ export default function ProductDetail() {
                           const parentVariant = variant.parentVariantId
                             ? sortedVariants.find((v) => v.id === variant.parentVariantId)
                             : null;
-                          const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                          const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
                           return (
                           <div
                             key={variant.id}
@@ -1783,7 +1790,7 @@ export default function ProductDetail() {
                               const parentVariant = variant.parentVariantId
                                 ? sortedVariants.find((v) => v.id === variant.parentVariantId)
                                 : null;
-                              const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1;
+                              const needsConfig = !variant.parentVariantId && variant.hierarchyLevel > 1 && !variant.isBaseUnit;
                               return (
                               <TableRow
                                 key={variant.id}
@@ -2061,26 +2068,46 @@ export default function ProductDetail() {
 
             <div className="space-y-1.5">
               <Label>Breaks Into (Parent Variant)</Label>
-              <Select
-                value={variantForm.parentVariantId ? String(variantForm.parentVariantId) : "none"}
-                onValueChange={(v) => setVariantForm((prev) => ({ ...prev, parentVariantId: v === "none" ? null : parseInt(v) }))}
-              >
-                <SelectTrigger className="h-11">
-                  <SelectValue placeholder="None (base variant)" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None (base variant)</SelectItem>
-                  {sortedVariants
-                    .filter((v) => v.id !== editingVariant?.id && v.unitsPerVariant < variantForm.unitsPerVariant)
-                    .map((v) => (
-                      <SelectItem key={v.id} value={String(v.id)}>
-                        {v.sku || v.name} ({v.unitsPerVariant} units)
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
+              {variantForm.hierarchyLevel >= 2 && (
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="isBaseUnit"
+                    checked={variantForm.isBaseUnit}
+                    onCheckedChange={(checked) => setVariantForm((prev) => ({
+                      ...prev,
+                      isBaseUnit: checked === true,
+                      parentVariantId: checked === true ? null : prev.parentVariantId,
+                    }))}
+                  />
+                  <label htmlFor="isBaseUnit" className="text-sm text-muted-foreground cursor-pointer">
+                    This is the base (smallest sellable) unit — does not break down further
+                  </label>
+                </div>
+              )}
+              {!variantForm.isBaseUnit && (
+                <Select
+                  value={variantForm.parentVariantId ? String(variantForm.parentVariantId) : "none"}
+                  onValueChange={(v) => setVariantForm((prev) => ({ ...prev, parentVariantId: v === "none" ? null : parseInt(v) }))}
+                >
+                  <SelectTrigger className="h-11">
+                    <SelectValue placeholder="None (base variant)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">None (base variant)</SelectItem>
+                    {sortedVariants
+                      .filter((v) => v.id !== editingVariant?.id && v.unitsPerVariant < variantForm.unitsPerVariant)
+                      .map((v) => (
+                        <SelectItem key={v.id} value={String(v.id)}>
+                          {v.sku || v.name} ({v.unitsPerVariant} units)
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
               <p className="text-xs text-muted-foreground">
-                Which smaller variant does this break down into?
+                {variantForm.isBaseUnit
+                  ? "This variant is marked as the smallest sellable unit for this product."
+                  : "Which smaller variant does this break down into?"}
               </p>
             </div>
           </div>

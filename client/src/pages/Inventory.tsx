@@ -141,6 +141,7 @@ interface VariantLevel {
   unitsPerVariant: number;
   parentVariantId: number | null;
   hierarchyLevel: number;
+  isBaseUnit: boolean;
   baseSku: string | null;
   productId: number | null;
   variantQty: number;
