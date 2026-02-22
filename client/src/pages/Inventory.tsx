@@ -616,7 +616,7 @@ export default function Inventory() {
   const noReplenCount = variantLevels.filter(v => v.noReplen).length;
   const overReservedCount = variantLevels.filter(v => v.overReserved).length;
   const negativeQtyCount = variantLevels.filter(v => v.negativeQty).length;
-  const issueCount = noBinCount + noCaseBreakCount + noReplenCount + overReservedCount + negativeQtyCount;
+  const issueCount = duplicateCount + strayCount + negativeQtyCount + overReservedCount + noBinCount + noReplenCount + noCaseBreakCount + noBarcodeCount;
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -822,33 +822,55 @@ export default function Inventory() {
           <div className="flex items-center gap-3 text-xs text-muted-foreground py-2 px-1">
             {activeTab === "physical" && (
               <>
+                {/* Totals */}
                 <button
                   className={`hover:underline ${stockFilter === "all" ? "font-semibold" : ""}`}
                   onClick={() => setStockFilter("all")}
                 >
                   {variantLevels.length} SKUs
                 </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${stockFilter === "order_now" ? "underline font-semibold" : ""} ${orderNowCount > 0 ? "text-red-600 font-medium" : ""}`}
-                  onClick={() => setStockFilter(stockFilter === "order_now" ? "all" : "order_now")}
-                >
-                  {orderNowCount} need ordering
-                </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${stockFilter === "order_soon" ? "underline font-semibold" : ""} ${orderSoonCount > 0 ? "text-amber-600 font-medium" : ""}`}
-                  onClick={() => setStockFilter(stockFilter === "order_soon" ? "all" : "order_soon")}
-                >
-                  {orderSoonCount} order soon
-                </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${stockFilter === "oos" ? "underline font-semibold" : ""} ${oosCount > 0 ? "text-red-600 font-medium" : ""}`}
-                  onClick={() => setStockFilter(stockFilter === "oos" ? "all" : "oos")}
-                >
-                  {oosCount} out of stock
-                </button>
+                {locationHealth && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <span>{locationHealth.totalLocations - locationHealth.emptyLocations}/{locationHealth.totalLocations} locations</span>
+                  </>
+                )}
+
+                {/* Purchasing group — clicks navigate to Purchasing tab */}
+                {(orderNowCount > 0 || orderSoonCount > 0 || oosCount > 0) && (
+                  <>
+                    <span className="text-muted-foreground/30 mx-0.5">|</span>
+                    <span className="text-muted-foreground/60 text-[10px] uppercase tracking-wide">Supply</span>
+                    <button
+                      className={`hover:underline ${orderNowCount > 0 ? "text-red-600 font-medium" : ""}`}
+                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("need_ordering"); }}
+                    >
+                      {orderNowCount} need ordering
+                    </button>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${orderSoonCount > 0 ? "text-amber-600 font-medium" : ""}`}
+                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("order_soon"); }}
+                    >
+                      {orderSoonCount} order soon
+                    </button>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${oosCount > 0 ? "text-red-600 font-medium" : ""}`}
+                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("stockout"); }}
+                    >
+                      {oosCount} out of stock
+                    </button>
+                  </>
+                )}
+
+                {/* Data quality / ops group — clicks filter this tab */}
+                {issueCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/30 mx-0.5">|</span>
+                    <span className="text-muted-foreground/60 text-[10px] uppercase tracking-wide">Issues</span>
+                  </>
+                )}
                 {duplicateCount > 0 && (
                   <>
                     <span className="text-muted-foreground/40">·</span>
@@ -935,12 +957,6 @@ export default function Inventory() {
                     >
                       {noBarcodeCount} no barcode
                     </button>
-                  </>
-                )}
-                {locationHealth && (
-                  <>
-                    <span className="text-muted-foreground/40">·</span>
-                    <span>{locationHealth.totalLocations - locationHealth.emptyLocations}/{locationHealth.totalLocations} locations</span>
                   </>
                 )}
               </>
