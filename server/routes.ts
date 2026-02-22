@@ -5566,20 +5566,61 @@ export async function registerRoutes(
       }
 
       const levels = await storage.getInventoryLevelsByProductVariantId(variantId);
-      
+
       // Join with warehouse locations to get location codes
       const locations = await storage.getAllWarehouseLocations();
       const locationMap = new Map(locations.map(l => [l.id, l]));
-      
+
+      // Check which locations have this variant assigned
+      const assignments = await db.select({ warehouseLocationId: productLocations.warehouseLocationId })
+        .from(productLocations)
+        .where(eq(productLocations.productVariantId, variantId));
+      const assignedLocationIds = new Set(assignments.map(a => a.warehouseLocationId));
+
       const result = levels.map(level => ({
         ...level,
+        isAssigned: assignedLocationIds.has(level.warehouseLocationId),
         location: locationMap.get(level.warehouseLocationId)
       }));
-      
+
       res.json(result);
     } catch (error) {
       console.error("Error getting variant locations:", error);
       res.status(500).json({ error: "Failed to get variant locations" });
+    }
+  });
+
+  // Delete an orphan inventory_levels row (0 qty, not assigned)
+  app.delete("/api/inventory/levels/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const [level] = await db.select().from(inventoryLevels).where(eq(inventoryLevels.id, id)).limit(1);
+      if (!level) return res.status(404).json({ error: "Inventory level not found" });
+
+      // Safety: only allow deletion of fully empty rows
+      if (level.variantQty !== 0 || level.reservedQty !== 0) {
+        return res.status(400).json({ error: "Cannot delete — row still has quantity or reservations" });
+      }
+
+      // Safety: don't delete if variant is assigned to this location
+      const [assignment] = await db.select({ id: productLocations.id })
+        .from(productLocations)
+        .where(and(
+          eq(productLocations.productVariantId, level.productVariantId),
+          eq(productLocations.warehouseLocationId, level.warehouseLocationId),
+        ))
+        .limit(1);
+      if (assignment) {
+        return res.status(400).json({ error: "Cannot delete — variant is assigned to this location" });
+      }
+
+      await db.delete(inventoryLevels).where(eq(inventoryLevels.id, id));
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting inventory level:", error);
+      res.status(500).json({ error: error.message || "Failed to delete" });
     }
   });
 

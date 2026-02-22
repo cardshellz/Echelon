@@ -25,7 +25,8 @@ import {
   ArrowDown,
   ArrowLeftRight,
   ShoppingCart,
-  Building2
+  Building2,
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -158,6 +159,7 @@ interface VariantLocationLevel {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
+  isAssigned: boolean;
   location: {
     id: number;
     code: string;
@@ -175,8 +177,20 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   canEdit: boolean;
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
 }) {
+  const queryClient = useQueryClient();
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [`/api/inventory/variants/${variantId}/locations`],
+  });
+
+  const deleteOrphanMutation = useMutation({
+    mutationFn: async (levelId: number) => {
+      const res = await fetch(`/api/inventory/levels/${levelId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error((await res.json()).error);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inventory/variants/${variantId}/locations`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+    },
   });
 
   if (isLoading) {
@@ -242,23 +256,39 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
             {canEdit && (
               <TableCell className="text-right">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 text-xs px-2"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onTransfer(
-                      locLevel.location?.id || 0,
-                      locLevel.location?.code || "",
-                      variantId,
-                      sku
-                    );
-                  }}
-                >
-                  <ArrowLeftRight className="h-3 w-3 mr-1" />
-                  Move
-                </Button>
+                {locLevel.variantQty === 0 && !locLevel.reservedQty && !locLevel.isAssigned ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-xs px-2 text-destructive hover:text-destructive"
+                    disabled={deleteOrphanMutation.isPending}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteOrphanMutation.mutate(locLevel.id);
+                    }}
+                  >
+                    <Trash2 className="h-3 w-3 mr-1" />
+                    Delete
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-xs px-2"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTransfer(
+                        locLevel.location?.id || 0,
+                        locLevel.location?.code || "",
+                        variantId,
+                        sku
+                      );
+                    }}
+                  >
+                    <ArrowLeftRight className="h-3 w-3 mr-1" />
+                    Move
+                  </Button>
+                )}
               </TableCell>
             )}
           </TableRow>
