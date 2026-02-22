@@ -971,6 +971,9 @@ export default function ProductDetail() {
   const sortedVariants = product?.variants
     ? [...product.variants].filter(v => v.isActive !== false).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
     : [];
+  const archivedVariants = product?.variants
+    ? [...product.variants].filter(v => v.isActive === false).sort((a, b) => a.hierarchyLevel - b.hierarchyLevel)
+    : [];
 
   // --- Render ---
   if (!productId) {
@@ -1845,6 +1848,21 @@ export default function ProductDetail() {
                       >
                         Add your first variant
                       </Button>
+                    </div>
+                  )}
+                  {/* Archived variants section */}
+                  {archivedVariants.length > 0 && (
+                    <div className="mt-6 pt-4 border-t border-dashed">
+                      <p className="text-xs font-medium text-muted-foreground mb-2">Archived ({archivedVariants.length})</p>
+                      <div className="space-y-1">
+                        {archivedVariants.map((variant) => (
+                          <div key={variant.id} className="flex items-center gap-3 px-3 py-2 rounded-md bg-muted/30 opacity-50">
+                            <span className="font-mono text-xs">{variant.sku}</span>
+                            <span className="text-xs text-muted-foreground truncate flex-1">{variant.name}</span>
+                            <Badge variant="outline" className="text-[10px] h-5">Archived</Badge>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </CardContent>
