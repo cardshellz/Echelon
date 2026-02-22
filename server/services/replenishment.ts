@@ -268,6 +268,81 @@ class ReplenishmentService {
       activeTasks.map((t) => `${t.pickProductVariantId}:${t.toLocationId}`),
     );
 
+    // --- 5b. Re-evaluate blocked tasks — unblock if source stock now available ---
+    const blockedTasks = activeTasks.filter((t) => t.status === "blocked");
+    for (const task of blockedTasks) {
+      if (!task.sourceProductVariantId || !task.toLocationId) continue;
+
+      const destLocation = pickLocationMap.get(task.toLocationId);
+      if (!destLocation) continue;
+
+      const pickVariant = task.pickProductVariantId != null
+        ? variantMap.get(task.pickProductVariantId)
+        : undefined;
+      const rule = task.pickProductVariantId != null
+        ? ruleByPickVariant.get(task.pickProductVariantId)
+        : undefined;
+      const tierDefault = pickVariant
+        ? this.findTierDefault(tierDefaults, pickVariant.hierarchyLevel, destLocation.warehouseId ?? undefined)
+        : undefined;
+
+      const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+      const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+
+      // Try to find source stock now
+      const sourceLocation = await this.findSourceLocation(
+        task.sourceProductVariantId,
+        destLocation.warehouseId ?? undefined,
+        sourceLocationType,
+        destLocation.parentLocationId,
+        sourcePriority,
+      );
+
+      if (sourceLocation) {
+        // Source stock is available — calculate qty and unblock
+        const currentLevel = levels.find(
+          (l) => l.productVariantId === task.pickProductVariantId && l.warehouseLocationId === task.toLocationId,
+        );
+        const currentQty = currentLevel?.variantQty ?? 0;
+        const maxQty = rule?.maxQty ?? tierDefault?.maxQty ?? null;
+        const triggerValue = rule?.triggerValue ?? tierDefault?.triggerValue ?? 0;
+        const qtyNeeded = (maxQty ?? triggerValue * 2) - currentQty;
+
+        const sourceVariant = variantMap.get(task.sourceProductVariantId) ?? pickVariant;
+        const unitsPerSource = sourceVariant?.unitsPerVariant ?? 1;
+        const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / unitsPerSource));
+        const qtyTargetUnits = qtySourceUnits * unitsPerSource;
+
+        const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
+          rule?.autoReplen ?? null,
+          tierDefault?.autoReplen ?? null,
+          whSettings,
+          qtyTargetUnits,
+        );
+
+        await this.db
+          .update(replenTasks)
+          .set({
+            fromLocationId: sourceLocation.id,
+            qtySourceUnits,
+            qtyTargetUnits,
+            status: "pending",
+            executionMode,
+            notes: `${task.notes || ""}\nUnblocked: source stock found at ${sourceLocation.code}`,
+          })
+          .where(eq(replenTasks.id, task.id));
+
+        // Auto-execute if settings allow
+        if (shouldAutoExecute) {
+          try {
+            await this.executeTask(task.id, "system:auto-replen");
+          } catch (autoErr: any) {
+            console.warn(`[Replen] Auto-execute unblocked task ${task.id} failed:`, autoErr?.message);
+          }
+        }
+      }
+    }
+
     // --- 6. For each level, check threshold and create task if needed ---
     const newTasks: ReplenTask[] = [];
 
@@ -1359,6 +1434,15 @@ class ReplenishmentService {
 
         const unitsPerSource = sourceVariant.unitsPerVariant || 1;
 
+        // Find best source with available stock (needed for both new tasks and unblocking)
+        let selectedSource: { locationId: number; availableQty: number } | null = null;
+        for (const src of sourceLocations) {
+          if (src.qty > 0) {
+            selectedSource = { locationId: src.locationId, availableQty: src.qty };
+            break;
+          }
+        }
+
         // Check for existing pending task (dedup)
         const [existingTask] = await this.db.select().from(replenTasks)
           .where(and(
@@ -1368,23 +1452,49 @@ class ReplenishmentService {
           )).limit(1);
 
         if (existingTask) {
-          skipped.push({
-            pickLocation: destLocation?.code,
-            product: product.sku || product.name,
-            reason: "pending_task_exists",
-            currentQty: pickLoc.currentQty,
-            triggerValue: effectiveTriggerValue,
-          });
-          continue;
-        }
-
-        // Find best source with available stock
-        let selectedSource: { locationId: number; availableQty: number } | null = null;
-        for (const src of sourceLocations) {
-          if (src.qty > 0) {
-            selectedSource = { locationId: src.locationId, availableQty: src.qty };
-            break;
+          if (existingTask.status === "blocked" && selectedSource) {
+            const qtyNeeded = (effectiveMaxQty ?? effectiveTriggerValue * 2) - pickLoc.currentQty;
+            const qtySource = Math.max(1, Math.ceil(qtyNeeded / unitsPerSource));
+            const qtyTarget = qtySource * unitsPerSource;
+            const wh = getLocationSettings(destLocation ?? {} as any);
+            const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
+              override?.autoReplen ?? null,
+              matchedDefault.autoReplen ?? null,
+              wh as WarehouseSettings,
+              qtyTarget,
+            );
+            await this.db.update(replenTasks).set({
+              fromLocationId: selectedSource.locationId,
+              qtySourceUnits: qtySource,
+              qtyTargetUnits: qtyTarget,
+              status: "pending",
+              executionMode,
+              notes: `${existingTask.notes || ""}\nUnblocked: source stock now available`,
+            }).where(eq(replenTasks.id, existingTask.id));
+            tasksCreated.push({
+              id: existingTask.id,
+              action: "unblocked",
+              product: product.sku || product.name,
+              from: selectedSource.locationId,
+              to: pickLoc.locationId,
+            });
+            if (shouldAutoExecute) {
+              try {
+                await this.executeTask(existingTask.id, "system:auto-replen");
+              } catch (autoErr: any) {
+                console.warn(`[Replen] Auto-execute unblocked task ${existingTask.id} failed:`, autoErr?.message);
+              }
+            }
+          } else {
+            skipped.push({
+              pickLocation: destLocation?.code,
+              product: product.sku || product.name,
+              reason: "pending_task_exists",
+              currentQty: pickLoc.currentQty,
+              triggerValue: effectiveTriggerValue,
+            });
           }
+          continue;
         }
 
         if (!selectedSource) {
