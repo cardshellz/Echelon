@@ -852,6 +852,7 @@ export default function Picking() {
   const [binCountOpen, setBinCountOpen] = useState(false);
   const [binCountContext, setBinCountContext] = useState<PickInventoryContext | null>(null);
   const [binCountQty, setBinCountQty] = useState("");
+  const binCountPendingRef = useRef(false); // Track bin count synchronously to prevent race conditions
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
@@ -877,9 +878,12 @@ export default function Picking() {
 
       // Show bin count prompt when needed
       if (inventory?.binCountNeeded) {
+        binCountPendingRef.current = true; // Set ref immediately (synchronous)
         setBinCountContext(inventory);
         setBinCountQty("");
         setBinCountOpen(true);
+      } else {
+        binCountPendingRef.current = false;
       }
     },
   });
@@ -889,6 +893,7 @@ export default function Picking() {
     mutationFn: ({ sku, locationId, actualQty }: { sku: string; locationId: number; actualQty: number }) =>
       confirmBinCount(sku, locationId, actualQty),
     onSuccess: (result: BinCountResponse) => {
+      binCountPendingRef.current = false;
       setBinCountOpen(false);
       setBinCountContext(null);
       if (result.adjustment !== 0) {
@@ -921,6 +926,7 @@ export default function Picking() {
     mutationFn: ({ sku, locationId, actualQty }: { sku: string; locationId: number; actualQty: number }) =>
       skipBinCount(sku, locationId, actualQty),
     onSuccess: () => {
+      binCountPendingRef.current = false;
       setBinCountOpen(false);
       setBinCountContext(null);
       toast({ title: "Replen skipped", description: "Pending replen tasks cancelled" });
@@ -1419,7 +1425,7 @@ export default function Picking() {
     setMultiQtyOpen(false);
     setPickQty(1);
 
-    if (orderCompleted && !binCountOpen) {
+    if (orderCompleted && !binCountPendingRef.current) {
       setTimeout(() => {
         if (pickingMode === "batch") {
           setActiveBatchId(null);
@@ -1435,7 +1441,7 @@ export default function Picking() {
       setTimeout(() => {
         advanceToNext();
         maintainFocus();
-      }, 300);
+        }, 300);
     }
   };
   
@@ -4223,7 +4229,7 @@ export default function Picking() {
       </Dialog>
       
       {/* Bin Count Dialog — shown after pick when inventory needs verification */}
-      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { setBinCountOpen(false); setBinCountContext(null); } }}>
+      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); } }}>
         <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2">
@@ -4334,7 +4340,7 @@ export default function Picking() {
             <Button
               variant="ghost"
               className="w-full h-10 min-h-[44px] text-xs text-muted-foreground"
-              onClick={() => { setBinCountOpen(false); setBinCountContext(null); }}
+              onClick={() => { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); }}
             >
               Dismiss
             </Button>
