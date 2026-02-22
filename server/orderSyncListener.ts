@@ -413,10 +413,78 @@ export async function syncNewOrders() {
   }
 }
 
+// Release pickedQty for items that were picked through the Echelon pick flow
+// but never had recordShipment called (because the fulfillment webhook wasn't wired up).
+// Finds items with picked_quantity > 0 and calls recordShipment to clear pickedQty.
+async function releasePickedInventoryOnShipment(orderId: number): Promise<void> {
+  // Find items that were already picked (picked_quantity > 0)
+  const items = await db.execute<{
+    id: number;
+    sku: string;
+    picked_quantity: number;
+  }>(sql`
+    SELECT id, sku, picked_quantity
+    FROM order_items
+    WHERE order_id = ${orderId}
+      AND picked_quantity > 0
+      AND sku IS NOT NULL
+  `);
+
+  if (items.rows.length === 0) return;
+
+  for (const item of items.rows) {
+    const variant = await storage.getProductVariantBySku(item.sku);
+    if (!variant) continue;
+
+    // Find the location this item was picked from via the pick transaction
+    const pickTx = await db.execute<{ from_location_id: number }>(sql`
+      SELECT from_location_id FROM inventory_transactions
+      WHERE order_id = ${orderId}
+        AND product_variant_id = ${variant.id}
+        AND transaction_type = 'pick'
+        AND from_location_id IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+
+    if (pickTx.rows.length === 0) continue;
+    const locationId = pickTx.rows[0].from_location_id;
+
+    // Check if there's actually pickedQty at this location to release
+    const level = await db.execute<{ picked_qty: number }>(sql`
+      SELECT picked_qty FROM inventory_levels
+      WHERE product_variant_id = ${variant.id}
+        AND warehouse_location_id = ${locationId}
+        AND picked_qty > 0
+    `);
+
+    if (level.rows.length === 0) continue;
+
+    const qtyToRelease = Math.min(item.picked_quantity, level.rows[0].picked_qty);
+    if (qtyToRelease <= 0) continue;
+
+    try {
+      await inventoryCore.recordShipment({
+        productVariantId: variant.id,
+        warehouseLocationId: locationId,
+        qty: qtyToRelease,
+        orderId,
+        orderItemId: item.id,
+        userId: "system",
+      });
+      console.log(`[ORDER SYNC] Released pickedQty: ${qtyToRelease}x ${item.sku} from location ${locationId} for order ${orderId}`);
+    } catch (err: any) {
+      console.warn(`[ORDER SYNC] Failed to release pickedQty for ${item.sku} (order ${orderId}): ${err.message}`);
+    }
+  }
+}
+
 // Deduct inventory for items that were shipped externally (e.g. ShipStation)
-// without going through the Echelon pick flow. Only deducts the delta
-// (quantity - picked_quantity) so partially-picked items aren't double-deducted.
+// without going through the Echelon pick flow. Uses recordShipment which
+// decrements variantQty (and any pickedQty/reservedQty) in one step — the
+// item went straight from shelf to out-the-door, no intermediate "picked" state.
 async function deductInventoryForExternalShipment(orderId: number): Promise<void> {
+  // Find items not yet fully deducted: either not picked at all, or partially picked
   const items = await db.execute<{
     id: number;
     sku: string;
@@ -471,7 +539,12 @@ async function deductInventoryForExternalShipment(orderId: number): Promise<void
     }
 
     try {
-      await inventoryCore.pickItem({
+      // Use recordShipment instead of pickItem — the item was never in a
+      // "picked" state, it went straight from shelf to shipped externally.
+      // recordShipment decrements variantQty, releases reservedQty, and
+      // drains any existing pickedQty first (so previously-picked items
+      // are handled correctly too).
+      await inventoryCore.recordShipment({
         productVariantId: variant.id,
         warehouseLocationId: pickLocationId,
         qty: remainingQty,
@@ -482,7 +555,7 @@ async function deductInventoryForExternalShipment(orderId: number): Promise<void
       await db.execute(sql`
         UPDATE order_items SET picked_quantity = quantity WHERE id = ${item.id}
       `);
-      console.log(`[ORDER SYNC] Deducted ${remainingQty}x ${item.sku} from location ${pickLocationId} for order ${orderId}`);
+      console.log(`[ORDER SYNC] Shipped ${remainingQty}x ${item.sku} from location ${pickLocationId} for order ${orderId}`);
     } catch (err: any) {
       console.warn(`[ORDER SYNC] Inventory deduction failed for ${item.sku} (order ${orderId}): ${err.message}`);
     }
@@ -564,6 +637,8 @@ async function syncOrderUpdate(shopifyOrderId: string) {
         UPDATE orders SET warehouse_status = 'shipped'
         WHERE id = ${orderId}
       `);
+      // Release pickedQty for items that were picked through Echelon pick flow
+      await releasePickedInventoryOnShipment(orderId);
       // Deduct inventory for anything not picked through the normal pick flow
       await deductInventoryForExternalShipment(orderId);
       await db.execute(sql`
