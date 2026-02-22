@@ -10,6 +10,7 @@ import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebh
 import { createProductImportService } from "./services/product-import";
 import { createChannelProductPushService } from "./services/channel-product-push";
 import { createBinAssignmentService } from "./services/bin-assignment";
+import { createPurchasingService, PurchasingError } from "./services/purchasing";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -22,6 +23,7 @@ const orderCombining = createOrderCombiningService(db);
 const productImport = createProductImportService();
 const channelProductPush = createChannelProductPushService(db);
 const binAssignment = createBinAssignmentService(db, storage);
+const purchasing = createPurchasingService(db, storage);
 
 // Permission checking middleware
 function requirePermission(resource: string, action: string) {
@@ -9920,6 +9922,64 @@ export async function registerRoutes(
     }
   });
 
+  // --- Inventory Lots ---
+
+  app.get("/api/inventory/lots", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { inventoryLots } = req.app.locals.services;
+      const variantId = req.query.variantId ? Number(req.query.variantId) : undefined;
+      const locationId = req.query.locationId ? Number(req.query.locationId) : undefined;
+
+      let lots;
+      if (variantId && locationId) {
+        lots = await inventoryLots.getLotsAtLocation(variantId, locationId);
+      } else if (variantId) {
+        lots = await inventoryLots.getLotsByVariant(variantId);
+      } else {
+        lots = await inventoryLots.getActiveLots(500);
+      }
+
+      res.json(lots);
+    } catch (error: any) {
+      console.error("Error fetching inventory lots:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch lots" });
+    }
+  });
+
+  app.get("/api/inventory/lots/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { inventoryLots } = req.app.locals.services;
+      const lot = await inventoryLots.getLot(Number(req.params.id));
+      if (!lot) return res.status(404).json({ error: "Lot not found" });
+      res.json(lot);
+    } catch (error: any) {
+      console.error("Error fetching lot:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch lot" });
+    }
+  });
+
+  app.get("/api/inventory/valuation", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { inventoryLots } = req.app.locals.services;
+      const valuation = await inventoryLots.getInventoryValuation();
+      res.json(valuation);
+    } catch (error: any) {
+      console.error("Error computing inventory valuation:", error);
+      res.status(500).json({ error: error.message || "Failed to compute valuation" });
+    }
+  });
+
+  app.post("/api/inventory/lots/create-legacy", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { inventoryLots } = req.app.locals.services;
+      const result = await inventoryLots.createLegacyLots();
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Error creating legacy lots:", error);
+      res.status(500).json({ error: error.message || "Failed to create legacy lots" });
+    }
+  });
+
   // --- Replenishment Check Route ---
 
   app.post("/api/replen/check", requirePermission("inventory", "adjust"), async (req, res) => {
@@ -10068,9 +10128,13 @@ export async function registerRoutes(
           COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
           COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
           inv.variant_count,
+          order_uom.variant_id,
           order_uom.units_per_variant AS order_uom_units,
           order_uom.sku AS order_uom_sku,
           order_uom.hierarchy_level AS order_uom_level,
+          COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
+          COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
+          on_order.earliest_expected,
           (SELECT MAX(it2.created_at)
            FROM inventory_transactions it2
            JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
@@ -10100,12 +10164,24 @@ export async function registerRoutes(
           GROUP BY pv.product_id
         ) vel ON vel.product_id = p.id
         LEFT JOIN LATERAL (
-          SELECT pv.units_per_variant, pv.sku, pv.hierarchy_level
+          SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
           FROM product_variants pv
           WHERE pv.product_id = p.id AND pv.is_active = true
           ORDER BY pv.hierarchy_level DESC
           LIMIT 1
         ) order_uom ON true
+        LEFT JOIN (
+          SELECT pv.product_id,
+                 SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pv.units_per_variant) AS on_order_pieces,
+                 COUNT(DISTINCT po.id) AS open_po_count,
+                 MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
+          FROM purchase_order_lines pol
+          JOIN purchase_orders po ON po.id = pol.purchase_order_id
+          JOIN product_variants pv ON pv.id = pol.product_variant_id
+          WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
+            AND pol.status IN ('open', 'partially_received')
+          GROUP BY pv.product_id
+        ) on_order ON on_order.product_id = p.id
         WHERE p.is_active = true
         ORDER BY p.sku, p.name
       `);
@@ -10116,12 +10192,18 @@ export async function registerRoutes(
         const totalOnHand = Number(r.total_pieces);
         const totalReserved = Number(r.total_reserved_pieces);
         const totalOutbound = Number(r.total_outbound_pieces);
+        const onOrderPieces = Number(r.on_order_pieces);
+        const openPoCount = Number(r.open_po_count);
+        const earliestExpectedDate = r.earliest_expected || null;
         const leadTimeDays = Number(r.lead_time_days);
         const safetyStockDays = Number(r.safety_stock_days);
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
         const daysOfSupply = avgDailyUsage > 0 ? Math.round(totalOnHand / avgDailyUsage) : totalOnHand > 0 ? 9999 : 0;
         const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
-        const rawOrderQtyPieces = Math.max(0, (leadTimeDays + safetyStockDays) * avgDailyUsage - totalOnHand);
+
+        // Effective supply = on hand + on order (factor in open POs)
+        const effectiveSupply = totalOnHand + onOrderPieces;
+        const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
 
         // Round up to ordering UOM (highest hierarchy variant)
         const orderUomUnits = Number(r.order_uom_units) || 1;
@@ -10132,11 +10214,19 @@ export async function registerRoutes(
           : Math.ceil(rawOrderQtyPieces); // fallback: pieces
         const suggestedOrderPieces = suggestedOrderQty * orderUomUnits;
 
+        // On-order qty in ordering UOM
+        const onOrderQty = orderUomUnits > 1
+          ? Math.floor(onOrderPieces / orderUomUnits)
+          : onOrderPieces;
+
         let status: string;
         if (avgDailyUsage === 0) {
           status = "no_movement";
         } else if (totalOnHand <= 0) {
           status = "stockout";
+        } else if (totalOnHand <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
+          // Below reorder point but on-order covers the gap
+          status = "on_order";
         } else if (totalOnHand <= reorderPoint) {
           status = "order_now";
         } else if (daysOfSupply <= leadTimeDays * 1.5) {
@@ -10147,6 +10237,7 @@ export async function registerRoutes(
 
         return {
           productId: r.product_id,
+          productVariantId: r.variant_id ? Number(r.variant_id) : undefined,
           sku: r.base_sku || r.product_name,
           productName: r.product_name,
           variantCount: Number(r.variant_count || 0),
@@ -10163,6 +10254,10 @@ export async function registerRoutes(
           suggestedOrderPieces,
           orderUomUnits,
           orderUomLabel,
+          onOrderQty,
+          onOrderPieces,
+          openPoCount,
+          earliestExpectedDate,
           status,
           lastReceivedAt: r.last_received_at,
         };
@@ -10286,6 +10381,653 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Internal API - shipments error:", error);
       res.status(500).json({ error: "Failed to fetch shipments" });
+    }
+  });
+
+  // ==========================================================================
+  // PURCHASING — Purchase Orders, Vendor Products, Approval Tiers
+  // ==========================================================================
+
+  // ── PO CRUD ────────────────────────────────────────────────────────
+
+  app.get("/api/purchase-orders", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      // Support ?status=sent&status=acknowledged or ?status=sent,acknowledged
+      let statusFilter: string | string[] | undefined;
+      if (req.query.status) {
+        const raw = Array.isArray(req.query.status) ? req.query.status as string[] : (req.query.status as string).split(",");
+        statusFilter = raw.length === 1 ? raw[0] : raw;
+      }
+      const filters = {
+        status: statusFilter,
+        vendorId: req.query.vendorId ? Number(req.query.vendorId) : undefined,
+        search: req.query.search as string | undefined,
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+        offset: req.query.offset ? Number(req.query.offset) : 0,
+      };
+      const [pos, count, allVendors] = await Promise.all([
+        purchasing.getPurchaseOrders(filters),
+        purchasing.getPurchaseOrdersCount(filters),
+        storage.getAllVendors(),
+      ]);
+      const vendorMap = new Map(allVendors.map((v: any) => [v.id, v]));
+      const enriched = pos.map((po: any) => ({
+        ...po,
+        vendor: vendorMap.get(po.vendorId) || null,
+      }));
+      res.json({ purchaseOrders: enriched, total: count });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
+      if (!po) return res.status(404).json({ error: "Purchase order not found" });
+
+      const [lines, vendor] = await Promise.all([
+        purchasing.getPurchaseOrderLines(po.id),
+        storage.getVendorById(po.vendorId),
+      ]);
+      res.json({ ...po, lines, vendor });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const po = await purchasing.createPO({
+        ...req.body,
+        createdBy: req.session.user?.id,
+      });
+      res.status(201).json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.updatePO(Number(req.params.id), req.body, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await purchasing.deletePO(Number(req.params.id));
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── PO Lines ───────────────────────────────────────────────────────
+
+  app.get("/api/purchase-orders/:id/lines", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const lines = await purchasing.getPurchaseOrderLines(Number(req.params.id));
+      res.json({ lines });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/lines", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const line = await purchasing.addLine(Number(req.params.id), req.body, req.session.user?.id);
+      res.status(201).json(line);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/lines/bulk", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const lines = await purchasing.addBulkLines(Number(req.params.id), req.body.lines, req.session.user?.id);
+      res.status(201).json({ lines });
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/purchase-orders/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const line = await purchasing.updateLine(Number(req.params.lineId), req.body, req.session.user?.id);
+      res.json(line);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/purchase-orders/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await purchasing.deleteLine(Number(req.params.lineId), req.session.user?.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Status Transitions ─────────────────────────────────────────────
+
+  app.post("/api/purchase-orders/:id/submit", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const po = await purchasing.submit(Number(req.params.id), req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/return-to-draft", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.returnToDraft(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const po = await purchasing.approve(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/send", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const po = await purchasing.send(Number(req.params.id), req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const po = await purchasing.acknowledge(Number(req.params.id), req.body, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/cancel", requirePermission("purchasing", "cancel"), async (req, res) => {
+    try {
+      const po = await purchasing.cancel(Number(req.params.id), req.body.reason, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const po = await purchasing.cancel(Number(req.params.id), req.body.reason, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/close", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const po = await purchasing.close(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/close-short", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const po = await purchasing.closeShort(Number(req.params.id), req.body.reason, req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── PO ↔ Receiving ─────────────────────────────────────────────────
+
+  app.post("/api/purchase-orders/:id/create-receipt", requirePermission("inventory", "receive"), async (req, res) => {
+    try {
+      const ro = await purchasing.createReceiptFromPO(Number(req.params.id), req.session.user?.id);
+      res.status(201).json(ro);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/receipts", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const receipts = await purchasing.getPoReceipts(Number(req.params.id));
+      res.json({ receipts });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/history", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const history = await purchasing.getPoStatusHistory(Number(req.params.id));
+      res.json({ history });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/revisions", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const revisions = await purchasing.getPoRevisions(Number(req.params.id));
+      res.json({ revisions });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Vendor Products ────────────────────────────────────────────────
+
+  app.get("/api/vendor-products", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const filters = {
+        vendorId: req.query.vendorId ? Number(req.query.vendorId) : undefined,
+        productId: req.query.productId ? Number(req.query.productId) : undefined,
+        productVariantId: req.query.productVariantId ? Number(req.query.productVariantId) : undefined,
+        isActive: req.query.isActive !== undefined ? Number(req.query.isActive) : undefined,
+      };
+      const vendorProducts = await purchasing.getVendorProducts(filters);
+      res.json({ vendorProducts });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/vendor-products", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const vp = await purchasing.createVendorProduct(req.body);
+      res.status(201).json(vp);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/vendor-products/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const vp = await purchasing.updateVendorProduct(Number(req.params.id), req.body);
+      if (!vp) return res.status(404).json({ error: "Vendor product not found" });
+      res.json(vp);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/vendor-products/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const deleted = await purchasing.deleteVendorProduct(Number(req.params.id));
+      if (!deleted) return res.status(404).json({ error: "Vendor product not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/products/:id/vendors", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const vendorProducts = await purchasing.getVendorProducts({ productId: Number(req.params.id) });
+      res.json({ vendorProducts });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/vendors/:id/products", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const vendorProducts = await purchasing.getVendorProducts({ vendorId: Number(req.params.id) });
+      res.json({ vendorProducts });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Approval Tiers ─────────────────────────────────────────────────
+
+  app.get("/api/purchasing/approval-tiers", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const tiers = await purchasing.getApprovalTiers();
+      res.json({ tiers });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchasing/approval-tiers", requirePermission("settings", "edit"), async (req, res) => {
+    try {
+      const tier = await purchasing.createApprovalTier(req.body);
+      res.status(201).json(tier);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/purchasing/approval-tiers/:id", requirePermission("settings", "edit"), async (req, res) => {
+    try {
+      const tier = await purchasing.updateApprovalTier(Number(req.params.id), req.body);
+      if (!tier) return res.status(404).json({ error: "Approval tier not found" });
+      res.json(tier);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/purchasing/approval-tiers/:id", requirePermission("settings", "edit"), async (req, res) => {
+    try {
+      const deleted = await purchasing.deleteApprovalTier(Number(req.params.id));
+      if (!deleted) return res.status(404).json({ error: "Approval tier not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Reorder → PO ──────────────────────────────────────────────────
+
+  app.post("/api/purchasing/create-po-from-reorder", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const pos = await purchasing.createPOFromReorder(req.body.items, req.session.user?.id);
+      res.status(201).json({ purchaseOrders: pos });
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // FINANCIAL REPORTING ENDPOINTS
+  // ════════════════════════════════════════════════════════════════════
+
+  // --- Order Profitability ---
+  app.get("/api/reports/order-profitability", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const offset = Number(req.query.offset) || 0;
+
+      const rows = await db.execute(sql`
+        SELECT
+          o.id AS order_id,
+          o.order_number,
+          o.customer_name,
+          o.order_placed_at,
+          o.warehouse_status,
+          COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
+          COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
+          COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+          CASE WHEN SUM(oi.total_price_cents) > 0
+            THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+            ELSE 0
+          END AS margin_percent,
+          COUNT(DISTINCT oi.id) AS line_count
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        LEFT JOIN (
+          SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+          FROM order_item_costs
+          GROUP BY order_item_id
+        ) oic_agg ON oic_agg.order_item_id = oi.id
+        WHERE oi.total_price_cents IS NOT NULL
+        GROUP BY o.id, o.order_number, o.customer_name, o.order_placed_at, o.warehouse_status
+        ORDER BY o.order_placed_at DESC NULLS LAST
+        LIMIT ${limit} OFFSET ${offset}
+      `);
+
+      res.json({ orders: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching order profitability:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch order profitability" });
+    }
+  });
+
+  // --- Product Profitability ---
+  app.get("/api/reports/product-profitability", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const offset = Number(req.query.offset) || 0;
+
+      const rows = await db.execute(sql`
+        SELECT
+          pv.id AS product_variant_id,
+          pv.sku,
+          p.title AS product_name,
+          SUM(oi.quantity) AS units_sold,
+          COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
+          COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
+          COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+          CASE WHEN SUM(oi.total_price_cents) > 0
+            THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+            ELSE 0
+          END AS margin_percent,
+          pv.last_cost_cents,
+          pv.avg_cost_cents
+        FROM order_items oi
+        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+        JOIN products p ON p.id = pv.product_id
+        LEFT JOIN (
+          SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+          FROM order_item_costs
+          GROUP BY order_item_id
+        ) oic_agg ON oic_agg.order_item_id = oi.id
+        WHERE oi.total_price_cents IS NOT NULL
+        GROUP BY pv.id, pv.sku, p.title, pv.last_cost_cents, pv.avg_cost_cents
+        ORDER BY profit_cents DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `);
+
+      res.json({ products: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching product profitability:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch product profitability" });
+    }
+  });
+
+  // --- Inventory Valuation (via lot service) ---
+  app.get("/api/reports/inventory-valuation", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { inventoryLots } = req.app.locals.services;
+      const valuation = await inventoryLots.getInventoryValuation();
+      res.json(valuation);
+    } catch (error: any) {
+      console.error("Error computing inventory valuation:", error);
+      res.status(500).json({ error: error.message || "Failed to compute inventory valuation" });
+    }
+  });
+
+  // --- Vendor Spend ---
+  app.get("/api/reports/vendor-spend", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          v.id AS vendor_id,
+          v.name AS vendor_name,
+          COUNT(DISTINCT po.id) AS po_count,
+          SUM(po.total_cents) AS total_spend_cents,
+          SUM(CASE WHEN po.status = 'closed' THEN po.total_cents ELSE 0 END) AS closed_spend_cents,
+          SUM(CASE WHEN po.status IN ('sent', 'acknowledged', 'partially_received') THEN po.total_cents ELSE 0 END) AS open_spend_cents,
+          MIN(po.order_date) AS first_po_date,
+          MAX(po.order_date) AS last_po_date
+        FROM purchase_orders po
+        JOIN vendors v ON v.id = po.vendor_id
+        WHERE po.status NOT IN ('cancelled', 'draft')
+        GROUP BY v.id, v.name
+        ORDER BY total_spend_cents DESC
+      `);
+
+      res.json({ vendors: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching vendor spend:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch vendor spend" });
+    }
+  });
+
+  // --- Cost Variance (PO cost vs actual receipt cost) ---
+  app.get("/api/reports/cost-variance", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          pr.id,
+          po.po_number,
+          v.name AS vendor_name,
+          pol.sku,
+          pol.product_name,
+          pr.po_unit_cost_cents,
+          pr.actual_unit_cost_cents,
+          pr.variance_cents,
+          pr.qty_received,
+          CASE WHEN pr.po_unit_cost_cents > 0
+            THEN ROUND((pr.variance_cents::numeric / pr.po_unit_cost_cents) * 100, 2)
+            ELSE 0
+          END AS variance_percent,
+          pr.created_at
+        FROM po_receipts pr
+        JOIN purchase_orders po ON po.id = pr.purchase_order_id
+        JOIN purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
+        JOIN vendors v ON v.id = po.vendor_id
+        WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
+        ORDER BY ABS(pr.variance_cents) DESC
+        LIMIT 100
+      `);
+
+      res.json({ variances: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching cost variance:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch cost variance" });
+    }
+  });
+
+  // --- Open PO Summary ---
+  app.get("/api/reports/open-po-summary", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          po.status,
+          COUNT(*) AS po_count,
+          SUM(po.total_cents) AS total_value_cents,
+          SUM(po.line_count) AS total_lines,
+          MIN(po.expected_delivery_date) AS earliest_delivery,
+          MAX(po.expected_delivery_date) AS latest_delivery
+        FROM purchase_orders po
+        WHERE po.status IN ('draft', 'pending_approval', 'approved', 'sent', 'acknowledged', 'partially_received')
+        GROUP BY po.status
+        ORDER BY
+          CASE po.status
+            WHEN 'draft' THEN 1
+            WHEN 'pending_approval' THEN 2
+            WHEN 'approved' THEN 3
+            WHEN 'sent' THEN 4
+            WHEN 'acknowledged' THEN 5
+            WHEN 'partially_received' THEN 6
+          END
+      `);
+
+      const total = (rows.rows as any[]).reduce(
+        (acc: any, r: any) => ({
+          poCount: acc.poCount + Number(r.po_count),
+          valueCents: acc.valueCents + Number(r.total_value_cents || 0),
+        }),
+        { poCount: 0, valueCents: 0 },
+      );
+
+      res.json({ byStatus: rows.rows, total });
+    } catch (error: any) {
+      console.error("Error fetching open PO summary:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch open PO summary" });
+    }
+  });
+
+  // --- PO Aging ---
+  app.get("/api/reports/po-aging", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          po.id,
+          po.po_number,
+          v.name AS vendor_name,
+          po.status,
+          po.total_cents,
+          po.order_date,
+          po.expected_delivery_date,
+          EXTRACT(DAY FROM (NOW() - po.order_date))::integer AS days_open,
+          CASE
+            WHEN po.expected_delivery_date < NOW() THEN 'overdue'
+            WHEN po.expected_delivery_date < NOW() + INTERVAL '7 days' THEN 'due_soon'
+            ELSE 'on_track'
+          END AS delivery_status
+        FROM purchase_orders po
+        JOIN vendors v ON v.id = po.vendor_id
+        WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
+          AND po.order_date IS NOT NULL
+        ORDER BY po.order_date ASC
+      `);
+
+      res.json({ orders: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching PO aging:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch PO aging" });
+    }
+  });
+
+  // --- Expected Receipts ---
+  app.get("/api/reports/expected-receipts", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          po.id AS purchase_order_id,
+          po.po_number,
+          v.name AS vendor_name,
+          po.status,
+          po.expected_delivery_date,
+          po.confirmed_delivery_date,
+          COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) AS eta,
+          SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
+          COUNT(pol.id) AS pending_lines,
+          SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
+        FROM purchase_orders po
+        JOIN vendors v ON v.id = po.vendor_id
+        JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+          AND pol.status IN ('open', 'partially_received')
+        WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
+        GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
+        ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
+      `);
+
+      res.json({ receipts: rows.rows });
+    } catch (error: any) {
+      console.error("Error fetching expected receipts:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch expected receipts" });
     }
   });
 

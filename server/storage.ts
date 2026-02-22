@@ -73,6 +73,26 @@ import {
   type InsertReplenTask,
   type WarehouseSettings,
   type InsertWarehouseSettings,
+  type VendorProduct,
+  type InsertVendorProduct,
+  type PoApprovalTier,
+  type InsertPoApprovalTier,
+  type PurchaseOrder,
+  type InsertPurchaseOrder,
+  type PurchaseOrderLine,
+  type InsertPurchaseOrderLine,
+  type PoStatusHistory,
+  type InsertPoStatusHistory,
+  type PoRevision,
+  type InsertPoRevision,
+  type PoReceipt,
+  type InsertPoReceipt,
+  type InventoryLot,
+  type InsertInventoryLot,
+  type OrderItemCost,
+  type InsertOrderItemCost,
+  type OrderItemFinancial,
+  type InsertOrderItemFinancial,
   users,
   productLocations,
   orders,
@@ -110,7 +130,17 @@ import {
   shipments,
   shipmentItems,
   generateLocationCode,
-  echelonSettings
+  echelonSettings,
+  vendorProducts,
+  poApprovalTiers,
+  purchaseOrders,
+  purchaseOrderLines,
+  poStatusHistory,
+  poRevisions,
+  poReceipts,
+  inventoryLots,
+  orderItemCosts,
+  orderItemFinancials,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, or, isNull, isNotNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -527,6 +557,73 @@ export interface IStorage {
   updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>): Promise<ReceivingLine | null>;
   deleteReceivingLine(id: number): Promise<boolean>;
   bulkCreateReceivingLines(lines: InsertReceivingLine[]): Promise<ReceivingLine[]>;
+
+  // ===== PROCUREMENT =====
+
+  // Vendor Products
+  getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]>;
+  getVendorProductById(id: number): Promise<VendorProduct | undefined>;
+  getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined>;
+  createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
+  updateVendorProduct(id: number, updates: Partial<InsertVendorProduct>): Promise<VendorProduct | null>;
+  deleteVendorProduct(id: number): Promise<boolean>;
+
+  // PO Approval Tiers
+  getAllPoApprovalTiers(): Promise<PoApprovalTier[]>;
+  getPoApprovalTierById(id: number): Promise<PoApprovalTier | undefined>;
+  getMatchingApprovalTier(totalCents: number): Promise<PoApprovalTier | undefined>;
+  createPoApprovalTier(data: InsertPoApprovalTier): Promise<PoApprovalTier>;
+  updatePoApprovalTier(id: number, updates: Partial<InsertPoApprovalTier>): Promise<PoApprovalTier | null>;
+  deletePoApprovalTier(id: number): Promise<boolean>;
+
+  // Purchase Orders
+  getPurchaseOrders(filters?: { status?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
+  getPurchaseOrdersCount(filters?: { status?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
+  getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined>;
+  getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
+  createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
+  updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null>;
+  deletePurchaseOrder(id: number): Promise<boolean>;
+  generatePoNumber(): Promise<string>;
+
+  // Purchase Order Lines
+  getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]>;
+  getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined>;
+  createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
+  bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
+  updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null>;
+  deletePurchaseOrderLine(id: number): Promise<boolean>;
+  getOpenPoLinesForVariant(productVariantId: number): Promise<PurchaseOrderLine[]>;
+
+  // PO Status History
+  createPoStatusHistory(data: InsertPoStatusHistory): Promise<PoStatusHistory>;
+  getPoStatusHistory(purchaseOrderId: number): Promise<PoStatusHistory[]>;
+
+  // PO Revisions
+  createPoRevision(data: InsertPoRevision): Promise<PoRevision>;
+  getPoRevisions(purchaseOrderId: number): Promise<PoRevision[]>;
+
+  // PO Receipts
+  createPoReceipt(data: InsertPoReceipt): Promise<PoReceipt>;
+  getPoReceipts(purchaseOrderId: number): Promise<PoReceipt[]>;
+  getPoReceiptsByLine(purchaseOrderLineId: number): Promise<PoReceipt[]>;
+
+  // Inventory Lots
+  getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]>;
+  getInventoryLotById(id: number): Promise<InventoryLot | undefined>;
+  createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot>;
+  updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null>;
+  getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]>;
+  generateLotNumber(): Promise<string>;
+
+  // Order Item Costs
+  createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost>;
+  getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]>;
+  getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]>;
+
+  // Order Item Financials
+  createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial>;
+  getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -3764,6 +3861,391 @@ export class DatabaseStorage implements IStorage {
   async deleteWarehouseSettings(id: number): Promise<boolean> {
     const result = await db.delete(warehouseSettings).where(eq(warehouseSettings.id, id)).returning();
     return result.length > 0;
+  }
+
+  // ==========================================================================
+  // PROCUREMENT
+  // ==========================================================================
+
+  // ===== Vendor Products =====
+
+  async getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]> {
+    const conditions: any[] = [];
+    if (filters?.vendorId) conditions.push(eq(vendorProducts.vendorId, filters.vendorId));
+    if (filters?.productId) conditions.push(eq(vendorProducts.productId, filters.productId));
+    if (filters?.productVariantId) conditions.push(eq(vendorProducts.productVariantId, filters.productVariantId));
+    if (filters?.isActive !== undefined) conditions.push(eq(vendorProducts.isActive, filters.isActive));
+
+    let query = db.select().from(vendorProducts).orderBy(desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    return await query;
+  }
+
+  async getVendorProductById(id: number): Promise<VendorProduct | undefined> {
+    const result = await db.select().from(vendorProducts).where(eq(vendorProducts.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined> {
+    const conditions: any[] = [
+      eq(vendorProducts.productId, productId),
+      eq(vendorProducts.isPreferred, 1),
+      eq(vendorProducts.isActive, 1),
+    ];
+    if (productVariantId) {
+      conditions.push(eq(vendorProducts.productVariantId, productVariantId));
+    }
+    const result = await db.select().from(vendorProducts)
+      .where(and(...conditions))
+      .limit(1);
+    return result[0];
+  }
+
+  async createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct> {
+    const result = await db.insert(vendorProducts).values(data).returning();
+    return result[0];
+  }
+
+  async updateVendorProduct(id: number, updates: Partial<InsertVendorProduct>): Promise<VendorProduct | null> {
+    const result = await db.update(vendorProducts)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(vendorProducts.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deleteVendorProduct(id: number): Promise<boolean> {
+    const result = await db.delete(vendorProducts).where(eq(vendorProducts.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ===== PO Approval Tiers =====
+
+  async getAllPoApprovalTiers(): Promise<PoApprovalTier[]> {
+    return await db.select().from(poApprovalTiers).orderBy(asc(poApprovalTiers.sortOrder));
+  }
+
+  async getPoApprovalTierById(id: number): Promise<PoApprovalTier | undefined> {
+    const result = await db.select().from(poApprovalTiers).where(eq(poApprovalTiers.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getMatchingApprovalTier(totalCents: number): Promise<PoApprovalTier | undefined> {
+    const result = await db.select().from(poApprovalTiers)
+      .where(and(
+        lte(poApprovalTiers.thresholdCents, totalCents),
+        eq(poApprovalTiers.active, 1),
+      ))
+      .orderBy(desc(poApprovalTiers.thresholdCents))
+      .limit(1);
+    return result[0];
+  }
+
+  async createPoApprovalTier(data: InsertPoApprovalTier): Promise<PoApprovalTier> {
+    const result = await db.insert(poApprovalTiers).values(data).returning();
+    return result[0];
+  }
+
+  async updatePoApprovalTier(id: number, updates: Partial<InsertPoApprovalTier>): Promise<PoApprovalTier | null> {
+    const result = await db.update(poApprovalTiers)
+      .set(updates)
+      .where(eq(poApprovalTiers.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deletePoApprovalTier(id: number): Promise<boolean> {
+    const result = await db.delete(poApprovalTiers).where(eq(poApprovalTiers.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ===== Purchase Orders =====
+
+  async getPurchaseOrders(filters?: { status?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]> {
+    const conditions: any[] = [];
+    if (filters?.status) {
+      if (Array.isArray(filters.status)) {
+        conditions.push(inArray(purchaseOrders.status, filters.status));
+      } else {
+        conditions.push(eq(purchaseOrders.status, filters.status));
+      }
+    }
+    if (filters?.vendorId) conditions.push(eq(purchaseOrders.vendorId, filters.vendorId));
+    if (filters?.search) {
+      conditions.push(or(
+        like(purchaseOrders.poNumber, `%${filters.search}%`),
+        like(purchaseOrders.referenceNumber, `%${filters.search}%`),
+      )!);
+    }
+
+    let query = db.select().from(purchaseOrders).orderBy(desc(purchaseOrders.createdAt));
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    if (filters?.limit) query = query.limit(filters.limit) as typeof query;
+    if (filters?.offset) query = query.offset(filters.offset) as typeof query;
+    return await query;
+  }
+
+  async getPurchaseOrdersCount(filters?: { status?: string | string[]; vendorId?: number; search?: string }): Promise<number> {
+    const conditions: any[] = [];
+    if (filters?.status) {
+      if (Array.isArray(filters.status)) {
+        conditions.push(inArray(purchaseOrders.status, filters.status));
+      } else {
+        conditions.push(eq(purchaseOrders.status, filters.status));
+      }
+    }
+    if (filters?.vendorId) conditions.push(eq(purchaseOrders.vendorId, filters.vendorId));
+    if (filters?.search) {
+      conditions.push(or(
+        like(purchaseOrders.poNumber, `%${filters.search}%`),
+        like(purchaseOrders.referenceNumber, `%${filters.search}%`),
+      )!);
+    }
+
+    let query = db.select({ count: sql<number>`count(*)` }).from(purchaseOrders);
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    const result = await query;
+    return Number(result[0]?.count ?? 0);
+  }
+
+  async getPurchaseOrderById(id: number): Promise<PurchaseOrder | undefined> {
+    const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined> {
+    const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.poNumber, poNumber)).limit(1);
+    return result[0];
+  }
+
+  async createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder> {
+    const result = await db.insert(purchaseOrders).values(data).returning();
+    return result[0];
+  }
+
+  async updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>): Promise<PurchaseOrder | null> {
+    const result = await db.update(purchaseOrders)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(purchaseOrders.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deletePurchaseOrder(id: number): Promise<boolean> {
+    const result = await db.delete(purchaseOrders).where(eq(purchaseOrders.id, id)).returning();
+    return result.length > 0;
+  }
+
+  async generatePoNumber(): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `PO-${dateStr}-`;
+
+    const existing = await db.select({ poNumber: purchaseOrders.poNumber })
+      .from(purchaseOrders)
+      .where(like(purchaseOrders.poNumber, `${prefix}%`))
+      .orderBy(desc(purchaseOrders.poNumber))
+      .limit(1);
+
+    let nextNum = 1;
+    if (existing.length > 0 && existing[0].poNumber) {
+      const lastNum = parseInt(existing[0].poNumber.replace(prefix, ''), 10);
+      if (!isNaN(lastNum)) nextNum = lastNum + 1;
+    }
+
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  }
+
+  // ===== Purchase Order Lines =====
+
+  async getPurchaseOrderLines(purchaseOrderId: number): Promise<PurchaseOrderLine[]> {
+    return await db.select().from(purchaseOrderLines)
+      .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
+      .orderBy(asc(purchaseOrderLines.lineNumber));
+  }
+
+  async getPurchaseOrderLineById(id: number): Promise<PurchaseOrderLine | undefined> {
+    const result = await db.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
+    return result[0];
+  }
+
+  async createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine> {
+    const result = await db.insert(purchaseOrderLines).values(data).returning();
+    return result[0];
+  }
+
+  async bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]> {
+    if (lines.length === 0) return [];
+    return await db.insert(purchaseOrderLines).values(lines).returning();
+  }
+
+  async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>): Promise<PurchaseOrderLine | null> {
+    const result = await db.update(purchaseOrderLines)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(purchaseOrderLines.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async deletePurchaseOrderLine(id: number): Promise<boolean> {
+    const result = await db.delete(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).returning();
+    return result.length > 0;
+  }
+
+  async getOpenPoLinesForVariant(productVariantId: number): Promise<PurchaseOrderLine[]> {
+    return await db.select().from(purchaseOrderLines)
+      .innerJoin(purchaseOrders, eq(purchaseOrderLines.purchaseOrderId, purchaseOrders.id))
+      .where(and(
+        eq(purchaseOrderLines.productVariantId, productVariantId),
+        inArray(purchaseOrderLines.status, ['open', 'partially_received']),
+        inArray(purchaseOrders.status, ['approved', 'sent', 'acknowledged', 'partially_received']),
+      ))
+      .then(rows => rows.map(r => r.purchase_order_lines));
+  }
+
+  // ===== PO Status History =====
+
+  async createPoStatusHistory(data: InsertPoStatusHistory): Promise<PoStatusHistory> {
+    const result = await db.insert(poStatusHistory).values(data).returning();
+    return result[0];
+  }
+
+  async getPoStatusHistory(purchaseOrderId: number): Promise<PoStatusHistory[]> {
+    return await db.select().from(poStatusHistory)
+      .where(eq(poStatusHistory.purchaseOrderId, purchaseOrderId))
+      .orderBy(asc(poStatusHistory.changedAt));
+  }
+
+  // ===== PO Revisions =====
+
+  async createPoRevision(data: InsertPoRevision): Promise<PoRevision> {
+    const result = await db.insert(poRevisions).values(data).returning();
+    return result[0];
+  }
+
+  async getPoRevisions(purchaseOrderId: number): Promise<PoRevision[]> {
+    return await db.select().from(poRevisions)
+      .where(eq(poRevisions.purchaseOrderId, purchaseOrderId))
+      .orderBy(desc(poRevisions.createdAt));
+  }
+
+  // ===== PO Receipts =====
+
+  async createPoReceipt(data: InsertPoReceipt): Promise<PoReceipt> {
+    const result = await db.insert(poReceipts).values(data).returning();
+    return result[0];
+  }
+
+  async getPoReceipts(purchaseOrderId: number): Promise<PoReceipt[]> {
+    return await db.select().from(poReceipts)
+      .where(eq(poReceipts.purchaseOrderId, purchaseOrderId))
+      .orderBy(desc(poReceipts.createdAt));
+  }
+
+  async getPoReceiptsByLine(purchaseOrderLineId: number): Promise<PoReceipt[]> {
+    return await db.select().from(poReceipts)
+      .where(eq(poReceipts.purchaseOrderLineId, purchaseOrderLineId))
+      .orderBy(desc(poReceipts.createdAt));
+  }
+
+  // ===== Inventory Lots =====
+
+  async getInventoryLots(filters?: { productVariantId?: number; warehouseLocationId?: number; status?: string; limit?: number; offset?: number }): Promise<InventoryLot[]> {
+    const conditions: any[] = [];
+    if (filters?.productVariantId) conditions.push(eq(inventoryLots.productVariantId, filters.productVariantId));
+    if (filters?.warehouseLocationId) conditions.push(eq(inventoryLots.warehouseLocationId, filters.warehouseLocationId));
+    if (filters?.status) conditions.push(eq(inventoryLots.status, filters.status));
+
+    let query = db.select().from(inventoryLots).orderBy(asc(inventoryLots.receivedAt));
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    if (filters?.limit) query = query.limit(filters.limit) as typeof query;
+    if (filters?.offset) query = query.offset(filters.offset) as typeof query;
+    return await query;
+  }
+
+  async getInventoryLotById(id: number): Promise<InventoryLot | undefined> {
+    const result = await db.select().from(inventoryLots).where(eq(inventoryLots.id, id)).limit(1);
+    return result[0];
+  }
+
+  async createInventoryLot(data: InsertInventoryLot): Promise<InventoryLot> {
+    const result = await db.insert(inventoryLots).values(data).returning();
+    return result[0];
+  }
+
+  async updateInventoryLot(id: number, updates: Partial<InsertInventoryLot>): Promise<InventoryLot | null> {
+    const result = await db.update(inventoryLots)
+      .set(updates)
+      .where(eq(inventoryLots.id, id))
+      .returning();
+    return result[0] || null;
+  }
+
+  async getFifoLots(productVariantId: number, warehouseLocationId: number): Promise<InventoryLot[]> {
+    return await db.select().from(inventoryLots)
+      .where(and(
+        eq(inventoryLots.productVariantId, productVariantId),
+        eq(inventoryLots.warehouseLocationId, warehouseLocationId),
+        eq(inventoryLots.status, 'active'),
+      ))
+      .orderBy(asc(inventoryLots.receivedAt));
+  }
+
+  async generateLotNumber(): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `LOT-${dateStr}-`;
+
+    const existing = await db.select({ lotNumber: inventoryLots.lotNumber })
+      .from(inventoryLots)
+      .where(like(inventoryLots.lotNumber, `${prefix}%`))
+      .orderBy(desc(inventoryLots.lotNumber))
+      .limit(1);
+
+    let nextNum = 1;
+    if (existing.length > 0 && existing[0].lotNumber) {
+      const lastNum = parseInt(existing[0].lotNumber.replace(prefix, ''), 10);
+      if (!isNaN(lastNum)) nextNum = lastNum + 1;
+    }
+
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  }
+
+  // ===== Order Item Costs =====
+
+  async createOrderItemCost(data: InsertOrderItemCost): Promise<OrderItemCost> {
+    const result = await db.insert(orderItemCosts).values(data).returning();
+    return result[0];
+  }
+
+  async getOrderItemCosts(orderItemId: number): Promise<OrderItemCost[]> {
+    return await db.select().from(orderItemCosts)
+      .where(eq(orderItemCosts.orderItemId, orderItemId));
+  }
+
+  async getOrderItemCostsByOrder(orderId: number): Promise<OrderItemCost[]> {
+    return await db.select().from(orderItemCosts)
+      .where(eq(orderItemCosts.orderId, orderId));
+  }
+
+  // ===== Order Item Financials =====
+
+  async createOrderItemFinancial(data: InsertOrderItemFinancial): Promise<OrderItemFinancial> {
+    const result = await db.insert(orderItemFinancials).values(data).returning();
+    return result[0];
+  }
+
+  async getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]> {
+    return await db.select().from(orderItemFinancials)
+      .where(eq(orderItemFinancials.orderId, orderId));
   }
 }
 

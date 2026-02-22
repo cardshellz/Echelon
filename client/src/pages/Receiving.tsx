@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
@@ -51,7 +52,8 @@ import {
   AlertTriangle,
   XCircle,
   MapPin,
-  Building2
+  Building2,
+  ChevronsUpDown
 } from "lucide-react";
 
 interface Vendor {
@@ -81,6 +83,7 @@ interface ReceivingLine {
   status: string;
   unitCost: number | null;
   notes: string | null;
+  purchaseOrderLineId: number | null;
 }
 
 interface ReceivingOrder {
@@ -91,6 +94,7 @@ interface ReceivingOrder {
   sourceType: string;
   vendorId: number | null;
   warehouseId: number | null;
+  purchaseOrderId: number | null;
   status: string;
   expectedDate: string | null;
   receivedDate: string | null;
@@ -264,6 +268,11 @@ DEF-456,25,,,5.00,,Location TBD`;
     URL.revokeObjectURL(url);
   };
   
+  // PO selection state (for "From Purchase Order" flow)
+  const [selectedPoId, setSelectedPoId] = useState<number | null>(null);
+  const [poSearch, setPoSearch] = useState("");
+  const [poPickerOpen, setPoPickerOpen] = useState(false);
+
   // New receipt form
   const [newReceipt, setNewReceipt] = useState({
     sourceType: "blind",
@@ -305,9 +314,34 @@ DEF-456,25,,,5.00,,Location TBD`;
     queryKey: ["/api/product-variants"],
   });
 
+  // Open POs for "From PO" flow (only fetch when PO source type selected)
+  const { data: openPOs = [] } = useQuery<{ id: number; poNumber: string; status: string; vendorId: number; totalCents: number; lineCount: number; vendor?: { name: string } }[]>({
+    queryKey: ["/api/purchase-orders", { status: "receivable" }],
+    queryFn: async () => {
+      const res = await fetch("/api/purchase-orders?status=sent,acknowledged,partially_received");
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.purchaseOrders || [];
+    },
+    enabled: newReceipt.sourceType === "po",
+  });
+
   // Mutations
   const createReceiptMutation = useMutation({
     mutationFn: async (data: typeof newReceipt) => {
+      // If PO source type with a selected PO, use the create-receipt-from-PO endpoint
+      if (data.sourceType === "po" && selectedPoId) {
+        const res = await fetch(`/api/purchase-orders/${selectedPoId}/create-receipt`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error || "Failed to create receipt from PO");
+        }
+        return res.json();
+      }
+      // Regular receipt creation
       const res = await fetch("/api/receiving", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -324,14 +358,23 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onSuccess: (receipt) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       setShowNewReceiptDialog(false);
       setNewReceipt({ sourceType: "blind", vendorId: "", warehouseId: "", poNumber: "", notes: "" });
+      setSelectedPoId(null);
+      setPoSearch("");
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created` });
-      setSelectedReceipt(receipt);
-      setShowReceiptDetail(true);
+      // Fetch the full receipt with lines for the detail view
+      fetch(`/api/receiving/${receipt.id}`).then(r => r.json()).then(full => {
+        setSelectedReceipt(full);
+        setShowReceiptDetail(true);
+      }).catch(() => {
+        setSelectedReceipt(receipt);
+        setShowReceiptDetail(true);
+      });
     },
-    onError: () => {
-      toast({ title: "Error", description: "Failed to create receipt", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message || "Failed to create receipt", variant: "destructive" });
     },
   });
 
@@ -404,6 +447,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       toast({
         title: "Receipt closed",
         description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
@@ -1191,12 +1235,72 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </SelectContent>
                   </Select>
                 </div>
-                {(newReceipt.sourceType === "po" || newReceipt.sourceType === "asn") && (
+                {newReceipt.sourceType === "po" && (
+                  <div>
+                    <Label className="text-sm">Purchase Order</Label>
+                    <Popover open={poPickerOpen} onOpenChange={setPoPickerOpen}>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between h-11 font-normal">
+                          {selectedPoId
+                            ? (() => {
+                                const po = openPOs.find(p => p.id === selectedPoId);
+                                return po ? `${po.poNumber} — ${po.vendor?.name || "Unknown"}` : "Select PO...";
+                              })()
+                            : "Select open PO..."}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                        <Command shouldFilter={false}>
+                          <CommandInput placeholder="Search PO#..." value={poSearch} onValueChange={setPoSearch} />
+                          <CommandList>
+                            <CommandEmpty>No open POs found</CommandEmpty>
+                            <CommandGroup>
+                              {openPOs
+                                .filter(po =>
+                                  !poSearch ||
+                                  po.poNumber.toLowerCase().includes(poSearch.toLowerCase()) ||
+                                  po.vendor?.name?.toLowerCase().includes(poSearch.toLowerCase())
+                                )
+                                .slice(0, 50)
+                                .map(po => (
+                                  <CommandItem
+                                    key={po.id}
+                                    value={po.id.toString()}
+                                    onSelect={() => {
+                                      setSelectedPoId(po.id);
+                                      setNewReceipt(prev => ({
+                                        ...prev,
+                                        poNumber: po.poNumber,
+                                        vendorId: po.vendorId?.toString() || prev.vendorId,
+                                      }));
+                                      setPoPickerOpen(false);
+                                      setPoSearch("");
+                                    }}
+                                  >
+                                    <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-medium">{po.poNumber}</div>
+                                      <div className="text-xs text-muted-foreground truncate">
+                                        {po.vendor?.name || "No vendor"} — {po.lineCount} lines — ${((po.totalCents || 0) / 100).toFixed(2)}
+                                      </div>
+                                    </div>
+                                    <Badge variant="outline" className="ml-2 text-xs shrink-0">{po.status}</Badge>
+                                  </CommandItem>
+                                ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                )}
+                {newReceipt.sourceType === "asn" && (
                   <div>
                     <Label className="text-sm">PO / Reference Number</Label>
-                    <Input 
+                    <Input
                       className="h-11"
-                      value={newReceipt.poNumber} 
+                      value={newReceipt.poNumber}
                       onChange={(e) => setNewReceipt({ ...newReceipt, poNumber: e.target.value })}
                       placeholder="Enter PO or reference number"
                       autoComplete="off"
@@ -1359,9 +1463,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </Badge>
                 </DialogTitle>
                 <DialogDescription className="text-xs md:text-sm">
-                  {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" : 
-                   selectedReceipt.sourceType === "po" ? `PO: ${selectedReceipt.poNumber}` :
-                   selectedReceipt.sourceType}
+                  {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" :
+                   selectedReceipt.sourceType === "po" ? (
+                     selectedReceipt.purchaseOrderId ? (
+                       <span>PO: <a href={`/purchasing/${selectedReceipt.purchaseOrderId}`} className="text-primary underline">{selectedReceipt.poNumber}</a></span>
+                     ) : `PO: ${selectedReceipt.poNumber}`
+                   ) : selectedReceipt.sourceType}
                   {selectedReceipt.vendor && ` • ${selectedReceipt.vendor.name}`}
                 </DialogDescription>
               </DialogHeader>

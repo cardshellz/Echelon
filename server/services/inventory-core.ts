@@ -11,6 +11,7 @@ import type {
   InsertInventoryTransaction,
   ProductVariant,
 } from "@shared/schema";
+import type { InventoryLotService } from "./inventory-lots";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -38,7 +39,10 @@ type DrizzleDb = {
  *   without structural changes.
  */
 export class InventoryCoreService {
-  constructor(private readonly db: DrizzleDb) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    private readonly lotService: InventoryLotService | null = null,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // READ helpers
@@ -185,6 +189,9 @@ export class InventoryCoreService {
     referenceId: string;
     notes?: string;
     userId?: string;
+    unitCostCents?: number;
+    receivingOrderId?: number;
+    purchaseOrderId?: number;
   }): Promise<void> {
     if (params.qty <= 0) {
       throw new Error("qty must be a positive integer");
@@ -202,6 +209,27 @@ export class InventoryCoreService {
         variantQty: params.qty,
       });
 
+      // Create lot for FIFO cost tracking
+      let lotId: number | undefined;
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        const lot = await lotSvc.createLot({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty: params.qty,
+          unitCostCents: params.unitCostCents ?? 0,
+          receivingOrderId: params.receivingOrderId,
+          purchaseOrderId: params.purchaseOrderId,
+          notes: params.notes,
+        });
+        lotId = lot.id;
+
+        // Update variant cost fields
+        if (params.unitCostCents !== undefined && params.unitCostCents > 0) {
+          await lotSvc.updateVariantCosts(params.productVariantId, params.unitCostCents);
+        }
+      }
+
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         toLocationId: params.warehouseLocationId,
@@ -215,6 +243,8 @@ export class InventoryCoreService {
         referenceId: params.referenceId,
         notes: params.notes ?? null,
         userId: params.userId ?? null,
+        unitCostCents: params.unitCostCents ?? null,
+        inventoryLotId: lotId ?? null,
       });
     });
   }
@@ -279,6 +309,18 @@ export class InventoryCoreService {
       if (!updated) {
         // Another concurrent pick claimed the stock — insufficient qty
         return false;
+      }
+
+      // Pick from lots (FIFO) and record order_item_costs
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.pickFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty: params.qty,
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+        });
       }
 
       await svc.logTransaction({
@@ -364,6 +406,16 @@ export class InventoryCoreService {
         });
       }
 
+      // Deplete lots for shipment
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.shipFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty: params.qty,
+        });
+      }
+
       // Determine source state for audit log
       const sourceState = fromOnHand > 0 ? "on_hand" : "picked";
 
@@ -431,6 +483,17 @@ export class InventoryCoreService {
       await svc.adjustLevel(level.id, {
         variantQty: params.qtyDelta,
       });
+
+      // Adjust lots (positive = new zero-cost lot, negative = consume oldest first)
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.adjustLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qtyDelta: params.qtyDelta,
+          notes: params.reason,
+        });
+      }
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
@@ -532,6 +595,16 @@ export class InventoryCoreService {
         reservedQty: params.qty,
       });
 
+      // Reserve from lots (FIFO)
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.reserveFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty: params.qty,
+        });
+      }
+
       await svc.logTransaction({
         productVariantId: params.productVariantId,
         toLocationId: params.warehouseLocationId,
@@ -593,6 +666,16 @@ export class InventoryCoreService {
       await svc.adjustLevel(level.id, {
         reservedQty: -params.qty,
       });
+
+      // Release from lots (reverse FIFO — newest first)
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.releaseFromLots({
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          qty: params.qty,
+        });
+      }
 
       await svc.logTransaction({
         productVariantId: params.productVariantId,
@@ -715,6 +798,18 @@ export class InventoryCoreService {
       await svc.adjustLevel(destLevel.id, {
         variantQty: params.qty,
       });
+
+      // Transfer lots (consume source FIFO, create new lot at dest with avg cost)
+      if (svc.lotService) {
+        const lotSvc = svc.lotService.withTx(tx);
+        await lotSvc.transferLots({
+          productVariantId: params.productVariantId,
+          fromLocationId: params.fromLocationId,
+          toLocationId: params.toLocationId,
+          qty: params.qty,
+          notes: params.notes,
+        });
+      }
 
       // --- AUDIT (two entries: source decrement + dest increment) ---
       await svc.logTransaction({
@@ -895,7 +990,7 @@ export class InventoryCoreService {
   // ---------------------------------------------------------------------------
 
   private withTx(tx: any): InventoryCoreService {
-    return new InventoryCoreService(tx);
+    return new InventoryCoreService(tx, this.lotService);
   }
 }
 
@@ -903,6 +998,6 @@ export class InventoryCoreService {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createInventoryCoreService(db: any) {
-  return new InventoryCoreService(db);
+export function createInventoryCoreService(db: any, lotService?: InventoryLotService | null) {
+  return new InventoryCoreService(db, lotService ?? null);
 }

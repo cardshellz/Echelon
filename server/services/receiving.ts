@@ -20,11 +20,24 @@ interface InventoryCore {
     referenceId: string;
     notes?: string;
     userId?: string;
+    unitCostCents?: number;
+    receivingOrderId?: number;
+    purchaseOrderId?: number;
   }): Promise<void>;
 }
 
 interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+}
+
+interface Purchasing {
+  onReceivingOrderClosed(receivingOrderId: number, receivingLines: Array<{
+    receivingLineId: number;
+    purchaseOrderLineId?: number;
+    receivedQty: number;
+    damagedQty?: number;
+    unitCost?: number;
+  }>): Promise<void>;
 }
 
 interface Storage {
@@ -113,6 +126,7 @@ export class ReceivingService {
     private inventoryCore: InventoryCore,
     private channelSync: ChannelSync,
     private storage: Storage,
+    private purchasing: Purchasing | null = null,
   ) {}
 
   // ─── Open ─────────────────────────────────────────────────────
@@ -188,6 +202,9 @@ export class ReceivingService {
           referenceId: batchId,
           notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
           userId: userId || undefined,
+          unitCostCents: (line as any).unitCost || undefined,
+          receivingOrderId: orderId,
+          purchaseOrderId: order.purchaseOrderId || undefined,
         });
 
         // Mark line as put away
@@ -217,6 +234,21 @@ export class ReceivingService {
       receivedLineCount: linesReceived,
       receivedTotalUnits: totalReceived,
     });
+
+    // If this receipt is linked to a PO, update PO line quantities and auto-transition status
+    if (order.purchaseOrderId && this.purchasing) {
+      try {
+        await this.purchasing.onReceivingOrderClosed(orderId, lines.map((l: any) => ({
+          receivingLineId: l.id,
+          purchaseOrderLineId: l.purchaseOrderLineId || undefined,
+          receivedQty: l.receivedQty || 0,
+          damagedQty: l.damagedQty || 0,
+          unitCost: l.unitCost || undefined,
+        })));
+      } catch (err: any) {
+        console.warn(`[Receiving] PO callback failed for order ${orderId}:`, err.message);
+      }
+    }
 
     return {
       success: true,
@@ -585,6 +617,7 @@ export function createReceivingService(
   inventoryCore: InventoryCore,
   channelSync: ChannelSync,
   storage: Storage,
+  purchasing?: Purchasing | null,
 ) {
-  return new ReceivingService(db, inventoryCore, channelSync, storage);
+  return new ReceivingService(db, inventoryCore, channelSync, storage, purchasing ?? null);
 }

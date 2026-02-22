@@ -27,6 +27,7 @@
  */
 
 import { createInventoryCoreService } from "./inventory-core";
+import { createInventoryLotService } from "./inventory-lots";
 import { createInventoryAtpService } from "./inventory-atp";
 import { createBreakAssemblyService } from "./break-assembly";
 import { createFulfillmentService } from "./fulfillment";
@@ -46,11 +47,13 @@ import { createReceivingService } from "./receiving";
 import { createProductImportService } from "./product-import";
 import { createChannelProductPushService } from "./channel-product-push";
 import { createBinAssignmentService } from "./bin-assignment";
+import { createPurchasingService } from "./purchasing";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
   // Foundation
-  const inventoryCore = createInventoryCoreService(db);
+  const inventoryLots = createInventoryLotService(db);
+  const inventoryCore = createInventoryCoreService(db, inventoryLots);
   const atp = createInventoryAtpService(db);
 
   // Channel sync (depends on atp only — must precede fulfillment/reservation)
@@ -79,8 +82,11 @@ export function createServices(db: any) {
   // Standalone (read-only analytics)
   const operationsDashboard = createOperationsDashboardService(db);
 
-  // Depends on inventoryCore + channelSync + storage
-  const receiving = createReceivingService(db, inventoryCore, channelSync, storage);
+  // Purchasing (depends on storage) — must precede receiving
+  const purchasing = createPurchasingService(db, storage);
+
+  // Depends on inventoryCore + channelSync + storage + purchasing
+  const receiving = createReceivingService(db, inventoryCore, channelSync, storage, purchasing);
 
   // Standalone (imports from Shopify)
   const productImport = createProductImportService();
@@ -93,6 +99,7 @@ export function createServices(db: any) {
 
   return {
     inventoryCore,
+    inventoryLots,
     atp,
     breakAssembly,
     fulfillment,
@@ -112,6 +119,7 @@ export function createServices(db: any) {
     productImport,
     channelProductPush,
     binAssignment,
+    purchasing,
   };
 }
 
@@ -155,3 +163,7 @@ export type { ProductImportService, ContentSyncResult, ProductSyncResult } from 
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./channel-product-push";
 export { createBinAssignmentService } from "./bin-assignment";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment";
+export { createPurchasingService } from "./purchasing";
+export type { PurchasingService, PurchasingError } from "./purchasing";
+export { createInventoryLotService } from "./inventory-lots";
+export type { InventoryLotService } from "./inventory-lots";

@@ -83,6 +83,13 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "roles", action: "edit", description: "Edit role permissions", category: "users" },
   { resource: "roles", action: "delete", description: "Delete custom roles", category: "users" },
   
+  // Purchasing
+  { resource: "purchasing", action: "view", description: "View purchase orders and vendor products", category: "purchasing" },
+  { resource: "purchasing", action: "create", description: "Create purchase orders", category: "purchasing" },
+  { resource: "purchasing", action: "edit", description: "Edit purchase orders and vendor products", category: "purchasing" },
+  { resource: "purchasing", action: "approve", description: "Approve purchase orders (multi-level)", category: "purchasing" },
+  { resource: "purchasing", action: "cancel", description: "Cancel purchase orders", category: "purchasing" },
+
   // Settings
   { resource: "settings", action: "view", description: "View system settings", category: "settings" },
   { resource: "settings", action: "edit", description: "Edit system settings", category: "settings" },
@@ -116,6 +123,7 @@ export const SYSTEM_ROLES = {
       "inventory:view",
       "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
       "picking:view", "picking:perform", "picking:complete",
+      "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
       "reports:view",
       "users:view",
       "shopify:view",

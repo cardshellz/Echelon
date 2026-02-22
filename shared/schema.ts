@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint, boolean, numeric } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -218,7 +218,12 @@ export const orderItems = pgTable("order_items", {
   name: text("name").notNull(),
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // For scanner matching
-  
+
+  // ===== FINANCIALS (from channel) =====
+  priceCents: integer("price_cents"), // Sale price per unit
+  discountCents: integer("discount_cents").default(0), // Per-unit discount
+  totalPriceCents: integer("total_price_cents"), // Line total after discount
+
   // ===== QUANTITIES =====
   quantity: integer("quantity").notNull(),
   pickedQuantity: integer("picked_quantity").notNull().default(0),
@@ -490,6 +495,7 @@ export const products = pgTable("products", {
   leadTimeDays: integer("lead_time_days").notNull().default(120), // Supplier lead time in days
   safetyStockDays: integer("safety_stock_days").notNull().default(7), // Safety stock buffer in days of cover
   status: varchar("status", { length: 20 }).default("active"), // active, draft, archived
+  inventoryType: varchar("inventory_type", { length: 20 }).notNull().default("inventory"), // inventory, non_inventory, expense
   isActive: boolean("is_active").notNull().default(true),
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -524,6 +530,9 @@ export const productVariants = pgTable("product_variants", {
   heightMm: integer("height_mm"),
   priceCents: integer("price_cents"),
   compareAtPriceCents: integer("compare_at_price_cents"),
+  standardCostCents: integer("standard_cost_cents"), // Standard cost for valuation
+  lastCostCents: integer("last_cost_cents"), // Most recent purchase cost
+  avgCostCents: integer("avg_cost_cents"), // Weighted average cost (updated on each receipt)
   trackInventory: boolean("track_inventory").default(true),
   inventoryPolicy: varchar("inventory_policy", { length: 20 }).default("deny"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }),
@@ -635,6 +644,10 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   batchId: varchar("batch_id", { length: 50 }), // Groups transactions from same operation
   sourceState: varchar("source_state", { length: 20 }), // "on_hand", "committed", "picked", etc.
   targetState: varchar("target_state", { length: 20 }), // "committed", "picked", "shipped", etc.
+
+  // Cost & lot tracking
+  unitCostCents: integer("unit_cost_cents"), // Cost traceability on every transaction
+  inventoryLotId: integer("inventory_lot_id"), // Lot linkage (FK added after inventoryLots table definition)
 
   // Reference links - which operation triggered this transaction
   orderId: integer("order_id").references(() => orders.id),
@@ -1238,7 +1251,7 @@ export type ChannelAssetOverride = typeof channelAssetOverrides.$inferSelect;
 // ============================================
 
 // Permission categories for UI grouping
-export const permissionCategoryEnum = ["dashboard", "inventory", "orders", "picking", "channels", "reports", "users", "settings"] as const;
+export const permissionCategoryEnum = ["dashboard", "inventory", "orders", "picking", "purchasing", "channels", "reports", "users", "settings"] as const;
 export type PermissionCategory = typeof permissionCategoryEnum[number];
 
 // Auth roles - custom roles created by admin
@@ -1457,6 +1470,22 @@ export const vendors = pgTable("vendors", {
   address: text("address"),
   notes: text("notes"),
   active: integer("active").notNull().default(1),
+
+  // ===== PROCUREMENT ENHANCEMENTS =====
+  paymentTermsDays: integer("payment_terms_days").default(30), // Net payment days
+  paymentTermsType: varchar("payment_terms_type", { length: 20 }).default("net"), // net, cod, prepaid, cia
+  currency: varchar("currency", { length: 3 }).default("USD"), // Default transaction currency
+  taxId: varchar("tax_id", { length: 50 }), // Vendor tax ID / EIN (1099 reporting)
+  accountNumber: varchar("account_number", { length: 50 }), // Our account # with this vendor
+  website: text("website"),
+  defaultLeadTimeDays: integer("default_lead_time_days").default(120), // Default lead time
+  minimumOrderCents: integer("minimum_order_cents").default(0), // Min PO dollar amount
+  freeFreightThresholdCents: integer("free_freight_threshold_cents"), // PO value above which freight is free
+  vendorType: varchar("vendor_type", { length: 20 }).default("distributor"), // manufacturer, distributor, broker
+  shipFromAddress: text("ship_from_address"), // Where they ship from (for landed cost)
+  country: varchar("country", { length: 50 }).default("US"), // Origin country
+  rating: integer("rating"), // 1-5 manual performance rating
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -1485,6 +1514,7 @@ export const receivingOrders = pgTable("receiving_orders", {
   // Identification
   receiptNumber: varchar("receipt_number", { length: 50 }).notNull().unique(), // Auto-generated RCV-YYYYMMDD-XXX
   poNumber: varchar("po_number", { length: 100 }), // External PO number from vendor
+  purchaseOrderId: integer("purchase_order_id"), // FK to purchase_orders (added post-definition)
   asnNumber: varchar("asn_number", { length: 100 }), // Advance shipment notice number
   
   // Source & vendor
@@ -1547,7 +1577,10 @@ export const receivingLines = pgTable("receiving_lines", {
   expectedQty: integer("expected_qty").notNull().default(0), // From PO (0 for blind receives)
   receivedQty: integer("received_qty").notNull().default(0), // Actually received
   damagedQty: integer("damaged_qty").notNull().default(0), // Damaged during receipt
-  
+
+  // PO line linkage
+  purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
+
   // Cost tracking
   unitCost: integer("unit_cost"), // Cost per unit in cents
   
@@ -1684,3 +1717,386 @@ export const appSettings = pgTable("app_settings", {
 });
 
 export type AppSetting = typeof appSettings.$inferSelect;
+
+// ============================================================================
+// PROCUREMENT — Purchase Orders, Vendor Products, Approval Tiers
+// ============================================================================
+
+// PO status workflow: draft → pending_approval → approved → sent → acknowledged → partially_received → received → closed
+export const poStatusEnum = [
+  "draft", "pending_approval", "approved", "sent", "acknowledged",
+  "partially_received", "received", "closed", "cancelled",
+] as const;
+export type PoStatus = typeof poStatusEnum[number];
+
+// PO type
+export const poTypeEnum = ["standard", "blanket", "dropship"] as const;
+export type PoType = typeof poTypeEnum[number];
+
+// PO priority
+export const poPriorityEnum = ["rush", "high", "normal"] as const;
+export type PoPriority = typeof poPriorityEnum[number];
+
+// PO line status
+export const poLineStatusEnum = ["open", "partially_received", "received", "closed", "cancelled"] as const;
+export type PoLineStatus = typeof poLineStatusEnum[number];
+
+// Inventory type for products
+export const inventoryTypeEnum = ["inventory", "non_inventory", "expense"] as const;
+export type InventoryType = typeof inventoryTypeEnum[number];
+
+// ===== VENDOR PRODUCTS (product → vendor mapping) =====
+
+export const vendorProducts = pgTable("vendor_products", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: "cascade" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // Specific variant if vendor sells at variant level
+  vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's own catalog number
+  vendorProductName: text("vendor_product_name"), // Vendor's product name
+  unitCostCents: integer("unit_cost_cents").default(0), // Negotiated cost per unit
+  packSize: integer("pack_size").default(1), // Units in vendor's selling unit
+  moq: integer("moq").default(1), // Minimum order quantity
+  leadTimeDays: integer("lead_time_days"), // Vendor-specific override
+  isPreferred: integer("is_preferred").default(0), // 1 = primary vendor for this product
+  isActive: integer("is_active").default(1),
+  lastPurchasedAt: timestamp("last_purchased_at"), // For stale-link detection
+  lastCostCents: integer("last_cost_cents"), // Cost from most recent closed PO
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("vendor_products_vendor_product_variant_idx").on(table.vendorId, table.productId, table.productVariantId),
+]);
+
+export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertVendorProduct = z.infer<typeof insertVendorProductSchema>;
+export type VendorProduct = typeof vendorProducts.$inferSelect;
+
+// ===== PO APPROVAL TIERS =====
+
+export const poApprovalTiers = pgTable("po_approval_tiers", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  tierName: text("tier_name").notNull(), // "Standard", "High Value", "Critical"
+  thresholdCents: integer("threshold_cents").notNull(), // Min PO total to trigger this tier
+  approverRole: varchar("approver_role", { length: 30 }).notNull(), // Required role: "lead", "admin"
+  sortOrder: integer("sort_order").default(0),
+  active: integer("active").default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPoApprovalTierSchema = createInsertSchema(poApprovalTiers).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPoApprovalTier = z.infer<typeof insertPoApprovalTierSchema>;
+export type PoApprovalTier = typeof poApprovalTiers.$inferSelect;
+
+// ===== PURCHASE ORDERS =====
+
+export const purchaseOrders = pgTable("purchase_orders", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  poNumber: varchar("po_number", { length: 30 }).notNull().unique(), // Auto: PO-YYYYMMDD-###
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }), // Ship-to warehouse
+  shipToAddress: text("ship_to_address"), // Override warehouse address
+  shipFromAddress: text("ship_from_address"), // Vendor's ship-from (for landed cost)
+
+  // Status
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  poType: varchar("po_type", { length: 20 }).default("standard"), // standard, blanket, dropship
+  priority: varchar("priority", { length: 10 }).default("normal"), // rush, high, normal
+
+  // Dates
+  orderDate: timestamp("order_date"), // When PO placed (set on "send")
+  expectedDeliveryDate: timestamp("expected_delivery_date"), // Our requested date
+  confirmedDeliveryDate: timestamp("confirmed_delivery_date"), // Vendor's confirmed date
+  cancelDate: timestamp("cancel_date"), // Auto-cancel if not received by
+  actualDeliveryDate: timestamp("actual_delivery_date"), // When fully received
+
+  // Financials
+  currency: varchar("currency", { length: 3 }).default("USD"),
+  subtotalCents: bigint("subtotal_cents", { mode: "number" }).default(0), // Sum of line totals
+  discountCents: bigint("discount_cents", { mode: "number" }).default(0), // Header-level discount
+  taxCents: bigint("tax_cents", { mode: "number" }).default(0),
+  shippingCostCents: bigint("shipping_cost_cents", { mode: "number" }).default(0), // Freight estimate
+  totalCents: bigint("total_cents", { mode: "number" }).default(0), // Grand total
+  paymentTermsDays: integer("payment_terms_days"), // Copied from vendor, editable
+  paymentTermsType: varchar("payment_terms_type", { length: 20 }),
+
+  // Shipping
+  shippingMethod: varchar("shipping_method", { length: 50 }), // ground, ocean, air, ltl, ftl
+  shippingAccountNumber: varchar("shipping_account_number", { length: 50 }), // If using own freight account
+  incoterms: varchar("incoterms", { length: 10 }), // FOB, CIF, EXW, DDP
+  freightTerms: varchar("freight_terms", { length: 30 }), // prepaid, collect, third_party
+
+  // Vendor
+  referenceNumber: varchar("reference_number", { length: 100 }), // Vendor's quote/contract ref
+  vendorContactName: varchar("vendor_contact_name", { length: 100 }),
+  vendorContactEmail: varchar("vendor_contact_email", { length: 255 }),
+  vendorAckDate: timestamp("vendor_ack_date"), // When vendor acknowledged
+  vendorRefNumber: varchar("vendor_ref_number", { length: 100 }), // Vendor's order confirmation #
+
+  // Counts
+  lineCount: integer("line_count").default(0), // Denormalized
+  receivedLineCount: integer("received_line_count").default(0),
+  revisionNumber: integer("revision_number").default(0), // Increments on amendments after sent
+
+  // Notes
+  vendorNotes: text("vendor_notes"), // Printed on PO document
+  internalNotes: text("internal_notes"), // Warehouse-only
+
+  // Approval
+  approvalTierId: integer("approval_tier_id").references(() => poApprovalTiers.id, { onDelete: "set null" }),
+  approvedBy: varchar("approved_by").references(() => users.id, { onDelete: "set null" }),
+  approvedAt: timestamp("approved_at"),
+  approvalNotes: text("approval_notes"),
+
+  // Lifecycle
+  sentToVendorAt: timestamp("sent_to_vendor_at"),
+  cancelledAt: timestamp("cancelled_at"),
+  cancelledBy: varchar("cancelled_by").references(() => users.id, { onDelete: "set null" }),
+  cancelReason: text("cancel_reason"),
+  closedAt: timestamp("closed_at"),
+  closedBy: varchar("closed_by").references(() => users.id, { onDelete: "set null" }),
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  metadata: jsonb("metadata"), // Extensible (attachments, custom fields)
+});
+
+export const insertPurchaseOrderSchema = createInsertSchema(purchaseOrders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertPurchaseOrder = z.infer<typeof insertPurchaseOrderSchema>;
+export type PurchaseOrder = typeof purchaseOrders.$inferSelect;
+
+// ===== PURCHASE ORDER LINES =====
+
+export const purchaseOrderLines = pgTable("purchase_order_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  lineNumber: integer("line_number").notNull(), // Sequential for display
+
+  // Product (required — catalog item must exist for full cost chain)
+  productId: integer("product_id").notNull().references(() => products.id),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  vendorProductId: integer("vendor_product_id").references(() => vendorProducts.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }), // Cached at creation
+  productName: text("product_name"), // Cached
+  description: text("description"), // Special instructions, specs
+  vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's SKU
+
+  // Quantities
+  unitOfMeasure: varchar("unit_of_measure", { length: 20 }), // each, pack, box, case
+  unitsPerUom: integer("units_per_uom").default(1), // For base unit conversion
+  orderQty: integer("order_qty").notNull(), // Ordered quantity (variant units)
+  receivedQty: integer("received_qty").default(0), // Running tally from receipts
+  damagedQty: integer("damaged_qty").default(0), // Running tally
+  returnedQty: integer("returned_qty").default(0), // Running tally for RMA
+  cancelledQty: integer("cancelled_qty").default(0),
+
+  // Cost
+  unitCostCents: integer("unit_cost_cents").notNull().default(0),
+  discountPercent: numeric("discount_percent", { precision: 5, scale: 2 }).default("0"),
+  discountCents: integer("discount_cents").default(0), // Computed
+  taxRatePercent: numeric("tax_rate_percent", { precision: 5, scale: 2 }).default("0"),
+  taxCents: integer("tax_cents").default(0),
+  lineTotalCents: bigint("line_total_cents", { mode: "number" }), // (order_qty * unit_cost_cents) - discount + tax
+
+  // Dates
+  expectedDeliveryDate: timestamp("expected_delivery_date"), // Per-line override
+  promisedDate: timestamp("promised_date"), // Vendor's per-line promise
+  receivedDate: timestamp("received_date"), // When first receipt happened
+  fullyReceivedDate: timestamp("fully_received_date"), // When received_qty >= order_qty
+  lastReceivedAt: timestamp("last_received_at"), // Most recent receipt
+
+  // Status
+  status: varchar("status", { length: 20 }).default("open"), // open, partially_received, received, closed, cancelled
+  closeShortReason: text("close_short_reason"), // Why closed before fully received
+
+  // Meta
+  weightGrams: integer("weight_grams"), // For freight estimation
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertPurchaseOrderLineSchema = createInsertSchema(purchaseOrderLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertPurchaseOrderLine = z.infer<typeof insertPurchaseOrderLineSchema>;
+export type PurchaseOrderLine = typeof purchaseOrderLines.$inferSelect;
+
+// ===== PO STATUS HISTORY (status transition audit) =====
+
+export const poStatusHistory = pgTable("po_status_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  fromStatus: varchar("from_status", { length: 20 }), // NULL for creation
+  toStatus: varchar("to_status", { length: 20 }).notNull(),
+  changedBy: varchar("changed_by").references(() => users.id, { onDelete: "set null" }),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+  notes: text("notes"), // Reason for change
+  revisionNumber: integer("revision_number"), // Snapshot
+});
+
+export const insertPoStatusHistorySchema = createInsertSchema(poStatusHistory).omit({
+  id: true,
+  changedAt: true,
+});
+
+export type InsertPoStatusHistory = z.infer<typeof insertPoStatusHistorySchema>;
+export type PoStatusHistory = typeof poStatusHistory.$inferSelect;
+
+// ===== PO REVISIONS (field-level change audit) =====
+
+export const poRevisions = pgTable("po_revisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  revisionNumber: integer("revision_number"),
+  changedBy: varchar("changed_by").references(() => users.id, { onDelete: "set null" }),
+  changeType: varchar("change_type", { length: 20 }), // line_added, line_removed, qty_changed, price_changed, date_changed, header_changed
+  fieldChanged: varchar("field_changed", { length: 50 }),
+  oldValue: text("old_value"),
+  newValue: text("new_value"),
+  lineId: integer("line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }), // Nullable — for line-level changes
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPoRevisionSchema = createInsertSchema(poRevisions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPoRevision = z.infer<typeof insertPoRevisionSchema>;
+export type PoRevision = typeof poRevisions.$inferSelect;
+
+// ===== PO RECEIPTS (PO line → Receiving line link) =====
+
+export const poReceipts = pgTable("po_receipts", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  purchaseOrderLineId: integer("purchase_order_line_id").notNull().references(() => purchaseOrderLines.id, { onDelete: "cascade" }),
+  receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
+  receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id, { onDelete: "cascade" }),
+  qtyReceived: integer("qty_received").notNull().default(0),
+  poUnitCostCents: integer("po_unit_cost_cents"), // Cost on PO
+  actualUnitCostCents: integer("actual_unit_cost_cents"), // Actual receipt cost
+  varianceCents: integer("variance_cents"), // actual - po
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("po_receipts_po_line_rcv_line_idx").on(table.purchaseOrderLineId, table.receivingLineId),
+]);
+
+export const insertPoReceiptSchema = createInsertSchema(poReceipts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertPoReceipt = z.infer<typeof insertPoReceiptSchema>;
+export type PoReceipt = typeof poReceipts.$inferSelect;
+
+// ============================================================================
+// INVENTORY LOTS — FIFO cost layers (Phase 6, schema defined now)
+// ============================================================================
+
+export const inventoryLotStatusEnum = ["active", "depleted", "expired"] as const;
+export type InventoryLotStatus = typeof inventoryLotStatusEnum[number];
+
+export const inventoryLots = pgTable("inventory_lots", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  lotNumber: varchar("lot_number", { length: 50 }).notNull(), // Auto: LOT-YYYYMMDD-###
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
+  receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id, { onDelete: "set null" }),
+  purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
+  unitCostCents: integer("unit_cost_cents").notNull().default(0), // Cost per variant unit
+  qtyOnHand: integer("qty_on_hand").notNull().default(0),
+  qtyReserved: integer("qty_reserved").notNull().default(0),
+  qtyPicked: integer("qty_picked").notNull().default(0),
+  receivedAt: timestamp("received_at").notNull(), // FIFO sort key
+  expiryDate: timestamp("expiry_date"), // Future (perishables)
+  status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInventoryLotSchema = createInsertSchema(inventoryLots).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertInventoryLot = z.infer<typeof insertInventoryLotSchema>;
+export type InventoryLot = typeof inventoryLots.$inferSelect;
+
+// ============================================================================
+// ORDER ITEM COSTS — COGS per shipment (Phase 6, schema defined now)
+// ============================================================================
+
+export const orderItemCosts = pgTable("order_item_costs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  inventoryLotId: integer("inventory_lot_id").notNull().references(() => inventoryLots.id),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  qty: integer("qty").notNull(), // Units from this lot
+  unitCostCents: integer("unit_cost_cents").notNull(), // From lot
+  totalCostCents: integer("total_cost_cents").notNull(), // qty * unit_cost
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertOrderItemCostSchema = createInsertSchema(orderItemCosts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOrderItemCost = z.infer<typeof insertOrderItemCostSchema>;
+export type OrderItemCost = typeof orderItemCosts.$inferSelect;
+
+// ============================================================================
+// ORDER ITEM FINANCIALS — Contribution profit per shipped line item (Phase 7)
+// ============================================================================
+
+export const orderItemFinancials = pgTable("order_item_financials", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  productId: integer("product_id").references(() => products.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }), // Cached for fast queries
+  productName: text("product_name"), // Cached
+  qtyShipped: integer("qty_shipped").notNull(),
+  revenueCents: bigint("revenue_cents", { mode: "number" }).notNull(), // From order_items.total_price_cents
+  cogsCents: bigint("cogs_cents", { mode: "number" }).notNull(), // From SUM(order_item_costs.total_cost_cents)
+  grossProfitCents: bigint("gross_profit_cents", { mode: "number" }).notNull(), // revenue - cogs
+  marginPercent: numeric("margin_percent", { precision: 5, scale: 2 }), // (profit / revenue) * 100
+  avgSellingPriceCents: integer("avg_selling_price_cents"), // revenue / qty
+  avgUnitCostCents: integer("avg_unit_cost_cents"), // cogs / qty
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }), // Which vendor supplied (from lot's PO)
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
+  shippedAt: timestamp("shipped_at").notNull(), // When fulfilled
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertOrderItemFinancialSchema = createInsertSchema(orderItemFinancials).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOrderItemFinancial = z.infer<typeof insertOrderItemFinancialSchema>;
+export type OrderItemFinancial = typeof orderItemFinancials.$inferSelect;

@@ -141,6 +141,9 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
       fulfillable_quantity: number | null;
       fulfillment_status: string | null;
       requires_shipping: boolean | null;
+      paid_price_cents: number | null;
+      total_price_cents: number | null;
+      total_discount_cents: number | null;
     }>(sql`
       SELECT * FROM shopify_order_items WHERE order_id = ${shopifyOrderId}
     `);
@@ -208,6 +211,9 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
       imageUrl: imageUrl,
       barcode: binLocation?.barcode || null,
       requiresShipping: item.requires_shipping ? 1 : 0,
+      priceCents: item.paid_price_cents ?? null,
+      discountCents: item.total_discount_cents ? Math.round((item.total_discount_cents || 0) / qty) : 0,
+      totalPriceCents: item.total_price_cents ?? null,
     });
   }
 

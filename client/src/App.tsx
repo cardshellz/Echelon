@@ -29,6 +29,8 @@ import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
 import BinAssignments from "@/pages/BinAssignments";
 import ChannelAllocation from "@/pages/ChannelAllocation";
+import PurchaseOrders from "@/pages/PurchaseOrders";
+import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import Returns from "@/pages/Returns";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
@@ -151,8 +153,11 @@ function Router() {
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/purchasing/:id">
+          <ProtectedRoute component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/purchasing">
-          <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrders} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/receiving">
           <ProtectedRoute component={Receiving} allowedRoles={["admin", "lead"]} />

@@ -1,12 +1,18 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   TrendingDown,
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
+  ShoppingCart,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { useToast } from "@/hooks/use-toast";
 import {
   Select,
   SelectContent,
@@ -25,6 +31,7 @@ import {
 
 interface ReorderItem {
   productId: number;
+  productVariantId?: number;
   sku: string;
   productName: string;
   variantCount: number;
@@ -41,6 +48,10 @@ interface ReorderItem {
   suggestedOrderPieces: number;
   orderUomUnits: number;
   orderUomLabel: string;
+  onOrderQty: number;
+  onOrderPieces: number;
+  openPoCount: number;
+  earliestExpectedDate: string | null;
   status: string;
   lastReceivedAt: string | null;
 }
@@ -67,6 +78,7 @@ const STATUS_CONFIG: Record<string, { label: string; className: string; priority
   stockout: { label: "Stockout", className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", priority: 0 },
   order_now: { label: "Order Now", className: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400", priority: 1 },
   order_soon: { label: "Order Soon", className: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400", priority: 2 },
+  on_order: { label: "On Order", className: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400", priority: 2.5 },
   ok: { label: "OK", className: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400", priority: 3 },
   no_movement: { label: "No Movement", className: "bg-gray-100 text-gray-600 dark:bg-gray-800/30 dark:text-gray-400", priority: 4 },
 };
@@ -83,7 +95,10 @@ const LOOKBACK_OPTIONS = [
 export default function PurchasingView({ searchQuery, statusFilter, setStatusFilter }: PurchasingViewProps) {
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const [, navigate] = useLocation();
 
   const { data, isLoading } = useQuery<ReorderAnalysis>({
     queryKey: ["/api/purchasing/reorder-analysis"],
@@ -123,6 +138,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
         case "sku": aVal = a.sku; bVal = b.sku; break;
         case "name": aVal = a.productName; bVal = b.productName; break;
         case "onHand": aVal = a.totalOnHand; bVal = b.totalOnHand; break;
+        case "onOrder": aVal = a.onOrderPieces; bVal = b.onOrderPieces; break;
         case "usage": aVal = a.periodUsage; bVal = b.periodUsage; break;
         case "dos": aVal = a.daysOfSupply; bVal = b.daysOfSupply; break;
         case "reorderPt": aVal = a.reorderPoint; bVal = b.reorderPoint; break;
@@ -138,6 +154,74 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
       }
       return sortDir === "asc" ? aVal - bVal : bVal - aVal;
     });
+
+  // Selection helpers
+  const toggleSelect = (productId: number) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    const selectableIds = filtered.filter(i => i.suggestedOrderQty > 0).map(i => i.productId);
+    const allSelected = selectableIds.length > 0 && selectableIds.every(id => selectedIds.has(id));
+    if (allSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(selectableIds));
+    }
+  };
+  const selectableCount = filtered.filter(i => i.suggestedOrderQty > 0).length;
+  const allSelected = selectableCount > 0 && filtered.filter(i => i.suggestedOrderQty > 0).every(i => selectedIds.has(i.productId));
+
+  // Create PO from selected reorder items
+  const createPoMutation = useMutation({
+    mutationFn: async (items: Array<{ productId: number; productVariantId: number; suggestedQty: number }>) => {
+      const res = await fetch("/api/purchasing/create-po-from-reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || "Failed to create PO");
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      setSelectedIds(new Set());
+      const poCount = result.purchaseOrders?.length || 1;
+      toast({
+        title: `${poCount} PO${poCount > 1 ? "s" : ""} created`,
+        description: poCount === 1
+          ? `${result.purchaseOrders?.[0]?.poNumber} created as draft`
+          : `${poCount} POs created, grouped by vendor`,
+      });
+      if (poCount === 1 && result.purchaseOrders?.[0]?.id) {
+        navigate(`/purchasing/${result.purchaseOrders[0].id}`);
+      } else {
+        navigate("/purchasing");
+      }
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to create PO", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const handleCreatePO = () => {
+    const items = filtered
+      .filter(i => selectedIds.has(i.productId) && i.suggestedOrderQty > 0)
+      .map(i => ({
+        productId: i.productId,
+        productVariantId: i.productVariantId || i.productId, // fallback
+        suggestedQty: i.suggestedOrderQty,
+      }));
+    if (items.length === 0) return;
+    createPoMutation.mutate(items);
+  };
 
   const SortIcon = ({ field }: { field: string }) => {
     if (sortField !== field) return <ArrowUpDown className="h-3 w-3 text-muted-foreground" />;
@@ -170,6 +254,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
             <SelectItem value="stockout">Stockout</SelectItem>
             <SelectItem value="order_now">Order Now</SelectItem>
             <SelectItem value="order_soon">Order Soon</SelectItem>
+            <SelectItem value="on_order">On Order</SelectItem>
             <SelectItem value="ok">OK</SelectItem>
             <SelectItem value="no_movement">No Movement</SelectItem>
           </SelectContent>
@@ -215,12 +300,22 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
           <div className="md:hidden flex-1 overflow-auto space-y-3">
             {filtered.map((item) => {
               const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
+              const canSelect = item.suggestedOrderQty > 0;
               return (
                 <div key={item.productId} className="rounded-md border bg-card p-4">
                   <div className="flex items-start justify-between mb-2">
-                    <div>
-                      <div className="font-mono font-medium text-primary text-sm">{item.sku}</div>
-                      <div className="text-sm text-muted-foreground mt-0.5">{item.productName}</div>
+                    <div className="flex items-start gap-2">
+                      {canSelect && (
+                        <Checkbox
+                          checked={selectedIds.has(item.productId)}
+                          onCheckedChange={() => toggleSelect(item.productId)}
+                          className="mt-0.5"
+                        />
+                      )}
+                      <div>
+                        <div className="font-mono font-medium text-primary text-sm">{item.sku}</div>
+                        <div className="text-sm text-muted-foreground mt-0.5">{item.productName}</div>
+                      </div>
                     </div>
                     <Badge variant="outline" className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
                   </div>
@@ -250,6 +345,11 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                       {item.periodUsage > 0 && item.orderUomUnits > 1 && <div className="text-[10px] text-muted-foreground font-mono">{item.periodUsage.toLocaleString()} pcs</div>}
                     </div>
                   </div>
+                  {item.onOrderPieces > 0 && (
+                    <div className="mt-2 text-xs bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded p-2 text-blue-800 dark:text-blue-400">
+                      On order: <span className="font-mono font-bold">{item.onOrderPieces.toLocaleString()}</span> pcs from {item.openPoCount} PO{item.openPoCount !== 1 ? "s" : ""}
+                    </div>
+                  )}
                   {item.suggestedOrderQty > 0 && (
                     <div className="mt-2 text-xs bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800/30 rounded p-2">
                       Suggested order: <span className="font-mono font-bold">{item.suggestedOrderQty.toLocaleString()}</span> {item.orderUomUnits > 1 ? item.orderUomLabel.toLowerCase() + (item.suggestedOrderQty !== 1 ? "s" : "") : "pcs"}
@@ -266,6 +366,13 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
             <Table>
               <TableHeader className="bg-muted/40 sticky top-0 z-10">
                 <TableRow>
+                  <TableHead className="w-[40px]">
+                    <Checkbox
+                      checked={allSelected}
+                      onCheckedChange={toggleSelectAll}
+                      aria-label="Select all"
+                    />
+                  </TableHead>
                   <TableHead className="w-[160px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("sku")}>
                     <div className="flex items-center gap-1">SKU <SortIcon field="sku" /></div>
                   </TableHead>
@@ -274,6 +381,9 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                   </TableHead>
                   <TableHead className="text-right w-[110px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onHand")}>
                     <div className="flex items-center justify-end gap-1">On Hand <SortIcon field="onHand" /></div>
+                  </TableHead>
+                  <TableHead className="text-right w-[90px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("onOrder")}>
+                    <div className="flex items-center justify-end gap-1">On Order <SortIcon field="onOrder" /></div>
                   </TableHead>
                   <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("usage")}>
                     <div className="flex items-center justify-end gap-1">{data?.lookbackDays ?? ""}d Usage <SortIcon field="usage" /></div>
@@ -295,8 +405,17 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
               <TableBody>
                 {filtered.map((item) => {
                   const cfg = STATUS_CONFIG[item.status] || STATUS_CONFIG.ok;
+                  const canSelect = item.suggestedOrderQty > 0;
                   return (
-                    <TableRow key={item.productId}>
+                    <TableRow key={item.productId} className={selectedIds.has(item.productId) ? "bg-primary/5" : ""}>
+                      <TableCell>
+                        {canSelect ? (
+                          <Checkbox
+                            checked={selectedIds.has(item.productId)}
+                            onCheckedChange={() => toggleSelect(item.productId)}
+                          />
+                        ) : <span className="w-4" />}
+                      </TableCell>
                       <TableCell className="font-mono font-medium text-primary">{item.sku}</TableCell>
                       <TableCell className="truncate max-w-[200px]">{item.productName}</TableCell>
                       <TableCell className="text-right font-mono font-bold">
@@ -307,6 +426,22 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                           </div>
                         ) : (
                           <span>{item.totalOnHand.toLocaleString()}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {item.onOrderPieces > 0 ? (
+                          <div>
+                            <span className="text-blue-600 font-medium">
+                              {item.onOrderQty > 0 && item.orderUomUnits > 1
+                                ? <>{item.onOrderQty.toLocaleString()} {item.orderUomLabel.toLowerCase()}{item.onOrderQty !== 1 ? "s" : ""}</>
+                                : <>{item.onOrderPieces.toLocaleString()}</>}
+                            </span>
+                            {item.orderUomUnits > 1 && (
+                              <div className="text-[10px] text-muted-foreground">{item.onOrderPieces.toLocaleString()} pcs</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
                         )}
                       </TableCell>
                       <TableCell className="text-right font-mono text-muted-foreground">
@@ -356,7 +491,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
                 })}
                 {filtered.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={10} className="text-center py-8 text-muted-foreground">
                       No items match the current filters
                     </TableCell>
                   </TableRow>
@@ -371,6 +506,32 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
               {" · "}Quantities shown in ordering UOM where available
             </div>
           )}
+        </div>
+      )}
+
+      {/* Floating action bar when items selected */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-primary text-primary-foreground rounded-lg shadow-lg px-4 py-3 flex items-center gap-3 min-w-[280px]">
+          <span className="text-sm font-medium">{selectedIds.size} item{selectedIds.size !== 1 ? "s" : ""} selected</span>
+          <div className="flex-1" />
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            <X className="h-3 w-3 mr-1" />
+            Clear
+          </Button>
+          <Button
+            size="sm"
+            className="h-8 bg-white text-primary hover:bg-white/90"
+            onClick={handleCreatePO}
+            disabled={createPoMutation.isPending}
+          >
+            <ShoppingCart className="h-3 w-3 mr-1" />
+            {createPoMutation.isPending ? "Creating..." : "Create PO"}
+          </Button>
         </div>
       )}
     </div>
