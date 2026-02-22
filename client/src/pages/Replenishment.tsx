@@ -1368,9 +1368,9 @@ export default function Replenishment() {
                     <TableRow>
                       <TableHead className="text-xs">Created</TableHead>
                       <TableHead className="text-xs hidden md:table-cell">Source</TableHead>
+                      <TableHead className="text-xs hidden md:table-cell">Pick</TableHead>
                       <TableHead className="text-xs">From</TableHead>
                       <TableHead className="hidden sm:table-cell"></TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Pick</TableHead>
                       <TableHead className="text-xs">To</TableHead>
                       <TableHead className="text-xs">Qty</TableHead>
                       <TableHead className="text-xs">Status</TableHead>
@@ -1393,14 +1393,6 @@ export default function Replenishment() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="py-2">
-                          <div className="font-mono text-xs sm:text-sm">
-                            {task.fromLocation?.code || `LOC-${task.fromLocationId}`}
-                          </div>
-                        </TableCell>
-                        <TableCell className="hidden sm:table-cell py-2">
-                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
-                        </TableCell>
                         <TableCell className="hidden md:table-cell py-2">
                           <div className="text-xs sm:text-sm">
                             {task.pickVariant?.sku || task.product?.sku || "-"}
@@ -1408,6 +1400,14 @@ export default function Replenishment() {
                               <div className="text-[10px] text-muted-foreground">{uomLabel(task.pickVariant.hierarchyLevel)}</div>
                             )}
                           </div>
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <div className="font-mono text-xs sm:text-sm">
+                            {task.fromLocation?.code || `LOC-${task.fromLocationId}`}
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell py-2">
+                          <ArrowRight className="w-4 h-4 text-muted-foreground" />
                         </TableCell>
                         <TableCell className="py-2">
                           <div className="font-mono text-xs sm:text-sm">
