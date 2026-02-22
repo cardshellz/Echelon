@@ -2000,10 +2000,13 @@ export default function ProductDetail() {
             <div className="space-y-1.5">
               <Label>Units Per Variant</Label>
               <Input
-                type="number"
-                min={1}
+                type="text"
+                inputMode="numeric"
                 value={variantForm.unitsPerVariant}
-                onChange={(e) => handleUnitsChange(parseInt(e.target.value) || 1)}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/[^0-9]/g, "");
+                  handleUnitsChange(parseInt(val) || 1);
+                }}
                 className="h-11"
               />
             </div>
