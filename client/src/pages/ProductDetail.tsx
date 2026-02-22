@@ -334,7 +334,7 @@ export default function ProductDetail() {
         inventoryDetails: { variantId: number; sku: string | null; warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[];
       };
       shipments: { pending: number };
-      channelFeeds: { active: number };
+      channelFeeds: { active: number; details?: { channelName: string; provider: string; channelSku: string | null; variantSku: string | null }[] };
       variants: { total: number; active: number };
     };
   } | null>(null);
@@ -888,7 +888,7 @@ export default function ProductDetail() {
         inventoryDetails: { warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[];
       };
       shipments: { pending: number };
-      channelFeeds: { active: number };
+      channelFeeds: { active: number; details?: { channelName: string; provider: string; channelSku: string | null }[] };
     };
   } | null>(null);
   const [variantArchiveScanning, setVariantArchiveScanning] = useState(false);
@@ -2190,11 +2190,18 @@ export default function ProductDetail() {
                   )}
                   <div>
                     <p className="text-sm font-medium">Channel Feeds</p>
-                    <p className="text-xs text-muted-foreground">
-                      {archiveDeps.dependencies.channelFeeds.active > 0
-                        ? `${archiveDeps.dependencies.channelFeeds.active} active Shopify feed mappings will be deactivated`
-                        : "No active channel feeds"}
-                    </p>
+                    {archiveDeps.dependencies.channelFeeds.active > 0 ? (
+                      <div className="text-xs text-muted-foreground space-y-0.5">
+                        <p>{archiveDeps.dependencies.channelFeeds.active} active feed{archiveDeps.dependencies.channelFeeds.active !== 1 ? "s" : ""} will be deactivated:</p>
+                        {archiveDeps.dependencies.channelFeeds.details?.map((d, i) => (
+                          <p key={i} className="pl-2 text-foreground/70">
+                            {d.channelName} — {d.variantSku}{d.channelSku ? ` (${d.channelSku})` : ""}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No active channel feeds</p>
+                    )}
                   </div>
                 </div>
 
@@ -2457,11 +2464,18 @@ export default function ProductDetail() {
                   )}
                   <div>
                     <p className="text-sm font-medium">Channel Feeds</p>
-                    <p className="text-xs text-muted-foreground">
-                      {variantArchiveDeps.dependencies.channelFeeds.active > 0
-                        ? `${variantArchiveDeps.dependencies.channelFeeds.active} active feed mappings will be deactivated`
-                        : "No active channel feeds"}
-                    </p>
+                    {variantArchiveDeps.dependencies.channelFeeds.active > 0 ? (
+                      <div className="text-xs text-muted-foreground space-y-0.5">
+                        <p>{variantArchiveDeps.dependencies.channelFeeds.active} active feed{variantArchiveDeps.dependencies.channelFeeds.active !== 1 ? "s" : ""} will be deactivated:</p>
+                        {variantArchiveDeps.dependencies.channelFeeds.details?.map((d, i) => (
+                          <p key={i} className="pl-2 text-foreground/70">
+                            {d.channelName}{d.channelSku ? ` (${d.channelSku})` : ""}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">No active channel feeds</p>
+                    )}
                   </div>
                 </div>
 

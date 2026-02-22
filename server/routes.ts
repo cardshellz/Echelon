@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channelListings, inventoryLevels, inventoryTransactions, orders, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
 import { createOrderCombiningService } from "./services/order-combining";
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import { createProductImportService } from "./services/product-import";
@@ -3502,18 +3502,28 @@ export async function registerRoutes(
 
       const pendingShipments = await storage.getPendingShipmentItemsByVariantIds(variantIds);
 
-      // Count active channel feeds
+      // Count active channel feeds with details
       let activeFeeds = 0;
+      const feedDetails: { channelName: string; provider: string; channelSku: string | null; variantSku: string | null }[] = [];
       for (const v of variants) {
         const feeds = await storage.getChannelFeedsByProductVariantId(v.id);
-        activeFeeds += feeds.filter((f: any) => f.isActive === 1).length;
+        const activeFeedList = feeds.filter((f: any) => f.isActive === 1);
+        activeFeeds += activeFeedList.length;
+        for (const feed of activeFeedList) {
+          let channelName = feed.channelType || "Unknown";
+          if (feed.channelId) {
+            const [ch] = await db.select({ name: channels.name }).from(channels).where(eq(channels.id, feed.channelId)).limit(1);
+            if (ch) channelName = ch.name;
+          }
+          feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku, variantSku: v.sku });
+        }
       }
 
       // Build dependency report
       const dependencies = {
         inventory: { totalQty: totalInventory, bins: inventoryBins, variants: variantInventory, hasReserved: totalReserved > 0, inventoryDetails },
         shipments: { pending: pendingShipments.length, items: pendingShipments.slice(0, 10) },
-        channelFeeds: { active: activeFeeds },
+        channelFeeds: { active: activeFeeds, details: feedDetails },
         variants: { total: variants.length, active: variants.filter(v => v.isActive).length },
       };
 
@@ -3897,12 +3907,22 @@ export async function registerRoutes(
 
       const pendingShipments = await storage.getPendingShipmentItemsByVariantIds([id]);
       const feeds = await storage.getChannelFeedsByProductVariantId(id);
-      const activeFeeds = feeds.filter((f: any) => f.isActive === 1).length;
+      const activeFeedList = feeds.filter((f: any) => f.isActive === 1);
+      const feedDetails: { channelName: string; provider: string; channelSku: string | null }[] = [];
+      for (const feed of activeFeedList) {
+        let channelName = feed.channelType || "Unknown";
+        if (feed.channelId) {
+          const [ch] = await db.select({ name: channels.name, provider: channels.provider })
+            .from(channels).where(eq(channels.id, feed.channelId)).limit(1);
+          if (ch) channelName = ch.name;
+        }
+        feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku });
+      }
 
       const dependencies = {
         inventory: { totalQty, bins, hasReserved: totalReserved > 0, inventoryDetails },
         shipments: { pending: pendingShipments.length },
-        channelFeeds: { active: activeFeeds },
+        channelFeeds: { active: activeFeedList.length, details: feedDetails },
       };
 
       const hasBlockers = totalQty > 0 || pendingShipments.length > 0;
