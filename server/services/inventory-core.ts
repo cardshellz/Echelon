@@ -682,6 +682,30 @@ export class InventoryCoreService {
         );
       }
 
+      // Clean up empty source level — only if all qtys are zero and variant
+      // is not assigned to this location (same pattern as cycle count cleanup)
+      if (
+        decremented.variantQty === 0 &&
+        decremented.reservedQty === 0 &&
+        (decremented.pickedQty ?? 0) === 0 &&
+        (decremented.packedQty ?? 0) === 0 &&
+        (decremented.backorderQty ?? 0) === 0
+      ) {
+        const [assignment] = await tx
+          .select({ id: productLocations.id })
+          .from(productLocations)
+          .where(
+            and(
+              eq(productLocations.productVariantId, params.productVariantId),
+              eq(productLocations.warehouseLocationId, params.fromLocationId),
+            ),
+          )
+          .limit(1);
+        if (!assignment) {
+          await tx.delete(inventoryLevels).where(eq(inventoryLevels.id, decremented.id));
+        }
+      }
+
       // --- DESTINATION ---
       const destLevel = await svc.upsertLevel(
         params.productVariantId,
