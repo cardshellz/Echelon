@@ -48,8 +48,11 @@ export default function BinAssignments() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  // Filters
-  const [search, setSearch] = useState("");
+  // Filters (pre-fill from URL ?search= param if navigating from Inventory)
+  const [search, setSearch] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("search") || "";
+  });
   const debouncedSearch = useDebounce(search, 300);
   const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [zoneFilter, setZoneFilter] = useState("");

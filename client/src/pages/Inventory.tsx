@@ -178,6 +178,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
 }) {
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [`/api/inventory/variants/${variantId}/locations`],
   });
@@ -232,7 +233,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
         const available = locLevel.variantQty - locLevel.reservedQty;
         const locType = locLevel.location?.locationType || "";
         return (
-          <TableRow key={locLevel.id} className="bg-muted/20 text-sm">
+          <TableRow key={locLevel.id} className={`text-sm ${locLevel.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
             <TableCell colSpan={2} className="pl-8">
               <div className="flex items-center gap-2">
                 <MapPin className="h-3 w-3 text-muted-foreground shrink-0" />
@@ -249,6 +250,11 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
                     [{warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}]
                   </span>
                 )}
+                {!locLevel.isAssigned && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                    STRAY
+                  </span>
+                )}
               </div>
             </TableCell>
             <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
@@ -256,39 +262,55 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
             <TableCell className="text-right font-mono text-xs">{available}</TableCell>
             {canEdit && (
               <TableCell className="text-right">
-                {locLevel.variantQty === 0 && !locLevel.reservedQty && !locLevel.isAssigned ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 text-xs px-2 text-destructive hover:text-destructive"
-                    disabled={deleteOrphanMutation.isPending}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteOrphanMutation.mutate(locLevel.id);
-                    }}
-                  >
-                    <Trash2 className="h-3 w-3 mr-1" />
-                    Delete
-                  </Button>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 text-xs px-2"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onTransfer(
-                        locLevel.location?.id || 0,
-                        locLevel.location?.code || "",
-                        variantId,
-                        sku
-                      );
-                    }}
-                  >
-                    <ArrowLeftRight className="h-3 w-3 mr-1" />
-                    Move
-                  </Button>
-                )}
+                <div className="flex items-center justify-end gap-1">
+                  {!locLevel.isAssigned && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs px-2 text-amber-600 hover:text-amber-700"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/bin-assignments?search=${encodeURIComponent(sku)}`);
+                      }}
+                    >
+                      <MapPin className="h-3 w-3 mr-1" />
+                      Assign
+                    </Button>
+                  )}
+                  {locLevel.variantQty === 0 && !locLevel.reservedQty && !locLevel.isAssigned ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs px-2 text-destructive hover:text-destructive"
+                      disabled={deleteOrphanMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteOrphanMutation.mutate(locLevel.id);
+                      }}
+                    >
+                      <Trash2 className="h-3 w-3 mr-1" />
+                      Delete
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs px-2"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTransfer(
+                          locLevel.location?.id || 0,
+                          locLevel.location?.code || "",
+                          variantId,
+                          sku
+                        );
+                      }}
+                    >
+                      <ArrowLeftRight className="h-3 w-3 mr-1" />
+                      Move
+                    </Button>
+                  )}
+                </div>
               </TableCell>
             )}
           </TableRow>
