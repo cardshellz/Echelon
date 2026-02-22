@@ -3798,7 +3798,7 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/product-variants/:id", requirePermission("inventory", "update"), async (req, res) => {
+  app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       // Check for SKU conflict when SKU is being changed
