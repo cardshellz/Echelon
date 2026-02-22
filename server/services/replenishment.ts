@@ -289,14 +289,13 @@ class ReplenishmentService {
       const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
       const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
 
-      // Try to find source stock now (exclude destination to prevent self-replen)
+      // Try to find source stock now
       const sourceLocation = await this.findSourceLocation(
         task.sourceProductVariantId,
         destLocation.warehouseId ?? undefined,
         sourceLocationType,
         destLocation.parentLocationId,
         sourcePriority,
-        task.toLocationId,
       );
 
       if (sourceLocation) {
@@ -410,14 +409,13 @@ class ReplenishmentService {
         0, // qtyTargetUnits not known yet for blocked tasks — recalculated below
       );
 
-      // Find a source location with stock (exclude pick bin to prevent self-replen)
+      // Find a source location with stock (try dedicated parent first)
       const sourceLocation = await this.findSourceLocation(
         sourceVariantId ?? level.productVariantId,
         location.warehouseId ?? undefined,
         sourceLocationType,
         location.parentLocationId,
         sourcePriority,
-        level.warehouseLocationId,
       );
       if (!sourceLocation) {
         // No stock at immediate parent — try cascade (walk up one more level)
@@ -1044,14 +1042,13 @@ class ReplenishmentService {
       0, // qtyTargetUnits not known yet — recalculated below
     );
 
-    // Find source location with stock (exclude pick bin to prevent self-replen)
+    // Find source location with stock (try dedicated parent first)
     const sourceLocation = await this.findSourceLocation(
       sourceVariantId ?? productVariantId,
       location.warehouseId ?? undefined,
       sourceLocationType,
       location.parentLocationId,
       sourcePriority,
-      warehouseLocationId,
     );
     if (!sourceLocation) {
       // No stock at immediate parent — try cascade (walk up one more level)
@@ -1306,11 +1303,34 @@ class ReplenishmentService {
       const productId = (pl as any).productId;
       if (!productId) continue;
 
-      const productVars = variantsByProduct.get(productId);
-      if (!productVars) continue;
-      const lowestLevel = Math.min(...Array.from(productVars.keys()));
-      const variant = productVars.get(lowestLevel);
-      if (!variant) continue;
+      // Use the actual assigned variant, not just the lowest hierarchy level
+      const assignedVariantId = (pl as any).productVariantId;
+      const variant = assignedVariantId
+        ? variantMap.get(assignedVariantId)
+        : null;
+
+      if (!variant) {
+        // Fallback: no variant assignment — use lowest hierarchy level
+        const productVars = variantsByProduct.get(productId);
+        if (!productVars) continue;
+        const lowestLevel = Math.min(...Array.from(productVars.keys()));
+        const fallbackVariant = productVars.get(lowestLevel);
+        if (!fallbackVariant) continue;
+
+        const key = `${(pl as any).warehouseLocationId}:${fallbackVariant.id}`;
+        if (seenPickLocVariant.has(key)) continue;
+        seenPickLocVariant.add(key);
+
+        const arr = pickLocationsNeedingReplen.get(productId) ?? [];
+        arr.push({
+          locationId: (pl as any).warehouseLocationId,
+          variantId: fallbackVariant.id,
+          currentQty: 0,
+          hierarchyLevel: fallbackVariant.hierarchyLevel,
+        });
+        pickLocationsNeedingReplen.set(productId, arr);
+        continue;
+      }
 
       const key = `${(pl as any).warehouseLocationId}:${variant.id}`;
       if (seenPickLocVariant.has(key)) continue;
@@ -1444,10 +1464,9 @@ class ReplenishmentService {
         const unitsPerSource = sourceVariant.unitsPerVariant || 1;
 
         // Find best source with available stock (needed for both new tasks and unblocking)
-        // IMPORTANT: exclude the destination (pick) location — never replen from/to same bin
         let selectedSource: { locationId: number; availableQty: number } | null = null;
         for (const src of sourceLocations) {
-          if (src.qty > 0 && src.locationId !== pickLoc.locationId) {
+          if (src.qty > 0) {
             selectedSource = { locationId: src.locationId, availableQty: src.qty };
             break;
           }
@@ -2077,7 +2096,6 @@ class ReplenishmentService {
       cascadeSourceLocationType,
       null, // no parent location hint for cascade
       opts.sourcePriority,
-      opts.pickLocationId, // never source from the pick bin itself
     );
     if (!cascadeSourceLocation) return null; // No stock at grandparent either
 
@@ -2328,10 +2346,9 @@ class ReplenishmentService {
     sourceLocationType: string,
     parentLocationId?: number | null,
     sourcePriority?: string,
-    excludeLocationId?: number | null,
   ): Promise<WarehouseLocation | null> {
-    // --- 1. Try dedicated parent location first (but never the destination itself) ---
-    if (parentLocationId && parentLocationId !== excludeLocationId) {
+    // --- 1. Try dedicated parent location first ---
+    if (parentLocationId) {
       const parentLevel = await this.inventoryCore.getLevel(
         productVariantId,
         parentLocationId,
@@ -2346,7 +2363,7 @@ class ReplenishmentService {
       }
     }
 
-    // --- 2. Fallback: general search (FIFO), excluding destination location ---
+    // --- 2. Fallback: general search (FIFO) ---
     const levelsWithStock: Array<InventoryLevel & { location?: WarehouseLocation }> =
       await this.db
         .select({
@@ -2365,9 +2382,6 @@ class ReplenishmentService {
             sql`${inventoryLevels.variantQty} > 0`,
             ...(warehouseId != null
               ? [eq(warehouseLocations.warehouseId, warehouseId)]
-              : []),
-            ...(excludeLocationId != null
-              ? [sql`${warehouseLocations.id} != ${excludeLocationId}`]
               : []),
           ),
         )
