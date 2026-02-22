@@ -1249,17 +1249,18 @@ class ReplenishmentService {
       if (rule.productId) overridesByProduct.set(rule.productId, rule);
     }
 
-    // --- 3. Build inventory index: variantId-locationType -> locations with stock ---
-    const inventoryByVariantAndType = this.buildInventoryIndex(allLevels, locationMap);
-
-    // --- 4. Find all pick locations below threshold ---
-    // Build assignment set for quick lookup — only replenish assigned bins
+    // --- 3. Build assignment set and inventory index ---
+    // Assignment set: only pick locations with explicit variant assignments count
     const assignedSet = new Set<string>();
     for (const pl of allProductLocs) {
       if ((pl as any).productVariantId && (pl as any).warehouseLocationId) {
         assignedSet.add(`${(pl as any).warehouseLocationId}:${(pl as any).productVariantId}`);
       }
     }
+    // Inventory index: for pick locations, only include assigned variant+location pairs
+    const inventoryByVariantAndType = this.buildInventoryIndex(allLevels, locationMap, assignedSet);
+
+    // --- 4. Find all pick locations below threshold ---
 
     const pickLocationsNeedingReplen = new Map<number, Array<{
       locationId: number;
@@ -1909,10 +1910,15 @@ class ReplenishmentService {
    * Build an index of variant+locationType -> list of {locationId, qty, updatedAt}
    * for all inventory levels with positive stock. Used by generateTasks for
    * efficient source location lookup.
+   *
+   * For pick locations, only includes entries where the variant is assigned to
+   * that location (via assignedSet). Reserve/bulk locations have no assignment
+   * constraint — stock lives there freely from receiving.
    */
   private buildInventoryIndex(
     levels: InventoryLevel[],
     locationMap: Map<number, WarehouseLocation>,
+    assignedSet?: Set<string>,
   ): Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>> {
     const index = new Map<string, Array<{ locationId: number; qty: number; updatedAt: Date | null }>>();
     for (const level of levels) {
@@ -1920,6 +1926,10 @@ class ReplenishmentService {
       if (qty <= 0) continue;
       const location = locationMap.get(level.warehouseLocationId);
       if (!location) continue;
+      // For pick locations, only include if variant is assigned to this bin
+      if (assignedSet && location.isPickable === 1) {
+        if (!assignedSet.has(`${level.warehouseLocationId}:${level.productVariantId}`)) continue;
+      }
       const key = `${level.productVariantId}-${location.locationType}`;
       const arr = index.get(key) || [];
       arr.push({ locationId: level.warehouseLocationId, qty, updatedAt: level.updatedAt });
@@ -2364,32 +2374,46 @@ class ReplenishmentService {
     }
 
     // --- 2. Fallback: general search (FIFO) ---
-    const levelsWithStock: Array<InventoryLevel & { location?: WarehouseLocation }> =
-      await this.db
-        .select({
-          level: inventoryLevels,
-          location: warehouseLocations,
-        })
-        .from(inventoryLevels)
-        .innerJoin(
-          warehouseLocations,
-          eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-        )
-        .where(
-          and(
-            eq(inventoryLevels.productVariantId, productVariantId),
-            eq(warehouseLocations.locationType, sourceLocationType),
-            sql`${inventoryLevels.variantQty} > 0`,
-            ...(warehouseId != null
-              ? [eq(warehouseLocations.warehouseId, warehouseId)]
-              : []),
-          ),
-        )
-        .orderBy(
-          sourcePriority === "smallest_first"
-            ? inventoryLevels.variantQty       // ascending = smallest first
-            : inventoryLevels.updatedAt        // ascending = FIFO (oldest first)
-        );
+    // For pick locations, require the variant to be assigned there via product_locations.
+    // Reserve/bulk locations have no assignment constraint.
+    const isPick = sourceLocationType === "pick" || sourceLocationType === "forward_pick";
+    const query = this.db
+      .select({
+        level: inventoryLevels,
+        location: warehouseLocations,
+      })
+      .from(inventoryLevels)
+      .innerJoin(
+        warehouseLocations,
+        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+      );
+
+    if (isPick) {
+      (query as any).innerJoin(
+        productLocations,
+        and(
+          eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
+          eq(productLocations.productVariantId, inventoryLevels.productVariantId),
+        ),
+      );
+    }
+
+    const levelsWithStock = await query
+      .where(
+        and(
+          eq(inventoryLevels.productVariantId, productVariantId),
+          eq(warehouseLocations.locationType, sourceLocationType),
+          sql`${inventoryLevels.variantQty} > 0`,
+          ...(warehouseId != null
+            ? [eq(warehouseLocations.warehouseId, warehouseId)]
+            : []),
+        ),
+      )
+      .orderBy(
+        sourcePriority === "smallest_first"
+          ? inventoryLevels.variantQty       // ascending = smallest first
+          : inventoryLevels.updatedAt        // ascending = FIFO (oldest first)
+      );
 
     if (levelsWithStock.length === 0) return null;
 
