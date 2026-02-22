@@ -106,13 +106,12 @@ class ReplenishmentService {
    * @returns Array of newly created replen tasks.
    */
   async checkThresholds(warehouseId?: number): Promise<ReplenTask[]> {
-    // --- 1. Get all pick locations ---
+    // --- 1. Get all pickable locations (any type with is_pickable=1) ---
     const pickLocationQuery = this.db
       .select()
       .from(warehouseLocations)
       .where(
         and(
-          eq(warehouseLocations.locationType, "pick"),
           eq(warehouseLocations.isPickable, 1),
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
@@ -862,7 +861,7 @@ class ReplenishmentService {
       .where(eq(warehouseLocations.id, warehouseLocationId))
       .limit(1);
 
-    if (!location || location.locationType !== "pick") return null;
+    if (!location || location.isPickable !== 1) return null;
 
     // Only replenish variants that are assigned to this pick location
     const [assignment] = await this.db
@@ -1197,7 +1196,7 @@ class ReplenishmentService {
 
     for (const level of allLevels) {
       const location = locationMap.get(level.warehouseLocationId);
-      if (!location || location.locationType !== "pick") continue;
+      if (!location || location.isPickable !== 1) continue;
       if (warehouseId != null && location.warehouseId !== warehouseId) continue;
 
       const variant = variantMap.get(level.productVariantId);
