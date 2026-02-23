@@ -10472,6 +10472,7 @@ export async function registerRoutes(
     try {
       const po = await purchasing.createPO({
         ...req.body,
+        expectedDeliveryDate: req.body.expectedDeliveryDate ? new Date(req.body.expectedDeliveryDate) : undefined,
         createdBy: req.session.user?.id,
       });
       res.status(201).json(po);
@@ -10483,7 +10484,11 @@ export async function registerRoutes(
 
   app.patch("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const po = await purchasing.updatePO(Number(req.params.id), req.body, req.session.user?.id);
+      const updates = { ...req.body };
+      if (updates.expectedDeliveryDate) updates.expectedDeliveryDate = new Date(updates.expectedDeliveryDate);
+      if (updates.confirmedDeliveryDate) updates.confirmedDeliveryDate = new Date(updates.confirmedDeliveryDate);
+      if (updates.cancelDate) updates.cancelDate = new Date(updates.cancelDate);
+      const po = await purchasing.updatePO(Number(req.params.id), updates, req.session.user?.id);
       res.json(po);
     } catch (error: any) {
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
