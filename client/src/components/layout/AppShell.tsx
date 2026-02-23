@@ -31,7 +31,8 @@ import {
   Layers,
   RefreshCw,
   ArrowLeftRight,
-  RotateCcw
+  RotateCcw,
+  Ship,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -67,13 +68,15 @@ function isNavGroup(entry: NavEntry): entry is NavGroup {
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
   {
-    label: "Inbound",
-    icon: Truck,
+    label: "Procurement",
+    icon: ShoppingBag,
     roles: ["admin", "lead"],
     children: [
-      { label: "Purchase Orders", icon: ShoppingBag, href: "/purchasing" },
+      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders" },
       { label: "Receiving", icon: Truck, href: "/receiving" },
-      { label: "Supplier Catalog", icon: Layers, href: "/purchasing/catalog" },
+      { label: "Shipments", icon: Ship, href: "/shipments" },
+      { label: "Suppliers", icon: Building2, href: "/suppliers" },
+      { label: "Reorder Analysis", icon: BarChart3, href: "/reorder-analysis" },
     ],
   },
   {

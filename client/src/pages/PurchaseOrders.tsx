@@ -140,7 +140,7 @@ export default function PurchaseOrders() {
       setShowCreateDialog(false);
       setNewPO({ vendorId: 0, poType: "standard", priority: "normal", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
       toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
-      navigate(`/purchasing/${po.id}`);
+      navigate(`/purchase-orders/${po.id}`);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -242,7 +242,7 @@ export default function PurchaseOrders() {
             <Card
               key={po.id}
               className="cursor-pointer active:bg-accent/50"
-              onClick={() => navigate(`/purchasing/${po.id}`)}
+              onClick={() => navigate(`/purchase-orders/${po.id}`)}
             >
               <CardContent className="p-3">
                 <div className="flex items-start justify-between gap-2">
@@ -302,7 +302,7 @@ export default function PurchaseOrders() {
                 <TableRow
                   key={po.id}
                   className="cursor-pointer"
-                  onClick={() => navigate(`/purchasing/${po.id}`)}
+                  onClick={() => navigate(`/purchase-orders/${po.id}`)}
                 >
                   <TableCell className="font-mono font-medium">
                     <div className="flex items-center gap-2">

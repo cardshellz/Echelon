@@ -1466,7 +1466,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   {selectedReceipt.sourceType === "initial_load" ? "Initial Inventory Load" :
                    selectedReceipt.sourceType === "po" ? (
                      selectedReceipt.purchaseOrderId ? (
-                       <span>PO: <a href={`/purchasing/${selectedReceipt.purchaseOrderId}`} className="text-primary underline">{selectedReceipt.poNumber}</a></span>
+                       <span>PO: <a href={`/purchase-orders/${selectedReceipt.purchaseOrderId}`} className="text-primary underline">{selectedReceipt.poNumber}</a></span>
                      ) : `PO: ${selectedReceipt.poNumber}`
                    ) : selectedReceipt.sourceType}
                   {selectedReceipt.vendor && ` • ${selectedReceipt.vendor.name}`}

@@ -2,7 +2,6 @@ import React, { useState, useMemo } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
-import PurchasingView from "./PurchasingView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
 import { useAuth } from "@/lib/auth";
 import {
@@ -24,7 +23,6 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowLeftRight,
-  ShoppingCart,
   Building2,
   Trash2
 } from "lucide-react";
@@ -519,7 +517,6 @@ export default function Inventory() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray" | "no_bin" | "no_case_break" | "no_barcode" | "no_replen" | "over_reserved" | "negative_qty">("all");
-  const [purchasingFilter, setPurchasingFilter] = useState("all");
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -889,7 +886,7 @@ export default function Inventory() {
       </div>
 
       <div className="flex-1 px-4 md:px-6 pt-2 pb-4 overflow-hidden flex flex-col min-h-0">
-        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); setPurchasingFilter("all"); }} className="flex-1 flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); }} className="flex-1 flex flex-col min-h-0">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="physical"
@@ -897,13 +894,6 @@ export default function Inventory() {
             >
               <Package className="h-4 w-4 mr-2" />
               Physical Inventory
-            </TabsTrigger>
-            <TabsTrigger
-              value="purchasing"
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
-            >
-              <ShoppingCart className="h-4 w-4 mr-2" />
-              Purchasing
             </TabsTrigger>
             <TabsTrigger
               value="operations"
@@ -937,26 +927,26 @@ export default function Inventory() {
                   <>
                     <span className="text-muted-foreground/30 mx-0.5">|</span>
                     <span className="text-muted-foreground/60 text-[10px] uppercase tracking-wide">Supply</span>
-                    <button
+                    <a
                       className={`hover:underline ${orderNowCount > 0 ? "text-red-600 font-medium" : ""}`}
-                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("need_ordering"); }}
+                      href="/reorder-analysis"
                     >
                       {orderNowCount} need ordering
-                    </button>
+                    </a>
                     <span className="text-muted-foreground/40">·</span>
-                    <button
+                    <a
                       className={`hover:underline ${orderSoonCount > 0 ? "text-amber-600 font-medium" : ""}`}
-                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("order_soon"); }}
+                      href="/reorder-analysis"
                     >
                       {orderSoonCount} order soon
-                    </button>
+                    </a>
                     <span className="text-muted-foreground/40">·</span>
-                    <button
+                    <a
                       className={`hover:underline ${oosCount > 0 ? "text-red-600 font-medium" : ""}`}
-                      onClick={() => { setActiveTab("purchasing"); setPurchasingFilter("stockout"); }}
+                      href="/reorder-analysis"
                     >
                       {oosCount} out of stock
-                    </button>
+                    </a>
                   </>
                 )}
 
@@ -1055,37 +1045,6 @@ export default function Inventory() {
                     </button>
                   </>
                 )}
-              </>
-            )}
-            {activeTab === "purchasing" && reorderData && (
-              <>
-                <button
-                  className={`hover:underline ${purchasingFilter === "all" ? "font-semibold" : ""}`}
-                  onClick={() => setPurchasingFilter("all")}
-                >
-                  {reorderData.items?.length ?? 0} products
-                </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${purchasingFilter === "need_ordering" ? "underline font-semibold" : ""} ${reorderData.summary.belowReorderPoint > 0 ? "text-red-600 font-medium" : ""}`}
-                  onClick={() => setPurchasingFilter(purchasingFilter === "need_ordering" ? "all" : "need_ordering")}
-                >
-                  {reorderData.summary.belowReorderPoint} need ordering
-                </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${purchasingFilter === "order_soon" ? "underline font-semibold" : ""} ${reorderData.summary.orderSoon > 0 ? "text-amber-600 font-medium" : ""}`}
-                  onClick={() => setPurchasingFilter(purchasingFilter === "order_soon" ? "all" : "order_soon")}
-                >
-                  {reorderData.summary.orderSoon} order soon
-                </button>
-                <span className="text-muted-foreground/40">·</span>
-                <button
-                  className={`hover:underline ${purchasingFilter === "no_movement" ? "underline font-semibold" : ""}`}
-                  onClick={() => setPurchasingFilter(purchasingFilter === "no_movement" ? "all" : "no_movement")}
-                >
-                  {reorderData.summary.noMovement} no movement
-                </button>
               </>
             )}
             {activeTab === "operations" && locationHealth && (
@@ -1384,12 +1343,7 @@ export default function Inventory() {
             )}
           </TabsContent>
 
-          {/* ====== TAB 2: Purchasing / Reorder ====== */}
-          <TabsContent value="purchasing" className="flex-1 flex flex-col mt-0 min-h-0">
-            <PurchasingView searchQuery={searchQuery} statusFilter={purchasingFilter} setStatusFilter={setPurchasingFilter} />
-          </TabsContent>
-
-          {/* ====== TAB 3: Operations ====== */}
+          {/* ====== TAB 2: Operations ====== */}
           <TabsContent value="operations" className="flex-1 flex flex-col mt-0 min-h-0">
             <OperationsView warehouseId={selectedWarehouseId} searchQuery={searchQuery} />
           </TabsContent>

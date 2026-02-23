@@ -23,7 +23,8 @@ import CatalogPage from "@/pages/CatalogPage";
 import ProductDetail from "@/pages/ProductDetail";
 import CycleCounts from "@/pages/CycleCounts";
 import Transfers from "@/pages/Transfers";
-import ProductCatalog from "@/pages/ProductCatalog";
+import Suppliers from "@/pages/Suppliers";
+import PurchasingView from "@/pages/PurchasingView";
 import Receiving from "@/pages/Receiving";
 import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
@@ -32,6 +33,8 @@ import ChannelAllocation from "@/pages/ChannelAllocation";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import Returns from "@/pages/Returns";
+import InboundShipments from "@/pages/InboundShipments";
+import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -153,14 +156,20 @@ function Router() {
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/purchasing/:id">
+        <Route path="/purchase-orders/:id">
           <ProtectedRoute component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/purchasing">
+        <Route path="/purchase-orders">
           <ProtectedRoute component={PurchaseOrders} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/receiving">
           <ProtectedRoute component={Receiving} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/suppliers">
+          <ProtectedRoute component={Suppliers} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/reorder-analysis">
+          <ProtectedRoute component={PurchasingView} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/replenishment">
           <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />
@@ -168,12 +177,19 @@ function Router() {
         <Route path="/returns">
           <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/shipments/:id">
+          <ProtectedRoute component={InboundShipmentDetail} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/shipments">
+          <ProtectedRoute component={InboundShipments} allowedRoles={["admin", "lead"]} />
+        </Route>
         <Route path="/inventory/history">
           <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />
         </Route>
-        <Route path="/purchasing/catalog">
-          <ProtectedRoute component={ProductCatalog} allowedRoles={["admin", "lead"]} />
-        </Route>
+        {/* Redirects for old procurement URLs */}
+        <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>
+        <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
+        <Route path="/purchasing"><Redirect to="/purchase-orders" /></Route>
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />
         </Route>

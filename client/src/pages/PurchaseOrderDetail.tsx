@@ -55,7 +55,7 @@ export default function PurchaseOrderDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
-  const [, params] = useRoute("/purchasing/:id");
+  const [, params] = useRoute("/purchase-orders/:id");
   const poId = params?.id ? Number(params.id) : null;
 
   const [activeTab, setActiveTab] = useState("lines");
@@ -254,7 +254,7 @@ export default function PurchaseOrderDetail() {
     return (
       <div className="p-6 text-center">
         <p className="text-muted-foreground">Purchase order not found.</p>
-        <Button variant="link" onClick={() => navigate("/purchasing")}>Back to list</Button>
+        <Button variant="link" onClick={() => navigate("/purchase-orders")}>Back to list</Button>
       </div>
     );
   }
@@ -263,7 +263,7 @@ export default function PurchaseOrderDetail() {
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start gap-4">
-        <Button variant="ghost" size="sm" onClick={() => navigate("/purchasing")} className="min-h-[44px]">
+        <Button variant="ghost" size="sm" onClick={() => navigate("/purchase-orders")} className="min-h-[44px]">
           <ArrowLeft className="h-4 w-4 mr-2" />
           Back
         </Button>

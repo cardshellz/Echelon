@@ -7,8 +7,11 @@ import {
   ArrowUp,
   ArrowDown,
   ShoppingCart,
+  Search,
+  BarChart3,
   X,
 } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -68,12 +71,6 @@ interface ReorderAnalysis {
   lookbackDays: number;
 }
 
-interface PurchasingViewProps {
-  searchQuery: string;
-  statusFilter: string;
-  setStatusFilter: (filter: string) => void;
-}
-
 const STATUS_CONFIG: Record<string, { label: string; className: string; priority: number }> = {
   stockout: { label: "Stockout", className: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400", priority: 0 },
   order_now: { label: "Order Now", className: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400", priority: 1 },
@@ -92,7 +89,9 @@ const LOOKBACK_OPTIONS = [
   { value: "180", label: "180d" },
 ];
 
-export default function PurchasingView({ searchQuery, statusFilter, setStatusFilter }: PurchasingViewProps) {
+export default function PurchasingView() {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [sortField, setSortField] = useState("status");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -201,9 +200,9 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
           : `${poCount} POs created, grouped by vendor`,
       });
       if (poCount === 1 && result.purchaseOrders?.[0]?.id) {
-        navigate(`/purchasing/${result.purchaseOrders[0].id}`);
+        navigate(`/purchase-orders/${result.purchaseOrders[0].id}`);
       } else {
-        navigate("/purchasing");
+        navigate("/purchase-orders");
       }
     },
     onError: (err: Error) => {
@@ -241,7 +240,31 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 gap-3">
+    <div className="flex flex-col h-full">
+      <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10 p-2 md:p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-lg md:text-2xl font-bold tracking-tight flex items-center gap-2">
+              <BarChart3 className="h-5 w-5 md:h-6 md:w-6" />
+              Reorder Analysis
+            </h1>
+            <p className="text-xs md:text-sm text-muted-foreground mt-1">
+              Identify products that need reordering based on velocity and stock levels
+            </p>
+          </div>
+          <div className="relative md:w-64">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
+            <Input
+              placeholder="Search SKU or product..."
+              className="pl-9 h-10"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 flex flex-col min-h-0 gap-3 p-2 md:p-6">
       {/* Filters */}
       <div className="flex flex-wrap gap-2 shrink-0">
         <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -534,6 +557,7 @@ export default function PurchasingView({ searchQuery, statusFilter, setStatusFil
           </Button>
         </div>
       )}
+      </div>
     </div>
   );
 }
