@@ -876,6 +876,9 @@ export default function Picking() {
   
   // Bin count dialog state
   const [binCountOpen, setBinCountOpen] = useState(false);
+  const [replenConfirmOpen, setReplenConfirmOpen] = useState(false);
+  const [pendingReplenTaskId, setPendingReplenTaskId] = useState<number | null>(null);
+  const [replenConfirmed, setReplenConfirmed] = useState(false);
   const [binCountContext, setBinCountContext] = useState<PickInventoryContext | null>(null);
   const [binCountQty, setBinCountQty] = useState("");
   const binCountPendingRef = useRef(false); // Track bin count synchronously to prevent race conditions
@@ -902,12 +905,20 @@ export default function Picking() {
       });
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
-      // Show bin count prompt when needed
+      // Show replen confirmation or bin count prompt when needed
       if (inventory?.binCountNeeded) {
         binCountPendingRef.current = true; // Set ref immediately (synchronous)
         setBinCountContext(inventory);
         setBinCountQty("");
-        setBinCountOpen(true);
+
+        // If replen was triggered, ask picker to confirm FIRST
+        if (inventory?.replen?.triggered && inventory?.replen?.taskId) {
+          setPendingReplenTaskId(inventory.replen.taskId);
+          setReplenConfirmOpen(true);
+        } else {
+          // No replen or already handled, go straight to bin count
+          setBinCountOpen(true);
+        }
       } else {
         binCountPendingRef.current = false;
       }
@@ -963,7 +974,53 @@ export default function Picking() {
       playSound("error");
     },
   });
-  
+
+  // Mutation for confirming replen (picker says YES, they did replen)
+  const confirmReplenMutation = useMutation({
+    mutationFn: async (taskId: number) => {
+      const res = await fetch("/api/picking/replen/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    onSuccess: () => {
+      setReplenConfirmOpen(false);
+      setReplenConfirmed(true); // Track that replen was confirmed
+      setBinCountOpen(true); // Now show bin count dialog
+      playSound("success");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Confirm failed", description: error.message, variant: "destructive" });
+      playSound("error");
+    },
+  });
+
+  // Mutation for cancelling replen (picker says NO, they didn't replen)
+  const cancelReplenMutation = useMutation({
+    mutationFn: async (taskId: number) => {
+      const res = await fetch("/api/picking/replen/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    onSuccess: () => {
+      setReplenConfirmOpen(false);
+      setReplenConfirmed(false); // Track that replen was NOT done
+      setBinCountOpen(true); // Now show bin count dialog
+      playSound("success");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Cancel failed", description: error.message, variant: "destructive" });
+      playSound("error");
+    },
+  });
+
   // Mutation for marking order ready to ship
   const readyToShipMutation = useMutation({
     mutationFn: ({ orderId }: { orderId: number }) => markOrderReadyToShip(orderId),
@@ -1045,10 +1102,10 @@ export default function Picking() {
   // Keep focus on scan input - aggressive refocus for scanner devices
   const maintainFocus = useCallback(() => {
     // Don't steal focus when any dialog is open — let dialogs own their focus
-    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && manualInputRef.current) {
+    if (view === "picking" && !shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen && manualInputRef.current) {
       manualInputRef.current.focus();
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen]);
 
   // Focus scan input on mount only — do NOT re-focus on every click/touch.
   // The global window keydown handler captures scanner input regardless of focus,
@@ -1065,10 +1122,10 @@ export default function Picking() {
 
   // Refocus after dialogs close (but not bin count — it has its own focus)
   useEffect(() => {
-    if (!shortPickOpen && !multiQtyOpen && !binCountOpen) {
+    if (!shortPickOpen && !multiQtyOpen && !binCountOpen && !replenConfirmOpen) {
       setTimeout(maintainFocus, 100);
     }
-  }, [shortPickOpen, multiQtyOpen, binCountOpen, maintainFocus]);
+  }, [shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, maintainFocus]);
 
   // Prevent other inputs from stealing focus — but allow dialog inputs when a dialog is open
   useEffect(() => {
@@ -1076,7 +1133,7 @@ export default function Picking() {
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as HTMLElement;
         // If a dialog is open, let its inputs have focus normally
-        if (shortPickOpen || multiQtyOpen || binCountOpen) return;
+        if (shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen) return;
         // Otherwise redirect any stray input focus back to the scan input
         if (target !== manualInputRef.current && target.tagName === "INPUT") {
           e.preventDefault();
@@ -1087,7 +1144,7 @@ export default function Picking() {
       document.addEventListener("focusin", handleFocusIn);
       return () => document.removeEventListener("focusin", handleFocusIn);
     }
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, maintainFocus]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen, maintainFocus]);
   
   // Auto-scroll to keep first pending item visible after each pick
   useEffect(() => {
@@ -1114,7 +1171,7 @@ export default function Picking() {
   // Global scanner capture - works with readOnly input to suppress keyboard
   // Captures all keystrokes and builds buffer, processes on Enter
   useEffect(() => {
-    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen) {
+    if (view !== "picking" || shortPickOpen || multiQtyOpen || binCountOpen || replenConfirmOpen) {
       return;
     }
     
@@ -4254,8 +4311,75 @@ export default function Picking() {
         </DialogContent>
       </Dialog>
       
+      {/* Replen Confirmation Dialog — shown FIRST when system thinks replen is needed */}
+      <Dialog open={replenConfirmOpen} onOpenChange={(open) => { if (!open) { setReplenConfirmOpen(false); setPendingReplenTaskId(null); } }}>
+        <DialogContent className="w-[95vw] max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2">
+              <PackageCheck className="h-5 w-5 text-blue-600" />
+              Replenishment Needed?
+            </DialogTitle>
+            {binCountContext && (
+              <DialogDescription className="text-center space-y-2">
+                <div className="text-sm">
+                  System thinks <span className="font-mono font-semibold">{binCountContext.sku}</span> needs replenishment at <span className="font-mono font-semibold">{binCountContext.locationCode}</span>
+                </div>
+                {binCountContext.replen.sourceLocationCode && (
+                  <div className="p-3 bg-blue-50 border border-blue-200 rounded space-y-1">
+                    <div className="text-xs font-medium text-blue-700">Suggested Replen:</div>
+                    <div className="text-sm text-blue-600">
+                      From: <span className="font-mono font-bold">{binCountContext.replen.sourceLocationCode}</span>
+                    </div>
+                    <div className="text-sm text-blue-600">
+                      Bring: <span className="font-bold">{binCountContext.replen.qtyToMove}</span> {binCountContext.replen.sourceVariantName || 'units'}
+                    </div>
+                  </div>
+                )}
+                <div className="text-sm font-medium pt-2">
+                  Did you actually replenish this bin?
+                </div>
+              </DialogDescription>
+            )}
+          </DialogHeader>
+
+          <div className="grid grid-cols-2 gap-3 pt-4">
+            <Button
+              variant="outline"
+              size="lg"
+              className="h-16 text-lg"
+              onClick={() => {
+                if (pendingReplenTaskId) {
+                  cancelReplenMutation.mutate(pendingReplenTaskId);
+                }
+              }}
+              disabled={cancelReplenMutation.isPending}
+            >
+              <span className="flex flex-col items-center gap-1">
+                <span>NO</span>
+                <span className="text-xs text-muted-foreground">Didn't replen</span>
+              </span>
+            </Button>
+            <Button
+              size="lg"
+              className="h-16 text-lg"
+              onClick={() => {
+                if (pendingReplenTaskId) {
+                  confirmReplenMutation.mutate(pendingReplenTaskId);
+                }
+              }}
+              disabled={confirmReplenMutation.isPending}
+            >
+              <span className="flex flex-col items-center gap-1">
+                <span>YES</span>
+                <span className="text-xs opacity-90">Did replen</span>
+              </span>
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Bin Count Dialog — shown after pick when inventory needs verification */}
-      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); } }}>
+      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); setReplenConfirmed(false); } }}>
         <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2">
@@ -4286,8 +4410,8 @@ export default function Picking() {
                 </div>
                 <div className="text-xs">
                   Expected: <span className="font-medium">{binCountContext.systemQtyAfter}</span>
-                  {binCountContext.replen.autoExecuted && <span className="text-blue-600"> (after pick + replen)</span>}
-                  {!binCountContext.replen.autoExecuted && <span className="text-muted-foreground"> (after pick)</span>}
+                  {replenConfirmed && <span className="text-blue-600"> (after pick + replen)</span>}
+                  {!replenConfirmed && <span className="text-muted-foreground"> (after pick only)</span>}
                 </div>
                 {!binCountContext.deducted && (
                   <div className="text-xs text-amber-600 font-medium">
@@ -4296,9 +4420,9 @@ export default function Picking() {
                 )}
                 {binCountContext.replen.triggered && !binCountContext.replen.stockout && (
                   <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-1">
-                    {binCountContext.replen.autoExecuted ? (
+                    {replenConfirmed ? (
                       <>
-                        <div className="font-medium text-blue-700">System Replenished:</div>
+                        <div className="font-medium text-blue-700">✓ Replenishment Confirmed:</div>
                         <div className="text-blue-600">
                           Moved {binCountContext.replen.qtyToMove} units
                           {binCountContext.replen.sourceLocationCode && ` from ${binCountContext.replen.sourceLocationCode}`}
@@ -4309,17 +4433,10 @@ export default function Picking() {
                       </>
                     ) : (
                       <>
-                        <div className="font-medium text-amber-700">Replen Needed:</div>
-                        {binCountContext.replen.sourceLocationCode && (
-                          <div className="text-amber-600">Go to: <span className="font-mono font-bold">{binCountContext.replen.sourceLocationCode}</span></div>
-                        )}
-                        <div className="text-amber-600">
-                          Bring {binCountContext.replen.qtyToMove} units
-                          {binCountContext.replen.sourceVariantSku && ` of ${binCountContext.replen.sourceVariantSku}`}
+                        <div className="font-medium text-muted-foreground">No Replenishment</div>
+                        <div className="text-muted-foreground text-[10px]">
+                          (Replen was suggested but not performed)
                         </div>
-                        {binCountContext.replen.sourceVariantName && binCountContext.replen.sourceVariantName !== binCountContext.replen.sourceVariantSku && (
-                          <div className="text-amber-600 text-[10px]">({binCountContext.replen.sourceVariantName})</div>
-                        )}
                       </>
                     )}
                   </div>
@@ -4335,9 +4452,9 @@ export default function Picking() {
 
           <div className="py-4 space-y-3">
             <label className="text-sm font-medium">
-              {binCountContext?.replen.triggered && !binCountContext.replen.autoExecuted
-                ? "Complete replen above, then count the bin"
-                : "Count what's left in the bin after picking complete"}
+              {replenConfirmed
+                ? "Count what's in the bin after pick + replen"
+                : "Count what's in the bin after pick"}
             </label>
             <Input
               type="number"

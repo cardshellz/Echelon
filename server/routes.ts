@@ -1116,6 +1116,36 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/picking/replen/confirm", requireAuth, async (req, res) => {
+    try {
+      const { replenishment } = req.app.locals.services as any;
+      const { taskId } = req.body;
+      if (!taskId) {
+        return res.status(400).json({ error: "taskId is required" });
+      }
+      const task = await replenishment.confirmPickerReplen(taskId, req.session.user?.id);
+      res.json(task);
+    } catch (error: any) {
+      console.error("Error confirming replen:", error);
+      res.status(500).json({ error: error.message || "Failed to confirm replen" });
+    }
+  });
+
+  app.post("/api/picking/replen/cancel", requireAuth, async (req, res) => {
+    try {
+      const { replenishment } = req.app.locals.services as any;
+      const { taskId } = req.body;
+      if (!taskId) {
+        return res.status(400).json({ error: "taskId is required" });
+      }
+      await replenishment.cancelPickerReplen(taskId);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error cancelling replen:", error);
+      res.status(500).json({ error: error.message || "Failed to cancel replen" });
+    }
+  });
+
   app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
     try {
       const { picking } = req.app.locals.services as any;

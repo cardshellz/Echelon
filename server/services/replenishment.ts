@@ -1152,8 +1152,20 @@ class ReplenishmentService {
       } satisfies InsertReplenTask)
       .returning();
 
-    // Unified auto-execute: immediately execute if resolved decision says so
-    console.log(`[Replen DEBUG] Task ${task.id} shouldAutoExecute=${execDecision.shouldAutoExecute}, executionMode=${execDecision.executionMode}`);
+    // CHANGED: Don't auto-execute yet - wait for picker confirmation to avoid drift issues
+    // Task will be executed via confirmPickerReplen() if picker confirms they actually did it
+    // This prevents inventory errors when system thinks replen is needed but picker didn't do it
+    console.log(`[Replen DEBUG] Task ${task.id} created, waiting for picker confirmation (shouldAutoExecute=${execDecision.shouldAutoExecute}, executionMode=${execDecision.executionMode})`);
+
+    // Store the auto-execute decision in notes for later reference
+    await this.db
+      .update(replenTasks)
+      .set({
+        notes: `${taskNotes}\nAuto-execute decision: ${execDecision.shouldAutoExecute ? 'YES' : 'NO'} (${execDecision.executionMode})`,
+      })
+      .where(eq(replenTasks.id, task.id));
+
+    /* DISABLED AUTO-EXECUTE - now requires picker confirmation
     if (execDecision.shouldAutoExecute) {
       try {
         console.log(`[Replen DEBUG] Calling executeTask(${task.id})...`);
@@ -1175,8 +1187,71 @@ class ReplenishmentService {
         }
       }
     }
+    */
 
     return task as ReplenTask;
+  }
+
+  /**
+   * Confirm and execute replen task after picker verification
+   * Called when picker confirms they actually performed the replenishment
+   * This ensures inventory accuracy by only executing when replen actually happened
+   */
+  async confirmPickerReplen(
+    taskId: number,
+    userId?: string
+  ): Promise<ReplenTask> {
+    // Get the task
+    const [task] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    if (!task) {
+      throw new Error(`Replen task ${taskId} not found`);
+    }
+
+    if (task.status !== "pending") {
+      throw new Error(`Task ${taskId} is ${task.status}, cannot confirm`);
+    }
+
+    // Execute the task (moves inventory)
+    await this.executeTask(taskId, userId ?? "picker:confirmed");
+
+    // Return updated task
+    const [updated] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    return updated as ReplenTask;
+  }
+
+  /**
+   * Cancel replen task when picker confirms replen was NOT needed
+   * This handles cases where system thought replen was needed but picker disagrees (drift)
+   */
+  async cancelPickerReplen(taskId: number): Promise<void> {
+    const [task] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    if (!task) {
+      throw new Error(`Replen task ${taskId} not found`);
+    }
+
+    // Cancel the task
+    await this.db
+      .update(replenTasks)
+      .set({
+        status: "cancelled",
+        notes: `${task.notes || ""}\nCancelled by picker - replen not needed (system drift)`,
+      })
+      .where(eq(replenTasks.id, taskId));
   }
 
   // ---------------------------------------------------------------------------
