@@ -923,6 +923,26 @@ export default function Picking() {
         binCountPendingRef.current = false;
       }
     },
+    onError: (error: Error) => {
+      // Critical: Reset all state so scanner can work again
+      binCountPendingRef.current = false;
+      setBinCountOpen(false);
+      setReplenConfirmOpen(false);
+      setBinCountContext(null);
+      setPendingReplenTaskId(null);
+      setMultiQtyOpen(false);
+
+      // Show error to user
+      toast({
+        title: "Pick failed",
+        description: error.message || "Failed to update item. Try again.",
+        variant: "destructive",
+      });
+      playSound("error");
+
+      // Refetch to ensure UI is in sync with backend
+      queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
+    },
   });
 
   // Mutation for confirming bin count
@@ -953,6 +973,11 @@ export default function Picking() {
       playSound("success");
     },
     onError: (error: Error) => {
+      // Critical: Reset state so scanner can work again
+      binCountPendingRef.current = false;
+      setBinCountOpen(false);
+      setBinCountContext(null);
+
       toast({ title: "Bin count failed", description: error.message, variant: "destructive" });
       playSound("error");
     },
@@ -970,6 +995,11 @@ export default function Picking() {
       playSound("success");
     },
     onError: (error: Error) => {
+      // Critical: Reset state so scanner can work again
+      binCountPendingRef.current = false;
+      setBinCountOpen(false);
+      setBinCountContext(null);
+
       toast({ title: "Skip failed", description: error.message, variant: "destructive" });
       playSound("error");
     },
@@ -993,6 +1023,11 @@ export default function Picking() {
       playSound("success");
     },
     onError: (error: Error) => {
+      // Critical: Reset state so scanner can work again
+      setReplenConfirmOpen(false);
+      setPendingReplenTaskId(null);
+      binCountPendingRef.current = false;
+
       toast({ title: "Confirm failed", description: error.message, variant: "destructive" });
       playSound("error");
     },
@@ -1016,6 +1051,11 @@ export default function Picking() {
       playSound("success");
     },
     onError: (error: Error) => {
+      // Critical: Reset state so scanner can work again
+      setReplenConfirmOpen(false);
+      setPendingReplenTaskId(null);
+      binCountPendingRef.current = false;
+
       toast({ title: "Cancel failed", description: error.message, variant: "destructive" });
       playSound("error");
     },
@@ -1233,7 +1273,7 @@ export default function Picking() {
         clearTimeout(scanBufferTimeoutRef.current);
       }
     };
-  }, [view, shortPickOpen, multiQtyOpen, binCountOpen]);
+  }, [view, shortPickOpen, multiQtyOpen, binCountOpen, replenConfirmOpen]);
   
   // Claim error state
   const [claimError, setClaimError] = useState<string | null>(null);
