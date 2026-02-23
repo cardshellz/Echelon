@@ -382,6 +382,18 @@ export default function PurchaseOrders() {
                           </CommandItem>
                         ))}
                       </CommandGroup>
+                      <CommandGroup>
+                        <CommandItem
+                          onSelect={() => {
+                            setVendorOpen(false);
+                            navigate("/suppliers");
+                          }}
+                          className="text-primary"
+                        >
+                          <Plus className="mr-2 h-4 w-4" />
+                          Add New Vendor
+                        </CommandItem>
+                      </CommandGroup>
                     </CommandList>
                   </Command>
                 </PopoverContent>
