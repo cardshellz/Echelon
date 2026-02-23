@@ -882,6 +882,7 @@ export default function Picking() {
   const [binCountContext, setBinCountContext] = useState<PickInventoryContext | null>(null);
   const [binCountQty, setBinCountQty] = useState("");
   const binCountPendingRef = useRef(false); // Track bin count synchronously to prevent race conditions
+  const orderCompletedPendingRef = useRef(false); // Defer order completion until API response confirms no binCount needed
 
   // Mutation for updating items
   const updateItemMutation = useMutation({
@@ -922,10 +923,27 @@ export default function Picking() {
       } else {
         binCountPendingRef.current = false;
       }
+
+      // If the last item's pick deferred order completion, resolve it now
+      if (orderCompletedPendingRef.current && !binCountPendingRef.current) {
+        orderCompletedPendingRef.current = false;
+        setTimeout(() => {
+          if (pickingMode === "batch") {
+            setActiveBatchId(null);
+          } else {
+            setActiveOrderId(null);
+          }
+          playSound("complete");
+          triggerHaptic("heavy");
+          setCurrentItemIndex(0);
+          setView("queue");
+        }, 500);
+      }
     },
     onError: (error: Error) => {
       // Critical: Reset all state so scanner can work again
       binCountPendingRef.current = false;
+      orderCompletedPendingRef.current = false;
       setBinCountOpen(false);
       setReplenConfirmOpen(false);
       setBinCountContext(null);
@@ -970,7 +988,23 @@ export default function Picking() {
           variant: result.replenTaskStatus === "blocked" ? "destructive" : "default",
         });
       }
-      playSound("success");
+      // Complete the order now that bin count + replen confirmation are both done
+      if (orderCompletedPendingRef.current) {
+        orderCompletedPendingRef.current = false;
+        setTimeout(() => {
+          if (pickingMode === "batch") {
+            setActiveBatchId(null);
+          } else {
+            setActiveOrderId(null);
+          }
+          playSound("complete");
+          triggerHaptic("heavy");
+          setCurrentItemIndex(0);
+          setView("queue");
+        }, 500);
+      } else {
+        playSound("success");
+      }
     },
     onError: (error: Error) => {
       // Critical: Reset state so scanner can work again
@@ -992,7 +1026,23 @@ export default function Picking() {
       setBinCountOpen(false);
       setBinCountContext(null);
       toast({ title: "Replen skipped", description: "Pending replen tasks cancelled" });
-      playSound("success");
+      // Complete the order now that replen skip is confirmed
+      if (orderCompletedPendingRef.current) {
+        orderCompletedPendingRef.current = false;
+        setTimeout(() => {
+          if (pickingMode === "batch") {
+            setActiveBatchId(null);
+          } else {
+            setActiveOrderId(null);
+          }
+          playSound("complete");
+          triggerHaptic("heavy");
+          setCurrentItemIndex(0);
+          setView("queue");
+        }, 500);
+      } else {
+        playSound("success");
+      }
     },
     onError: (error: Error) => {
       // Critical: Reset state so scanner can work again
@@ -1548,18 +1598,24 @@ export default function Picking() {
     setMultiQtyOpen(false);
     setPickQty(1);
 
-    if (orderCompleted && !binCountPendingRef.current) {
-      setTimeout(() => {
-        if (pickingMode === "batch") {
-          setActiveBatchId(null);
-        } else {
-          setActiveOrderId(null);
-        }
-        playSound("complete");
-        triggerHaptic("heavy");
-        setCurrentItemIndex(0);
-        setView("queue");
-      }, 500);
+    if (orderCompleted) {
+      if (isRealItem) {
+        // Defer completion until onSuccess — we don't yet know if binCountNeeded will block it
+        orderCompletedPendingRef.current = true;
+      } else {
+        // Demo/mock mode — no API call in flight, complete immediately
+        setTimeout(() => {
+          if (pickingMode === "batch") {
+            setActiveBatchId(null);
+          } else {
+            setActiveOrderId(null);
+          }
+          playSound("complete");
+          triggerHaptic("heavy");
+          setCurrentItemIndex(0);
+          setView("queue");
+        }, 500);
+      }
     } else {
       setTimeout(() => {
         advanceToNext();
