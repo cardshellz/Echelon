@@ -714,7 +714,7 @@ export default function Picking() {
   
   // Merge API data with local state - local state takes precedence for in-progress orders
   // For completed orders, use API data which has picker metadata
-  const singleQueue = pickingMode === "single" && ordersFromApi.length > 0 
+  const singleQueue = pickingMode === "single" && ordersFromApi.length > 0
     ? (() => {
         // Start with API orders, preferring local state for in-progress orders only
         const merged = ordersFromApi.map(apiOrder => {
@@ -732,6 +732,28 @@ export default function Picking() {
         return [...merged, ...completedLocalOrders];
       })()
     : localSingleQueue.length > 0 ? localSingleQueue : createSingleOrderQueue();
+
+  // Sync completed orders from API into local state to persist across refetches
+  useEffect(() => {
+    if (pickingMode === "single" && ordersFromApi.length > 0) {
+      const completedFromApi = ordersFromApi.filter(o => o.status === "completed");
+      if (completedFromApi.length > 0) {
+        setLocalSingleQueue(prev => {
+          // Get current completed orders from local state
+          const localCompleted = prev.filter(o => o.status === "completed");
+          // Merge: API completed orders + local completed orders not in API
+          const localOnlyCompleted = localCompleted.filter(
+            lc => !completedFromApi.some(ac => ac.id === lc.id)
+          );
+          // Combine unique completed orders from both sources
+          const allCompleted = [...completedFromApi, ...localOnlyCompleted];
+          // Keep non-completed local orders (in-progress work)
+          const localNonCompleted = prev.filter(o => o.status !== "completed");
+          return [...localNonCompleted, ...allCompleted];
+        });
+      }
+    }
+  }, [ordersFromApi, pickingMode]);
   
   // Mutation for claiming orders
   const claimMutation = useMutation({
