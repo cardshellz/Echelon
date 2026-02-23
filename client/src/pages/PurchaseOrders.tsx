@@ -74,6 +74,10 @@ export default function PurchaseOrders() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [vendorOpen, setVendorOpen] = useState(false);
   const [vendorSearch, setVendorSearch] = useState("");
+
+  // New vendor dialog
+  const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
+  const [newVendor, setNewVendor] = useState({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
   const [newPO, setNewPO] = useState({
     vendorId: 0,
     poType: "standard",
@@ -141,6 +145,31 @@ export default function PurchaseOrders() {
       setNewPO({ vendorId: 0, poType: "standard", priority: "normal", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
       toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
       navigate(`/purchase-orders/${po.id}`);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const createVendorMutation = useMutation({
+    mutationFn: async (data: typeof newVendor) => {
+      const res = await fetch("/api/vendors", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to create vendor");
+      }
+      return res.json();
+    },
+    onSuccess: (vendor) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendors"] });
+      setNewPO(prev => ({ ...prev, vendorId: vendor.id }));
+      setShowNewVendorDialog(false);
+      setNewVendor({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
+      toast({ title: "Supplier created", description: `${vendor.code} — ${vendor.name} added and selected.` });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -386,7 +415,7 @@ export default function PurchaseOrders() {
                         <CommandItem
                           onSelect={() => {
                             setVendorOpen(false);
-                            navigate("/suppliers");
+                            setShowNewVendorDialog(true);
                           }}
                           className="text-primary"
                         >
@@ -466,6 +495,91 @@ export default function PurchaseOrders() {
                 disabled={!newPO.vendorId || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : "Create Draft"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Quick Add Vendor Dialog */}
+      <Dialog open={showNewVendorDialog} onOpenChange={setShowNewVendorDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add New Supplier</DialogTitle>
+            <DialogDescription>Create a supplier to use in this purchase order.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Code *</Label>
+                <Input
+                  value={newVendor.code}
+                  onChange={e => setNewVendor(prev => ({ ...prev, code: e.target.value.toUpperCase() }))}
+                  placeholder="e.g. ULTRA-PRO"
+                  className="h-10 font-mono"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Name *</Label>
+                <Input
+                  value={newVendor.name}
+                  onChange={e => setNewVendor(prev => ({ ...prev, name: e.target.value }))}
+                  placeholder="Supplier name"
+                  className="h-10"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <Label>Contact Name</Label>
+                <Input
+                  value={newVendor.contactName}
+                  onChange={e => setNewVendor(prev => ({ ...prev, contactName: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input
+                  type="email"
+                  value={newVendor.email}
+                  onChange={e => setNewVendor(prev => ({ ...prev, email: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Phone</Label>
+                <Input
+                  value={newVendor.phone}
+                  onChange={e => setNewVendor(prev => ({ ...prev, phone: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Address</Label>
+              <Input
+                value={newVendor.address}
+                onChange={e => setNewVendor(prev => ({ ...prev, address: e.target.value }))}
+                className="h-10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Notes</Label>
+              <Textarea
+                value={newVendor.notes}
+                onChange={e => setNewVendor(prev => ({ ...prev, notes: e.target.value }))}
+                placeholder="Internal notes..."
+                rows={2}
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowNewVendorDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => createVendorMutation.mutate(newVendor)}
+                disabled={!newVendor.code || !newVendor.name || createVendorMutation.isPending}
+              >
+                {createVendorMutation.isPending ? "Creating..." : "Create Supplier"}
               </Button>
             </div>
           </div>
