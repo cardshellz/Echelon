@@ -48,6 +48,7 @@ import { createProductImportService } from "./product-import";
 import { createChannelProductPushService } from "./channel-product-push";
 import { createBinAssignmentService } from "./bin-assignment";
 import { createPurchasingService } from "./purchasing";
+import { createShipmentTrackingService } from "./shipment-tracking";
 import { storage } from "../storage";
 
 export function createServices(db: any) {
@@ -85,8 +86,11 @@ export function createServices(db: any) {
   // Purchasing (depends on storage) — must precede receiving
   const purchasing = createPurchasingService(db, storage);
 
-  // Depends on inventoryCore + channelSync + storage + purchasing
-  const receiving = createReceivingService(db, inventoryCore, channelSync, storage, purchasing);
+  // Shipment tracking (depends on storage)
+  const shipmentTracking = createShipmentTrackingService(db, storage);
+
+  // Depends on inventoryCore + channelSync + storage + purchasing + shipmentTracking
+  const receiving = createReceivingService(db, inventoryCore, channelSync, storage, purchasing, shipmentTracking);
 
   // Standalone (imports from Shopify)
   const productImport = createProductImportService();
@@ -120,6 +124,7 @@ export function createServices(db: any) {
     channelProductPush,
     binAssignment,
     purchasing,
+    shipmentTracking,
   };
 }
 
@@ -165,5 +170,7 @@ export { createBinAssignmentService } from "./bin-assignment";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment";
 export { createPurchasingService } from "./purchasing";
 export type { PurchasingService, PurchasingError } from "./purchasing";
+export { createShipmentTrackingService } from "./shipment-tracking";
+export type { ShipmentTrackingService, ShipmentTrackingError } from "./shipment-tracking";
 export { createInventoryLotService } from "./inventory-lots";
 export type { InventoryLotService } from "./inventory-lots";

@@ -11,6 +11,7 @@ import { createProductImportService } from "./services/product-import";
 import { createChannelProductPushService } from "./services/channel-product-push";
 import { createBinAssignmentService } from "./services/bin-assignment";
 import { createPurchasingService, PurchasingError } from "./services/purchasing";
+import { createShipmentTrackingService, ShipmentTrackingError } from "./services/shipment-tracking";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -24,6 +25,7 @@ const productImport = createProductImportService();
 const channelProductPush = createChannelProductPushService(db);
 const binAssignment = createBinAssignmentService(db, storage);
 const purchasing = createPurchasingService(db, storage);
+const shipmentTracking = createShipmentTrackingService(db, storage);
 
 // Permission checking middleware
 function requirePermission(resource: string, action: string) {
@@ -11028,6 +11030,295 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Error fetching expected receipts:", error);
       res.status(500).json({ error: error.message || "Failed to fetch expected receipts" });
+    }
+  });
+
+  // ==========================================================================
+  // INBOUND SHIPMENTS — Tracking, Costs, Landed Cost Allocation
+  // ==========================================================================
+
+  // ── Shipment CRUD ──
+
+  app.get("/api/inbound-shipments", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const filters: any = {};
+      if (req.query.status) filters.status = (req.query.status as string).includes(",") ? (req.query.status as string).split(",") : req.query.status;
+      if (req.query.mode) filters.mode = req.query.mode;
+      if (req.query.search) filters.search = req.query.search;
+      if (req.query.warehouseId) filters.warehouseId = Number(req.query.warehouseId);
+      if (req.query.limit) filters.limit = Number(req.query.limit);
+      if (req.query.offset) filters.offset = Number(req.query.offset);
+
+      const [shipments, total] = await Promise.all([
+        shipmentTracking.getShipments(filters),
+        shipmentTracking.getShipmentsCount(filters),
+      ]);
+      res.json({ shipments, total });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.getShipment(Number(req.params.id));
+      const [lines, costs, history] = await Promise.all([
+        shipmentTracking.getLines(shipment.id),
+        shipmentTracking.getCosts(shipment.id),
+        shipmentTracking.getStatusHistory(shipment.id),
+      ]);
+      res.json({ ...shipment, lines, costs, statusHistory: history });
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.createShipment(req.body, req.session.user?.id);
+      res.status(201).json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/inbound-shipments/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.updateShipment(Number(req.params.id), req.body);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/inbound-shipments/:id", requirePermission("purchasing", "delete"), async (req, res) => {
+    try {
+      await shipmentTracking.deleteShipment(Number(req.params.id));
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Status Transitions ──
+
+  app.post("/api/inbound-shipments/:id/book", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.book(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.markInTransit(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.shipDate ? new Date(req.body.shipDate) : undefined);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/at-port", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.markAtPort(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.actualArrival ? new Date(req.body.actualArrival) : undefined);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/customs-clearance", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.markCustomsClearance(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/delivered", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.markDelivered(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.deliveredDate ? new Date(req.body.deliveredDate) : undefined);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/start-costing", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.startCosting(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/close", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.close(Number(req.params.id), req.session.user?.id, req.body.notes);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/cancel", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const shipment = await shipmentTracking.cancel(Number(req.params.id), req.session.user?.id, req.body.reason);
+      res.json(shipment);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Shipment Lines ──
+
+  app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const lines = await shipmentTracking.addLinesFromPO(Number(req.params.id), req.body.purchaseOrderId, req.body.lineIds);
+      res.status(201).json(lines);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/lines/import-packing-list", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.importPackingList(Number(req.params.id), req.body.rows);
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/lines/resolve-dimensions", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.resolveDimensionsForShipment(Number(req.params.id));
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const line = await shipmentTracking.updateLineDimensions(Number(req.params.lineId), req.body);
+      res.json(line);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await shipmentTracking.removeLine(Number(req.params.lineId));
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Shipment Costs ──
+
+  app.get("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const costs = await shipmentTracking.getCosts(Number(req.params.id));
+      res.json(costs);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const cost = await shipmentTracking.addCost(Number(req.params.id), req.body);
+      res.status(201).json(cost);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const cost = await shipmentTracking.updateCost(Number(req.params.costId), req.body);
+      res.json(cost);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await shipmentTracking.removeCost(Number(req.params.costId));
+      res.json({ success: true });
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Allocation ──
+
+  app.post("/api/inbound-shipments/:id/allocate", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.runAllocation(Number(req.params.id));
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/finalize", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.finalizeAllocations(Number(req.params.id), req.session.user?.id);
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Cross-references ──
+
+  app.get("/api/purchase-orders/:id/shipments", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const shipments = await shipmentTracking.getShipmentsByPo(Number(req.params.id));
+      res.json(shipments);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/push-costs-to-lots", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const result = await shipmentTracking.pushLandedCostsToLots(Number(req.params.id));
+      res.json(result);
+    } catch (error: any) {
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
     }
   });
 

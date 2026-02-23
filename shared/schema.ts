@@ -1516,7 +1516,8 @@ export const receivingOrders = pgTable("receiving_orders", {
   poNumber: varchar("po_number", { length: 100 }), // External PO number from vendor
   purchaseOrderId: integer("purchase_order_id"), // FK to purchase_orders (added post-definition)
   asnNumber: varchar("asn_number", { length: 100 }), // Advance shipment notice number
-  
+  inboundShipmentId: integer("inbound_shipment_id"), // FK to inbound_shipments (added post-definition)
+
   // Source & vendor
   sourceType: varchar("source_type", { length: 20 }).notNull().default("blind"), // po, asn, blind, initial_load
   vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
@@ -1762,6 +1763,11 @@ export const vendorProducts = pgTable("vendor_products", {
   isActive: integer("is_active").default(1),
   lastPurchasedAt: timestamp("last_purchased_at"), // For stale-link detection
   lastCostCents: integer("last_cost_cents"), // Cost from most recent closed PO
+  // Packaging dimensions (for shipment tracking / landed cost allocation)
+  weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
+  lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
+  widthCm: numeric("width_cm", { precision: 8, scale: 2 }),
+  heightCm: numeric("height_cm", { precision: 8, scale: 2 }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -2032,6 +2038,8 @@ export const inventoryLots = pgTable("inventory_lots", {
   receivedAt: timestamp("received_at").notNull(), // FIFO sort key
   expiryDate: timestamp("expiry_date"), // Future (perishables)
   status: varchar("status", { length: 20 }).default("active"), // active, depleted, expired
+  inboundShipmentId: integer("inbound_shipment_id"), // FK to inbound_shipments (added post-definition)
+  costProvisional: integer("cost_provisional").notNull().default(0), // 1 = landed cost not yet finalized
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -2100,3 +2108,189 @@ export const insertOrderItemFinancialSchema = createInsertSchema(orderItemFinanc
 
 export type InsertOrderItemFinancial = z.infer<typeof insertOrderItemFinancialSchema>;
 export type OrderItemFinancial = typeof orderItemFinancials.$inferSelect;
+
+// ============================================================
+// Inbound Shipment Tracking + Landed Cost Allocation
+// ============================================================
+
+export const inboundShipments = pgTable("inbound_shipments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  shipmentNumber: varchar("shipment_number", { length: 30 }).notNull().unique(),
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  mode: varchar("mode", { length: 20 }),
+  carrierName: varchar("carrier_name", { length: 100 }),
+  forwarderName: varchar("forwarder_name", { length: 100 }),
+  bookingReference: varchar("booking_reference", { length: 100 }),
+  originPort: varchar("origin_port", { length: 100 }),
+  destinationPort: varchar("destination_port", { length: 100 }),
+  originCountry: varchar("origin_country", { length: 50 }),
+  destinationCountry: varchar("destination_country", { length: 50 }),
+  containerNumber: varchar("container_number", { length: 30 }),
+  sealNumber: varchar("seal_number", { length: 30 }),
+  containerSize: varchar("container_size", { length: 10 }),
+  containerCapacityCbm: numeric("container_capacity_cbm", { precision: 8, scale: 2 }),
+  bolNumber: varchar("bol_number", { length: 100 }),
+  houseBol: varchar("house_bol", { length: 100 }),
+  trackingNumber: varchar("tracking_number", { length: 200 }),
+  shipDate: timestamp("ship_date"),
+  etd: timestamp("etd"),
+  eta: timestamp("eta"),
+  actualArrival: timestamp("actual_arrival"),
+  customsClearedDate: timestamp("customs_cleared_date"),
+  deliveredDate: timestamp("delivered_date"),
+  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }),
+  totalWeightKg: numeric("total_weight_kg", { precision: 12, scale: 3 }),
+  totalVolumeCbm: numeric("total_volume_cbm", { precision: 12, scale: 6 }),
+  totalGrossVolumeCbm: numeric("total_gross_volume_cbm", { precision: 12, scale: 6 }),
+  totalPieces: integer("total_pieces"),
+  totalCartons: integer("total_cartons"),
+  estimatedTotalCostCents: bigint("estimated_total_cost_cents", { mode: "number" }),
+  actualTotalCostCents: bigint("actual_total_cost_cents", { mode: "number" }),
+  allocationMethodDefault: varchar("allocation_method_default", { length: 30 }),
+  notes: text("notes"),
+  internalNotes: text("internal_notes"),
+  createdBy: varchar("created_by", { length: 100 }).references(() => users.id, { onDelete: "set null" }),
+  closedBy: varchar("closed_by", { length: 100 }).references(() => users.id, { onDelete: "set null" }),
+  closedAt: timestamp("closed_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInboundShipmentSchema = createInsertSchema(inboundShipments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertInboundShipment = z.infer<typeof insertInboundShipmentSchema>;
+export type InboundShipment = typeof inboundShipments.$inferSelect;
+
+export const inboundShipmentLines = pgTable("inbound_shipment_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
+  purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
+  purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }),
+  qtyShipped: integer("qty_shipped").notNull(),
+  // Per-unit dimensions
+  weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
+  lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
+  widthCm: numeric("width_cm", { precision: 8, scale: 2 }),
+  heightCm: numeric("height_cm", { precision: 8, scale: 2 }),
+  // Computed totals
+  totalWeightKg: numeric("total_weight_kg", { precision: 12, scale: 3 }),
+  totalVolumeCbm: numeric("total_volume_cbm", { precision: 12, scale: 6 }),
+  chargeableWeightKg: numeric("chargeable_weight_kg", { precision: 12, scale: 3 }),
+  // Gross volume
+  grossVolumeCbm: numeric("gross_volume_cbm", { precision: 12, scale: 6 }),
+  cartonCount: integer("carton_count"),
+  palletCount: integer("pallet_count"),
+  // Allocation results
+  allocatedCostCents: bigint("allocated_cost_cents", { mode: "number" }),
+  landedUnitCostCents: integer("landed_unit_cost_cents"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInboundShipmentLineSchema = createInsertSchema(inboundShipmentLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertInboundShipmentLine = z.infer<typeof insertInboundShipmentLineSchema>;
+export type InboundShipmentLine = typeof inboundShipmentLines.$inferSelect;
+
+export const shipmentCosts = pgTable("shipment_costs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
+  costType: varchar("cost_type", { length: 30 }).notNull(),
+  description: text("description"),
+  estimatedCents: bigint("estimated_cents", { mode: "number" }),
+  actualCents: bigint("actual_cents", { mode: "number" }),
+  currency: varchar("currency", { length: 3 }).default("USD"),
+  exchangeRate: numeric("exchange_rate", { precision: 10, scale: 4 }).default("1"),
+  allocationMethod: varchar("allocation_method", { length: 30 }),
+  costStatus: varchar("cost_status", { length: 20 }).default("estimated"),
+  invoiceNumber: varchar("invoice_number", { length: 100 }),
+  invoiceDate: timestamp("invoice_date"),
+  dueDate: timestamp("due_date"),
+  paidDate: timestamp("paid_date"),
+  vendorName: text("vendor_name"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertShipmentCostSchema = createInsertSchema(shipmentCosts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertShipmentCost = z.infer<typeof insertShipmentCostSchema>;
+export type ShipmentCost = typeof shipmentCosts.$inferSelect;
+
+export const shipmentCostAllocations = pgTable("shipment_cost_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  shipmentCostId: integer("shipment_cost_id").notNull().references(() => shipmentCosts.id, { onDelete: "cascade" }),
+  inboundShipmentLineId: integer("inbound_shipment_line_id").notNull().references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
+  allocationBasisValue: numeric("allocation_basis_value", { precision: 14, scale: 6 }),
+  allocationBasisTotal: numeric("allocation_basis_total", { precision: 14, scale: 6 }),
+  sharePercent: numeric("share_percent", { precision: 8, scale: 4 }),
+  allocatedCents: bigint("allocated_cents", { mode: "number" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertShipmentCostAllocationSchema = createInsertSchema(shipmentCostAllocations).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertShipmentCostAllocation = z.infer<typeof insertShipmentCostAllocationSchema>;
+export type ShipmentCostAllocation = typeof shipmentCostAllocations.$inferSelect;
+
+export const landedCostSnapshots = pgTable("landed_cost_snapshots", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inboundShipmentLineId: integer("inbound_shipment_line_id").references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
+  purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  poUnitCostCents: integer("po_unit_cost_cents"),
+  freightAllocatedCents: bigint("freight_allocated_cents", { mode: "number" }),
+  dutyAllocatedCents: bigint("duty_allocated_cents", { mode: "number" }),
+  insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),
+  otherAllocatedCents: bigint("other_allocated_cents", { mode: "number" }),
+  totalLandedCostCents: bigint("total_landed_cost_cents", { mode: "number" }),
+  landedUnitCostCents: integer("landed_unit_cost_cents"),
+  qty: integer("qty"),
+  finalizedAt: timestamp("finalized_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertLandedCostSnapshotSchema = createInsertSchema(landedCostSnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertLandedCostSnapshot = z.infer<typeof insertLandedCostSnapshotSchema>;
+export type LandedCostSnapshot = typeof landedCostSnapshots.$inferSelect;
+
+export const inboundShipmentStatusHistory = pgTable("inbound_shipment_status_history", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
+  fromStatus: varchar("from_status", { length: 20 }),
+  toStatus: varchar("to_status", { length: 20 }).notNull(),
+  changedBy: varchar("changed_by", { length: 100 }).references(() => users.id, { onDelete: "set null" }),
+  changedAt: timestamp("changed_at").defaultNow().notNull(),
+  notes: text("notes"),
+});
+
+export const insertInboundShipmentStatusHistorySchema = createInsertSchema(inboundShipmentStatusHistory).omit({
+  id: true,
+  changedAt: true,
+});
+
+export type InsertInboundShipmentStatusHistory = z.infer<typeof insertInboundShipmentStatusHistorySchema>;
+export type InboundShipmentStatusHistory = typeof inboundShipmentStatusHistory.$inferSelect;

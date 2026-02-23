@@ -192,6 +192,8 @@ export class InventoryCoreService {
     unitCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
+    inboundShipmentId?: number;
+    costProvisional?: number;
   }): Promise<void> {
     if (params.qty <= 0) {
       throw new Error("qty must be a positive integer");
@@ -220,6 +222,8 @@ export class InventoryCoreService {
           unitCostCents: params.unitCostCents ?? 0,
           receivingOrderId: params.receivingOrderId,
           purchaseOrderId: params.purchaseOrderId,
+          inboundShipmentId: params.inboundShipmentId,
+          costProvisional: params.costProvisional,
           notes: params.notes,
         });
         lotId = lot.id;

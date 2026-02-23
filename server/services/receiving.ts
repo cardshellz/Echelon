@@ -40,6 +40,10 @@ interface Purchasing {
   }>): Promise<void>;
 }
 
+interface ShipmentTracking {
+  getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null>;
+}
+
 interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number): Promise<any>;
@@ -127,6 +131,7 @@ export class ReceivingService {
     private channelSync: ChannelSync,
     private storage: Storage,
     private purchasing: Purchasing | null = null,
+    private shipmentTracking: ShipmentTracking | null = null,
   ) {}
 
   // ─── Open ─────────────────────────────────────────────────────
@@ -195,6 +200,30 @@ export class ReceivingService {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
         const qtyToAdd = line.receivedQty;
 
+        // Determine unit cost: landed cost (if finalized) > PO line cost > receiving line cost
+        let unitCostCents = (line as any).unitCost || undefined;
+        let costProvisional = 0;
+        let inboundShipmentId: number | undefined;
+
+        if (line.purchaseOrderLineId && this.shipmentTracking) {
+          try {
+            const landedCost = await this.shipmentTracking.getLandedCostForPoLine(line.purchaseOrderLineId);
+            if (landedCost !== null) {
+              unitCostCents = landedCost;
+            } else if (order.inboundShipmentId) {
+              // Shipment exists but costs not finalized — mark provisional
+              costProvisional = 1;
+              inboundShipmentId = order.inboundShipmentId;
+            }
+          } catch {
+            // Non-critical — fall through to PO/line cost
+          }
+        } else if (order.inboundShipmentId) {
+          // Receiving order linked to shipment but no tracking service — mark provisional
+          costProvisional = 1;
+          inboundShipmentId = order.inboundShipmentId;
+        }
+
         await this.inventoryCore.receiveInventory({
           productVariantId: line.productVariantId,
           warehouseLocationId: line.putawayLocationId,
@@ -202,9 +231,11 @@ export class ReceivingService {
           referenceId: batchId,
           notes: `Received from ${order.sourceType === "po" ? `PO ${order.poNumber}` : order.receiptNumber}`,
           userId: userId || undefined,
-          unitCostCents: (line as any).unitCost || undefined,
+          unitCostCents,
           receivingOrderId: orderId,
           purchaseOrderId: order.purchaseOrderId || undefined,
+          inboundShipmentId,
+          costProvisional,
         });
 
         // Mark line as put away
@@ -618,6 +649,7 @@ export function createReceivingService(
   channelSync: ChannelSync,
   storage: Storage,
   purchasing?: Purchasing | null,
+  shipmentTracking?: ShipmentTracking | null,
 ) {
-  return new ReceivingService(db, inventoryCore, channelSync, storage, purchasing ?? null);
+  return new ReceivingService(db, inventoryCore, channelSync, storage, purchasing ?? null, shipmentTracking ?? null);
 }

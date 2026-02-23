@@ -71,6 +71,8 @@ export class InventoryLotService {
     unitCostCents: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
+    inboundShipmentId?: number;
+    costProvisional?: number;
     notes?: string;
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
@@ -88,6 +90,8 @@ export class InventoryLotService {
         receivedAt: new Date(),
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
+        inboundShipmentId: params.inboundShipmentId ?? null,
+        costProvisional: params.costProvisional ?? 0,
         status: "active",
         notes: params.notes ?? null,
       } as any)
