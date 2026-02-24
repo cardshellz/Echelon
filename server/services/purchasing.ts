@@ -639,7 +639,10 @@ export function createPurchasingService(db: any, storage: Storage) {
       productId: poLine.productId,
       sku: poLine.sku,
       productName: poLine.productName,
-      expectedQty: poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0),
+      expectedQty: Math.ceil(
+        (poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0)) /
+        (poLine.unitsPerUom || 1)
+      ),
       receivedQty: 0,
       damagedQty: 0,
       purchaseOrderLineId: poLine.id,
@@ -683,8 +686,11 @@ export function createPurchasingService(db: any, storage: Storage) {
       const poLine = await storage.getPurchaseOrderLineById(rl.purchaseOrderLineId);
       if (!poLine) continue;
 
-      const newReceivedQty = (poLine.receivedQty || 0) + rl.receivedQty;
-      const newDamagedQty = (poLine.damagedQty || 0) + (rl.damagedQty || 0);
+      const unitsPerUom = poLine.unitsPerUom || 1;
+      const receivedPieces = rl.receivedQty * unitsPerUom;
+      const damagedPieces = (rl.damagedQty || 0) * unitsPerUom;
+      const newReceivedQty = (poLine.receivedQty || 0) + receivedPieces;
+      const newDamagedQty = (poLine.damagedQty || 0) + damagedPieces;
       const remaining = poLine.orderQty - newReceivedQty - (poLine.cancelledQty || 0);
 
       const lineUpdates: any = {
@@ -706,13 +712,13 @@ export function createPurchasingService(db: any, storage: Storage) {
 
       await storage.updatePurchaseOrderLine(poLine.id, lineUpdates);
 
-      // Create PO receipt record
+      // Create PO receipt record (qtyReceived in pieces, matching PO orderQty units)
       await storage.createPoReceipt({
         purchaseOrderId: poId,
         purchaseOrderLineId: poLine.id,
         receivingOrderId: receivingOrderId,
         receivingLineId: rl.receivingLineId,
-        qtyReceived: rl.receivedQty,
+        qtyReceived: receivedPieces,
         poUnitCostCents: poLine.unitCostCents,
         actualUnitCostCents: rl.unitCost || poLine.unitCostCents,
         varianceCents: (rl.unitCost || poLine.unitCostCents) - poLine.unitCostCents,

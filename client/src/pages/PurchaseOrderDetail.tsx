@@ -66,13 +66,17 @@ export default function PurchaseOrderDetail() {
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
 
   // Add line form
-  const [skuSearch, setSkuSearch] = useState("");
-  const [skuOpen, setSkuOpen] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
+  const [productOpen, setProductOpen] = useState(false);
+  const [variantOpen, setVariantOpen] = useState(false);
+  const [selectedProductForLine, setSelectedProductForLine] = useState<any>(null);
+  const [unitCostDollars, setUnitCostDollars] = useState("");
   const [newLine, setNewLine] = useState({
     productId: 0,
     productVariantId: 0,
     orderQty: 1,
     unitCostCents: 0,
+    unitsPerUom: 1,
     vendorSku: "",
     description: "",
   });
@@ -93,8 +97,8 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId && activeTab === "receipts",
   });
 
-  const { data: variants = [] } = useQuery<any[]>({
-    queryKey: ["/api/product-variants"],
+  const { data: products = [] } = useQuery<any[]>({
+    queryKey: ["/api/products"],
     enabled: showAddLineDialog,
   });
 
@@ -103,12 +107,22 @@ export default function PurchaseOrderDetail() {
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
 
-  // Filtered variants for SKU typeahead
-  const filteredVariants = variants
-    .filter((v: any) =>
-      !skuSearch || v.sku?.toLowerCase().includes(skuSearch.toLowerCase()) || v.name?.toLowerCase().includes(skuSearch.toLowerCase())
+  // Filtered products for typeahead
+  const filteredProducts = products
+    .filter((p: any) =>
+      !productSearch ||
+      p.name?.toLowerCase().includes(productSearch.toLowerCase()) ||
+      p.sku?.toLowerCase().includes(productSearch.toLowerCase())
     )
     .slice(0, 50);
+
+  // Selected variant info for case helper
+  const selectedVariant = selectedProductForLine?.variants?.find(
+    (v: any) => v.id === newLine.productVariantId
+  );
+  const casesEquiv = newLine.unitsPerUom > 1 && newLine.orderQty > 0
+    ? Math.ceil(newLine.orderQty / newLine.unitsPerUom)
+    : null;
 
   // Mutations
   function createTransitionMutation(endpoint: string, method = "POST") {
@@ -218,8 +232,10 @@ export default function PurchaseOrderDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setShowAddLineDialog(false);
-      setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, vendorSku: "", description: "" });
-      setSkuSearch("");
+      setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+      setProductSearch("");
+      setSelectedProductForLine(null);
+      setUnitCostDollars("");
       toast({ title: "Line added" });
     },
     onError: (err: Error) => {
@@ -409,8 +425,12 @@ export default function PurchaseOrderDetail() {
                         </div>
                         <div className="text-sm mt-1 truncate">{line.productName || "—"}</div>
                         <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
-                          <span>Qty: {line.receivedQty || 0}/{line.orderQty}</span>
-                          <span>@ {formatCents(line.unitCostCents)}</span>
+                          <span>
+                            {(line.unitsPerUom || 1) > 1
+                              ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)`
+                              : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
+                          </span>
+                          <span>@ {formatCents(line.unitCostCents)}/pc</span>
                           <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
                         </div>
                       </div>
@@ -462,9 +482,15 @@ export default function PurchaseOrderDetail() {
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                       <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
-                      <TableCell className="text-right">{line.orderQty}</TableCell>
                       <TableCell className="text-right">
-                        {line.receivedQty || 0}
+                        {(line.unitsPerUom || 1) > 1
+                          ? <span>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)</span></span>
+                          : line.orderQty}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {(line.unitsPerUom || 1) > 1
+                          ? <span>{(line.receivedQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.receivedQty || 0) / (line.unitsPerUom || 1))} cases)</span></span>
+                          : line.receivedQty || 0}
                         {(line.damagedQty || 0) > 0 && (
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}
@@ -581,47 +607,52 @@ export default function PurchaseOrderDetail() {
       </Tabs>
 
       {/* ── Add Line Dialog ── */}
-      <Dialog open={showAddLineDialog} onOpenChange={setShowAddLineDialog}>
+      <Dialog open={showAddLineDialog} onOpenChange={(open) => {
+        setShowAddLineDialog(open);
+        if (!open) {
+          setProductSearch("");
+          setSelectedProductForLine(null);
+          setUnitCostDollars("");
+          setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+        }
+      }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Add Line Item</DialogTitle>
-            <DialogDescription>Search for a product variant to add.</DialogDescription>
+            <DialogDescription>Search by product, then select the variant (e.g. case size).</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+
+            {/* Step 1: Product search */}
             <div className="space-y-2">
-              <Label>Product / SKU *</Label>
-              <Popover open={skuOpen} onOpenChange={setSkuOpen}>
+              <Label>Product *</Label>
+              <Popover open={productOpen} onOpenChange={setProductOpen}>
                 <PopoverTrigger asChild>
                   <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                    {newLine.productVariantId
-                      ? variants.find((v: any) => v.id === newLine.productVariantId)?.sku || "Selected"
-                      : "Search SKU..."}
+                    {selectedProductForLine ? selectedProductForLine.name : "Search product..."}
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
                   <Command shouldFilter={false}>
-                    <CommandInput placeholder="Search SKU or name..." value={skuSearch} onValueChange={setSkuSearch} />
+                    <CommandInput placeholder="Search name or SKU..." value={productSearch} onValueChange={setProductSearch} />
                     <CommandList>
-                      <CommandEmpty>No variants found.</CommandEmpty>
+                      <CommandEmpty>No products found.</CommandEmpty>
                       <CommandGroup>
-                        {filteredVariants.map((v: any) => (
+                        {filteredProducts.map((p: any) => (
                           <CommandItem
-                            key={v.id}
-                            value={String(v.id)}
+                            key={p.id}
+                            value={String(p.id)}
                             onSelect={() => {
-                              setNewLine(prev => ({
-                                ...prev,
-                                productVariantId: v.id,
-                                productId: v.productId,
-                              }));
-                              setSkuOpen(false);
-                              setSkuSearch("");
+                              setSelectedProductForLine(p);
+                              setNewLine(prev => ({ ...prev, productId: p.id, productVariantId: 0, unitsPerUom: 1 }));
+                              setProductOpen(false);
+                              setProductSearch("");
                             }}
                           >
-                            <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
-                            <span className="font-mono text-xs mr-2">{v.sku}</span>
-                            <span className="truncate">{v.name}</span>
+                            <Check className={`mr-2 h-4 w-4 ${selectedProductForLine?.id === p.id ? "opacity-100" : "opacity-0"}`} />
+                            <span className="font-mono text-xs mr-2 text-muted-foreground">{p.sku}</span>
+                            <span className="truncate">{p.name}</span>
                           </CommandItem>
                         ))}
                       </CommandGroup>
@@ -631,9 +662,57 @@ export default function PurchaseOrderDetail() {
               </Popover>
             </div>
 
+            {/* Step 2: Variant (case size) — only shown after product selected */}
+            {selectedProductForLine && (
+              <div className="space-y-2">
+                <Label>Variant / Case Size *</Label>
+                <Popover open={variantOpen} onOpenChange={setVariantOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="w-full justify-between h-10 font-normal">
+                      {selectedVariant
+                        ? `${selectedVariant.sku} — ${selectedVariant.name}`
+                        : "Select variant..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command>
+                      <CommandList>
+                        <CommandEmpty>No variants available.</CommandEmpty>
+                        <CommandGroup>
+                          {(selectedProductForLine.variants || []).map((v: any) => (
+                            <CommandItem
+                              key={v.id}
+                              value={String(v.id)}
+                              onSelect={() => {
+                                setNewLine(prev => ({
+                                  ...prev,
+                                  productVariantId: v.id,
+                                  unitsPerUom: v.unitsPerVariant || 1,
+                                }));
+                                setVariantOpen(false);
+                              }}
+                            >
+                              <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                              <span className="font-mono text-xs mr-2">{v.sku}</span>
+                              <span className="truncate">{v.name}</span>
+                              {(v.unitsPerVariant || 1) > 1 && (
+                                <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                              )}
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            )}
+
+            {/* Qty in pieces + case helper */}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>Quantity *</Label>
+                <Label>Qty (pieces) *</Label>
                 <Input
                   type="number"
                   min="1"
@@ -641,16 +720,26 @@ export default function PurchaseOrderDetail() {
                   onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 1 }))}
                   className="h-10"
                 />
+                {casesEquiv !== null && (
+                  <p className="text-xs text-muted-foreground">= {casesEquiv} cases @ {newLine.unitsPerUom} pcs/case</p>
+                )}
               </div>
               <div className="space-y-2">
-                <Label>Unit Cost (cents) *</Label>
+                <Label>Unit Cost ($/pc) *</Label>
                 <Input
                   type="number"
                   min="0"
-                  value={newLine.unitCostCents}
-                  onChange={e => setNewLine(prev => ({ ...prev, unitCostCents: parseInt(e.target.value) || 0 }))}
+                  step="0.001"
+                  placeholder="0.05"
+                  value={unitCostDollars}
+                  onChange={e => setUnitCostDollars(e.target.value)}
                   className="h-10"
                 />
+                {unitCostDollars && newLine.orderQty > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Total: {formatCents(Math.round(parseFloat(unitCostDollars || "0") * 100) * newLine.orderQty)}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -667,8 +756,11 @@ export default function PurchaseOrderDetail() {
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
               <Button
-                onClick={() => addLineMutation.mutate(newLine)}
-                disabled={!newLine.productVariantId || !newLine.orderQty || addLineMutation.isPending}
+                onClick={() => addLineMutation.mutate({
+                  ...newLine,
+                  unitCostCents: Math.round(parseFloat(unitCostDollars || "0") * 100),
+                })}
+                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
