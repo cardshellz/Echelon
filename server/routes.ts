@@ -10714,6 +10714,40 @@ export async function registerRoutes(
     }
   });
 
+  // Upsert: create or update vendor catalog entry by (vendorId, productId, productVariantId)
+  app.post("/api/vendor-products/upsert", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const { vendorId, productId, productVariantId, vendorSku, unitCostCents, packSize, isPreferred } = req.body;
+      if (!vendorId || !productId || !productVariantId) {
+        return res.status(400).json({ error: "vendorId, productId, and productVariantId are required" });
+      }
+      const existing = await purchasing.getVendorProducts({ vendorId, productId, productVariantId });
+      let vp;
+      if (existing.length > 0) {
+        vp = await purchasing.updateVendorProduct(existing[0].id, {
+          vendorSku: vendorSku || existing[0].vendorSku,
+          unitCostCents: unitCostCents ?? existing[0].unitCostCents,
+          packSize: packSize ?? existing[0].packSize,
+          isPreferred: isPreferred ? 1 : existing[0].isPreferred,
+        });
+      } else {
+        vp = await purchasing.createVendorProduct({
+          vendorId,
+          productId,
+          productVariantId,
+          vendorSku,
+          unitCostCents: unitCostCents ?? 0,
+          packSize: packSize ?? 1,
+          isPreferred: isPreferred ? 1 : 0,
+          isActive: 1,
+        });
+      }
+      res.json({ vp, created: existing.length === 0 });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.patch("/api/vendor-products/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const vp = await purchasing.updateVendorProduct(Number(req.params.id), req.body);

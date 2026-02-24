@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
@@ -71,6 +72,8 @@ export default function PurchaseOrderDetail() {
   const [variantOpen, setVariantOpen] = useState(false);
   const [selectedProductForLine, setSelectedProductForLine] = useState<any>(null);
   const [unitCostDollars, setUnitCostDollars] = useState("");
+  const [saveToVendorCatalog, setSaveToVendorCatalog] = useState(true);
+  const [setAsPreferred, setSetAsPreferred] = useState(false);
   const [newLine, setNewLine] = useState({
     productId: 0,
     productVariantId: 0,
@@ -219,8 +222,35 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const catalogUpsertMutation = useMutation({
+    mutationFn: async (data: {
+      vendorId: number; productId: number; productVariantId: number;
+      vendorSku: string; unitCostCents: number; packSize: number; isPreferred: boolean;
+    }) => {
+      const res = await fetch("/api/vendor-products/upsert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor-products"] });
+      toast({
+        title: result.created ? "Added to catalog" : "Catalog updated",
+        description: result.created
+          ? "Vendor catalog entry created for this product."
+          : "Vendor catalog entry updated with latest cost.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Catalog save failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const addLineMutation = useMutation({
-    mutationFn: async (data: typeof newLine) => {
+    mutationFn: async (data: typeof newLine & { unitCostCents: number }) => {
       const res = await fetch(`/api/purchase-orders/${poId}/lines`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -230,13 +260,28 @@ export default function PurchaseOrderDetail() {
       return res.json();
     },
     onSuccess: () => {
+      // Capture before state reset
+      const catalogData = saveToVendorCatalog && po?.vendorId && newLine.productVariantId ? {
+        vendorId: po.vendorId,
+        productId: newLine.productId,
+        productVariantId: newLine.productVariantId,
+        vendorSku: newLine.vendorSku,
+        unitCostCents: Math.round(parseFloat(unitCostDollars || "0") * 100),
+        packSize: newLine.unitsPerUom,
+        isPreferred: setAsPreferred,
+      } : null;
+
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setShowAddLineDialog(false);
       setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
       setProductSearch("");
       setSelectedProductForLine(null);
       setUnitCostDollars("");
+      setSaveToVendorCatalog(true);
+      setSetAsPreferred(false);
       toast({ title: "Line added" });
+
+      if (catalogData) catalogUpsertMutation.mutate(catalogData);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -613,6 +658,8 @@ export default function PurchaseOrderDetail() {
           setProductSearch("");
           setSelectedProductForLine(null);
           setUnitCostDollars("");
+          setSaveToVendorCatalog(true);
+          setSetAsPreferred(false);
           setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
         }
       }}>
@@ -716,8 +763,8 @@ export default function PurchaseOrderDetail() {
                 <Input
                   type="number"
                   min="1"
-                  value={newLine.orderQty}
-                  onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 1 }))}
+                  value={newLine.orderQty || ""}
+                  onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
                   className="h-10"
                 />
                 {casesEquiv !== null && (
@@ -753,6 +800,37 @@ export default function PurchaseOrderDetail() {
               />
             </div>
 
+            {/* Vendor catalog section */}
+            {newLine.productVariantId > 0 && (
+              <>
+                <Separator />
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="saveToVendorCatalog"
+                      checked={saveToVendorCatalog}
+                      onCheckedChange={(v) => setSaveToVendorCatalog(!!v)}
+                    />
+                    <label htmlFor="saveToVendorCatalog" className="text-sm cursor-pointer select-none">
+                      Save to vendor catalog
+                    </label>
+                  </div>
+                  {saveToVendorCatalog && (
+                    <div className="flex items-center gap-2 ml-6">
+                      <Checkbox
+                        id="setAsPreferred"
+                        checked={setAsPreferred}
+                        onCheckedChange={(v) => setSetAsPreferred(!!v)}
+                      />
+                      <label htmlFor="setAsPreferred" className="text-sm cursor-pointer select-none text-muted-foreground">
+                        Set as preferred vendor for this product
+                      </label>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
               <Button
@@ -760,7 +838,7 @@ export default function PurchaseOrderDetail() {
                   ...newLine,
                   unitCostCents: Math.round(parseFloat(unitCostDollars || "0") * 100),
                 })}
-                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending}
+                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
