@@ -25,6 +25,7 @@ import {
   Clock,
   Package,
   AlertCircle,
+  Trash2,
 } from "lucide-react";
 
 // Status badge config
@@ -178,6 +179,24 @@ export default function PurchaseOrders() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/purchase-orders/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to delete PO");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      toast({ title: "Purchase order deleted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const selectedVendor = vendors.find(v => v.id === newPO.vendorId);
   const filteredVendors = vendors.filter(v =>
     !vendorSearch || v.name.toLowerCase().includes(vendorSearch.toLowerCase()) || v.code.toLowerCase().includes(vendorSearch.toLowerCase())
@@ -299,6 +318,21 @@ export default function PurchaseOrders() {
                       {po.expectedDeliveryDate && ` • ETA ${format(new Date(po.expectedDeliveryDate), "MMM d")}`}
                     </div>
                   </div>
+                  {po.status === "draft" && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="min-h-[44px] min-w-[44px] p-0 shrink-0"
+                      onClick={e => {
+                        e.stopPropagation();
+                        if (confirm(`Delete ${po.poNumber}? This cannot be undone.`)) {
+                          deleteMutation.mutate(po.id);
+                        }
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4 text-red-500" />
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -319,12 +353,13 @@ export default function PurchaseOrders() {
               <TableHead className="text-right">Total</TableHead>
               <TableHead>Expected</TableHead>
               <TableHead>Created</TableHead>
+              <TableHead className="w-10"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {purchaseOrders.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                   No purchase orders found. Click "New Purchase Order" to create one.
                 </TableCell>
               </TableRow>
@@ -358,6 +393,22 @@ export default function PurchaseOrders() {
                     {po.expectedDeliveryDate ? format(new Date(po.expectedDeliveryDate), "MMM d, yyyy") : "-"}
                   </TableCell>
                   <TableCell className="text-sm">{format(new Date(po.createdAt), "MMM d, yyyy")}</TableCell>
+                  <TableCell onClick={e => e.stopPropagation()}>
+                    {po.status === "draft" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        onClick={() => {
+                          if (confirm(`Delete ${po.poNumber}? This cannot be undone.`)) {
+                            deleteMutation.mutate(po.id);
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4 text-red-500" />
+                      </Button>
+                    )}
+                  </TableCell>
                 </TableRow>
               ))
             )}
