@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -33,7 +34,23 @@ import {
   Ban,
   Archive,
   Truck,
+  Pencil,
 } from "lucide-react";
+
+// Incoterms → which vendor-side charges are applicable
+const INCOTERMS_LIST = ["EXW", "FCA", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP", "DPU", "DDP"] as const;
+const INCOTERMS_CHARGES: Record<string, { shipping: boolean; tax: boolean }> = {
+  EXW: { shipping: false, tax: false },
+  FCA: { shipping: false, tax: false },
+  FOB: { shipping: false, tax: false },
+  CFR: { shipping: true,  tax: false },
+  CIF: { shipping: true,  tax: false },
+  CPT: { shipping: true,  tax: false },
+  CIP: { shipping: true,  tax: false },
+  DAP: { shipping: true,  tax: false },
+  DPU: { shipping: true,  tax: false },
+  DDP: { shipping: true,  tax: true  },
+};
 
 const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
   draft: { variant: "secondary", label: "Draft" },
@@ -65,6 +82,16 @@ export default function PurchaseOrderDetail() {
   const [showAckDialog, setShowAckDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
+
+  // Inline charge editing state
+  const [editingIncoterms, setEditingIncoterms] = useState(false);
+  const [incotermsEdit, setIncotermsEdit] = useState("");
+  const [editingDiscount, setEditingDiscount] = useState(false);
+  const [discountDollars, setDiscountDollars] = useState("");
+  const [editingShipping, setEditingShipping] = useState(false);
+  const [shippingDollars, setShippingDollars] = useState("");
+  const [editingTax, setEditingTax] = useState(false);
+  const [taxDollars, setTaxDollars] = useState("");
 
   // Add line form
   const [productSearch, setProductSearch] = useState("");
@@ -109,6 +136,13 @@ export default function PurchaseOrderDetail() {
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
+  const isNotCancelled = po && !["cancelled"].includes(po.status);
+
+  // Incoterms-driven charge applicability: if no terms set, all are editable
+  const poIncoterms = po?.incoterms as string | null | undefined;
+  const chargeRules = poIncoterms ? INCOTERMS_CHARGES[poIncoterms] : null;
+  const shippingApplicable = !chargeRules || chargeRules.shipping;
+  const taxApplicable = !chargeRules || chargeRules.tax;
 
   // Filtered products for typeahead
   const filteredProducts = products
@@ -303,6 +337,30 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const updateChargesMutation = useMutation({
+    mutationFn: async (data: { incoterms?: string; discountCents?: number; taxCents?: number; shippingCostCents?: number }) => {
+      const res = await fetch(`/api/purchase-orders/${poId}/incoterms-charges`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+      setEditingIncoterms(false);
+      setEditingDiscount(false);
+      setEditingShipping(false);
+      setEditingTax(false);
+      toast({ title: "Updated" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
@@ -340,10 +398,47 @@ export default function PurchaseOrderDetail() {
             {po.priority === "rush" && <Badge variant="destructive">Rush</Badge>}
             {po.priority === "high" && <Badge variant="outline" className="text-orange-600 border-orange-300">High</Badge>}
           </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            {po.vendor?.name || `Vendor #${po.vendorId}`}
-            {po.poType !== "standard" && ` • ${po.poType}`}
-          </p>
+          <div className="text-sm text-muted-foreground mt-1 flex items-center gap-x-2 flex-wrap">
+            <span>{po.vendor?.name || `Vendor #${po.vendorId}`}</span>
+            {po.poType !== "standard" && <span>• {po.poType}</span>}
+            <span>•</span>
+            {!editingIncoterms ? (
+              <span className="flex items-center gap-1">
+                {poIncoterms
+                  ? <span className="font-medium text-foreground">{poIncoterms}</span>
+                  : <span className="italic text-amber-600">No incoterms set</span>}
+                {isNotCancelled && (
+                  <Button
+                    variant="ghost" size="icon" className="h-5 w-5 ml-0.5"
+                    onClick={() => { setIncotermsEdit(poIncoterms || ""); setEditingIncoterms(true); }}
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </Button>
+                )}
+              </span>
+            ) : (
+              <span className="flex items-center gap-1">
+                <Select value={incotermsEdit} onValueChange={setIncotermsEdit}>
+                  <SelectTrigger className="h-7 w-36 text-xs">
+                    <SelectValue placeholder="Select..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {INCOTERMS_LIST.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Button
+                  size="sm" className="h-7 px-2"
+                  disabled={!incotermsEdit || updateChargesMutation.isPending}
+                  onClick={() => updateChargesMutation.mutate({ incoterms: incotermsEdit })}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditingIncoterms(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Context-sensitive action buttons */}
@@ -399,38 +494,136 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
-      {/* Summary card */}
+      {/* Charge summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4">
+
+        {/* Subtotal — always read-only */}
         <Card>
           <CardContent className="p-3">
             <div className="text-xs text-muted-foreground">Subtotal</div>
             <div className="font-mono font-medium">{formatCents(po.subtotalCents)}</div>
           </CardContent>
         </Card>
+
+        {/* Discount — editable in draft */}
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Discount</div>
-            <div className="font-mono font-medium">{formatCents(po.discountCents)}</div>
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">Discount</div>
+              {isDraft && !editingDiscount && (
+                <Button variant="ghost" size="icon" className="h-5 w-5"
+                  onClick={() => { setDiscountDollars(((Number(po.discountCents) || 0) / 100).toFixed(2)); setEditingDiscount(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {editingDiscount ? (
+              <div className="flex gap-1 mt-1">
+                <Input type="number" min="0" step="0.01" value={discountDollars}
+                  onChange={e => setDiscountDollars(e.target.value)}
+                  className="h-7 text-sm font-mono" autoFocus
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ discountCents: Math.round(parseFloat(discountDollars || "0") * 100) }); if (e.key === "Escape") setEditingDiscount(false); }}
+                />
+                <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
+                  onClick={() => updateChargesMutation.mutate({ discountCents: Math.round(parseFloat(discountDollars || "0") * 100) })}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditingDiscount(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{formatCents(po.discountCents)}</div>
+            )}
           </CardContent>
         </Card>
-        <Card>
+
+        {/* Tax — editable when DDP (or no incoterms); grayed out otherwise */}
+        <Card className={!taxApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Tax</div>
-            <div className="font-mono font-medium">{formatCents(po.taxCents)}</div>
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">Tax / Duties</div>
+              {taxApplicable && isNotCancelled && !editingTax && (
+                <Button variant="ghost" size="icon" className="h-5 w-5"
+                  onClick={() => { setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); setEditingTax(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {editingTax ? (
+              <div className="flex gap-1 mt-1">
+                <Input type="number" min="0" step="0.01" value={taxDollars}
+                  onChange={e => setTaxDollars(e.target.value)}
+                  className="h-7 text-sm font-mono" autoFocus
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: Math.round(parseFloat(taxDollars || "0") * 100) }); if (e.key === "Escape") setEditingTax(false); }}
+                />
+                <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
+                  onClick={() => updateChargesMutation.mutate({ taxCents: Math.round(parseFloat(taxDollars || "0") * 100) })}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditingTax(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{formatCents(po.taxCents)}</div>
+            )}
+            {!taxApplicable && poIncoterms && (
+              <div className="text-xs text-muted-foreground mt-0.5">N/A — {poIncoterms}</div>
+            )}
           </CardContent>
         </Card>
-        <Card>
+
+        {/* Shipping — editable when CFR/CIF/CPT/CIP/DAP/DPU/DDP (or no incoterms); grayed otherwise */}
+        <Card className={!shippingApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Shipping</div>
-            <div className="font-mono font-medium">{formatCents(po.shippingCostCents)}</div>
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">Freight</div>
+              {shippingApplicable && isNotCancelled && !editingShipping && (
+                <Button variant="ghost" size="icon" className="h-5 w-5"
+                  onClick={() => { setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); setEditingShipping(true); }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
+            </div>
+            {editingShipping ? (
+              <div className="flex gap-1 mt-1">
+                <Input type="number" min="0" step="0.01" value={shippingDollars}
+                  onChange={e => setShippingDollars(e.target.value)}
+                  className="h-7 text-sm font-mono" autoFocus
+                  onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: Math.round(parseFloat(shippingDollars || "0") * 100) }); if (e.key === "Escape") setEditingShipping(false); }}
+                />
+                <Button size="sm" className="h-7 px-2" disabled={updateChargesMutation.isPending}
+                  onClick={() => updateChargesMutation.mutate({ shippingCostCents: Math.round(parseFloat(shippingDollars || "0") * 100) })}
+                >
+                  <Check className="h-3 w-3" />
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditingShipping(false)}>
+                  <XCircle className="h-3 w-3" />
+                </Button>
+              </div>
+            ) : (
+              <div className="font-mono font-medium">{formatCents(po.shippingCostCents)}</div>
+            )}
+            {!shippingApplicable && poIncoterms && (
+              <div className="text-xs text-muted-foreground mt-0.5">N/A — {poIncoterms}</div>
+            )}
           </CardContent>
         </Card>
+
+        {/* Total — always read-only */}
         <Card>
           <CardContent className="p-3">
             <div className="text-xs text-muted-foreground">Total</div>
             <div className="font-mono font-bold text-lg">{formatCents(po.totalCents)}</div>
           </CardContent>
         </Card>
+
       </div>
 
       {/* Tabs: Lines, Receipts, History */}

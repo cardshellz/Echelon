@@ -1485,6 +1485,7 @@ export const vendors = pgTable("vendors", {
   shipFromAddress: text("ship_from_address"), // Where they ship from (for landed cost)
   country: varchar("country", { length: 50 }).default("US"), // Origin country
   rating: integer("rating"), // 1-5 manual performance rating
+  defaultIncoterms: varchar("default_incoterms", { length: 10 }), // FOB, CIF, EXW, DDP etc — pre-populates POs
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

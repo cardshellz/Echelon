@@ -10496,6 +10496,22 @@ export async function registerRoutes(
     }
   });
 
+  // Update incoterms and/or header charges (discount in draft only; shipping/tax any non-cancelled status)
+  app.patch("/api/purchase-orders/:id/incoterms-charges", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const { incoterms, discountCents, taxCents, shippingCostCents } = req.body;
+      const po = await purchasing.updateIncotermsAndCharges(
+        Number(req.params.id),
+        { incoterms, discountCents, taxCents, shippingCostCents },
+        req.session.user?.id,
+      );
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.delete("/api/purchase-orders/:id", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       await purchasing.deletePO(Number(req.params.id));

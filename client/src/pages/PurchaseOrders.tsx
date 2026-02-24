@@ -45,7 +45,7 @@ function formatCents(cents: number | null | undefined): string {
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-type Vendor = { id: number; name: string; code: string };
+type Vendor = { id: number; name: string; code: string; defaultIncoterms?: string | null };
 type PurchaseOrder = {
   id: number;
   poNumber: string;
@@ -82,6 +82,7 @@ export default function PurchaseOrders() {
     vendorId: 0,
     poType: "standard",
     priority: "normal",
+    incoterms: "",
     expectedDeliveryDate: "",
     vendorNotes: "",
     internalNotes: "",
@@ -128,6 +129,7 @@ export default function PurchaseOrders() {
           vendorId: data.vendorId,
           poType: data.poType,
           priority: data.priority,
+          incoterms: data.incoterms || undefined,
           expectedDeliveryDate: data.expectedDeliveryDate || undefined,
           vendorNotes: data.vendorNotes || undefined,
           internalNotes: data.internalNotes || undefined,
@@ -142,7 +144,7 @@ export default function PurchaseOrders() {
     onSuccess: (po) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       setShowCreateDialog(false);
-      setNewPO({ vendorId: 0, poType: "standard", priority: "normal", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
+      setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
       toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
       navigate(`/purchase-orders/${po.id}`);
     },
@@ -400,7 +402,7 @@ export default function PurchaseOrders() {
                             key={v.id}
                             value={String(v.id)}
                             onSelect={() => {
-                              setNewPO(prev => ({ ...prev, vendorId: v.id }));
+                              setNewPO(prev => ({ ...prev, vendorId: v.id, incoterms: v.defaultIncoterms || prev.incoterms }));
                               setVendorOpen(false);
                               setVendorSearch("");
                             }}
@@ -456,6 +458,27 @@ export default function PurchaseOrders() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Incoterms *</Label>
+              <Select value={newPO.incoterms} onValueChange={v => setNewPO(prev => ({ ...prev, incoterms: v }))}>
+                <SelectTrigger className="h-10">
+                  <SelectValue placeholder="Select trade terms..." />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="EXW">EXW — Ex Works</SelectItem>
+                  <SelectItem value="FCA">FCA — Free Carrier</SelectItem>
+                  <SelectItem value="FOB">FOB — Free On Board</SelectItem>
+                  <SelectItem value="CFR">CFR — Cost &amp; Freight</SelectItem>
+                  <SelectItem value="CIF">CIF — Cost, Insurance &amp; Freight</SelectItem>
+                  <SelectItem value="CPT">CPT — Carriage Paid To</SelectItem>
+                  <SelectItem value="CIP">CIP — Carriage &amp; Insurance Paid</SelectItem>
+                  <SelectItem value="DAP">DAP — Delivered At Place</SelectItem>
+                  <SelectItem value="DPU">DPU — Delivered at Place Unloaded</SelectItem>
+                  <SelectItem value="DDP">DDP — Delivered Duty Paid</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
