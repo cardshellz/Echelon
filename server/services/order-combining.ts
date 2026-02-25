@@ -180,7 +180,7 @@ class OrderCombiningService {
                COALESCE((SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_items,
                COALESCE((SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1), 0) AS shippable_units
         FROM orders o
-        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status = 'active'
+        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
         LEFT JOIN shopify_orders s ON o.source_table_id = s.id
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
@@ -451,7 +451,7 @@ class OrderCombiningService {
                o.order_placed_at, o.shopify_created_at,
                CASE WHEN cog.id IS NOT NULL THEN o.combined_group_id ELSE NULL END AS combined_group_id
         FROM orders o
-        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status = 'active'
+        LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id AND cog.status != 'cancelled'
         WHERE o.warehouse_status = 'ready'
           AND o.on_hold = 0
       `);
