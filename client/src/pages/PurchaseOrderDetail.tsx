@@ -69,8 +69,8 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
   const n = Number(cents) / 100;
-  if (opts?.unitCost && n > 0 && n < 0.01) {
-    // Sub-cent unit cost: show up to 4 significant decimal places
+  if (opts?.unitCost && n > 0 && n !== parseFloat(n.toFixed(2))) {
+    // Has sub-cent precision: show up to 4 decimal places, trimming trailing zeros
     return `$${parseFloat(n.toFixed(4)).toString()}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
