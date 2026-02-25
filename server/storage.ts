@@ -93,6 +93,15 @@ import {
   type InsertOrderItemCost,
   type OrderItemFinancial,
   type InsertOrderItemFinancial,
+  type InboundShipment,
+  type InsertInboundShipment,
+  type InboundShipmentLine,
+  type InsertInboundShipmentLine,
+  type ShipmentCost,
+  type InsertShipmentCost,
+  type InsertShipmentCostAllocation,
+  type InsertLandedCostSnapshot,
+  type InboundShipmentStatusHistory,
   users,
   productLocations,
   orders,
@@ -141,6 +150,12 @@ import {
   inventoryLots,
   orderItemCosts,
   orderItemFinancials,
+  inboundShipments,
+  inboundShipmentLines,
+  shipmentCosts,
+  shipmentCostAllocations,
+  landedCostSnapshots,
+  inboundShipmentStatusHistory,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, inArray, notInArray, and, or, isNull, isNotNull, sql, desc, asc, gte, lte, like } from "drizzle-orm";
@@ -4248,6 +4263,233 @@ export class DatabaseStorage implements IStorage {
   async getOrderItemFinancials(orderId: number): Promise<OrderItemFinancial[]> {
     return await db.select().from(orderItemFinancials)
       .where(eq(orderItemFinancials.orderId, orderId));
+  }
+
+  // ===== Inbound Shipments =====
+
+  async getInboundShipments(filters?: any): Promise<InboundShipment[]> {
+    const conditions: any[] = [];
+    if (filters?.status) {
+      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
+      else conditions.push(eq(inboundShipments.status, filters.status));
+    }
+    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
+    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
+    if (filters?.search) {
+      conditions.push(or(
+        like(inboundShipments.shipmentNumber, `%${filters.search}%`),
+        like(inboundShipments.carrierName, `%${filters.search}%`),
+        like(inboundShipments.containerNumber, `%${filters.search}%`),
+      ));
+    }
+    let query = db.select().from(inboundShipments).orderBy(desc(inboundShipments.createdAt)) as any;
+    if (conditions.length > 0) query = query.where(and(...conditions));
+    if (filters?.limit) query = query.limit(filters.limit);
+    if (filters?.offset) query = query.offset(filters.offset);
+    return await query;
+  }
+
+  async getInboundShipmentsCount(filters?: any): Promise<number> {
+    const conditions: any[] = [];
+    if (filters?.status) {
+      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
+      else conditions.push(eq(inboundShipments.status, filters.status));
+    }
+    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
+    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
+    let query = db.select({ count: sql<number>`count(*)` }).from(inboundShipments) as any;
+    if (conditions.length > 0) query = query.where(and(...conditions));
+    const result = await query;
+    return Number(result[0]?.count || 0);
+  }
+
+  async getInboundShipmentById(id: number): Promise<InboundShipment | undefined> {
+    const result = await db.select().from(inboundShipments).where(eq(inboundShipments.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined> {
+    const result = await db.select().from(inboundShipments).where(eq(inboundShipments.shipmentNumber, shipmentNumber)).limit(1);
+    return result[0];
+  }
+
+  async createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment> {
+    const result = await db.insert(inboundShipments).values(data as any).returning();
+    return result[0];
+  }
+
+  async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>): Promise<InboundShipment | null> {
+    const result = await db.update(inboundShipments).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipments.id, id)).returning();
+    return result[0] || null;
+  }
+
+  async deleteInboundShipment(id: number): Promise<boolean> {
+    const result = await db.delete(inboundShipments).where(eq(inboundShipments.id, id)).returning();
+    return result.length > 0;
+  }
+
+  async generateShipmentNumber(): Promise<string> {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const prefix = `SHP-${dateStr}-`;
+    const existing = await db.select({ shipmentNumber: inboundShipments.shipmentNumber })
+      .from(inboundShipments)
+      .where(like(inboundShipments.shipmentNumber, `${prefix}%`))
+      .orderBy(desc(inboundShipments.shipmentNumber))
+      .limit(1);
+    let nextNum = 1;
+    if (existing.length > 0 && existing[0].shipmentNumber) {
+      const lastNum = parseInt(existing[0].shipmentNumber.replace(prefix, ''), 10);
+      if (!isNaN(lastNum)) nextNum = lastNum + 1;
+    }
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+  }
+
+  // ===== Inbound Shipment Lines =====
+
+  async getInboundShipmentLines(inboundShipmentId: number): Promise<InboundShipmentLine[]> {
+    return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.inboundShipmentId, inboundShipmentId));
+  }
+
+  async getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined> {
+    const result = await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]> {
+    return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
+  }
+
+  async createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine> {
+    const result = await db.insert(inboundShipmentLines).values(data as any).returning();
+    return result[0];
+  }
+
+  async bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]> {
+    if (lines.length === 0) return [];
+    return await db.insert(inboundShipmentLines).values(lines as any).returning();
+  }
+
+  async updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null> {
+    const result = await db.update(inboundShipmentLines).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipmentLines.id, id)).returning();
+    return result[0] || null;
+  }
+
+  async deleteInboundShipmentLine(id: number): Promise<boolean> {
+    const result = await db.delete(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ===== Shipment Costs =====
+
+  async getShipmentCosts(inboundShipmentId: number): Promise<ShipmentCost[]> {
+    return await db.select().from(shipmentCosts).where(eq(shipmentCosts.inboundShipmentId, inboundShipmentId));
+  }
+
+  async getShipmentCostById(id: number): Promise<ShipmentCost | undefined> {
+    const result = await db.select().from(shipmentCosts).where(eq(shipmentCosts.id, id)).limit(1);
+    return result[0];
+  }
+
+  async createShipmentCost(data: InsertShipmentCost): Promise<ShipmentCost> {
+    const result = await db.insert(shipmentCosts).values(data as any).returning();
+    return result[0];
+  }
+
+  async updateShipmentCost(id: number, updates: Partial<InsertShipmentCost>): Promise<ShipmentCost | null> {
+    const result = await db.update(shipmentCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(shipmentCosts.id, id)).returning();
+    return result[0] || null;
+  }
+
+  async deleteShipmentCost(id: number): Promise<boolean> {
+    const result = await db.delete(shipmentCosts).where(eq(shipmentCosts.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // ===== Shipment Cost Allocations =====
+
+  async getShipmentCostAllocations(shipmentCostId: number): Promise<any[]> {
+    return await db.select().from(shipmentCostAllocations).where(eq(shipmentCostAllocations.shipmentCostId, shipmentCostId));
+  }
+
+  async getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]> {
+    return await db.select().from(shipmentCostAllocations).where(eq(shipmentCostAllocations.inboundShipmentLineId, inboundShipmentLineId));
+  }
+
+  async createShipmentCostAllocation(data: InsertShipmentCostAllocation): Promise<any> {
+    const result = await db.insert(shipmentCostAllocations).values(data as any).returning();
+    return result[0];
+  }
+
+  async bulkCreateShipmentCostAllocations(allocations: InsertShipmentCostAllocation[]): Promise<any[]> {
+    if (allocations.length === 0) return [];
+    return await db.insert(shipmentCostAllocations).values(allocations as any).returning();
+  }
+
+  async deleteAllocationsForShipment(inboundShipmentId: number): Promise<void> {
+    const costs = await this.getShipmentCosts(inboundShipmentId);
+    if (costs.length > 0) {
+      await db.delete(shipmentCostAllocations).where(inArray(shipmentCostAllocations.shipmentCostId, costs.map(c => c.id)));
+    }
+  }
+
+  // ===== Landed Cost Snapshots =====
+
+  async getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]> {
+    return await db.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.inboundShipmentLineId, inboundShipmentLineId));
+  }
+
+  async getLandedCostSnapshotByPoLine(purchaseOrderLineId: number): Promise<any> {
+    const result = await db.select().from(landedCostSnapshots).where(eq(landedCostSnapshots.purchaseOrderLineId, purchaseOrderLineId)).limit(1);
+    return result[0];
+  }
+
+  async createLandedCostSnapshot(data: InsertLandedCostSnapshot): Promise<any> {
+    const result = await db.insert(landedCostSnapshots).values(data as any).returning();
+    return result[0];
+  }
+
+  async bulkCreateLandedCostSnapshots(snapshots: InsertLandedCostSnapshot[]): Promise<any[]> {
+    if (snapshots.length === 0) return [];
+    return await db.insert(landedCostSnapshots).values(snapshots as any).returning();
+  }
+
+  async deleteLandedCostSnapshotsForShipment(inboundShipmentId: number): Promise<void> {
+    const lines = await this.getInboundShipmentLines(inboundShipmentId);
+    if (lines.length > 0) {
+      await db.delete(landedCostSnapshots).where(inArray(landedCostSnapshots.inboundShipmentLineId, lines.map(l => l.id)));
+    }
+  }
+
+  // ===== Inbound Shipment Status History =====
+
+  async createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory> {
+    const result = await db.insert(inboundShipmentStatusHistory).values(data).returning();
+    return result[0];
+  }
+
+  async getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]> {
+    return await db.select().from(inboundShipmentStatusHistory)
+      .where(eq(inboundShipmentStatusHistory.inboundShipmentId, inboundShipmentId))
+      .orderBy(desc(inboundShipmentStatusHistory.changedAt));
+  }
+
+  // ===== Cross-references =====
+
+  async getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]> {
+    const subIds = await db
+      .selectDistinct({ id: inboundShipmentLines.inboundShipmentId })
+      .from(inboundShipmentLines)
+      .where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
+    if (subIds.length === 0) return [];
+    return await db.select().from(inboundShipments)
+      .where(inArray(inboundShipments.id, subIds.map(r => r.id)))
+      .orderBy(desc(inboundShipments.createdAt));
+  }
+
+  async getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]> {
+    return await db.select().from(inventoryLots)
+      .where(eq((inventoryLots as any).inboundShipmentId, inboundShipmentId));
   }
 }
 

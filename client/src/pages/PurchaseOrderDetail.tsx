@@ -35,6 +35,8 @@ import {
   Archive,
   Truck,
   Pencil,
+  Ship,
+  ExternalLink,
 } from "lucide-react";
 
 // Incoterms → which vendor-side charges are applicable
@@ -130,6 +132,11 @@ export default function PurchaseOrderDetail() {
   const { data: products = [] } = useQuery<any[]>({
     queryKey: ["/api/products"],
     enabled: showAddLineDialog,
+  });
+
+  const { data: linkedShipments = [] } = useQuery<any[]>({
+    queryKey: [`/api/purchase-orders/${poId}/shipments`],
+    enabled: !!poId && activeTab === "shipments",
   });
 
   const lines = po?.lines ?? [];
@@ -355,6 +362,37 @@ export default function PurchaseOrderDetail() {
       setEditingShipping(false);
       setEditingTax(false);
       toast({ title: "Updated" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const createShipmentMutation = useMutation({
+    mutationFn: async (mode: string) => {
+      // Create draft shipment
+      const res = await fetch("/api/inbound-shipments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: mode || undefined }),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
+      const shipment = await res.json();
+      // Add all open PO lines to it
+      const openLineIds = lines.filter((l: any) => l.status !== "closed" && l.status !== "cancelled").map((l: any) => l.id);
+      if (openLineIds.length > 0) {
+        await fetch(`/api/inbound-shipments/${shipment.id}/lines/from-po`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ purchaseOrderId: poId, lineIds: openLineIds }),
+        });
+      }
+      return shipment;
+    },
+    onSuccess: (shipment) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/shipments`] });
+      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with PO lines` });
+      navigate(`/shipments/${shipment.id}`);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -611,7 +649,15 @@ export default function PurchaseOrderDetail() {
               <div className="font-mono font-medium">{formatCents(po.shippingCostCents)}</div>
             )}
             {!shippingApplicable && poIncoterms && (
-              <div className="text-xs text-muted-foreground mt-0.5">N/A — {poIncoterms}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                N/A — {poIncoterms}
+                <button
+                  className="ml-1 text-primary underline"
+                  onClick={() => setActiveTab("shipments")}
+                >
+                  Log on shipment
+                </button>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -631,6 +677,7 @@ export default function PurchaseOrderDetail() {
         <TabsList>
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
+          <TabsTrigger value="shipments">Shipments {linkedShipments.length > 0 ? `(${linkedShipments.length})` : ""}</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
 
@@ -796,6 +843,111 @@ export default function PurchaseOrderDetail() {
                       </TableCell>
                     </TableRow>
                   ))}
+                </TableBody>
+              </Table>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ── Shipments Tab ── */}
+        <TabsContent value="shipments" className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              Inbound shipments carrying goods from this PO.
+              {!shippingApplicable && poIncoterms && (
+                <span className="ml-2 text-amber-600 font-medium">
+                  {poIncoterms} — log freight, duty &amp; insurance costs on each shipment.
+                </span>
+              )}
+            </p>
+            {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
+              <div className="flex gap-2">
+                {(["sea_fcl", "sea_lcl", "air", "ground", "ltl", "courier"] as const).length > 0 && (
+                  <select
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    defaultValue=""
+                    onChange={e => {
+                      if (e.target.value) {
+                        createShipmentMutation.mutate(e.target.value);
+                        e.target.value = "";
+                      }
+                    }}
+                    disabled={createShipmentMutation.isPending}
+                  >
+                    <option value="" disabled>
+                      {createShipmentMutation.isPending ? "Creating..." : "+ Create Shipment"}
+                    </option>
+                    <option value="sea_fcl">Sea — FCL</option>
+                    <option value="sea_lcl">Sea — LCL</option>
+                    <option value="air">Air</option>
+                    <option value="ground">Ground</option>
+                    <option value="ltl">LTL</option>
+                    <option value="ftl">FTL</option>
+                    <option value="courier">Courier</option>
+                  </select>
+                )}
+              </div>
+            )}
+          </div>
+
+          {linkedShipments.length === 0 ? (
+            <Card>
+              <CardContent className="p-6 text-center text-muted-foreground">
+                <Ship className="h-8 w-8 mx-auto mb-2 opacity-30" />
+                <p>No shipments linked to this PO yet.</p>
+                {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
+                  <p className="text-xs mt-1">Use "Create Shipment" above to start a new inbound shipment with this PO's open lines.</p>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Shipment #</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Mode</TableHead>
+                    <TableHead>Carrier</TableHead>
+                    <TableHead>ETA</TableHead>
+                    <TableHead className="text-right">Est. Cost</TableHead>
+                    <TableHead className="text-right">Actual Cost</TableHead>
+                    <TableHead className="w-10"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {linkedShipments.map((s: any) => {
+                    const shipBadge: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
+                      draft: { variant: "secondary", label: "Draft" },
+                      booked: { variant: "outline", label: "Booked", color: "text-blue-600 border-blue-300" },
+                      in_transit: { variant: "default", label: "In Transit", color: "bg-blue-500" },
+                      at_port: { variant: "default", label: "At Port", color: "bg-indigo-500" },
+                      customs_clearance: { variant: "outline", label: "Customs", color: "text-amber-600 border-amber-300" },
+                      delivered: { variant: "default", label: "Delivered", color: "bg-green-600" },
+                      costing: { variant: "outline", label: "Costing", color: "text-purple-600 border-purple-300" },
+                      closed: { variant: "secondary", label: "Closed" },
+                      cancelled: { variant: "destructive", label: "Cancelled" },
+                    };
+                    const badge = shipBadge[s.status] || { variant: "secondary" as const, label: s.status };
+                    return (
+                      <TableRow key={s.id} className="cursor-pointer" onClick={() => navigate(`/shipments/${s.id}`)}>
+                        <TableCell className="font-mono font-medium">{s.shipmentNumber}</TableCell>
+                        <TableCell>
+                          <Badge variant={badge.variant} className={badge.color || ""}>{badge.label}</Badge>
+                        </TableCell>
+                        <TableCell className="capitalize">{s.mode?.replace(/_/g, " ") || "—"}</TableCell>
+                        <TableCell>{s.carrierName || s.forwarderName || "—"}</TableCell>
+                        <TableCell className="text-sm">
+                          {s.eta ? format(new Date(s.eta), "MMM d, yyyy") : "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(s.estimatedTotalCostCents)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(s.actualTotalCostCents)}</TableCell>
+                        <TableCell>
+                          <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </Card>

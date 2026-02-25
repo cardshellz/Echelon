@@ -1562,7 +1562,7 @@ export default function InboundShipmentDetail() {
                           >
                             <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
                             <span className="font-mono text-sm mr-2">{po.poNumber}</span>
-                            <span className="text-muted-foreground text-xs">{po.vendorName || ""}</span>
+                            <span className="text-muted-foreground text-xs">{po.vendor?.name || po.vendorName || ""}</span>
                             <Badge variant="outline" className="ml-auto text-xs">{po.status}</Badge>
                           </CommandItem>
                         ))}
@@ -1620,9 +1620,19 @@ export default function InboundShipmentDetail() {
                           <div className="flex items-center gap-2">
                             <span className="font-mono text-sm">{line.sku || "—"}</span>
                             <span className="text-sm truncate">{line.productName || ""}</span>
+                            {(line.orderQty - (line.receivedQty || 0)) <= 0 && (
+                              <span className="text-xs text-muted-foreground italic">fully received</span>
+                            )}
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            Qty: {line.orderQty} | {formatCents(line.unitCostCents)}/unit
+                            {formatCents(line.unitCostCents)}/unit
+                            {" · "}
+                            Ordered: {line.orderQty}
+                            {(line.receivedQty || 0) > 0 && ` · Received: ${line.receivedQty}`}
+                            {" · "}
+                            <span className={(line.orderQty - (line.receivedQty || 0)) > 0 ? "text-foreground font-medium" : "text-muted-foreground"}>
+                              Open: {Math.max(0, line.orderQty - (line.receivedQty || 0))}
+                            </span>
                           </div>
                         </div>
                       </div>
