@@ -12,6 +12,7 @@ import { createChannelProductPushService } from "./services/channel-product-push
 import { createBinAssignmentService } from "./services/bin-assignment";
 import { createPurchasingService, PurchasingError } from "./services/purchasing";
 import { createShipmentTrackingService, ShipmentTrackingError } from "./services/shipment-tracking";
+import * as apLedger from "./services/ap-ledger";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -11407,6 +11408,212 @@ export async function registerRoutes(
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============================================================
+  // AP LEDGER — VENDOR INVOICES
+  // ============================================================
+
+  app.get("/api/vendor-invoices", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const { vendorId, status, overdue, dueBefore, limit, offset } = req.query;
+      const invoices = await apLedger.listInvoices({
+        vendorId: vendorId ? Number(vendorId) : undefined,
+        status: status ? (Array.isArray(status) ? status as string[] : (status as string).split(",")) : undefined,
+        overdue: overdue === "true",
+        dueBefore: dueBefore ? new Date(dueBefore as string) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        offset: offset ? Number(offset) : undefined,
+      });
+      res.json({ invoices });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const body = req.body;
+      if (!body.vendorId || !body.invoiceNumber || body.invoicedAmountCents == null) {
+        return res.status(400).json({ error: "vendorId, invoiceNumber, and invoicedAmountCents are required" });
+      }
+      const invoice = await apLedger.createInvoice({
+        ...body,
+        invoiceDate: body.invoiceDate ? new Date(body.invoiceDate) : undefined,
+        dueDate: body.dueDate ? new Date(body.dueDate) : undefined,
+        createdBy: (req as any).user?.id,
+      });
+      res.status(201).json(invoice);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/vendor-invoices/:id", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const invoice = await apLedger.getInvoiceById(Number(req.params.id));
+      if (!invoice) return res.status(404).json({ error: "Invoice not found" });
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch("/api/vendor-invoices/:id", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const invoice = await apLedger.updateInvoice(Number(req.params.id), {
+        ...req.body,
+        invoiceDate: req.body.invoiceDate ? new Date(req.body.invoiceDate) : undefined,
+        dueDate: req.body.dueDate ? new Date(req.body.dueDate) : undefined,
+        updatedBy: (req as any).user?.id,
+      });
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/receive", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const invoice = await apLedger.receiveInvoice(Number(req.params.id), (req as any).user?.id);
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const invoice = await apLedger.approveInvoice(Number(req.params.id), (req as any).user?.id);
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const { reason } = req.body;
+      if (!reason) return res.status(400).json({ error: "reason is required" });
+      const invoice = await apLedger.disputeInvoice(Number(req.params.id), reason, (req as any).user?.id);
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const { reason } = req.body;
+      if (!reason) return res.status(400).json({ error: "reason is required" });
+      const invoice = await apLedger.voidInvoice(Number(req.params.id), reason, (req as any).user?.id);
+      res.json(invoice);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/po-links", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const { purchaseOrderId, allocatedAmountCents, notes } = req.body;
+      if (!purchaseOrderId) return res.status(400).json({ error: "purchaseOrderId is required" });
+      const link = await apLedger.linkPoToInvoice(Number(req.params.id), purchaseOrderId, allocatedAmountCents, notes);
+      res.status(201).json(link);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/vendor-invoices/:id/po-links/:poId", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await apLedger.unlinkPoFromInvoice(Number(req.params.id), Number(req.params.poId));
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/invoices", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const invoices = await apLedger.getInvoicesForPo(Number(req.params.id));
+      res.json({ invoices });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================================
+  // AP LEDGER — PAYMENTS
+  // ============================================================
+
+  app.get("/api/ap-payments", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const { vendorId, status, paymentMethod, dateFrom, dateTo, limit, offset } = req.query;
+      const rows = await apLedger.listPayments({
+        vendorId: vendorId ? Number(vendorId) : undefined,
+        status: status ? (Array.isArray(status) ? status as string[] : (status as string).split(",")) : undefined,
+        paymentMethod: paymentMethod as string | undefined,
+        dateFrom: dateFrom ? new Date(dateFrom as string) : undefined,
+        dateTo: dateTo ? new Date(dateTo as string) : undefined,
+        limit: limit ? Number(limit) : undefined,
+        offset: offset ? Number(offset) : undefined,
+      });
+      res.json({ payments: rows.map(r => ({ ...r.payment, vendorName: r.vendorName, vendorCode: r.vendorCode })) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/ap-payments", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const body = req.body;
+      if (!body.vendorId || !body.paymentDate || !body.paymentMethod || body.totalAmountCents == null) {
+        return res.status(400).json({ error: "vendorId, paymentDate, paymentMethod, and totalAmountCents are required" });
+      }
+      const payment = await apLedger.recordPayment({
+        ...body,
+        paymentDate: new Date(body.paymentDate),
+        allocations: body.allocations ?? [],
+        createdBy: (req as any).user?.id,
+      });
+      res.status(201).json(payment);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/ap-payments/:id", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const payment = await apLedger.getPaymentById(Number(req.params.id));
+      if (!payment) return res.status(404).json({ error: "Payment not found" });
+      res.json(payment);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/ap-payments/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const { reason } = req.body;
+      if (!reason) return res.status(400).json({ error: "reason is required" });
+      await apLedger.voidPayment(Number(req.params.id), reason, (req as any).user?.id);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ============================================================
+  // AP LEDGER — SUMMARY / AGING
+  // ============================================================
+
+  app.get("/api/ap/summary", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const summary = await apLedger.getApSummary();
+      res.json(summary);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 

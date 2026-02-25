@@ -2295,3 +2295,152 @@ export const insertInboundShipmentStatusHistorySchema = createInsertSchema(inbou
 
 export type InsertInboundShipmentStatusHistory = z.infer<typeof insertInboundShipmentStatusHistorySchema>;
 export type InboundShipmentStatusHistory = typeof inboundShipmentStatusHistory.$inferSelect;
+
+// ============================================================================
+// ACCOUNTS PAYABLE LEDGER
+// ============================================================================
+
+export const vendorInvoiceStatusEnum = [
+  "draft", "received", "approved", "partially_paid", "paid", "disputed", "voided",
+] as const;
+export type VendorInvoiceStatus = typeof vendorInvoiceStatusEnum[number];
+
+export const apPaymentStatusEnum = [
+  "draft", "scheduled", "processing", "completed", "returned", "voided",
+] as const;
+export type ApPaymentStatus = typeof apPaymentStatusEnum[number];
+
+export const apPaymentMethodEnum = [
+  "ach", "check", "wire", "credit_card", "other",
+] as const;
+export type ApPaymentMethod = typeof apPaymentMethodEnum[number];
+
+// ===== VENDOR INVOICES =====
+
+export const vendorInvoices = pgTable("vendor_invoices", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  invoiceNumber: varchar("invoice_number", { length: 100 }).notNull(), // Vendor's invoice number
+  ourReference: varchar("our_reference", { length: 100 }), // Internal reference
+
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id),
+
+  status: varchar("status", { length: 20 }).notNull().default("draft"),
+
+  // Dates
+  invoiceDate: timestamp("invoice_date"), // Date on the vendor's invoice
+  receivedDate: timestamp("received_date"), // When we received it
+  dueDate: timestamp("due_date"), // Computed: invoiceDate + paymentTermsDays
+  approvedAt: timestamp("approved_at"),
+  approvedBy: varchar("approved_by").references(() => users.id, { onDelete: "set null" }),
+
+  // Amounts (bigint for totals; exact dollar amounts)
+  invoicedAmountCents: bigint("invoiced_amount_cents", { mode: "number" }).notNull().default(0),
+  paidAmountCents: bigint("paid_amount_cents", { mode: "number" }).notNull().default(0), // Denorm — updated on payment
+  balanceCents: bigint("balance_cents", { mode: "number" }).notNull().default(0), // invoicedAmount - paidAmount
+
+  currency: varchar("currency", { length: 3 }).default("USD"),
+  paymentTermsDays: integer("payment_terms_days"), // Copied from PO/vendor at creation
+  paymentTermsType: varchar("payment_terms_type", { length: 20 }),
+
+  // Notes
+  notes: text("notes"), // Vendor-facing
+  internalNotes: text("internal_notes"),
+  disputeReason: text("dispute_reason"),
+
+  // Audit
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertVendorInvoiceSchema = createInsertSchema(vendorInvoices).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertVendorInvoice = z.infer<typeof insertVendorInvoiceSchema>;
+export type VendorInvoice = typeof vendorInvoices.$inferSelect;
+
+// ===== VENDOR INVOICE → PO LINKS =====
+
+export const vendorInvoicePoLinks = pgTable("vendor_invoice_po_links", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
+  purchaseOrderId: integer("purchase_order_id").notNull().references(() => purchaseOrders.id, { onDelete: "cascade" }),
+  allocatedAmountCents: bigint("allocated_amount_cents", { mode: "number" }), // Portion of invoice for this PO (nullable = unallocated)
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("vendor_invoice_po_links_inv_po_idx").on(table.vendorInvoiceId, table.purchaseOrderId),
+]);
+
+export const insertVendorInvoicePoLinkSchema = createInsertSchema(vendorInvoicePoLinks).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertVendorInvoicePoLink = z.infer<typeof insertVendorInvoicePoLinkSchema>;
+export type VendorInvoicePoLink = typeof vendorInvoicePoLinks.$inferSelect;
+
+// ===== AP PAYMENTS =====
+
+export const apPayments = pgTable("ap_payments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  paymentNumber: varchar("payment_number", { length: 30 }).notNull().unique(), // Auto: PAY-YYYYMMDD-###
+
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id),
+
+  paymentDate: timestamp("payment_date").notNull(),
+  paymentMethod: varchar("payment_method", { length: 20 }).notNull(), // ach, check, wire, credit_card, other
+  referenceNumber: varchar("reference_number", { length: 100 }), // ACH trace, wire ref, etc.
+  checkNumber: varchar("check_number", { length: 50 }),
+  bankAccountLabel: varchar("bank_account_label", { length: 100 }), // e.g. "Chase Operating"
+
+  totalAmountCents: bigint("total_amount_cents", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }).default("USD"),
+
+  status: varchar("status", { length: 20 }).notNull().default("completed"),
+
+  voidedAt: timestamp("voided_at"),
+  voidedBy: varchar("voided_by").references(() => users.id, { onDelete: "set null" }),
+  voidReason: text("void_reason"),
+
+  notes: text("notes"),
+
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  updatedBy: varchar("updated_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertApPaymentSchema = createInsertSchema(apPayments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertApPayment = z.infer<typeof insertApPaymentSchema>;
+export type ApPayment = typeof apPayments.$inferSelect;
+
+// ===== AP PAYMENT ALLOCATIONS =====
+
+export const apPaymentAllocations = pgTable("ap_payment_allocations", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  apPaymentId: integer("ap_payment_id").notNull().references(() => apPayments.id, { onDelete: "cascade" }),
+  vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
+  appliedAmountCents: bigint("applied_amount_cents", { mode: "number" }).notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ap_payment_allocations_pay_inv_idx").on(table.apPaymentId, table.vendorInvoiceId),
+]);
+
+export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAllocations).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertApPaymentAllocation = z.infer<typeof insertApPaymentAllocationSchema>;
+export type ApPaymentAllocation = typeof apPaymentAllocations.$inferSelect;

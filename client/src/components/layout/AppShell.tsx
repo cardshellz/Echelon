@@ -33,6 +33,9 @@ import {
   ArrowLeftRight,
   RotateCcw,
   Ship,
+  Receipt,
+  CreditCard,
+  DollarSign,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -77,6 +80,16 @@ const navStructure: NavEntry[] = [
       { label: "Shipments", icon: Ship, href: "/shipments" },
       { label: "Suppliers", icon: Building2, href: "/suppliers" },
       { label: "Reorder Analysis", icon: BarChart3, href: "/reorder-analysis" },
+    ],
+  },
+  {
+    label: "Accounts Payable",
+    icon: DollarSign,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "AP Dashboard", icon: BarChart3, href: "/ap" },
+      { label: "Invoices", icon: Receipt, href: "/ap-invoices" },
+      { label: "Payments", icon: CreditCard, href: "/ap-payments" },
     ],
   },
   {

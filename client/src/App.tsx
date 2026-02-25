@@ -35,6 +35,10 @@ import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
+import APDashboard from "@/pages/APDashboard";
+import APInvoices from "@/pages/APInvoices";
+import APInvoiceDetail from "@/pages/APInvoiceDetail";
+import APPayments from "@/pages/APPayments";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -185,6 +189,18 @@ function Router() {
         </Route>
         <Route path="/inventory/history">
           <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/ap">
+          <ProtectedRoute component={APDashboard} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/ap-invoices/:id">
+          <ProtectedRoute component={APInvoiceDetail} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/ap-invoices">
+          <ProtectedRoute component={APInvoices} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/ap-payments">
+          <ProtectedRoute component={APPayments} allowedRoles={["admin", "lead"]} />
         </Route>
         {/* Redirects for old procurement URLs */}
         <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>

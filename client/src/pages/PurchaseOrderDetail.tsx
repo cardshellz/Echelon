@@ -158,6 +158,11 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId && activeTab === "shipments",
   });
 
+  const { data: invoicesData } = useQuery<{ invoices: any[] }>({
+    queryKey: [`/api/purchase-orders/${poId}/invoices`],
+    enabled: !!poId && activeTab === "invoices",
+  });
+
   const lines = po?.lines ?? [];
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
@@ -698,6 +703,7 @@ export default function PurchaseOrderDetail() {
         <TabsList>
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="receipts">Receipts</TabsTrigger>
+          <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="shipments">Shipments {linkedShipments.length > 0 ? `(${linkedShipments.length})` : ""}</TabsTrigger>
           <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
@@ -976,6 +982,65 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         {/* ── History Tab ── */}
+        {/* ── Invoices Tab ── */}
+        <TabsContent value="invoices" className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              Vendor invoices linked to this purchase order.
+            </p>
+            <a href="/ap-invoices" className="text-sm text-blue-600 hover:underline">
+              Manage all invoices →
+            </a>
+          </div>
+          {!invoicesData?.invoices?.length ? (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <p className="text-sm">No invoices linked to this PO yet.</p>
+                <p className="text-xs mt-1">Create an invoice in the AP Invoices section and link this PO.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Invoice #</TableHead>
+                      <TableHead>Invoice Date</TableHead>
+                      <TableHead>Due Date</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                      <TableHead className="text-right">Balance</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {invoicesData.invoices.map((inv: any) => (
+                      <TableRow key={inv.id}>
+                        <TableCell className="font-mono font-medium">{inv.invoiceNumber}</TableCell>
+                        <TableCell className="text-sm">{inv.invoiceDate ? format(new Date(inv.invoiceDate), "MMM d, yyyy") : "—"}</TableCell>
+                        <TableCell className={`text-sm ${inv.dueDate && new Date(inv.dueDate) < new Date() && !["paid","voided"].includes(inv.status) ? "text-red-600 font-medium" : ""}`}>
+                          {inv.dueDate ? format(new Date(inv.dueDate), "MMM d, yyyy") : "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
+                        <TableCell className="text-right font-mono font-medium">
+                          {inv.balanceCents > 0 ? formatCents(inv.balanceCents) : <span className="text-green-600 text-sm">Paid</span>}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="text-xs">{inv.status?.replace("_", " ")}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <a href={`/ap-invoices/${inv.id}`} className="text-xs text-blue-600 hover:underline">View →</a>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
         <TabsContent value="history" className="space-y-4">
           {history.length === 0 ? (
             <Card>
