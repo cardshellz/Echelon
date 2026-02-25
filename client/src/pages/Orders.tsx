@@ -422,22 +422,18 @@ export default function Orders() {
   const groupedOrders: DisplayOrder[] = (() => {
     const result: DisplayOrder[] = [];
     const processedGroupIds = new Set<number>();
-    
+
     for (const order of filteredOrders) {
-      // Skip child orders - they'll be merged into the parent
-      if (order.combinedGroupId && order.combinedRole === "child") {
-        continue;
-      }
-      
-      // If this is a parent of a combined group, merge all children
-      if (order.combinedGroupId && order.combinedRole === "parent") {
+      if (order.combinedGroupId) {
+        // Skip if we've already rendered this group (could be reached via parent or child)
         if (processedGroupIds.has(order.combinedGroupId)) continue;
         processedGroupIds.add(order.combinedGroupId);
-        
-        // Find all orders in this combined group
-        const groupOrders = filteredOrders.filter(o => o.combinedGroupId === order.combinedGroupId);
-        
-        // Calculate combined totals
+
+        // Look up ALL group members from the full orders list (not filteredOrders) so
+        // the count is correct even when the search term only matches one order in the group
+        const groupOrders = orders.filter(o => o.combinedGroupId === order.combinedGroupId);
+        const parentOrder = groupOrders.find(o => o.combinedRole === "parent") || groupOrders[0];
+
         const totalItemCount = groupOrders.reduce((sum, o) => sum + o.itemCount, 0);
         const totalPickedCount = groupOrders.reduce((sum, o) => sum + o.pickedCount, 0);
         const combinedOrdersList = groupOrders.map(o => ({
@@ -446,10 +442,9 @@ export default function Orders() {
           itemCount: o.itemCount,
           status: o.status,
         }));
-        
-        // Create combined entry using parent's data
+
         result.push({
-          ...order,
+          ...parentOrder,
           isCombinedGroup: true,
           combinedOrders: combinedOrdersList,
           totalItemCount,
@@ -462,7 +457,7 @@ export default function Orders() {
         result.push(order);
       }
     }
-    
+
     return result;
   })();
 
