@@ -2086,7 +2086,7 @@ export default function ProductDetail() {
                       </div>
                       <div>
                         <Label className="text-sm">Unit Cost ($)</Label>
-                        <Input className="h-11" type="number" step="0.01" value={(supplierForm.unitCostCents / 100).toFixed(2)} onChange={(e) => setSupplierForm(prev => ({ ...prev, unitCostCents: Math.round(parseFloat(e.target.value || "0") * 100) }))} />
+                        <Input className="h-11" type="number" step="0.0001" value={parseFloat((supplierForm.unitCostCents / 100).toFixed(4)).toString()} onChange={(e) => setSupplierForm(prev => ({ ...prev, unitCostCents: parseFloat(e.target.value || "0") * 100 }))} />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-4">

@@ -66,9 +66,14 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
   cancelled: { variant: "destructive", label: "Cancelled" },
 };
 
-function formatCents(cents: number | null | undefined): string {
+function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const n = Number(cents) / 100;
+  if (opts?.unitCost && n > 0 && n < 0.01) {
+    // Sub-cent unit cost: show up to 4 significant decimal places
+    return `$${parseFloat(n.toFixed(4)).toString()}`;
+  }
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export default function PurchaseOrderDetail() {
@@ -321,7 +326,7 @@ export default function PurchaseOrderDetail() {
         productId: newLine.productId,
         productVariantId: newLine.productVariantId,
         vendorSku: newLine.vendorSku,
-        unitCostCents: Math.round(parseFloat(unitCostDollars || "0") * 100),
+        unitCostCents: parseFloat(unitCostDollars || "0") * 100,
         packSize: newLine.unitsPerUom,
         isPreferred: setAsPreferred,
       } : null;
@@ -731,7 +736,7 @@ export default function PurchaseOrderDetail() {
                               ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)`
                               : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
                           </span>
-                          <span>@ {formatCents(line.unitCostCents)}/pc</span>
+                          <span>@ {formatCents(line.unitCostCents, { unitCost: true })}/pc</span>
                           <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
                         </div>
                       </div>
@@ -796,7 +801,7 @@ export default function PurchaseOrderDetail() {
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(line.unitCostCents)}</TableCell>
+                      <TableCell className="text-right font-mono">{formatCents(line.unitCostCents, { unitCost: true })}</TableCell>
                       <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">{line.status}</Badge>
@@ -849,8 +854,8 @@ export default function PurchaseOrderDetail() {
                       <TableCell>Line #{r.purchaseOrderLineId}</TableCell>
                       <TableCell>RO #{r.receivingOrderId}</TableCell>
                       <TableCell className="text-right">{r.qtyReceived}</TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(r.poUnitCostCents)}</TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(r.actualUnitCostCents)}</TableCell>
+                      <TableCell className="text-right font-mono">{formatCents(r.poUnitCostCents, { unitCost: true })}</TableCell>
+                      <TableCell className="text-right font-mono">{formatCents(r.actualUnitCostCents, { unitCost: true })}</TableCell>
                       <TableCell className={`text-right font-mono ${(r.varianceCents || 0) > 0 ? "text-red-500" : (r.varianceCents || 0) < 0 ? "text-green-500" : ""}`}>
                         {formatCents(r.varianceCents)}
                       </TableCell>
@@ -1372,7 +1377,7 @@ export default function PurchaseOrderDetail() {
                     />
                     {unitCostDollars && newLine.orderQty > 0 && (
                       <p className="text-xs text-muted-foreground">
-                        Total: {formatCents(Math.round(parseFloat(unitCostDollars || "0") * 100) * newLine.orderQty)}
+                        Total: {formatCents(parseFloat(unitCostDollars || "0") * 100 * newLine.orderQty)}
                       </p>
                     )}
                   </div>
@@ -1420,7 +1425,7 @@ export default function PurchaseOrderDetail() {
               <Button
                 onClick={() => addLineMutation.mutate({
                   ...newLine,
-                  unitCostCents: Math.round(parseFloat(unitCostDollars || "0") * 100),
+                  unitCostCents: parseFloat(unitCostDollars || "0") * 100,
                 })}
                 disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >

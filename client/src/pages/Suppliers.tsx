@@ -147,12 +147,14 @@ function formatCents(cents: number | null | undefined): string {
 function parseDollarsInput(val: string): number | null {
   const n = parseFloat(val);
   if (isNaN(n) || n < 0) return null;
-  return Math.round(n * 100);
+  return n * 100;
 }
 
 function centsToInputStr(cents: number | null | undefined): string {
   if (cents == null) return "";
-  return (cents / 100).toFixed(2);
+  const dollars = cents / 100;
+  // Show up to 4 decimal places, trimming trailing zeros
+  return dollars % 1 === 0 ? dollars.toFixed(2) : parseFloat(dollars.toFixed(4)).toString();
 }
 
 const VENDOR_TYPE_BADGES: Record<
@@ -1738,7 +1740,7 @@ export default function Suppliers() {
                 <Label>Unit Cost ($)</Label>
                 <Input
                   type="number"
-                  step="0.01"
+                  step="0.0001"
                   min="0"
                   value={vpForm.unitCostDollars}
                   onChange={(e) =>

@@ -97,9 +97,13 @@ const COST_STATUS_OPTIONS = [
 
 // ── Helpers ──
 
-function formatCents(cents: number | null | undefined): string {
+function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const n = Number(cents) / 100;
+  if (opts?.unitCost && n > 0 && n < 0.01) {
+    return `$${parseFloat(n.toFixed(4)).toString()}`;
+  }
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatNumber(val: string | number | null | undefined, decimals = 2): string {
@@ -1625,7 +1629,7 @@ export default function InboundShipmentDetail() {
                             )}
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            {formatCents(line.unitCostCents)}/unit
+                            {formatCents(line.unitCostCents, { unitCost: true })}/unit
                             {" · "}
                             Ordered: {line.orderQty}
                             {(line.receivedQty || 0) > 0 && ` · Received: ${line.receivedQty}`}

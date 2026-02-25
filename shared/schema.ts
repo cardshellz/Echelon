@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint, boolean, numeric } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, bigint, boolean, numeric, doublePrecision } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -530,9 +530,9 @@ export const productVariants = pgTable("product_variants", {
   heightMm: integer("height_mm"),
   priceCents: integer("price_cents"),
   compareAtPriceCents: integer("compare_at_price_cents"),
-  standardCostCents: integer("standard_cost_cents"), // Standard cost for valuation
-  lastCostCents: integer("last_cost_cents"), // Most recent purchase cost
-  avgCostCents: integer("avg_cost_cents"), // Weighted average cost (updated on each receipt)
+  standardCostCents: doublePrecision("standard_cost_cents"), // Standard cost for valuation
+  lastCostCents: doublePrecision("last_cost_cents"), // Most recent purchase cost
+  avgCostCents: doublePrecision("avg_cost_cents"), // Weighted average cost (updated on each receipt)
   trackInventory: boolean("track_inventory").default(true),
   inventoryPolicy: varchar("inventory_policy", { length: 20 }).default("deny"),
   shopifyVariantId: varchar("shopify_variant_id", { length: 100 }),
@@ -646,7 +646,7 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   targetState: varchar("target_state", { length: 20 }), // "committed", "picked", "shipped", etc.
 
   // Cost & lot tracking
-  unitCostCents: integer("unit_cost_cents"), // Cost traceability on every transaction
+  unitCostCents: doublePrecision("unit_cost_cents"), // Cost traceability on every transaction
   inventoryLotId: integer("inventory_lot_id"), // Lot linkage (FK added after inventoryLots table definition)
 
   // Reference links - which operation triggered this transaction
@@ -1584,7 +1584,7 @@ export const receivingLines = pgTable("receiving_lines", {
   purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
 
   // Cost tracking
-  unitCost: integer("unit_cost"), // Cost per unit in cents
+  unitCost: doublePrecision("unit_cost"), // Cost per unit in cents
   
   // Put-away location (where it goes after receiving)
   putawayLocationId: integer("putaway_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
@@ -1756,14 +1756,14 @@ export const vendorProducts = pgTable("vendor_products", {
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }), // Specific variant if vendor sells at variant level
   vendorSku: varchar("vendor_sku", { length: 100 }), // Vendor's own catalog number
   vendorProductName: text("vendor_product_name"), // Vendor's product name
-  unitCostCents: integer("unit_cost_cents").default(0), // Negotiated cost per unit
+  unitCostCents: doublePrecision("unit_cost_cents").default(0), // Negotiated cost per unit
   packSize: integer("pack_size").default(1), // Units in vendor's selling unit
   moq: integer("moq").default(1), // Minimum order quantity
   leadTimeDays: integer("lead_time_days"), // Vendor-specific override
   isPreferred: integer("is_preferred").default(0), // 1 = primary vendor for this product
   isActive: integer("is_active").default(1),
   lastPurchasedAt: timestamp("last_purchased_at"), // For stale-link detection
-  lastCostCents: integer("last_cost_cents"), // Cost from most recent closed PO
+  lastCostCents: doublePrecision("last_cost_cents"), // Cost from most recent closed PO
   // Packaging dimensions (for shipment tracking / landed cost allocation)
   weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
   lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
@@ -1914,12 +1914,12 @@ export const purchaseOrderLines = pgTable("purchase_order_lines", {
   cancelledQty: integer("cancelled_qty").default(0),
 
   // Cost
-  unitCostCents: integer("unit_cost_cents").notNull().default(0),
+  unitCostCents: doublePrecision("unit_cost_cents").notNull().default(0),
   discountPercent: numeric("discount_percent", { precision: 5, scale: 2 }).default("0"),
-  discountCents: integer("discount_cents").default(0), // Computed
+  discountCents: doublePrecision("discount_cents").default(0), // Computed
   taxRatePercent: numeric("tax_rate_percent", { precision: 5, scale: 2 }).default("0"),
-  taxCents: integer("tax_cents").default(0),
-  lineTotalCents: bigint("line_total_cents", { mode: "number" }), // (order_qty * unit_cost_cents) - discount + tax
+  taxCents: doublePrecision("tax_cents").default(0),
+  lineTotalCents: doublePrecision("line_total_cents"), // (order_qty * unit_cost_cents) - discount + tax
 
   // Dates
   expectedDeliveryDate: timestamp("expected_delivery_date"), // Per-line override
@@ -2002,9 +2002,9 @@ export const poReceipts = pgTable("po_receipts", {
   receivingOrderId: integer("receiving_order_id").notNull().references(() => receivingOrders.id, { onDelete: "cascade" }),
   receivingLineId: integer("receiving_line_id").notNull().references(() => receivingLines.id, { onDelete: "cascade" }),
   qtyReceived: integer("qty_received").notNull().default(0),
-  poUnitCostCents: integer("po_unit_cost_cents"), // Cost on PO
-  actualUnitCostCents: integer("actual_unit_cost_cents"), // Actual receipt cost
-  varianceCents: integer("variance_cents"), // actual - po
+  poUnitCostCents: doublePrecision("po_unit_cost_cents"), // Cost on PO
+  actualUnitCostCents: doublePrecision("actual_unit_cost_cents"), // Actual receipt cost
+  varianceCents: doublePrecision("variance_cents"), // actual - po
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("po_receipts_po_line_rcv_line_idx").on(table.purchaseOrderLineId, table.receivingLineId),
@@ -2032,7 +2032,7 @@ export const inventoryLots = pgTable("inventory_lots", {
   warehouseLocationId: integer("warehouse_location_id").notNull().references(() => warehouseLocations.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id, { onDelete: "set null" }),
   purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "set null" }),
-  unitCostCents: integer("unit_cost_cents").notNull().default(0), // Cost per variant unit
+  unitCostCents: doublePrecision("unit_cost_cents").notNull().default(0), // Cost per variant unit
   qtyOnHand: integer("qty_on_hand").notNull().default(0),
   qtyReserved: integer("qty_reserved").notNull().default(0),
   qtyPicked: integer("qty_picked").notNull().default(0),
@@ -2064,8 +2064,8 @@ export const orderItemCosts = pgTable("order_item_costs", {
   inventoryLotId: integer("inventory_lot_id").notNull().references(() => inventoryLots.id),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   qty: integer("qty").notNull(), // Units from this lot
-  unitCostCents: integer("unit_cost_cents").notNull(), // From lot
-  totalCostCents: integer("total_cost_cents").notNull(), // qty * unit_cost
+  unitCostCents: doublePrecision("unit_cost_cents").notNull(), // From lot
+  totalCostCents: doublePrecision("total_cost_cents").notNull(), // qty * unit_cost
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -2094,8 +2094,8 @@ export const orderItemFinancials = pgTable("order_item_financials", {
   cogsCents: bigint("cogs_cents", { mode: "number" }).notNull(), // From SUM(order_item_costs.total_cost_cents)
   grossProfitCents: bigint("gross_profit_cents", { mode: "number" }).notNull(), // revenue - cogs
   marginPercent: numeric("margin_percent", { precision: 5, scale: 2 }), // (profit / revenue) * 100
-  avgSellingPriceCents: integer("avg_selling_price_cents"), // revenue / qty
-  avgUnitCostCents: integer("avg_unit_cost_cents"), // cogs / qty
+  avgSellingPriceCents: doublePrecision("avg_selling_price_cents"), // revenue / qty
+  avgUnitCostCents: doublePrecision("avg_unit_cost_cents"), // cogs / qty
   vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }), // Which vendor supplied (from lot's PO)
   channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
   shippedAt: timestamp("shipped_at").notNull(), // When fulfilled
@@ -2189,7 +2189,7 @@ export const inboundShipmentLines = pgTable("inbound_shipment_lines", {
   palletCount: integer("pallet_count"),
   // Allocation results
   allocatedCostCents: bigint("allocated_cost_cents", { mode: "number" }),
-  landedUnitCostCents: integer("landed_unit_cost_cents"),
+  landedUnitCostCents: doublePrecision("landed_unit_cost_cents"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -2258,13 +2258,13 @@ export const landedCostSnapshots = pgTable("landed_cost_snapshots", {
   inboundShipmentLineId: integer("inbound_shipment_line_id").references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
-  poUnitCostCents: integer("po_unit_cost_cents"),
+  poUnitCostCents: doublePrecision("po_unit_cost_cents"),
   freightAllocatedCents: bigint("freight_allocated_cents", { mode: "number" }),
   dutyAllocatedCents: bigint("duty_allocated_cents", { mode: "number" }),
   insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),
   otherAllocatedCents: bigint("other_allocated_cents", { mode: "number" }),
   totalLandedCostCents: bigint("total_landed_cost_cents", { mode: "number" }),
-  landedUnitCostCents: integer("landed_unit_cost_cents"),
+  landedUnitCostCents: doublePrecision("landed_unit_cost_cents"),
   qty: integer("qty"),
   finalizedAt: timestamp("finalized_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
