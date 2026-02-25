@@ -1133,16 +1133,17 @@ export class DatabaseStorage implements IStorage {
     const imageMap = new Map<string, string>();
     if (skusMissingImages.length > 0) {
       try {
+        const imageSkuList = sql.join(skusMissingImages.map(s => sql`${s}`), sql`, `);
         const imageResults = await db.execute<{ sku: string; image_url: string }>(sql`
           SELECT UPPER(sku) as sku, image_url FROM (
             SELECT pl.sku, pl.image_url FROM product_locations pl
-            WHERE UPPER(pl.sku) = ANY(${skusMissingImages}) AND pl.image_url IS NOT NULL
+            WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
             SELECT pv.sku, COALESCE(pva.url, pa.url) as image_url
             FROM product_variants pv
             LEFT JOIN product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
             LEFT JOIN product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
-            WHERE UPPER(pv.sku) = ANY(${skusMissingImages})
+            WHERE UPPER(pv.sku) IN (${imageSkuList})
               AND COALESCE(pva.url, pa.url) IS NOT NULL
           ) sub
         `);
@@ -1164,10 +1165,11 @@ export class DatabaseStorage implements IStorage {
     const barcodeMap = new Map<string, string>();
     if (skusMissingBarcodes.length > 0) {
       try {
+        const barcodeSkuList = sql.join(skusMissingBarcodes.map(s => sql`${s}`), sql`, `);
         const barcodeResults = await db.execute<{ sku: string; barcode: string }>(sql`
           SELECT UPPER(pv.sku) as sku, pv.barcode
           FROM product_variants pv
-          WHERE UPPER(pv.sku) = ANY(${skusMissingBarcodes})
+          WHERE UPPER(pv.sku) IN (${barcodeSkuList})
             AND pv.barcode IS NOT NULL
         `);
         for (const row of barcodeResults.rows) {
