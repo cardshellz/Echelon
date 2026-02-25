@@ -288,7 +288,8 @@ export default function Suppliers() {
         credentials: "include",
       });
       if (!res.ok) throw new Error("Failed to fetch vendor products");
-      return res.json();
+      const data = await res.json();
+      return Array.isArray(data) ? data : (data.vendorProducts ?? []);
     },
     enabled: !!expandedVendorId,
   });
