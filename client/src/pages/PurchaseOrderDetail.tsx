@@ -103,6 +103,9 @@ export default function PurchaseOrderDetail() {
   const [unitCostDollars, setUnitCostDollars] = useState("");
   const [saveToVendorCatalog, setSaveToVendorCatalog] = useState(true);
   const [setAsPreferred, setSetAsPreferred] = useState(false);
+  const [addLineMode, setAddLineMode] = useState<"catalog" | "search">("catalog");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<any>(null);
   const [newLine, setNewLine] = useState({
     productId: 0,
     productVariantId: 0,
@@ -132,6 +135,17 @@ export default function PurchaseOrderDetail() {
   const { data: products = [] } = useQuery<any[]>({
     queryKey: ["/api/products"],
     enabled: showAddLineDialog,
+  });
+
+  const { data: vendorCatalog = [], isLoading: catalogLoading } = useQuery<any[]>({
+    queryKey: [`/api/vendor-products`, po?.vendorId],
+    queryFn: async () => {
+      if (!po?.vendorId) return [];
+      const res = await fetch(`/api/vendor-products?vendorId=${po.vendorId}&isActive=1`);
+      const data = await res.json();
+      return Array.isArray(data) ? data : (data.vendorProducts ?? []);
+    },
+    enabled: showAddLineDialog && !!po?.vendorId,
   });
 
   const { data: linkedShipments = [] } = useQuery<any[]>({
@@ -320,6 +334,8 @@ export default function PurchaseOrderDetail() {
       setUnitCostDollars("");
       setSaveToVendorCatalog(true);
       setSetAsPreferred(false);
+      setCatalogSearch("");
+      setSelectedCatalogEntry(null);
       toast({ title: "Line added" });
 
       if (catalogData) catalogUpsertMutation.mutate(catalogData);
@@ -1006,149 +1022,372 @@ export default function PurchaseOrderDetail() {
           setSaveToVendorCatalog(true);
           setSetAsPreferred(false);
           setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+          setCatalogSearch("");
+          setSelectedCatalogEntry(null);
+          setAddLineMode("catalog");
         }
       }}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Line Item</DialogTitle>
-            <DialogDescription>Search by product, then select the variant (e.g. case size).</DialogDescription>
+            <DialogDescription>
+              {addLineMode === "catalog"
+                ? "Select from this supplier's catalog, or search all products."
+                : "Search all products. You can save new items to the supplier's catalog."}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
 
-            {/* Step 1: Product search */}
-            <div className="space-y-2">
-              <Label>Product *</Label>
-              <Popover open={productOpen} onOpenChange={setProductOpen}>
-                <PopoverTrigger asChild>
-                  <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                    {selectedProductForLine ? selectedProductForLine.name : "Search product..."}
-                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                  <Command shouldFilter={false}>
-                    <CommandInput placeholder="Search name or SKU..." value={productSearch} onValueChange={setProductSearch} />
-                    <CommandList>
-                      <CommandEmpty>No products found.</CommandEmpty>
-                      <CommandGroup>
-                        {filteredProducts.map((p: any) => (
-                          <CommandItem
-                            key={p.id}
-                            value={String(p.id)}
-                            onSelect={() => {
-                              setSelectedProductForLine(p);
-                              setNewLine(prev => ({ ...prev, productId: p.id, productVariantId: 0, unitsPerUom: 1 }));
-                              setProductOpen(false);
-                              setProductSearch("");
-                            }}
-                          >
-                            <Check className={`mr-2 h-4 w-4 ${selectedProductForLine?.id === p.id ? "opacity-100" : "opacity-0"}`} />
-                            <span className="font-mono text-xs mr-2 text-muted-foreground">{p.sku}</span>
-                            <span className="truncate">{p.name}</span>
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
-            </div>
-
-            {/* Step 2: Variant (case size) — only shown after product selected */}
-            {selectedProductForLine && (
-              <div className="space-y-2">
-                <Label>Variant / Case Size *</Label>
-                <Popover open={variantOpen} onOpenChange={setVariantOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                      {selectedVariant
-                        ? `${selectedVariant.sku} — ${selectedVariant.name}`
-                        : "Select variant..."}
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                    <Command>
-                      <CommandList>
-                        <CommandEmpty>No variants available.</CommandEmpty>
-                        <CommandGroup>
-                          {(selectedProductForLine.variants || []).map((v: any) => (
-                            <CommandItem
-                              key={v.id}
-                              value={String(v.id)}
-                              onSelect={() => {
-                                setNewLine(prev => ({
-                                  ...prev,
-                                  productVariantId: v.id,
-                                  unitsPerUom: v.unitsPerVariant || 1,
-                                }));
-                                setVariantOpen(false);
-                              }}
-                            >
-                              <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
-                              <span className="font-mono text-xs mr-2">{v.sku}</span>
-                              <span className="truncate">{v.name}</span>
-                              {(v.unitsPerVariant || 1) > 1 && (
-                                <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
-                              )}
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
+            {/* Mode toggle — only when PO has a vendor */}
+            {po.vendorId && (
+              <div className="flex rounded-lg border p-0.5 gap-0.5 bg-muted/30">
+                <Button
+                  variant={addLineMode === "catalog" ? "default" : "ghost"}
+                  size="sm"
+                  className="flex-1 h-8 text-xs"
+                  onClick={() => {
+                    setAddLineMode("catalog");
+                    setSelectedProductForLine(null);
+                    setSelectedCatalogEntry(null);
+                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setUnitCostDollars("");
+                  }}
+                >
+                  Supplier Catalog{vendorCatalog.length > 0 ? ` (${vendorCatalog.length})` : ""}
+                </Button>
+                <Button
+                  variant={addLineMode === "search" ? "default" : "ghost"}
+                  size="sm"
+                  className="flex-1 h-8 text-xs"
+                  onClick={() => {
+                    setAddLineMode("search");
+                    setSelectedCatalogEntry(null);
+                    setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                    setUnitCostDollars("");
+                    setSelectedProductForLine(null);
+                  }}
+                >
+                  All Products
+                </Button>
               </div>
             )}
 
-            {/* Qty in pieces + case helper */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Qty (pieces) *</Label>
-                <Input
-                  type="number"
-                  min="1"
-                  value={newLine.orderQty || ""}
-                  onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
-                  className="h-10"
-                />
-                {casesEquiv !== null && (
-                  <p className="text-xs text-muted-foreground">= {casesEquiv} cases @ {newLine.unitsPerUom} pcs/case</p>
+            {/* ── CATALOG MODE ── */}
+            {addLineMode === "catalog" && po.vendorId && (
+              <>
+                {selectedCatalogEntry ? (
+                  /* Selected catalog entry chip */
+                  <div className="flex items-center gap-2 p-2.5 rounded-md bg-muted border">
+                    <div className="flex-1 min-w-0">
+                      {(() => {
+                        const product = products.find((p: any) => p.id === selectedCatalogEntry.productId);
+                        const variant = product?.variants?.find((v: any) => v.id === selectedCatalogEntry.productVariantId);
+                        return (
+                          <>
+                            <div className="font-medium text-sm truncate">
+                              {product?.name || selectedCatalogEntry.vendorProductName || `Product #${selectedCatalogEntry.productId}`}
+                            </div>
+                            {variant && (
+                              <div className="text-xs text-muted-foreground font-mono">{variant.sku} — {variant.name}</div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0"
+                      onClick={() => {
+                        setSelectedCatalogEntry(null);
+                        setSelectedProductForLine(null);
+                        setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
+                        setUnitCostDollars("");
+                      }}
+                    >
+                      <XCircle className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ) : (
+                  /* Catalog picker list */
+                  <>
+                    <div className="space-y-2">
+                      <Input
+                        placeholder="Filter supplier catalog..."
+                        value={catalogSearch}
+                        onChange={e => setCatalogSearch(e.target.value)}
+                        className="h-9"
+                      />
+                    </div>
+                    {catalogLoading ? (
+                      <div className="h-32 flex items-center justify-center text-sm text-muted-foreground">
+                        Loading catalog...
+                      </div>
+                    ) : vendorCatalog.length === 0 ? (
+                      <div className="rounded-md border p-4 text-center text-sm text-muted-foreground space-y-2">
+                        <Package className="h-6 w-6 mx-auto opacity-30" />
+                        <p>No catalog entries for this supplier yet.</p>
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-auto p-0 text-xs"
+                          onClick={() => setAddLineMode("search")}
+                        >
+                          Search all products →
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="rounded-md border divide-y max-h-52 overflow-y-auto">
+                        {vendorCatalog
+                          .filter((entry: any) => {
+                            if (!catalogSearch) return true;
+                            const s = catalogSearch.toLowerCase();
+                            const product = products.find((p: any) => p.id === entry.productId);
+                            const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+                            return (
+                              product?.name?.toLowerCase().includes(s) ||
+                              entry.vendorSku?.toLowerCase().includes(s) ||
+                              entry.vendorProductName?.toLowerCase().includes(s) ||
+                              variant?.sku?.toLowerCase().includes(s) ||
+                              product?.sku?.toLowerCase().includes(s)
+                            );
+                          })
+                          .map((entry: any) => {
+                            const product = products.find((p: any) => p.id === entry.productId);
+                            const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+                            return (
+                              <button
+                                key={entry.id}
+                                type="button"
+                                className="w-full text-left p-2.5 hover:bg-muted/50 transition-colors"
+                                onClick={() => {
+                                  setSelectedCatalogEntry(entry);
+                                  setSelectedProductForLine(product || null);
+                                  setNewLine(prev => ({
+                                    ...prev,
+                                    productId: entry.productId,
+                                    productVariantId: entry.productVariantId || 0,
+                                    vendorSku: entry.vendorSku || "",
+                                    unitsPerUom: entry.packSize || 1,
+                                  }));
+                                  setUnitCostDollars(
+                                    entry.unitCostCents ? (entry.unitCostCents / 100).toFixed(3) : ""
+                                  );
+                                  setSaveToVendorCatalog(false);
+                                }}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="font-medium text-sm truncate">
+                                      {product?.name || entry.vendorProductName || `Product #${entry.productId}`}
+                                    </div>
+                                    <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                      {variant && <span className="font-mono">{variant.sku}</span>}
+                                      {entry.vendorSku && <span>· {entry.vendorSku}</span>}
+                                      {(entry.packSize || 1) > 1 && <span>· {entry.packSize} pcs/case</span>}
+                                      {entry.moq > 1 && <span>· MOQ {entry.moq}</span>}
+                                    </div>
+                                  </div>
+                                  <div className="text-right shrink-0">
+                                    <div className="text-sm font-mono font-medium">{formatCents(entry.unitCostCents)}</div>
+                                    {entry.isPreferred ? (
+                                      <div className="text-xs text-green-600">Preferred</div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </button>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </>
                 )}
-              </div>
-              <div className="space-y-2">
-                <Label>Unit Cost ($/pc) *</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.001"
-                  placeholder="0.05"
-                  value={unitCostDollars}
-                  onChange={e => setUnitCostDollars(e.target.value)}
-                  className="h-10"
-                />
-                {unitCostDollars && newLine.orderQty > 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    Total: {formatCents(Math.round(parseFloat(unitCostDollars || "0") * 100) * newLine.orderQty)}
-                  </p>
+
+                {/* If catalog entry has no variant set, show variant picker */}
+                {selectedCatalogEntry && !selectedCatalogEntry.productVariantId && selectedProductForLine && (
+                  <div className="space-y-2">
+                    <Label>Variant / Case Size *</Label>
+                    <Popover open={variantOpen} onOpenChange={setVariantOpen}>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between h-10 font-normal">
+                          {selectedVariant
+                            ? `${selectedVariant.sku} — ${selectedVariant.name}`
+                            : "Select variant..."}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                        <Command>
+                          <CommandList>
+                            <CommandEmpty>No variants available.</CommandEmpty>
+                            <CommandGroup>
+                              {(selectedProductForLine.variants || []).map((v: any) => (
+                                <CommandItem
+                                  key={v.id}
+                                  value={String(v.id)}
+                                  onSelect={() => {
+                                    setNewLine(prev => ({
+                                      ...prev,
+                                      productVariantId: v.id,
+                                      unitsPerUom: v.unitsPerVariant || 1,
+                                    }));
+                                    setVariantOpen(false);
+                                  }}
+                                >
+                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <span className="font-mono text-xs mr-2">{v.sku}</span>
+                                  <span className="truncate">{v.name}</span>
+                                  {(v.unitsPerVariant || 1) > 1 && (
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                  )}
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
                 )}
-              </div>
-            </div>
+              </>
+            )}
 
-            <div className="space-y-2">
-              <Label>Vendor SKU</Label>
-              <Input
-                value={newLine.vendorSku}
-                onChange={e => setNewLine(prev => ({ ...prev, vendorSku: e.target.value }))}
-                placeholder="Vendor's catalog number"
-                className="h-10"
-              />
-            </div>
+            {/* ── SEARCH MODE ── */}
+            {(addLineMode === "search" || !po.vendorId) && (
+              <>
+                <div className="space-y-2">
+                  <Label>Product *</Label>
+                  <Popover open={productOpen} onOpenChange={setProductOpen}>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" className="w-full justify-between h-10 font-normal">
+                        {selectedProductForLine ? selectedProductForLine.name : "Search product..."}
+                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput placeholder="Search name or SKU..." value={productSearch} onValueChange={setProductSearch} />
+                        <CommandList>
+                          <CommandEmpty>No products found.</CommandEmpty>
+                          <CommandGroup>
+                            {filteredProducts.map((p: any) => (
+                              <CommandItem
+                                key={p.id}
+                                value={String(p.id)}
+                                onSelect={() => {
+                                  setSelectedProductForLine(p);
+                                  setNewLine(prev => ({ ...prev, productId: p.id, productVariantId: 0, unitsPerUom: 1 }));
+                                  setProductOpen(false);
+                                  setProductSearch("");
+                                }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${selectedProductForLine?.id === p.id ? "opacity-100" : "opacity-0"}`} />
+                                <span className="font-mono text-xs mr-2 text-muted-foreground">{p.sku}</span>
+                                <span className="truncate">{p.name}</span>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
 
-            {/* Vendor catalog section */}
+                {selectedProductForLine && (
+                  <div className="space-y-2">
+                    <Label>Variant / Case Size *</Label>
+                    <Popover open={variantOpen} onOpenChange={setVariantOpen}>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between h-10 font-normal">
+                          {selectedVariant
+                            ? `${selectedVariant.sku} — ${selectedVariant.name}`
+                            : "Select variant..."}
+                          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                        <Command>
+                          <CommandList>
+                            <CommandEmpty>No variants available.</CommandEmpty>
+                            <CommandGroup>
+                              {(selectedProductForLine.variants || []).map((v: any) => (
+                                <CommandItem
+                                  key={v.id}
+                                  value={String(v.id)}
+                                  onSelect={() => {
+                                    setNewLine(prev => ({
+                                      ...prev,
+                                      productVariantId: v.id,
+                                      unitsPerUom: v.unitsPerVariant || 1,
+                                    }));
+                                    setVariantOpen(false);
+                                  }}
+                                >
+                                  <Check className={`mr-2 h-4 w-4 ${newLine.productVariantId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  <span className="font-mono text-xs mr-2">{v.sku}</span>
+                                  <span className="truncate">{v.name}</span>
+                                  {(v.unitsPerVariant || 1) > 1 && (
+                                    <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs/case</span>
+                                  )}
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ── COMMON FIELDS — shown once a variant is selected ── */}
             {newLine.productVariantId > 0 && (
               <>
                 <Separator />
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Qty (pieces) *</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={newLine.orderQty || ""}
+                      onChange={e => setNewLine(prev => ({ ...prev, orderQty: parseInt(e.target.value) || 0 }))}
+                      className="h-10"
+                    />
+                    {casesEquiv !== null && (
+                      <p className="text-xs text-muted-foreground">= {casesEquiv} cases @ {newLine.unitsPerUom} pcs/case</p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Unit Cost ($/pc) *</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.001"
+                      placeholder="0.05"
+                      value={unitCostDollars}
+                      onChange={e => setUnitCostDollars(e.target.value)}
+                      className="h-10"
+                    />
+                    {unitCostDollars && newLine.orderQty > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Total: {formatCents(Math.round(parseFloat(unitCostDollars || "0") * 100) * newLine.orderQty)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Vendor SKU</Label>
+                  <Input
+                    value={newLine.vendorSku}
+                    onChange={e => setNewLine(prev => ({ ...prev, vendorSku: e.target.value }))}
+                    placeholder="Vendor's catalog number"
+                    className="h-10"
+                  />
+                </div>
+
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <Checkbox
@@ -1157,7 +1396,7 @@ export default function PurchaseOrderDetail() {
                       onCheckedChange={(v) => setSaveToVendorCatalog(!!v)}
                     />
                     <label htmlFor="saveToVendorCatalog" className="text-sm cursor-pointer select-none">
-                      Save to vendor catalog
+                      {selectedCatalogEntry ? "Update vendor catalog with new cost" : "Save to vendor catalog"}
                     </label>
                   </div>
                   {saveToVendorCatalog && (
