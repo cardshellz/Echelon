@@ -567,17 +567,25 @@ export default function Inventory() {
 
   // Reorder analysis for low stock indicators (from purchasing logic)
   const { data: reorderData } = useQuery<{
-    items: Array<{ sku: string; status: string }>;
-    summary: { belowReorderPoint: number; orderSoon: number; noMovement: number };
+    items: Array<{ sku: string; status: string; available: number }>;
+    summary: { outOfStock: number; belowReorderPoint: number; orderSoon: number; noMovement: number };
   }>({
     queryKey: ["/api/purchasing/reorder-analysis"],
     staleTime: 60_000,
   });
 
+  const oosSkus = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of reorderData?.items ?? []) {
+      if (item.status === "stockout") set.add(item.sku);
+    }
+    return set;
+  }, [reorderData]);
+
   const orderNowSkus = useMemo(() => {
     const set = new Set<string>();
     for (const item of reorderData?.items ?? []) {
-      if (item.status === "order_now" || item.status === "stockout") set.add(item.sku);
+      if (item.status === "order_now") set.add(item.sku);
     }
     return set;
   }, [reorderData]);
@@ -700,7 +708,7 @@ export default function Inventory() {
   // Summary bar stats — product-level counts from purchasing reorder analysis
   const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
-  const oosCount = variantLevels.filter(v => (fungibleAvailable.get(v.variantId) ?? v.available) <= 0).length;
+  const oosCount = reorderData?.summary?.outOfStock ?? 0;
   const duplicateCount = variantLevels.filter(v => v.isDuplicate).length;
   const strayCount = variantLevels.filter(v => !v.productId).length;
   const noBinCount = variantLevels.filter(v => v.noBin).length;
@@ -728,7 +736,7 @@ export default function Inventory() {
     .filter(v =>
       stockFilter === "order_now" ? (v.baseSku && orderNowSkus.has(v.baseSku)) :
       stockFilter === "order_soon" ? (v.baseSku && orderSoonSkus.has(v.baseSku)) :
-      stockFilter === "oos" ? (fungibleAvailable.get(v.variantId) ?? v.available) <= 0 :
+      stockFilter === "oos" ? (v.baseSku && oosSkus.has(v.baseSku)) :
       stockFilter === "duplicates" ? v.isDuplicate :
       stockFilter === "stray" ? !v.productId :
       stockFilter === "no_bin" ? v.noBin :

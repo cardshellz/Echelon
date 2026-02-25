@@ -10229,12 +10229,13 @@ export async function registerRoutes(
         const earliestExpectedDate = r.earliest_expected || null;
         const leadTimeDays = Number(r.lead_time_days);
         const safetyStockDays = Number(r.safety_stock_days);
+        const available = totalOnHand - totalReserved;
         const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
-        const daysOfSupply = avgDailyUsage > 0 ? Math.round(totalOnHand / avgDailyUsage) : totalOnHand > 0 ? 9999 : 0;
+        const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
         const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
 
-        // Effective supply = on hand + on order (factor in open POs)
-        const effectiveSupply = totalOnHand + onOrderPieces;
+        // Effective supply = available (unreserved) + on order
+        const effectiveSupply = available + onOrderPieces;
         const rawOrderQtyPieces = Math.max(0, reorderPoint - effectiveSupply);
 
         // Round up to ordering UOM (highest hierarchy variant)
@@ -10252,14 +10253,15 @@ export async function registerRoutes(
           : onOrderPieces;
 
         let status: string;
-        if (avgDailyUsage === 0) {
-          status = "no_movement";
-        } else if (totalOnHand <= 0) {
+        // Stockout = no available pieces regardless of velocity
+        if (available <= 0) {
           status = "stockout";
-        } else if (totalOnHand <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
+        } else if (avgDailyUsage === 0) {
+          status = "no_movement";
+        } else if (available <= reorderPoint && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
           // Below reorder point but on-order covers the gap
           status = "on_order";
-        } else if (totalOnHand <= reorderPoint) {
+        } else if (available <= reorderPoint) {
           status = "order_now";
         } else if (daysOfSupply <= leadTimeDays * 1.5) {
           status = "order_soon";
@@ -10275,7 +10277,7 @@ export async function registerRoutes(
           variantCount: Number(r.variant_count || 0),
           totalOnHand,
           totalReserved,
-          available: totalOnHand - totalReserved,
+          available,
           periodUsage: totalOutbound,
           avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
           daysOfSupply,
@@ -10297,7 +10299,8 @@ export async function registerRoutes(
 
       const summary = {
         totalProducts: items.length,
-        belowReorderPoint: items.filter((i) => i.status === "order_now" || i.status === "stockout").length,
+        outOfStock: items.filter((i) => i.status === "stockout").length,
+        belowReorderPoint: items.filter((i) => i.status === "order_now").length,
         orderSoon: items.filter((i) => i.status === "order_soon").length,
         noMovement: items.filter((i) => i.status === "no_movement").length,
         totalOnHand: items.reduce((s, i) => s + i.totalOnHand, 0),
