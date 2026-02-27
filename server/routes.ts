@@ -13,6 +13,8 @@ import { createBinAssignmentService } from "./services/bin-assignment";
 import { createPurchasingService, PurchasingError } from "./services/purchasing";
 import { createShipmentTrackingService, ShipmentTrackingError } from "./services/shipment-tracking";
 import * as apLedger from "./services/ap-ledger";
+import { renderPoHtml } from "./services/po-document";
+import * as emailService from "./services/email";
 import { broadcastOrdersUpdated } from "./websocket";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -10703,6 +10705,64 @@ export async function registerRoutes(
     try {
       const revisions = await purchasing.getPoRevisions(Number(req.params.id));
       res.json({ revisions });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/:id/document", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const poId = Number(req.params.id);
+      const po = await purchasing.getPurchaseOrderById(poId);
+      if (!po) return res.status(404).json({ error: "PO not found" });
+
+      const [lines, vendor, settings] = await Promise.all([
+        purchasing.getPurchaseOrderLines(poId),
+        storage.getVendorById(po.vendorId),
+        storage.getAllSettings(),
+      ]);
+
+      const html = renderPoHtml({
+        po,
+        lines,
+        vendor,
+        companyName: settings.company_name,
+        companyAddress: settings.company_address,
+        companyCity: settings.company_city,
+        companyState: settings.company_state,
+        companyPostalCode: settings.company_postal_code,
+        companyCountry: settings.company_country,
+      });
+
+      res.json({ html });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/purchase-orders/:id/send-email", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      if (!emailService.isSmtpConfigured()) {
+        return res.status(503).json({
+          error: "Email is not configured. Add SMTP_HOST, SMTP_USER, SMTP_PASS, and SMTP_FROM to your .env file.",
+        });
+      }
+      const { toEmail, ccEmail, message } = req.body;
+      if (!toEmail) return res.status(400).json({ error: "toEmail is required" });
+
+      const poId = Number(req.params.id);
+      await emailService.sendPurchaseOrder({ poId, toEmail, ccEmail, message });
+
+      // Record in PO history
+      await storage.createPoStatusHistory({
+        purchaseOrderId: poId,
+        fromStatus: null,
+        toStatus: "email_sent",
+        changedBy: (req as any).user?.id ?? null,
+        notes: `Email sent to ${toEmail}${ccEmail ? `, cc: ${ccEmail}` : ""}`,
+      });
+
+      res.json({ ok: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

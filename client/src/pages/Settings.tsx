@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { Building2, Package, Bell, Clock, Save, Volume2 } from "lucide-react";
+import { Building2, Package, Bell, Clock, Save, Volume2, ShoppingCart, Plus, Pencil, Trash2, Info } from "lucide-react";
 import { useSettings } from "@/lib/settings";
 import { themeNames, themeDescriptions, previewTheme, type SoundTheme } from "@/lib/sounds";
 
@@ -93,6 +95,69 @@ export default function Settings() {
 
   const canEdit = hasPermission("settings", "edit");
 
+  // ── Approval Tiers ──────────────────────────────────────────────────
+  const [showTierDialog, setShowTierDialog] = useState(false);
+  const [editingTier, setEditingTier] = useState<any>(null);
+  const [tierForm, setTierForm] = useState({ tierName: "", thresholdDollars: "", approverRole: "lead", sortOrder: "0", active: true });
+
+  const { data: tiersData } = useQuery<{ tiers: any[] }>({ queryKey: ["/api/purchasing/approval-tiers"] });
+  const tiers = tiersData?.tiers ?? [];
+
+  function openAddTier() {
+    setEditingTier(null);
+    setTierForm({ tierName: "", thresholdDollars: "", approverRole: "lead", sortOrder: "0", active: true });
+    setShowTierDialog(true);
+  }
+
+  function openEditTier(t: any) {
+    setEditingTier(t);
+    setTierForm({
+      tierName: t.tierName,
+      thresholdDollars: (t.thresholdCents / 100).toFixed(2),
+      approverRole: t.approverRole,
+      sortOrder: String(t.sortOrder ?? 0),
+      active: t.active !== 0,
+    });
+    setShowTierDialog(true);
+  }
+
+  const saveTierMutation = useMutation({
+    mutationFn: async () => {
+      const body = {
+        tierName: tierForm.tierName,
+        thresholdCents: Math.round(parseFloat(tierForm.thresholdDollars || "0") * 100),
+        approverRole: tierForm.approverRole,
+        sortOrder: parseInt(tierForm.sortOrder || "0"),
+        active: tierForm.active ? 1 : 0,
+      };
+      const url = editingTier
+        ? `/api/purchasing/approval-tiers/${editingTier.id}`
+        : "/api/purchasing/approval-tiers";
+      const method = editingTier ? "PATCH" : "POST";
+      const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error((await res.json()).error);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/approval-tiers"] });
+      setShowTierDialog(false);
+      toast({ title: editingTier ? "Tier updated" : "Tier created" });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteTierMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/purchasing/approval-tiers/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error((await res.json()).error);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/approval-tiers"] });
+      toast({ title: "Tier deleted" });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
   if (isLoading) {
     return (
       <div className="p-4 md:p-6 flex items-center justify-center">
@@ -149,6 +214,10 @@ export default function Settings() {
           <TabsTrigger value="notifications" data-testid="tab-notifications">
             <Bell className="h-4 w-4 mr-2" />
             Notifications
+          </TabsTrigger>
+          <TabsTrigger value="procurement">
+            <ShoppingCart className="h-4 w-4 mr-2" />
+            Procurement
           </TabsTrigger>
         </TabsList>
 
@@ -466,7 +535,7 @@ export default function Settings() {
                 </div>
                 <Switch
                   checked={formData.enable_low_stock_alerts === "true"}
-                  onCheckedChange={(checked) => 
+                  onCheckedChange={(checked) =>
                     setFormData({ ...formData, enable_low_stock_alerts: checked ? "true" : "false" })
                   }
                   disabled={!canEdit}
@@ -476,7 +545,124 @@ export default function Settings() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        <TabsContent value="procurement" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>PO Approval Tiers</CardTitle>
+                  <CardDescription>Require approval for purchase orders that meet or exceed a threshold</CardDescription>
+                </div>
+                {canEdit && (
+                  <Button size="sm" onClick={openAddTier}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Tier
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-start gap-2 rounded-md bg-blue-50 border border-blue-200 p-3 text-sm text-blue-800">
+                <Info className="h-4 w-4 mt-0.5 shrink-0" />
+                <p>
+                  POs auto-approve when no tier threshold is met. Add a tier at <strong>$0</strong> to require approval for all POs. The matching tier is the highest-threshold tier whose value ≤ the PO total.
+                </p>
+              </div>
+
+              {tiers.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground text-sm">
+                  No approval tiers configured — all POs auto-approve on submission.
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Tier Name</TableHead>
+                      <TableHead>Threshold</TableHead>
+                      <TableHead>Approver Role</TableHead>
+                      <TableHead>Sort Order</TableHead>
+                      <TableHead>Active</TableHead>
+                      {canEdit && <TableHead></TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {[...tiers].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)).map((t) => (
+                      <TableRow key={t.id}>
+                        <TableCell className="font-medium">{t.tierName}</TableCell>
+                        <TableCell className="font-mono">${(t.thresholdCents / 100).toLocaleString("en-US", { minimumFractionDigits: 2 })}</TableCell>
+                        <TableCell className="capitalize">{t.approverRole}</TableCell>
+                        <TableCell>{t.sortOrder ?? 0}</TableCell>
+                        <TableCell>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.active !== 0 ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"}`}>
+                            {t.active !== 0 ? "Active" : "Inactive"}
+                          </span>
+                        </TableCell>
+                        {canEdit && (
+                          <TableCell>
+                            <div className="flex gap-1">
+                              <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => openEditTier(t)}>
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700"
+                                onClick={() => { if (confirm(`Delete tier "${t.tierName}"?`)) deleteTierMutation.mutate(t.id); }}>
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
       </Tabs>
+
+      {/* Approval Tier Dialog */}
+      <Dialog open={showTierDialog} onOpenChange={setShowTierDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingTier ? "Edit Approval Tier" : "Add Approval Tier"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Tier Name *</Label>
+              <Input placeholder="e.g. Standard, High Value" value={tierForm.tierName} onChange={(e) => setTierForm(f => ({ ...f, tierName: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Threshold ($) *</Label>
+                <Input type="number" step="0.01" min="0" placeholder="0.00" value={tierForm.thresholdDollars} onChange={(e) => setTierForm(f => ({ ...f, thresholdDollars: e.target.value }))} />
+                <p className="text-xs text-muted-foreground">Min PO total to trigger this tier</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Sort Order</Label>
+                <Input type="number" min="0" value={tierForm.sortOrder} onChange={(e) => setTierForm(f => ({ ...f, sortOrder: e.target.value }))} />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Required Approver Role *</Label>
+              <select className="w-full border rounded-md h-10 px-3 text-sm bg-background" value={tierForm.approverRole} onChange={(e) => setTierForm(f => ({ ...f, approverRole: e.target.value }))}>
+                <option value="lead">Lead</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch checked={tierForm.active} onCheckedChange={(v) => setTierForm(f => ({ ...f, active: v }))} />
+              <Label>Active</Label>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowTierDialog(false)}>Cancel</Button>
+              <Button onClick={() => saveTierMutation.mutate()} disabled={!tierForm.tierName || !tierForm.thresholdDollars || saveTierMutation.isPending}>
+                {saveTierMutation.isPending ? "Saving..." : "Save"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -37,6 +37,8 @@ import {
   Pencil,
   Ship,
   ExternalLink,
+  Printer,
+  Mail,
 } from "lucide-react";
 
 // Incoterms → which vendor-side charges are applicable
@@ -87,6 +89,12 @@ export default function PurchaseOrderDetail() {
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
   const [showAckDialog, setShowAckDialog] = useState(false);
+  const [showDocDialog, setShowDocDialog] = useState(false);
+  const [showEmailDialog, setShowEmailDialog] = useState(false);
+  const [docHtml, setDocHtml] = useState<string | null>(null);
+  const [docLoading, setDocLoading] = useState(false);
+  const [emailForm, setEmailForm] = useState({ toEmail: "", ccEmail: "", message: "" });
+  const [emailSending, setEmailSending] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
 
@@ -553,6 +561,24 @@ export default function PurchaseOrderDetail() {
             <Button variant="outline" onClick={() => setShowCancelDialog(true)} className="flex-1 sm:flex-none min-h-[44px] text-red-600 hover:text-red-700">
               <Ban className="h-4 w-4 mr-2" />
               {["sent", "acknowledged"].includes(po.status) ? "Void" : "Cancel"}
+            </Button>
+          )}
+          {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+            <Button variant="outline" onClick={async () => {
+              setDocLoading(true);
+              setShowDocDialog(true);
+              try {
+                const res = await fetch(`/api/purchase-orders/${poId}/document`);
+                const data = await res.json();
+                setDocHtml(data.html);
+              } catch {
+                setDocHtml("<p>Failed to load document.</p>");
+              } finally {
+                setDocLoading(false);
+              }
+            }} className="flex-1 sm:flex-none min-h-[44px]">
+              <Printer className="h-4 w-4 mr-2" />
+              View / Print
             </Button>
           )}
         </div>
@@ -1568,6 +1594,119 @@ export default function PurchaseOrderDetail() {
                 disabled={acknowledgeMutation.isPending}
               >
                 {acknowledgeMutation.isPending ? "Saving..." : "Record Acknowledgment"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── PO Document Dialog ── */}
+      <Dialog open={showDocDialog} onOpenChange={(open) => { setShowDocDialog(open); if (!open) setDocHtml(null); }}>
+        <DialogContent className="max-w-4xl w-[95vw] h-[90vh] flex flex-col p-0">
+          <DialogHeader className="px-6 py-4 border-b flex-row items-center justify-between space-y-0">
+            <DialogTitle className="text-base font-semibold">
+              Purchase Order — {po?.poNumber}
+            </DialogTitle>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => {
+                setEmailForm(f => ({ ...f, toEmail: po?.vendor?.email || po?.vendorContactEmail || "" }));
+                setShowEmailDialog(true);
+              }}>
+                <Mail className="h-4 w-4 mr-2" />
+                Email to Vendor
+              </Button>
+              <Button size="sm" onClick={() => {
+                const iframe = document.getElementById("po-doc-iframe") as HTMLIFrameElement | null;
+                iframe?.contentWindow?.print();
+              }}>
+                <Printer className="h-4 w-4 mr-2" />
+                Print
+              </Button>
+            </div>
+          </DialogHeader>
+          <div className="flex-1 overflow-hidden">
+            {docLoading ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+              </div>
+            ) : docHtml ? (
+              <iframe
+                id="po-doc-iframe"
+                srcDoc={docHtml}
+                className="w-full h-full border-0"
+                title="PO Document"
+              />
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Email to Vendor Dialog ── */}
+      <Dialog open={showEmailDialog} onOpenChange={setShowEmailDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Email PO to Vendor</DialogTitle>
+            <DialogDescription>
+              Send <span className="font-mono font-medium">{po?.poNumber}</span> to the vendor. The full PO document will be included in the email body.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>To *</Label>
+              <Input
+                type="email"
+                placeholder="vendor@example.com"
+                value={emailForm.toEmail}
+                onChange={(e) => setEmailForm(f => ({ ...f, toEmail: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>CC <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Input
+                type="email"
+                placeholder="cc@example.com"
+                value={emailForm.ccEmail}
+                onChange={(e) => setEmailForm(f => ({ ...f, ccEmail: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Message <span className="text-muted-foreground text-xs">(optional)</span></Label>
+              <Textarea
+                placeholder="Add a personal note to the vendor..."
+                rows={3}
+                value={emailForm.message}
+                onChange={(e) => setEmailForm(f => ({ ...f, message: e.target.value }))}
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowEmailDialog(false)}>Cancel</Button>
+              <Button
+                disabled={!emailForm.toEmail || emailSending}
+                onClick={async () => {
+                  setEmailSending(true);
+                  try {
+                    const res = await fetch(`/api/purchase-orders/${poId}/send-email`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        toEmail: emailForm.toEmail,
+                        ccEmail: emailForm.ccEmail || undefined,
+                        message: emailForm.message || undefined,
+                      }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error);
+                    toast({ title: "Email sent", description: `PO sent to ${emailForm.toEmail}` });
+                    setShowEmailDialog(false);
+                    queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/history`] });
+                  } catch (err: any) {
+                    toast({ title: "Failed to send", description: err.message, variant: "destructive" });
+                  } finally {
+                    setEmailSending(false);
+                  }
+                }}
+              >
+                {emailSending ? "Sending..." : "Send Email"}
               </Button>
             </div>
           </div>
