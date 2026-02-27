@@ -72,8 +72,9 @@ function formatCents(cents: number | null | undefined, opts?: { unitCost?: boole
   if (!cents && cents !== 0) return "$0.00";
   const n = Number(cents) / 100;
   if (opts?.unitCost && n > 0 && n !== parseFloat(n.toFixed(2))) {
-    // Has sub-cent precision: show up to 4 decimal places, trimming trailing zeros
-    return `$${parseFloat(n.toFixed(4)).toString()}`;
+    // Has sub-cent precision: show all significant decimals, no rounding
+    const s = String(n);
+    return `$${s}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -1267,7 +1268,7 @@ export default function PurchaseOrderDetail() {
                                     unitsPerUom: entry.packSize || 1,
                                   }));
                                   setUnitCostDollars(
-                                    entry.unitCostCents ? (entry.unitCostCents / 100).toFixed(3) : ""
+                                    entry.unitCostCents ? String(entry.unitCostCents / 100) : ""
                                   );
                                   setSaveToVendorCatalog(false);
                                 }}

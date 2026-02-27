@@ -153,8 +153,7 @@ function parseDollarsInput(val: string): number | null {
 function centsToInputStr(cents: number | null | undefined): string {
   if (cents == null) return "";
   const dollars = cents / 100;
-  // Show up to 4 decimal places, trimming trailing zeros
-  return dollars % 1 === 0 ? dollars.toFixed(2) : parseFloat(dollars.toFixed(4)).toString();
+  return String(dollars);
 }
 
 const VENDOR_TYPE_BADGES: Record<

@@ -7,9 +7,9 @@
 function fmtMoney(cents: number | null | undefined): string {
   if (cents == null) return "$0.00";
   const n = Number(cents) / 100;
-  // Show sub-cent precision for unit costs
+  // Show sub-cent precision for unit costs — no rounding
   if (n !== parseFloat(n.toFixed(2))) {
-    return `$${parseFloat(n.toFixed(4)).toString()}`;
+    return `$${String(n)}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
