@@ -92,6 +92,8 @@ export default function PurchaseOrderDetail() {
   const [showAckDialog, setShowAckDialog] = useState(false);
   const [showDocDialog, setShowDocDialog] = useState(false);
   const [showEmailDialog, setShowEmailDialog] = useState(false);
+  const [showCreateInvoiceDialog, setShowCreateInvoiceDialog] = useState(false);
+  const [invoiceNumber, setInvoiceNumber] = useState("");
   const [docHtml, setDocHtml] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [emailForm, setEmailForm] = useState({ toEmail: "", ccEmail: "", message: "" });
@@ -244,6 +246,37 @@ export default function PurchaseOrderDetail() {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created. Open Receiving to process it.` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const createInvoiceMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/vendor-invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vendorId: po.vendorId,
+          invoiceNumber: invoiceNumber,
+          invoicedAmountCents: po.totalCents,
+          currency: po.currency || "USD",
+          paymentTermsDays: po.paymentTermsDays,
+          paymentTermsType: po.paymentTermsType,
+          invoiceDate: new Date().toISOString(),
+          internalNotes: `Auto-created from ${po.poNumber}`,
+          poIds: [po.id],
+        }),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create invoice"); }
+      return res.json();
+    },
+    onSuccess: (invoice) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      setShowCreateInvoiceDialog(false);
+      toast({ title: "Invoice created", description: `Invoice ${invoice.invoiceNumber} created and linked to this PO.` });
+      navigate(`/ap-invoices/${invoice.id}`);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -580,6 +613,15 @@ export default function PurchaseOrderDetail() {
             }} className="flex-1 sm:flex-none min-h-[44px]">
               <Printer className="h-4 w-4 mr-2" />
               View / Print
+            </Button>
+          )}
+          {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+            <Button variant="outline" onClick={() => {
+              setInvoiceNumber(`INV-${po.poNumber}`);
+              setShowCreateInvoiceDialog(true);
+            }} className="flex-1 sm:flex-none min-h-[44px]">
+              <FileText className="h-4 w-4 mr-2" />
+              Create Invoice
             </Button>
           )}
         </div>
@@ -1708,6 +1750,45 @@ export default function PurchaseOrderDetail() {
                 }}
               >
                 {emailSending ? "Sending..." : "Send Email"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Create Invoice from PO Dialog ── */}
+      <Dialog open={showCreateInvoiceDialog} onOpenChange={setShowCreateInvoiceDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create Invoice from PO</DialogTitle>
+            <DialogDescription>
+              Auto-create a vendor invoice pre-filled from this purchase order.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Vendor</Label>
+              <div className="text-sm font-medium p-2 bg-muted rounded-md">{po?.vendor?.name || `Vendor #${po?.vendorId}`}</div>
+            </div>
+            <div className="space-y-2">
+              <Label>Invoice Number *</Label>
+              <Input
+                value={invoiceNumber}
+                onChange={(e) => setInvoiceNumber(e.target.value)}
+                placeholder="INV-..."
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Amount</Label>
+              <div className="text-sm font-mono font-medium p-2 bg-muted rounded-md">{formatCents(po?.totalCents)}</div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowCreateInvoiceDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => createInvoiceMutation.mutate()}
+                disabled={createInvoiceMutation.isPending || !invoiceNumber.trim()}
+              >
+                {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>
             </div>
           </div>

@@ -85,8 +85,8 @@ export default function APInvoices() {
     queryKey: [`/api/vendor-invoices?${queryParams.toString()}`],
   });
 
-  const { data: vendorsData } = useQuery<any>({ queryKey: ["/api/vendors"] });
-  const vendors: any[] = vendorsData?.vendors ?? [];
+  const { data: vendorsData } = useQuery<any[]>({ queryKey: ["/api/vendors"] });
+  const vendors: any[] = vendorsData ?? [];
 
   const createMutation = useMutation({
     mutationFn: async (body: any) => {
