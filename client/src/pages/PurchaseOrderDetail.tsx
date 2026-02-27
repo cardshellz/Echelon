@@ -93,7 +93,7 @@ export default function PurchaseOrderDetail() {
   const [showDocDialog, setShowDocDialog] = useState(false);
   const [showEmailDialog, setShowEmailDialog] = useState(false);
   const [showCreateInvoiceDialog, setShowCreateInvoiceDialog] = useState(false);
-  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [invoiceForm, setInvoiceForm] = useState({ invoiceNumber: "", amountDollars: "", invoiceDate: "", dueDate: "", notes: "" });
   const [docHtml, setDocHtml] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
   const [emailForm, setEmailForm] = useState({ toEmail: "", ccEmail: "", message: "" });
@@ -259,12 +259,14 @@ export default function PurchaseOrderDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           vendorId: po.vendorId,
-          invoiceNumber: invoiceNumber,
-          invoicedAmountCents: po.totalCents,
+          invoiceNumber: invoiceForm.invoiceNumber,
+          invoicedAmountCents: Math.round(parseFloat(invoiceForm.amountDollars || "0") * 100),
           currency: po.currency || "USD",
           paymentTermsDays: po.paymentTermsDays,
           paymentTermsType: po.paymentTermsType,
-          invoiceDate: new Date().toISOString(),
+          invoiceDate: invoiceForm.invoiceDate || undefined,
+          dueDate: invoiceForm.dueDate || undefined,
+          notes: invoiceForm.notes || undefined,
           internalNotes: `Auto-created from ${po.poNumber}`,
           poIds: [po.id],
         }),
@@ -617,7 +619,13 @@ export default function PurchaseOrderDetail() {
           )}
           {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
             <Button variant="outline" onClick={() => {
-              setInvoiceNumber(`INV-${po.poNumber}`);
+              setInvoiceForm({
+                invoiceNumber: `INV-${po.poNumber}`,
+                amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
+                invoiceDate: new Date().toISOString().slice(0, 10),
+                dueDate: "",
+                notes: "",
+              });
               setShowCreateInvoiceDialog(true);
             }} className="flex-1 sm:flex-none min-h-[44px]">
               <FileText className="h-4 w-4 mr-2" />
@@ -1758,11 +1766,11 @@ export default function PurchaseOrderDetail() {
 
       {/* ── Create Invoice from PO Dialog ── */}
       <Dialog open={showCreateInvoiceDialog} onOpenChange={setShowCreateInvoiceDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Create Invoice from PO</DialogTitle>
             <DialogDescription>
-              Auto-create a vendor invoice pre-filled from this purchase order.
+              Pre-filled from {po?.poNumber}. Edit any field before creating.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1770,23 +1778,60 @@ export default function PurchaseOrderDetail() {
               <Label>Vendor</Label>
               <div className="text-sm font-medium p-2 bg-muted rounded-md">{po?.vendor?.name || `Vendor #${po?.vendorId}`}</div>
             </div>
-            <div className="space-y-2">
-              <Label>Invoice Number *</Label>
-              <Input
-                value={invoiceNumber}
-                onChange={(e) => setInvoiceNumber(e.target.value)}
-                placeholder="INV-..."
-              />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Invoice Number *</Label>
+                <Input
+                  value={invoiceForm.invoiceNumber}
+                  onChange={(e) => setInvoiceForm(f => ({ ...f, invoiceNumber: e.target.value }))}
+                  placeholder="INV-..."
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Invoice Amount ($) *</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={invoiceForm.amountDollars}
+                  onChange={(e) => setInvoiceForm(f => ({ ...f, amountDollars: e.target.value }))}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Invoice Date</Label>
+                <Input
+                  type="date"
+                  value={invoiceForm.invoiceDate}
+                  onChange={(e) => setInvoiceForm(f => ({ ...f, invoiceDate: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Due Date</Label>
+                <Input
+                  type="date"
+                  value={invoiceForm.dueDate}
+                  onChange={(e) => setInvoiceForm(f => ({ ...f, dueDate: e.target.value }))}
+                />
+              </div>
             </div>
             <div className="space-y-2">
-              <Label>Amount</Label>
-              <div className="text-sm font-mono font-medium p-2 bg-muted rounded-md">{formatCents(po?.totalCents)}</div>
+              <Label>Notes</Label>
+              <Input
+                value={invoiceForm.notes}
+                onChange={(e) => setInvoiceForm(f => ({ ...f, notes: e.target.value }))}
+                placeholder="Optional notes"
+              />
+            </div>
+            <div className="p-2 bg-muted/50 rounded text-xs text-muted-foreground">
+              This invoice will be automatically linked to {po?.poNumber}.
             </div>
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowCreateInvoiceDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => createInvoiceMutation.mutate()}
-                disabled={createInvoiceMutation.isPending || !invoiceNumber.trim()}
+                disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim() || !invoiceForm.amountDollars}
               >
                 {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>

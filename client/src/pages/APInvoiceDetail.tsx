@@ -32,6 +32,8 @@ import {
   Plus,
   CreditCard,
   Unlink,
+  Pencil,
+  Search,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -63,6 +65,61 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkAmount, setLinkAmount, linkPoMutation, onClose }: any) {
+  const [poSearch, setPoSearch] = useState("");
+  const { data: posData } = useQuery<any>({
+    queryKey: [`/api/purchase-orders?vendorId=${invoice.vendorId}&limit=100`],
+    enabled: !!invoice.vendorId,
+  });
+  const allPos: any[] = posData?.purchaseOrders ?? posData ?? [];
+  const linkedPoIds = new Set((invoice.poLinks || []).map((l: any) => l.purchaseOrderId));
+  const availablePos = allPos.filter((p: any) => !linkedPoIds.has(p.id));
+  const filteredPos = poSearch
+    ? availablePos.filter((p: any) => p.poNumber?.toLowerCase().includes(poSearch.toLowerCase()))
+    : availablePos;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <Label>Search POs</Label>
+        <div className="relative">
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input className="pl-8" placeholder="Filter by PO number..." value={poSearch} onChange={e => setPoSearch(e.target.value)} />
+        </div>
+        <div className="max-h-48 overflow-y-auto border rounded-md">
+          {filteredPos.length === 0 ? (
+            <p className="p-3 text-sm text-muted-foreground text-center">
+              {availablePos.length === 0 ? "All POs already linked." : "No matching POs."}
+            </p>
+          ) : (
+            filteredPos.map((p: any) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`w-full text-left px-3 py-2 text-sm hover:bg-muted/50 flex items-center justify-between ${String(p.id) === linkPoId ? "bg-primary/10 border-l-2 border-primary" : ""}`}
+                onClick={() => setLinkPoId(String(p.id))}
+              >
+                <span className="font-mono">{p.poNumber}</span>
+                <span className="text-muted-foreground">{formatCents(p.totalCents)}</span>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label>Allocated Amount ($) <span className="text-muted-foreground">(optional)</span></Label>
+        <Input type="number" step="0.01" min="0" placeholder="Leave blank for full invoice" value={linkAmount} onChange={(e) => setLinkAmount(e.target.value)} />
+      </div>
+      <div className="flex gap-2 justify-end">
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={() => linkPoMutation.mutate()} disabled={!linkPoId || linkPoMutation.isPending}>
+          {linkPoMutation.isPending ? "Linking..." : "Link PO"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function APInvoiceDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -77,6 +134,11 @@ export default function APInvoiceDetail() {
   const [reason, setReason] = useState("");
   const [linkPoId, setLinkPoId] = useState("");
   const [linkAmount, setLinkAmount] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({
+    invoiceNumber: "", ourReference: "", invoicedAmountDollars: "",
+    invoiceDate: "", dueDate: "", paymentTermsDays: "", notes: "",
+  });
 
   const [payment, setPayment] = useState({
     paymentDate: format(new Date(), "yyyy-MM-dd"),
@@ -155,6 +217,45 @@ export default function APInvoiceDetail() {
     onSuccess: () => { invalidate(); toast({ title: "PO unlinked" }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
+
+  const updateInvoiceMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/vendor-invoices/${invoiceId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoiceNumber: editForm.invoiceNumber || undefined,
+          ourReference: editForm.ourReference || undefined,
+          invoicedAmountCents: editForm.invoicedAmountDollars ? Math.round(parseFloat(editForm.invoicedAmountDollars) * 100) : undefined,
+          invoiceDate: editForm.invoiceDate || undefined,
+          dueDate: editForm.dueDate || undefined,
+          paymentTermsDays: editForm.paymentTermsDays ? parseInt(editForm.paymentTermsDays) : undefined,
+          notes: editForm.notes,
+        }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error);
+      return res.json();
+    },
+    onSuccess: () => {
+      invalidate();
+      setEditing(false);
+      toast({ title: "Invoice updated" });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  function startEditing() {
+    setEditForm({
+      invoiceNumber: invoice?.invoiceNumber || "",
+      ourReference: invoice?.ourReference || "",
+      invoicedAmountDollars: invoice?.invoicedAmountCents ? String(invoice.invoicedAmountCents / 100) : "",
+      invoiceDate: invoice?.invoiceDate ? invoice.invoiceDate.slice(0, 10) : "",
+      dueDate: invoice?.dueDate ? invoice.dueDate.slice(0, 10) : "",
+      paymentTermsDays: invoice?.paymentTermsDays ? String(invoice.paymentTermsDays) : "",
+      notes: invoice?.notes || "",
+    });
+    setEditing(true);
+  }
 
   const paymentMutation = useMutation({
     mutationFn: () => fetch("/api/ap-payments", {
@@ -282,17 +383,67 @@ export default function APInvoiceDetail() {
 
       {/* Details */}
       <Card>
-        <CardHeader><CardTitle className="text-sm">Invoice Details</CardTitle></CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between py-3">
+          <CardTitle className="text-sm">Invoice Details</CardTitle>
+          {!editing && status !== "voided" && (
+            <Button size="sm" variant="ghost" onClick={startEditing}>
+              <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+            </Button>
+          )}
+        </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            <div><p className="text-muted-foreground">Invoice Date</p><p className="font-medium">{formatDate(invoice.invoiceDate)}</p></div>
-            <div><p className="text-muted-foreground">Due Date</p><p className="font-medium">{formatDate(invoice.dueDate)}</p></div>
-            <div><p className="text-muted-foreground">Our Reference</p><p className="font-medium">{invoice.ourReference || "—"}</p></div>
-            <div><p className="text-muted-foreground">Payment Terms</p><p className="font-medium">{invoice.paymentTermsDays ? `Net ${invoice.paymentTermsDays}` : "—"}</p></div>
-            {invoice.approvedAt && <div><p className="text-muted-foreground">Approved</p><p className="font-medium">{formatDate(invoice.approvedAt)}</p></div>}
-            {invoice.disputeReason && <div className="col-span-2"><p className="text-muted-foreground">Dispute Reason</p><p className="font-medium text-red-600">{invoice.disputeReason}</p></div>}
-            {invoice.notes && <div className="col-span-2"><p className="text-muted-foreground">Notes</p><p className="font-medium">{invoice.notes}</p></div>}
-          </div>
+          {editing ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="space-y-1">
+                  <Label className="text-xs">Invoice Number</Label>
+                  <Input value={editForm.invoiceNumber} onChange={e => setEditForm(f => ({ ...f, invoiceNumber: e.target.value }))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Our Reference</Label>
+                  <Input value={editForm.ourReference} onChange={e => setEditForm(f => ({ ...f, ourReference: e.target.value }))} placeholder="Internal ref" />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Amount ($)</Label>
+                  <Input type="number" step="0.01" value={editForm.invoicedAmountDollars} onChange={e => setEditForm(f => ({ ...f, invoicedAmountDollars: e.target.value }))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Payment Terms (days)</Label>
+                  <Input type="number" value={editForm.paymentTermsDays} onChange={e => setEditForm(f => ({ ...f, paymentTermsDays: e.target.value }))} placeholder="30" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="space-y-1">
+                  <Label className="text-xs">Invoice Date</Label>
+                  <Input type="date" value={editForm.invoiceDate} onChange={e => setEditForm(f => ({ ...f, invoiceDate: e.target.value }))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Due Date</Label>
+                  <Input type="date" value={editForm.dueDate} onChange={e => setEditForm(f => ({ ...f, dueDate: e.target.value }))} />
+                </div>
+                <div className="space-y-1 col-span-2">
+                  <Label className="text-xs">Notes</Label>
+                  <Input value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} placeholder="Optional notes" />
+                </div>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <Button size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+                <Button size="sm" onClick={() => updateInvoiceMutation.mutate()} disabled={updateInvoiceMutation.isPending}>
+                  {updateInvoiceMutation.isPending ? "Saving..." : "Save Changes"}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div><p className="text-muted-foreground">Invoice Date</p><p className="font-medium">{formatDate(invoice.invoiceDate)}</p></div>
+              <div><p className="text-muted-foreground">Due Date</p><p className="font-medium">{formatDate(invoice.dueDate)}</p></div>
+              <div><p className="text-muted-foreground">Our Reference</p><p className="font-medium">{invoice.ourReference || "—"}</p></div>
+              <div><p className="text-muted-foreground">Payment Terms</p><p className="font-medium">{invoice.paymentTermsDays ? `Net ${invoice.paymentTermsDays}` : "—"}</p></div>
+              {invoice.approvedAt && <div><p className="text-muted-foreground">Approved</p><p className="font-medium">{formatDate(invoice.approvedAt)}</p></div>}
+              {invoice.disputeReason && <div className="col-span-2"><p className="text-muted-foreground">Dispute Reason</p><p className="font-medium text-red-600">{invoice.disputeReason}</p></div>}
+              {invoice.notes && <div className="col-span-2"><p className="text-muted-foreground">Notes</p><p className="font-medium">{invoice.notes}</p></div>}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -441,24 +592,19 @@ export default function APInvoiceDetail() {
       {/* Link PO Dialog */}
       <Dialog open={showLinkPoDialog} onOpenChange={setShowLinkPoDialog}>
         <DialogContent className="max-w-md">
-          <DialogHeader><DialogTitle>Link Purchase Order</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>PO Number or ID</Label>
-              <Input placeholder="e.g. PO-20240101-001 or ID" value={linkPoId} onChange={(e) => setLinkPoId(e.target.value)} />
-              <p className="text-xs text-muted-foreground">Enter the purchase order ID (number).</p>
-            </div>
-            <div className="space-y-2">
-              <Label>Allocated Amount ($) <span className="text-muted-foreground">(optional)</span></Label>
-              <Input type="number" step="0.01" min="0" placeholder="Leave blank for full invoice" value={linkAmount} onChange={(e) => setLinkAmount(e.target.value)} />
-            </div>
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowLinkPoDialog(false)}>Cancel</Button>
-              <Button onClick={() => linkPoMutation.mutate()} disabled={!linkPoId || linkPoMutation.isPending}>
-                {linkPoMutation.isPending ? "Linking..." : "Link PO"}
-              </Button>
-            </div>
-          </div>
+          <DialogHeader>
+            <DialogTitle>Link Purchase Order</DialogTitle>
+            <DialogDescription>Select a PO from {invoice.vendorName} to link to this invoice.</DialogDescription>
+          </DialogHeader>
+          <LinkPoDialogContent
+            invoice={invoice}
+            linkPoId={linkPoId}
+            setLinkPoId={setLinkPoId}
+            linkAmount={linkAmount}
+            setLinkAmount={setLinkAmount}
+            linkPoMutation={linkPoMutation}
+            onClose={() => setShowLinkPoDialog(false)}
+          />
         </DialogContent>
       </Dialog>
 
