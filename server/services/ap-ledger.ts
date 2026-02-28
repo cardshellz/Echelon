@@ -658,11 +658,11 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
   for (const pol of poLines) {
     if (pol.status === "cancelled") continue;
     lineNum++;
-    const unitCost = Math.round(Number(pol.unitCostCents || 0));
+    const unitCost = Number(pol.unitCostCents || 0);
     const qty = pol.orderQty;
     // Use the actual PO line total — it includes discounts + tax, no recomputation
     const lineTotal = pol.lineTotalCents != null
-      ? Math.round(Number(pol.lineTotalCents))
+      ? Number(pol.lineTotalCents)
       : qty * unitCost; // Fallback only if PO line has no total
     const [line] = await db
       .insert(vendorInvoiceLines)
@@ -776,7 +776,8 @@ async function recalculateInvoiceFromLines(invoiceId: number) {
     .from(vendorInvoiceLines)
     .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId));
 
-  const linesTotalCents = Number(result[0]?.total ?? 0);
+  // Round to whole cents for invoice header totals (bigint columns)
+  const linesTotalCents = Math.round(Number(result[0]?.total ?? 0));
 
   const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, invoiceId));
   if (!inv) return;
@@ -812,7 +813,7 @@ export async function runInvoiceMatch(invoiceId: number) {
         .where(eq(purchaseOrderLines.id, line.purchaseOrderLineId));
 
       if (poLine) {
-        const poUnitCost = Math.round(Number(poLine.unitCostCents || 0));
+        const poUnitCost = Number(poLine.unitCostCents || 0);
         const invoiceUnitCost = Number(line.unitCostCents);
         const qtyReceived = poLine.receivedQty ?? 0;
 
