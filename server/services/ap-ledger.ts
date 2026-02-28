@@ -614,14 +614,19 @@ export async function getApSummary() {
     vendorAging[inv.vendorId].total += balance;
   }
 
-  // Paid this month
+  // Payment totals
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const paidThisMonthResult = await db
-    .select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
-    .from(apPayments)
-    .where(and(eq(apPayments.status, "completed"), gte(apPayments.paymentDate, startOfMonth)));
+  const [paidThisMonthResult, paidAllTimeResult] = await Promise.all([
+    db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
+      .from(apPayments)
+      .where(and(eq(apPayments.status, "completed"), gte(apPayments.paymentDate, startOfMonth))),
+    db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
+      .from(apPayments)
+      .where(eq(apPayments.status, "completed")),
+  ]);
 
   const paidThisMonthCents = Number(paidThisMonthResult[0]?.total ?? 0);
+  const paidAllTimeCents = Number(paidAllTimeResult[0]?.total ?? 0);
 
   // Recent payments (last 10)
   const recentPayments = await db
@@ -663,6 +668,7 @@ export async function getApSummary() {
     overdueCents,
     dueSoonCents,
     paidThisMonthCents,
+    paidAllTimeCents,
     agingBuckets,
     openInvoiceCount,
     vendorAging: Object.entries(vendorAging).map(([vendorId, data]) => ({

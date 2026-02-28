@@ -120,12 +120,15 @@ export default function APDashboard() {
           </CardContent>
         </Card>
 
-        <Card className={summary?.paidThisMonthCents > 0 ? "border-green-200" : ""}>
+        <Card className={summary?.paidAllTimeCents > 0 ? "border-green-200" : ""}>
           <CardContent className="pt-6">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Paid This Month</p>
-                <p className="text-2xl font-bold mt-1 text-green-600">{formatCents(summary?.paidThisMonthCents)}</p>
+                <p className="text-sm text-muted-foreground">Total Paid</p>
+                <p className="text-2xl font-bold mt-1 text-green-600">{formatCents(summary?.paidAllTimeCents)}</p>
+                {summary?.paidThisMonthCents > 0 && (
+                  <p className="text-xs text-muted-foreground mt-1">{formatCents(summary.paidThisMonthCents)} this month</p>
+                )}
               </div>
               <CheckCircle className="h-5 w-5 text-green-500 mt-1" />
             </div>
