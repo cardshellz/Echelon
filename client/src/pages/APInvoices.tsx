@@ -66,6 +66,7 @@ export default function APInvoices() {
     dueDate: "",
     paymentTermsDays: "",
     notes: "",
+    linkedPoId: "",
   });
 
   const statusFilter: Record<string, string[] | undefined> = {
@@ -87,6 +88,14 @@ export default function APInvoices() {
 
   const { data: vendorsData } = useQuery<any[]>({ queryKey: ["/api/vendors"] });
   const vendors: any[] = vendorsData ?? [];
+
+  const { data: vendorPosData } = useQuery<any>({
+    queryKey: [`/api/purchase-orders?vendorId=${newInvoice.vendorId}&limit=100`],
+    enabled: !!newInvoice.vendorId && showNewDialog,
+  });
+  const vendorPos: any[] = (vendorPosData?.purchaseOrders ?? []).filter(
+    (p: any) => !["cancelled", "voided", "closed"].includes(p.status)
+  );
 
   const createMutation = useMutation({
     mutationFn: async (body: any) => {
@@ -120,19 +129,21 @@ export default function APInvoices() {
 
   function handleCreate() {
     const vendorId = parseInt(newInvoice.vendorId);
-    if (!vendorId || !newInvoice.invoiceNumber || !newInvoice.invoicedAmountDollars) {
-      toast({ title: "Missing fields", description: "Vendor, invoice number, and amount are required", variant: "destructive" });
+    const hasLinkedPo = !!newInvoice.linkedPoId;
+    if (!vendorId || !newInvoice.invoiceNumber || (!hasLinkedPo && !newInvoice.invoicedAmountDollars)) {
+      toast({ title: "Missing fields", description: `Vendor, invoice number${hasLinkedPo ? "" : ", and amount"} are required`, variant: "destructive" });
       return;
     }
     createMutation.mutate({
       vendorId,
       invoiceNumber: newInvoice.invoiceNumber,
       ourReference: newInvoice.ourReference || undefined,
-      invoicedAmountCents: Math.round(parseFloat(newInvoice.invoicedAmountDollars) * 100),
+      invoicedAmountCents: hasLinkedPo ? undefined : Math.round(parseFloat(newInvoice.invoicedAmountDollars) * 100),
       invoiceDate: newInvoice.invoiceDate || undefined,
       dueDate: newInvoice.dueDate || undefined,
       paymentTermsDays: newInvoice.paymentTermsDays ? parseInt(newInvoice.paymentTermsDays) : undefined,
       notes: newInvoice.notes || undefined,
+      poIds: hasLinkedPo ? [parseInt(newInvoice.linkedPoId)] : undefined,
     });
   }
 
@@ -245,7 +256,7 @@ export default function APInvoices() {
               <select
                 className="w-full border rounded-md h-10 px-3 text-sm bg-background"
                 value={newInvoice.vendorId}
-                onChange={(e) => setNewInvoice((f) => ({ ...f, vendorId: e.target.value }))}
+                onChange={(e) => setNewInvoice((f) => ({ ...f, vendorId: e.target.value, linkedPoId: "" }))}
               >
                 <option value="">Select vendor...</option>
                 {vendors.map((v: any) => (
@@ -253,6 +264,36 @@ export default function APInvoices() {
                 ))}
               </select>
             </div>
+
+            {newInvoice.vendorId && vendorPos.length > 0 && (
+              <div className="space-y-2">
+                <Label>Link to Purchase Order</Label>
+                <select
+                  className="w-full border rounded-md h-10 px-3 text-sm bg-background"
+                  value={newInvoice.linkedPoId}
+                  onChange={(e) => {
+                    const poId = e.target.value;
+                    const po = vendorPos.find((p: any) => String(p.id) === poId);
+                    setNewInvoice((f) => ({
+                      ...f,
+                      linkedPoId: poId,
+                      invoiceNumber: po ? `INV-${po.poNumber}` : f.invoiceNumber,
+                      invoicedAmountDollars: "", // Lines become source of truth
+                    }));
+                  }}
+                >
+                  <option value="">None (manual invoice)</option>
+                  {vendorPos.map((p: any) => (
+                    <option key={p.id} value={p.id}>
+                      {p.poNumber} — {formatCents(p.totalCents)} — {p.status}
+                    </option>
+                  ))}
+                </select>
+                {newInvoice.linkedPoId && (
+                  <p className="text-xs text-muted-foreground">PO line items will be auto-imported. Amount calculated from lines.</p>
+                )}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -273,17 +314,19 @@ export default function APInvoices() {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label>Invoice Amount ($) *</Label>
-              <Input
-                type="number"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                value={newInvoice.invoicedAmountDollars}
-                onChange={(e) => setNewInvoice((f) => ({ ...f, invoicedAmountDollars: e.target.value }))}
-              />
-            </div>
+            {!newInvoice.linkedPoId && (
+              <div className="space-y-2">
+                <Label>Invoice Amount ($) *</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  value={newInvoice.invoicedAmountDollars}
+                  onChange={(e) => setNewInvoice((f) => ({ ...f, invoicedAmountDollars: e.target.value }))}
+                />
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
