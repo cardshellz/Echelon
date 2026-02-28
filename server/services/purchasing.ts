@@ -97,6 +97,8 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 const EDITABLE_STATUSES = new Set(["draft"]);
+// Broader set for amending existing lines (cost corrections, qty adjustments) — any non-terminal state
+const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"]);
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
 
@@ -439,7 +441,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     const po = await storage.getPurchaseOrderById(line.purchaseOrderId);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
-    if (!EDITABLE_STATUSES.has(po.status)) {
+    if (!LINE_AMENDABLE_STATUSES.has(po.status)) {
       throw new PurchasingError(`Cannot edit lines on PO in '${po.status}' status`, 400);
     }
 

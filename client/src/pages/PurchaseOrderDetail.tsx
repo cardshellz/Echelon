@@ -111,6 +111,11 @@ export default function PurchaseOrderDetail() {
   const [editingTax, setEditingTax] = useState(false);
   const [taxDollars, setTaxDollars] = useState("");
 
+  // Inline line editing state
+  const [editingLineId, setEditingLineId] = useState<number | null>(null);
+  const [editingLineField, setEditingLineField] = useState<"unitCost" | "qty" | null>(null);
+  const [editLineValue, setEditLineValue] = useState("");
+
   // Add line form
   const [productSearch, setProductSearch] = useState("");
   const [productOpen, setProductOpen] = useState(false);
@@ -178,6 +183,7 @@ export default function PurchaseOrderDetail() {
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
+  const canEditLines = po && ["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"].includes(po.status);
   const isNotCancelled = po && !["cancelled"].includes(po.status);
 
   // Incoterms-driven charge applicability: if no terms set, all are editable
@@ -412,6 +418,52 @@ export default function PurchaseOrderDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  const updateLineMutation = useMutation({
+    mutationFn: async ({ lineId, updates }: { lineId: number; updates: Record<string, any> }) => {
+      const res = await fetch(`/api/purchase-orders/lines/${lineId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      setEditingLineId(null);
+      setEditingLineField(null);
+      toast({ title: "Line updated" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  function startLineEdit(lineId: number, field: "unitCost" | "qty", currentValue: number) {
+    setEditingLineId(lineId);
+    setEditingLineField(field);
+    setEditLineValue(field === "unitCost" ? String(Number(currentValue) / 100) : String(currentValue));
+  }
+
+  function saveLineEdit(lineId: number) {
+    if (!editingLineField) return;
+    const val = parseFloat(editLineValue);
+    if (isNaN(val) || val < 0) {
+      toast({ title: "Invalid value", variant: "destructive" });
+      return;
+    }
+    const updates = editingLineField === "unitCost"
+      ? { unitCostCents: val * 100 }
+      : { orderQty: Math.round(val) };
+    updateLineMutation.mutate({ lineId, updates });
+  }
+
+  function cancelLineEdit() {
+    setEditingLineId(null);
+    setEditingLineField(null);
+    setEditLineValue("");
+  }
 
   const updateChargesMutation = useMutation({
     mutationFn: async (data: { incoterms?: string; discountCents?: number; taxCents?: number; shippingCostCents?: number }) => {
@@ -811,7 +863,9 @@ export default function PurchaseOrderDetail() {
                 </CardContent>
               </Card>
             ) : (
-              lines.map((line: any) => (
+              lines.map((line: any) => {
+                const isEditingCostMobile = editingLineId === line.id && editingLineField === "unitCost";
+                return (
                 <Card key={line.id}>
                   <CardContent className="p-3">
                     <div className="flex items-start justify-between gap-2">
@@ -827,7 +881,25 @@ export default function PurchaseOrderDetail() {
                               ? `${(line.orderQty || 0).toLocaleString()} pcs (${Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)`
                               : `Qty: ${line.receivedQty || 0}/${line.orderQty}`}
                           </span>
-                          <span>@ {formatCents(line.unitCostCents, { unitCost: true })}/pc</span>
+                          {isEditingCostMobile ? (
+                            <span className="flex items-center gap-1">
+                              $<Input
+                                type="number" min="0" step="0.000001" value={editLineValue}
+                                onChange={e => setEditLineValue(e.target.value)}
+                                className="h-6 w-20 text-xs font-mono" autoFocus
+                                onKeyDown={e => { if (e.key === "Enter") saveLineEdit(line.id); if (e.key === "Escape") cancelLineEdit(); }}
+                              />
+                              <Button size="sm" className="h-6 px-1" onClick={() => saveLineEdit(line.id)}><Check className="h-3 w-3" /></Button>
+                              <Button variant="ghost" size="sm" className="h-6 px-1" onClick={cancelLineEdit}><XCircle className="h-3 w-3" /></Button>
+                            </span>
+                          ) : (
+                            <span
+                              className={canEditLines ? "cursor-pointer underline decoration-dotted" : ""}
+                              onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
+                            >
+                              @ {formatCents(line.unitCostCents, { unitCost: true })}/pc
+                            </span>
+                          )}
                           <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
                         </div>
                       </div>
@@ -844,7 +916,8 @@ export default function PurchaseOrderDetail() {
                     </div>
                   </CardContent>
                 </Card>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -873,16 +946,48 @@ export default function PurchaseOrderDetail() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  lines.map((line: any) => (
+                  lines.map((line: any) => {
+                    const isEditingCost = editingLineId === line.id && editingLineField === "unitCost";
+                    const isEditingQty = editingLineId === line.id && editingLineField === "qty";
+                    return (
                     <TableRow key={line.id}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                       <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
                       <TableCell className="text-right">
-                        {(line.unitsPerUom || 1) > 1
-                          ? <span>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)</span></span>
-                          : line.orderQty}
+                        {isEditingQty ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <Input
+                              type="number"
+                              min="1"
+                              step="1"
+                              value={editLineValue}
+                              onChange={e => setEditLineValue(e.target.value)}
+                              className="h-7 w-24 text-right text-sm font-mono"
+                              autoFocus
+                              onKeyDown={e => {
+                                if (e.key === "Enter") saveLineEdit(line.id);
+                                if (e.key === "Escape") cancelLineEdit();
+                              }}
+                            />
+                            <Button size="sm" className="h-7 px-1.5" onClick={() => saveLineEdit(line.id)} disabled={updateLineMutation.isPending}>
+                              <Check className="h-3 w-3" />
+                            </Button>
+                            <Button variant="ghost" size="sm" className="h-7 px-1.5" onClick={cancelLineEdit}>
+                              <XCircle className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <span
+                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            onClick={() => canEditLines && startLineEdit(line.id, "qty", line.orderQty)}
+                          >
+                            {(line.unitsPerUom || 1) > 1
+                              ? <>{(line.orderQty || 0).toLocaleString()} pcs<br /><span className="text-xs text-muted-foreground">({Math.ceil((line.orderQty || 0) / (line.unitsPerUom || 1))} cases)</span></>
+                              : line.orderQty}
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         {(line.unitsPerUom || 1) > 1
@@ -892,7 +997,39 @@ export default function PurchaseOrderDetail() {
                           <span className="text-red-500 ml-1">({line.damagedQty} dmg)</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right font-mono">{formatCents(line.unitCostCents, { unitCost: true })}</TableCell>
+                      <TableCell className="text-right font-mono">
+                        {isEditingCost ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <span className="text-sm">$</span>
+                            <Input
+                              type="number"
+                              min="0"
+                              step="0.000001"
+                              value={editLineValue}
+                              onChange={e => setEditLineValue(e.target.value)}
+                              className="h-7 w-28 text-right text-sm font-mono"
+                              autoFocus
+                              onKeyDown={e => {
+                                if (e.key === "Enter") saveLineEdit(line.id);
+                                if (e.key === "Escape") cancelLineEdit();
+                              }}
+                            />
+                            <Button size="sm" className="h-7 px-1.5" onClick={() => saveLineEdit(line.id)} disabled={updateLineMutation.isPending}>
+                              <Check className="h-3 w-3" />
+                            </Button>
+                            <Button variant="ghost" size="sm" className="h-7 px-1.5" onClick={cancelLineEdit}>
+                              <XCircle className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <span
+                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            onClick={() => canEditLines && startLineEdit(line.id, "unitCost", line.unitCostCents)}
+                          >
+                            {formatCents(line.unitCostCents, { unitCost: true })}
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">{line.status}</Badge>
@@ -910,7 +1047,8 @@ export default function PurchaseOrderDetail() {
                         </TableCell>
                       )}
                     </TableRow>
-                  ))
+                    );
+                  })
                 )}
               </TableBody>
             </Table>
