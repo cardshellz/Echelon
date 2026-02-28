@@ -623,16 +623,54 @@ export async function getApSummary() {
 
   const paidThisMonthCents = Number(paidThisMonthResult[0]?.total ?? 0);
 
+  // Recent payments (last 10)
+  const recentPayments = await db
+    .select({
+      id: apPayments.id,
+      paymentNumber: apPayments.paymentNumber,
+      vendorName: vendors.name,
+      paymentDate: apPayments.paymentDate,
+      paymentMethod: apPayments.paymentMethod,
+      totalAmountCents: apPayments.totalAmountCents,
+      status: apPayments.status,
+    })
+    .from(apPayments)
+    .leftJoin(vendors, eq(apPayments.vendorId, vendors.id))
+    .orderBy(desc(apPayments.paymentDate), desc(apPayments.createdAt))
+    .limit(10);
+
+  // Open invoice count
+  const openInvoiceCount = allOpen.length;
+
+  // Recently paid invoices (last 10)
+  const recentlyPaid = await db
+    .select({
+      id: vendorInvoices.id,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      vendorName: vendors.name,
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents,
+      paidAmountCents: vendorInvoices.paidAmountCents,
+      updatedAt: vendorInvoices.updatedAt,
+    })
+    .from(vendorInvoices)
+    .leftJoin(vendors, eq(vendorInvoices.vendorId, vendors.id))
+    .where(eq(vendorInvoices.status, "paid"))
+    .orderBy(desc(vendorInvoices.updatedAt))
+    .limit(10);
+
   return {
     totalOutstandingCents,
     overdueCents,
     dueSoonCents,
     paidThisMonthCents,
     agingBuckets,
+    openInvoiceCount,
     vendorAging: Object.entries(vendorAging).map(([vendorId, data]) => ({
       vendorId: Number(vendorId),
       ...data,
     })),
+    recentPayments,
+    recentlyPaid,
   };
 }
 
