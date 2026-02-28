@@ -617,9 +617,18 @@ export default function PurchaseOrderDetail() {
             </Button>
           )}
           {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
-            <Button variant="outline" onClick={() => {
+            <Button variant="outline" onClick={async () => {
+              // Fetch existing invoices to determine next sequence number
+              let seq = 1;
+              try {
+                const res = await fetch(`/api/purchase-orders/${poId}/invoices`);
+                if (res.ok) {
+                  const data = await res.json();
+                  seq = (data.invoices?.length ?? 0) + 1;
+                }
+              } catch {}
               setInvoiceForm({
-                invoiceNumber: `INV-${po.poNumber}`,
+                invoiceNumber: `INV-${po.poNumber}-${String(seq).padStart(3, "0")}`,
                 amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
                 invoiceDate: new Date().toISOString().slice(0, 10),
                 dueDate: "",
@@ -1092,8 +1101,8 @@ export default function PurchaseOrderDetail() {
                   </TableHeader>
                   <TableBody>
                     {invoicesData.invoices.map((inv: any) => (
-                      <TableRow key={inv.id}>
-                        <TableCell className="font-mono font-medium">{inv.invoiceNumber}</TableCell>
+                      <TableRow key={inv.id} className={inv.status === "voided" ? "opacity-40" : ""}>
+                        <TableCell className={`font-mono font-medium ${inv.status === "voided" ? "line-through" : ""}`}>{inv.invoiceNumber}</TableCell>
                         <TableCell className="text-sm">{inv.invoiceDate ? format(new Date(inv.invoiceDate), "MMM d, yyyy") : "—"}</TableCell>
                         <TableCell className={`text-sm ${inv.dueDate && new Date(inv.dueDate) < new Date() && !["paid","voided"].includes(inv.status) ? "text-red-600 font-medium" : ""}`}>
                           {inv.dueDate ? format(new Date(inv.dueDate), "MMM d, yyyy") : "—"}
