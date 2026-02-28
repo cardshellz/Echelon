@@ -392,17 +392,18 @@ class PickingService {
       }
     }
 
-    // Fallback: auto-select by location type priority
+    // Fallback: auto-select from PICKABLE locations only (never reserve/receiving)
     if (!pickLocationId) {
-      const priorityOrder: Record<string, number> = { pick: 0, pallet: 1, reserve: 2, receiving: 3 };
+      const pickablePriority: Record<string, number> = { pick: 0, pallet: 1 };
       const sortedLevels = levels
-        .filter((l: any) => l.variantQty >= pickedQty)
+        .filter((l: any) => {
+          const loc = allLocations.find(loc => loc.id === l.warehouseLocationId);
+          return loc?.isPickable === 1 && l.variantQty >= pickedQty;
+        })
         .sort((a: any, b: any) => {
           const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
           const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
-          const priorityA = priorityOrder[locA?.locationType as string] ?? 99;
-          const priorityB = priorityOrder[locB?.locationType as string] ?? 99;
-          return priorityA - priorityB;
+          return (pickablePriority[locA?.locationType as string] ?? 99) - (pickablePriority[locB?.locationType as string] ?? 99);
         });
       pickLocationId = sortedLevels[0]?.warehouseLocationId || null;
     }

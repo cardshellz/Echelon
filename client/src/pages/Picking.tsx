@@ -1149,6 +1149,13 @@ export default function Picking() {
   const [shortPickReason, setShortPickReason] = useState("");
   const [shortPickQty, setShortPickQty] = useState("0");
   const [shortPickListIndex, setShortPickListIndex] = useState<number | null>(null);
+  const [replenGuidanceOpen, setReplenGuidanceOpen] = useState(false);
+  const [replenGuidanceData, setReplenGuidanceData] = useState<{
+    action: "replen_inline" | "short_pick_with_replen" | "true_short_pick";
+    source?: { locationCode: string; availableQty: number; variantSku: string; variantName: string };
+    targetItem?: { sku: string; location: string };
+  } | null>(null);
+  const [replenGuidanceLoading, setReplenGuidanceLoading] = useState(false);
   const [multiQtyOpen, setMultiQtyOpen] = useState(false);
   const [pickQty, setPickQty] = useState(1);
   const [releaseDialogOpen, setReleaseDialogOpen] = useState(false);
@@ -1624,6 +1631,50 @@ export default function Picking() {
     }
   };
   
+  // Check replen guidance before opening short pick dialog
+  const checkReplenGuidance = async (item: PickItem, listIndex: number | null) => {
+    if (!item.location || item.location === "UNASSIGNED") {
+      // No location — skip guidance, go straight to short pick
+      setShortPickQty(String(item.picked || 0));
+      setShortPickReason("");
+      setShortPickListIndex(listIndex);
+      setShortPickOpen(true);
+      return;
+    }
+
+    setReplenGuidanceLoading(true);
+    try {
+      const resp = await fetch("/api/picking/replen-guidance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sku: item.sku, locationCode: item.location }),
+      });
+      const guidance = await resp.json();
+
+      if (guidance.action === "replen_inline" && guidance.source) {
+        // Pickable source has stock — show replen guidance dialog first
+        setReplenGuidanceData({ ...guidance, targetItem: { sku: item.sku, location: item.location } });
+        setShortPickListIndex(listIndex);
+        setReplenGuidanceOpen(true);
+      } else {
+        // No pickable source — go straight to short pick dialog
+        setShortPickQty(String(item.picked || 0));
+        setShortPickReason("");
+        setShortPickListIndex(listIndex);
+        setShortPickOpen(true);
+      }
+    } catch (err) {
+      // On error, fall back to short pick dialog
+      console.warn("[ReplenGuidance] Failed:", err);
+      setShortPickQty(String(item.picked || 0));
+      setShortPickReason("");
+      setShortPickListIndex(listIndex);
+      setShortPickOpen(true);
+    } finally {
+      setReplenGuidanceLoading(false);
+    }
+  };
+
   // Short pick - works for both card view (currentItem) and list view (shortPickListIndex)
   const handleShortPick = () => {
     if (!activeWork) return;
@@ -1698,17 +1749,16 @@ export default function Picking() {
     setShortPickListIndex(null);
     
     if (orderCompleted) {
-      setTimeout(() => {
-        if (pickingMode === "batch") {
-          setActiveBatchId(null);
-        } else {
-          setActiveOrderId(null);
-        }
-        playSound("complete");
-        triggerHaptic("heavy");
-        setCurrentItemIndex(0);
-        setView("queue");
-      }, 500);
+      if (isRealItem) {
+        // Defer navigation — let updateItemMutation.onSuccess handle it
+        // after checking binCountPendingRef (avoids race with bin count dialog)
+        orderCompletedPendingRef.current = true;
+      } else {
+        setTimeout(() => {
+          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
+          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
+        }, 500);
+      }
     } else if (!isListView) {
       setTimeout(() => {
         advanceToNext();
@@ -1716,7 +1766,7 @@ export default function Picking() {
       }, 300);
     }
   };
-  
+
   // Helper to add debug log entry
   const addDebug = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -1859,27 +1909,27 @@ export default function Picking() {
       });
     }
     
-    // Helper to check completion and handle it
+    // Helper to check completion — defers navigation to updateItemMutation.onSuccess for real items
     const checkAndHandleCompletion = (items: typeof activeWork.items) => {
       const allDone = items.every(it => it.status === "completed" || it.status === "short");
       if (allDone) {
-        setTimeout(() => {
-          playSound("complete");
-          triggerHaptic("heavy");
-          setActiveOrderId(null);
-          setActiveBatchId(null);
-          setCurrentItemIndex(0);
-          setView("queue");
-        }, 500);
+        if (isRealItem) {
+          orderCompletedPendingRef.current = true;
+        } else {
+          setTimeout(() => {
+            if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
+            playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
+          }, 500);
+        }
       }
       return allDone;
     };
-    
+
     if (pickingMode === "batch") {
       // Update batch queue
       setQueue(prev => prev.map(batch => {
         if (batch.id !== activeBatchId) return batch;
-        
+
         const newItems = batch.items.map((it, i) => {
           if (i !== idx) return it;
           return {
@@ -1888,7 +1938,7 @@ export default function Picking() {
             status: isItemComplete ? "completed" as const : "in_progress" as const
           };
         });
-        
+
         checkAndHandleCompletion(newItems);
         return { ...batch, items: newItems };
       }));
@@ -1897,10 +1947,10 @@ export default function Picking() {
       setLocalSingleQueue(prev => {
         const orderExists = prev.some(o => o.id === activeOrderId);
         const base = orderExists ? prev : [...prev, ...singleQueue.filter(o => o.id === activeOrderId)];
-        
+
         return base.map(order => {
           if (order.id !== activeOrderId) return order;
-          
+
           const newItems = order.items.map((it, i) => {
             if (i !== idx) return it;
             return {
@@ -1909,7 +1959,7 @@ export default function Picking() {
               status: isItemComplete ? "completed" as const : "in_progress" as const
             };
           });
-          
+
           const allDone = checkAndHandleCompletion(newItems);
           return { ...order, items: newItems, status: allDone ? "completed" as const : order.status };
         });
@@ -1978,20 +2028,19 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      setTimeout(() => {
-        if (pickingMode === "batch") {
-          setActiveBatchId(null);
-        } else {
-          setActiveOrderId(null);
-        }
-        playSound("complete");
-        triggerHaptic("heavy");
-        setCurrentItemIndex(0);
-        setView("queue");
-      }, 500);
+      if (isRealItem) {
+        // Defer navigation — let updateItemMutation.onSuccess handle it
+        // after checking binCountPendingRef (avoids race with bin count dialog)
+        orderCompletedPendingRef.current = true;
+      } else {
+        setTimeout(() => {
+          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
+          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
+        }, 500);
+      }
     }
   };
-  
+
   // Handle clicking pick button on list item
   const handleListItemPick = (idx: number) => {
     if (!activeWork) return;
@@ -2043,17 +2092,13 @@ export default function Picking() {
     }, 100);
   };
   
-  // Handle clicking short pick button on list item - opens dialog
+  // Handle clicking short pick button on list item - checks replen guidance first
   const handleListItemShort = (idx: number) => {
     if (!activeWork) return;
     const item = activeWork.items[idx];
     if (!item || item.status === "completed" || item.status === "short") return;
-    
-    // Set the current picked qty as the short qty default
-    setShortPickQty(String(item.picked || 0));
-    setShortPickReason("");
-    setShortPickListIndex(idx);
-    setShortPickOpen(true);
+
+    checkReplenGuidance(item, idx);
   };
   
   // Legacy immediate short (kept for compatibility, not used currently)
@@ -2174,20 +2219,19 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      setTimeout(() => {
-        if (pickingMode === "batch") {
-          setActiveBatchId(null);
-        } else {
-          setActiveOrderId(null);
-        }
-        playSound("complete");
-        triggerHaptic("heavy");
-        setCurrentItemIndex(0);
-        setView("queue");
-      }, 500);
+      if (isRealItem) {
+        // Defer navigation — let updateItemMutation.onSuccess handle it
+        // after checking binCountPendingRef (avoids race with bin count dialog)
+        orderCompletedPendingRef.current = true;
+      } else {
+        setTimeout(() => {
+          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
+          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
+        }, 500);
+      }
     }
   };
-  
+
   // Handle decrement (-1) - for correcting over-picks
   const handleListItemDecrement = (idx: number) => {
     if (!activeWork) return;
@@ -2302,24 +2346,23 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      setTimeout(() => {
-        if (pickingMode === "batch") {
-          setActiveBatchId(null);
-        } else {
-          setActiveOrderId(null);
-        }
-        playSound("complete");
-        triggerHaptic("heavy");
-        setCurrentItemIndex(0);
-        setView("queue");
-      }, 500);
+      if (isRealItem) {
+        // Defer navigation — let updateItemMutation.onSuccess handle it
+        // after checking binCountPendingRef (avoids race with bin count dialog)
+        orderCompletedPendingRef.current = true;
+      } else {
+        setTimeout(() => {
+          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
+          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
+        }, 500);
+      }
     }
-    
+
     setEditQtyOpen(false);
     setEditQtyIdx(null);
   };
-  
-  
+
+
   // Advance to next item
   const advanceToNext = () => {
     const updatedWork = pickingMode === "batch" 
@@ -3794,10 +3837,11 @@ export default function Picking() {
                       <CheckCircle2 className="h-5 w-5 mr-2" />
                       Manual OK
                     </Button>
-                    <Button 
+                    <Button
                       variant="outline"
                       className="h-14 min-h-[44px] text-base font-medium text-amber-600 border-amber-300 hover:bg-amber-50"
-                      onClick={() => setShortPickOpen(true)}
+                      onClick={() => currentItem && checkReplenGuidance(currentItem, null)}
+                      disabled={replenGuidanceLoading}
                       data-testid="button-short-pick"
                     >
                       <AlertTriangle className="h-5 w-5 mr-2" />
@@ -4238,6 +4282,67 @@ export default function Picking() {
       </Dialog>
       
       {/* Short Pick Dialog */}
+      {/* Replen Guidance Dialog — shown BEFORE short pick when pickable source has stock */}
+      <Dialog open={replenGuidanceOpen} onOpenChange={(open) => { if (!open) { setReplenGuidanceOpen(false); setReplenGuidanceData(null); } }}>
+        <DialogContent className="w-[95vw] max-w-md p-4">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2 text-blue-600">
+              <PackageCheck className="h-5 w-5" />
+              Replen Source Available
+            </DialogTitle>
+            {replenGuidanceData?.source && (
+              <DialogDescription className="text-center space-y-2">
+                <div className="text-sm">
+                  Before shorting <span className="font-mono font-semibold">{replenGuidanceData.targetItem?.sku}</span> at <span className="font-mono font-semibold">{replenGuidanceData.targetItem?.location}</span>:
+                </div>
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded space-y-1">
+                  <div className="text-xs font-medium text-blue-700">Go replen from:</div>
+                  <div className="text-lg font-mono font-bold text-blue-700">{replenGuidanceData.source.locationCode}</div>
+                  <div className="text-sm text-blue-600">
+                    {replenGuidanceData.source.availableQty} x {replenGuidanceData.source.variantName}
+                  </div>
+                </div>
+                <div className="text-xs text-muted-foreground pt-1">
+                  Replen this bin, then pick the item normally.
+                </div>
+              </DialogDescription>
+            )}
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 gap-3 pt-4">
+            <Button
+              size="lg"
+              className="h-14 text-lg"
+              onClick={() => {
+                // Dismiss — picker goes to replen, then picks normally
+                setReplenGuidanceOpen(false);
+                setReplenGuidanceData(null);
+              }}
+            >
+              OK, Going to Replen
+            </Button>
+            <Button
+              variant="outline"
+              size="lg"
+              className="h-12 text-base text-amber-600 border-amber-300"
+              onClick={() => {
+                // Source is also empty — allow short pick (escape hatch)
+                setReplenGuidanceOpen(false);
+                setReplenGuidanceData(null);
+                const targetItem = shortPickListIndex !== null
+                  ? activeWork?.items[shortPickListIndex]
+                  : currentItem;
+                setShortPickQty(String(targetItem?.picked || 0));
+                setShortPickReason("");
+                setShortPickOpen(true);
+              }}
+            >
+              Source is also empty — Short Pick
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={shortPickOpen} onOpenChange={(open) => { if (!open) { setShortPickOpen(false); setShortPickListIndex(null); } }}>
         <DialogContent className="w-[95vw] max-w-sm p-4">
           <DialogHeader>

@@ -127,6 +127,8 @@ class ReservationService {
           eq(inventoryLevels.productVariantId, variant.id),
           // Available = onHand - reserved - picked > 0
           sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
+          // Belt-and-suspenders: only reserve against pickable locations (even if productLocations JOIN should filter)
+          eq(warehouseLocations.isPickable, 1),
         ];
         if (warehouseId) {
           locationFilters.push(eq(warehouseLocations.warehouseId, warehouseId));
@@ -493,6 +495,8 @@ class ReservationService {
             sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
             // Exclude the location we just zeroed out
             sql`${inventoryLevels.warehouseLocationId} != ${warehouseLocationId}`,
+            // Only pickable locations
+            eq(warehouseLocations.isPickable, 1),
           ];
 
           const altLevels = await this.db

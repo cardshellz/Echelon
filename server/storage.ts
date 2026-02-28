@@ -827,6 +827,15 @@ export class DatabaseStorage implements IStorage {
     imageUrl?: string | null;
     barcode?: string | null;
   }): Promise<ProductLocation> {
+    // Guard: only allow assignments to pickable locations
+    const [loc] = await db
+      .select({ isPickable: warehouseLocations.isPickable })
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, data.warehouseLocationId))
+      .limit(1);
+    if (loc && loc.isPickable !== 1) {
+      throw new Error(`Cannot assign products to non-pick location (id=${data.warehouseLocationId})`);
+    }
     // Check if product already has a location entry
     // If so, update the existing entry instead of inserting
     const existingByProduct = await db.select().from(productLocations)
@@ -920,6 +929,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createProductLocation(location: InsertProductLocation): Promise<ProductLocation> {
+    // Guard: only allow assignments to pickable locations
+    if (location.warehouseLocationId) {
+      const [loc] = await db
+        .select({ isPickable: warehouseLocations.isPickable })
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, location.warehouseLocationId))
+        .limit(1);
+      if (loc && loc.isPickable !== 1) {
+        throw new Error(`Cannot assign products to non-pick location (id=${location.warehouseLocationId})`);
+      }
+    }
     const result = await db.insert(productLocations).values({
       ...location,
       sku: location.sku?.toUpperCase() || null,

@@ -1149,6 +1149,21 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
+    try {
+      const { replenishment } = req.app.locals.services as any;
+      const { sku, locationCode } = req.body;
+      if (!sku || !locationCode) {
+        return res.status(400).json({ error: "sku and locationCode are required" });
+      }
+      const guidance = await replenishment.getReplenGuidance(sku, locationCode);
+      res.json(guidance);
+    } catch (error: any) {
+      console.error("Error getting replen guidance:", error);
+      res.status(500).json({ error: error.message || "Failed to get replen guidance" });
+    }
+  });
+
   app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
     try {
       const { picking } = req.app.locals.services as any;

@@ -259,7 +259,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
         const available = locLevel.variantQty - locLevel.reservedQty;
         const locType = locLevel.location?.locationType || "";
         return (
-          <TableRow key={locLevel.id} className={`text-sm ${locLevel.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
+          <TableRow key={locLevel.id} className={`text-sm ${locLevel.isAssigned || !isPickable ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
             <TableCell colSpan={2} className="pl-8">
               <div className="flex items-center gap-2">
                 <MapPin className="h-3 w-3 text-muted-foreground shrink-0" />
@@ -276,7 +276,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
                     [{warehouses.find(w => w.id === locLevel.location?.warehouseId)?.code || ""}]
                   </span>
                 )}
-                {!locLevel.isAssigned && (
+                {!locLevel.isAssigned && isPickable && (
                   <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
                     STRAY
                   </span>
@@ -289,7 +289,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
             {canEdit && (
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
-                  {!locLevel.isAssigned && locLevel.location && (
+                  {!locLevel.isAssigned && isPickable && locLevel.location && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
                         <Button

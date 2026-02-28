@@ -1071,8 +1071,8 @@ class ReplenishmentService {
         if (cascadeResult) return cascadeResult;
       }
 
-      // No cascade possible — create a blocked task so it's visible
-      const [blockedTask] = await this.db
+      // No cascade possible — create a blocked task so it's visible in queue
+      await this.db
         .insert(replenTasks)
         .values({
           replenRuleId: rule?.id ?? null,
@@ -1094,7 +1094,8 @@ class ReplenishmentService {
           notes: `${taskNotes}\nBlocked: no source stock found in ${sourceLocationType} locations`,
         } satisfies InsertReplenTask)
         .returning();
-      return blockedTask as ReplenTask;
+      // Return null — blocked tasks are for warehouse queue, not picker inline dialog
+      return null;
     }
 
     // Calculate quantities
@@ -1189,6 +1190,13 @@ class ReplenishmentService {
     }
     */
 
+    // Only return inline task to picker if source is a PICKABLE location.
+    // Non-pickable sources (reserve) stay in queue for warehouse associate — picker never sees them.
+    if (sourceLocation.isPickable !== 1) {
+      console.log(`[Replen] Task ${task.id} source ${sourceLocation.code} is non-pickable — queued for warehouse associate, not returned to picker`);
+      return null;
+    }
+
     return task as ReplenTask;
   }
 
@@ -1252,6 +1260,93 @@ class ReplenishmentService {
         notes: `${task.notes || ""}\nCancelled by picker - replen not needed (system drift)`,
       })
       .where(eq(replenTasks.id, taskId));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5b. REPLEN GUIDANCE — check if pickable replen source exists for a location
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Check whether a pick location has a pickable replen source with system stock.
+   * Used by short pick flow to guide picker to replen before allowing short pick.
+   *
+   * Returns:
+   * - replen_inline: pickable source has stock → picker should go replen first
+   * - short_pick_with_replen: only reserve source has stock → short pick OK, replen queued for WH associate
+   * - true_short_pick: no stock anywhere → short pick, order to exception queue
+   */
+  async getReplenGuidance(
+    sku: string,
+    locationCode: string,
+  ): Promise<{
+    action: "replen_inline" | "short_pick_with_replen" | "true_short_pick";
+    source?: { locationCode: string; availableQty: number; variantSku: string; variantName: string };
+  }> {
+    // Resolve variant from SKU
+    const [variant] = await this.db
+      .select()
+      .from(productVariants)
+      .where(eq(productVariants.sku, sku))
+      .limit(1);
+    if (!variant) return { action: "true_short_pick" };
+
+    // Resolve location from code
+    const [location] = await this.db
+      .select()
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.code, locationCode))
+      .limit(1);
+    if (!location || location.isPickable !== 1) return { action: "true_short_pick" };
+
+    // Get replen config for this location + variant (same resolution as checkAndTriggerAfterPick)
+    const rule = await this.findRuleForVariant(variant.id);
+    const tierDefault = await this.findTierDefaultForVariant(
+      variant.hierarchyLevel,
+      location.warehouseId ?? undefined,
+    );
+
+    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+    const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+    const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
+
+    // Find source location with stock
+    const sourceLocation = await this.findSourceLocation(
+      sourceVariantId ?? variant.id,
+      location.warehouseId ?? undefined,
+      sourceLocationType,
+      location.parentLocationId,
+      sourcePriority,
+    );
+
+    if (!sourceLocation) {
+      // No source has stock — true short pick
+      return { action: "true_short_pick" };
+    }
+
+    // Check if source is pickable
+    if (sourceLocation.isPickable === 1) {
+      // Pickable source has stock — picker should go replen
+      const sourceLevel = await this.inventoryCore.getLevel(
+        sourceVariantId ?? variant.id,
+        sourceLocation.id,
+      );
+      const sourceVariant = sourceVariantId
+        ? (await this.db.select().from(productVariants).where(eq(productVariants.id, sourceVariantId)).limit(1))[0]
+        : variant;
+
+      return {
+        action: "replen_inline",
+        source: {
+          locationCode: sourceLocation.code,
+          availableQty: sourceLevel?.variantQty ?? 0,
+          variantSku: sourceVariant?.sku ?? variant.sku,
+          variantName: sourceVariant?.name || sourceVariant?.sku || variant.sku,
+        },
+      };
+    }
+
+    // Non-pickable source has stock — short pick OK, replen queued for WH associate
+    return { action: "short_pick_with_replen" };
   }
 
   // ---------------------------------------------------------------------------
