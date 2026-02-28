@@ -374,18 +374,30 @@ export default function APInvoiceDetail() {
   const lines: any[] = invoice.lines ?? [];
   const attachments: any[] = invoice.attachments ?? [];
 
+  const isVoided = status === "voided";
+
   return (
-    <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6">
+    <div className={`p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6 ${isVoided ? "opacity-50 pointer-events-auto" : ""}`}>
+      {/* ── Voided Banner ── */}
+      {isVoided && (
+        <div className="bg-slate-100 border border-slate-300 rounded-lg px-4 py-3 text-center pointer-events-auto">
+          <p className="text-sm font-medium text-slate-500">This invoice has been voided and is read-only.</p>
+          {invoice.internalNotes && invoice.internalNotes.includes("VOIDED:") && (
+            <p className="text-xs text-slate-400 mt-1">{invoice.internalNotes.split("\n").filter((l: string) => l.startsWith("VOIDED:")).pop()}</p>
+          )}
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row items-start justify-between gap-3">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => navigate("/ap-invoices")}>
+          <Button variant="ghost" size="sm" className="pointer-events-auto" onClick={() => navigate("/ap-invoices")}>
             <ChevronLeft className="h-4 w-4 mr-1" />
             Invoices
           </Button>
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-lg md:text-xl font-bold">Invoice #{invoice.invoiceNumber}</h1>
+              <h1 className={`text-lg md:text-xl font-bold ${isVoided ? "line-through" : ""}`}>Invoice #{invoice.invoiceNumber}</h1>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? ""}`}>
                 {status.replace("_", " ")}
               </span>
@@ -394,35 +406,37 @@ export default function APInvoiceDetail() {
           </div>
         </div>
 
-        <div className="flex gap-2 flex-wrap justify-end">
-          {canApprove && (
-            <Button size="sm" onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending}>
-              <CheckCircle className="h-4 w-4 mr-1" />
-              Approve
-            </Button>
-          )}
-          {canPay && (
-            <Button size="sm" onClick={() => {
-              setPayment(p => ({ ...p, amountDollars: (invoice.balanceCents / 100).toFixed(2) }));
-              setShowPaymentDialog(true);
-            }}>
-              <CreditCard className="h-4 w-4 mr-1" />
-              Record Payment
-            </Button>
-          )}
-          {canDispute && (
-            <Button size="sm" variant="outline" className="text-red-600 border-red-200" onClick={() => setShowDisputeDialog(true)}>
-              <AlertTriangle className="h-4 w-4 mr-1" />
-              Dispute
-            </Button>
-          )}
-          {canVoid && (
-            <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setShowVoidDialog(true)}>
-              <XCircle className="h-4 w-4 mr-1" />
-              Void
-            </Button>
-          )}
-        </div>
+        {!isVoided && (
+          <div className="flex gap-2 flex-wrap justify-end">
+            {canApprove && (
+              <Button size="sm" onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending}>
+                <CheckCircle className="h-4 w-4 mr-1" />
+                Approve
+              </Button>
+            )}
+            {canPay && (
+              <Button size="sm" onClick={() => {
+                setPayment(p => ({ ...p, amountDollars: (invoice.balanceCents / 100).toFixed(2) }));
+                setShowPaymentDialog(true);
+              }}>
+                <CreditCard className="h-4 w-4 mr-1" />
+                Record Payment
+              </Button>
+            )}
+            {canDispute && (
+              <Button size="sm" variant="outline" className="text-red-600 border-red-200" onClick={() => setShowDisputeDialog(true)}>
+                <AlertTriangle className="h-4 w-4 mr-1" />
+                Dispute
+              </Button>
+            )}
+            {canVoid && (
+              <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setShowVoidDialog(true)}>
+                <XCircle className="h-4 w-4 mr-1" />
+                Void
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Amount Cards ── */}

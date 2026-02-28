@@ -53,7 +53,7 @@ export default function APInvoices() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
-  const [tab, setTab] = useState("all");
+  const [tab, setTab] = useState("open");
   const [search, setSearch] = useState("");
   const [showNewDialog, setShowNewDialog] = useState(false);
 
@@ -69,11 +69,12 @@ export default function APInvoices() {
   });
 
   const statusFilter: Record<string, string[] | undefined> = {
-    all: undefined,
+    open: ["received", "approved", "partially_paid"],
     needs_approval: ["received"],
     overdue: ["received", "approved", "partially_paid"],
-    open: ["received", "approved", "partially_paid"],
     paid: ["paid"],
+    voided: ["voided"],
+    all: undefined,
   };
 
   const queryParams = new URLSearchParams();
@@ -151,11 +152,12 @@ export default function APInvoices() {
       <div className="flex items-center gap-3">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
-            <TabsTrigger value="all">All</TabsTrigger>
+            <TabsTrigger value="open">Open</TabsTrigger>
             <TabsTrigger value="needs_approval">Needs Approval</TabsTrigger>
             <TabsTrigger value="overdue">Overdue</TabsTrigger>
-            <TabsTrigger value="open">Open</TabsTrigger>
             <TabsTrigger value="paid">Paid</TabsTrigger>
+            <TabsTrigger value="voided">Voided</TabsTrigger>
+            <TabsTrigger value="all">All</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="relative ml-auto w-64">
@@ -200,7 +202,7 @@ export default function APInvoices() {
                   return (
                     <TableRow
                       key={inv.id}
-                      className="cursor-pointer hover:bg-muted/50"
+                      className={`cursor-pointer hover:bg-muted/50 ${inv.status === "voided" ? "opacity-40" : ""}`}
                       onClick={() => navigate(`/ap-invoices/${inv.id}`)}
                     >
                       <TableCell className="font-mono font-medium">{inv.invoiceNumber}</TableCell>
