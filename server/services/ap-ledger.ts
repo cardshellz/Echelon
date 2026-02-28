@@ -7,18 +7,20 @@ import { db } from "../db";
 import {
   vendorInvoices,
   vendorInvoicePoLinks,
+  vendorInvoiceLines,
+  vendorInvoiceAttachments,
   apPayments,
   apPaymentAllocations,
   purchaseOrders,
+  purchaseOrderLines,
   vendors,
 } from "../../shared/schema";
-import { eq, and, inArray, sql, desc, lt, lte, gte, isNull, ne } from "drizzle-orm";
+import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc } from "drizzle-orm";
 import { format } from "date-fns";
 
 // ─── Status Transition Validation ────────────────────────────────────────────
 
 const INVOICE_VALID_TRANSITIONS: Record<string, string[]> = {
-  draft: ["received", "voided"],
   received: ["approved", "disputed", "voided"],
   approved: ["partially_paid", "paid", "disputed", "voided"],
   partially_paid: ["paid", "disputed", "voided"],
@@ -108,13 +110,13 @@ export async function createInvoice(data: {
   vendorId: number;
   invoiceDate?: Date;
   dueDate?: Date;
-  invoicedAmountCents: number;
+  invoicedAmountCents?: number; // Optional — if lines imported, will be computed
   currency?: string;
   paymentTermsDays?: number;
   paymentTermsType?: string;
   notes?: string;
   internalNotes?: string;
-  poIds?: number[]; // POs to link immediately
+  poIds?: number[]; // POs to link + auto-import lines
   createdBy?: string;
 }) {
   const [invoice] = await db
@@ -123,12 +125,13 @@ export async function createInvoice(data: {
       invoiceNumber: data.invoiceNumber,
       ourReference: data.ourReference,
       vendorId: data.vendorId,
-      status: "draft",
+      status: "received",
+      receivedDate: new Date(),
       invoiceDate: data.invoiceDate,
       dueDate: data.dueDate,
-      invoicedAmountCents: data.invoicedAmountCents,
+      invoicedAmountCents: data.invoicedAmountCents ?? 0,
       paidAmountCents: 0,
-      balanceCents: data.invoicedAmountCents,
+      balanceCents: data.invoicedAmountCents ?? 0,
       currency: data.currency ?? "USD",
       paymentTermsDays: data.paymentTermsDays,
       paymentTermsType: data.paymentTermsType,
@@ -146,9 +149,19 @@ export async function createInvoice(data: {
         purchaseOrderId: poId,
       }))
     );
+
+    // Auto-import lines from all linked POs
+    for (const poId of data.poIds) {
+      await importLinesFromPO(invoice.id, poId);
+    }
+
+    // Recalculate header total from lines
+    await recalculateInvoiceFromLines(invoice.id);
   }
 
-  return invoice;
+  // Re-fetch to get updated totals
+  const [final] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, invoice.id));
+  return final;
 }
 
 export async function getInvoiceById(id: number) {
@@ -189,7 +202,19 @@ export async function getInvoiceById(id: number) {
     .where(eq(apPaymentAllocations.vendorInvoiceId, id))
     .orderBy(desc(apPayments.paymentDate));
 
-  return { ...invoice, poLinks, payments };
+  const lines = await db
+    .select()
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, id))
+    .orderBy(asc(vendorInvoiceLines.lineNumber));
+
+  const attachments = await db
+    .select()
+    .from(vendorInvoiceAttachments)
+    .where(eq(vendorInvoiceAttachments.vendorInvoiceId, id))
+    .orderBy(desc(vendorInvoiceAttachments.uploadedAt));
+
+  return { ...invoice, poLinks, payments, lines, attachments };
 }
 
 export async function listInvoices(filters: {
@@ -280,18 +305,6 @@ export async function updateInvoice(
 }
 
 // ─── Invoice Status Transitions ───────────────────────────────────────────────
-
-export async function receiveInvoice(id: number, userId?: string) {
-  const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
-  if (!inv || inv.status !== "draft") throw new Error("Invoice must be in draft status to receive");
-
-  const [updated] = await db
-    .update(vendorInvoices)
-    .set({ status: "received", receivedDate: new Date(), updatedBy: userId, updatedAt: new Date() })
-    .where(eq(vendorInvoices.id, id))
-    .returning();
-  return updated;
-}
 
 export async function approveInvoice(id: number, userId?: string) {
   const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, id));
@@ -597,4 +610,257 @@ export async function getApSummary() {
       ...data,
     })),
   };
+}
+
+// ─── Invoice Lines ────────────────────────────────────────────────────────────
+
+export async function importLinesFromPO(invoiceId: number, purchaseOrderId: number) {
+  const poLines = await db
+    .select()
+    .from(purchaseOrderLines)
+    .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId))
+    .orderBy(asc(purchaseOrderLines.lineNumber));
+
+  if (poLines.length === 0) return [];
+
+  // Get current max line number on this invoice
+  const existing = await db
+    .select({ maxLine: sql<number>`COALESCE(MAX(${vendorInvoiceLines.lineNumber}), 0)` })
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId));
+  let lineNum = Number(existing[0]?.maxLine ?? 0);
+
+  const newLines = [];
+  for (const pol of poLines) {
+    if (pol.status === "cancelled") continue;
+    lineNum++;
+    const unitCost = Math.round(Number(pol.unitCostCents || 0));
+    const qty = pol.orderQty;
+    const [line] = await db
+      .insert(vendorInvoiceLines)
+      .values({
+        vendorInvoiceId: invoiceId,
+        purchaseOrderLineId: pol.id,
+        productVariantId: pol.productVariantId,
+        lineNumber: lineNum,
+        sku: pol.sku,
+        productName: pol.productName,
+        description: pol.description,
+        qtyInvoiced: qty,
+        qtyOrdered: qty,
+        qtyReceived: pol.receivedQty ?? 0,
+        unitCostCents: unitCost,
+        lineTotalCents: qty * unitCost,
+        matchStatus: "pending",
+      })
+      .returning();
+    newLines.push(line);
+  }
+
+  return newLines;
+}
+
+export async function addInvoiceLine(invoiceId: number, data: {
+  purchaseOrderLineId?: number;
+  productVariantId?: number;
+  sku?: string;
+  productName?: string;
+  description?: string;
+  qtyInvoiced: number;
+  unitCostCents: number;
+  notes?: string;
+}) {
+  // Get next line number
+  const existing = await db
+    .select({ maxLine: sql<number>`COALESCE(MAX(${vendorInvoiceLines.lineNumber}), 0)` })
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId));
+  const lineNumber = Number(existing[0]?.maxLine ?? 0) + 1;
+
+  const [line] = await db
+    .insert(vendorInvoiceLines)
+    .values({
+      vendorInvoiceId: invoiceId,
+      purchaseOrderLineId: data.purchaseOrderLineId,
+      productVariantId: data.productVariantId,
+      lineNumber,
+      sku: data.sku,
+      productName: data.productName,
+      description: data.description,
+      qtyInvoiced: data.qtyInvoiced,
+      unitCostCents: data.unitCostCents,
+      lineTotalCents: data.qtyInvoiced * data.unitCostCents,
+      matchStatus: "pending",
+      notes: data.notes,
+    })
+    .returning();
+
+  await recalculateInvoiceFromLines(invoiceId);
+  return line;
+}
+
+export async function updateInvoiceLine(lineId: number, data: {
+  qtyInvoiced?: number;
+  unitCostCents?: number;
+  description?: string;
+  notes?: string;
+}) {
+  const [existing] = await db.select().from(vendorInvoiceLines).where(eq(vendorInvoiceLines.id, lineId));
+  if (!existing) throw new Error("Invoice line not found");
+
+  const qty = data.qtyInvoiced ?? existing.qtyInvoiced;
+  const unitCost = data.unitCostCents ?? existing.unitCostCents;
+
+  const [updated] = await db
+    .update(vendorInvoiceLines)
+    .set({
+      ...data,
+      lineTotalCents: qty * unitCost,
+      matchStatus: "pending", // Reset match on edit
+      updatedAt: new Date(),
+    })
+    .where(eq(vendorInvoiceLines.id, lineId))
+    .returning();
+
+  await recalculateInvoiceFromLines(existing.vendorInvoiceId);
+  return updated;
+}
+
+export async function removeInvoiceLine(lineId: number) {
+  const [existing] = await db.select().from(vendorInvoiceLines).where(eq(vendorInvoiceLines.id, lineId));
+  if (!existing) throw new Error("Invoice line not found");
+
+  await db.delete(vendorInvoiceLines).where(eq(vendorInvoiceLines.id, lineId));
+  await recalculateInvoiceFromLines(existing.vendorInvoiceId);
+}
+
+export async function getInvoiceLines(invoiceId: number) {
+  return db
+    .select()
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId))
+    .orderBy(asc(vendorInvoiceLines.lineNumber));
+}
+
+async function recalculateInvoiceFromLines(invoiceId: number) {
+  const result = await db
+    .select({ total: sql<number>`COALESCE(SUM(${vendorInvoiceLines.lineTotalCents}), 0)` })
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId));
+
+  const linesTotalCents = Number(result[0]?.total ?? 0);
+
+  const [inv] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, invoiceId));
+  if (!inv) return;
+
+  const balance = linesTotalCents - Number(inv.paidAmountCents);
+
+  await db
+    .update(vendorInvoices)
+    .set({
+      invoicedAmountCents: linesTotalCents,
+      balanceCents: Math.max(0, balance),
+      updatedAt: new Date(),
+    })
+    .where(eq(vendorInvoices.id, invoiceId));
+}
+
+// ─── 3-Way Match ──────────────────────────────────────────────────────────────
+
+export async function runInvoiceMatch(invoiceId: number) {
+  const lines = await db
+    .select()
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId));
+
+  for (const line of lines) {
+    let matchStatus = "pending";
+
+    if (line.purchaseOrderLineId) {
+      // Fetch current PO line data for comparison
+      const [poLine] = await db
+        .select()
+        .from(purchaseOrderLines)
+        .where(eq(purchaseOrderLines.id, line.purchaseOrderLineId));
+
+      if (poLine) {
+        const poUnitCost = Math.round(Number(poLine.unitCostCents || 0));
+        const invoiceUnitCost = Number(line.unitCostCents);
+        const qtyReceived = poLine.receivedQty ?? 0;
+
+        // Update received qty from latest PO data
+        await db
+          .update(vendorInvoiceLines)
+          .set({ qtyReceived: qtyReceived })
+          .where(eq(vendorInvoiceLines.id, line.id));
+
+        if (invoiceUnitCost !== poUnitCost) {
+          matchStatus = "price_discrepancy";
+        } else if (line.qtyInvoiced > qtyReceived && qtyReceived > 0) {
+          matchStatus = "over_billed";
+        } else if (line.qtyInvoiced !== poLine.orderQty) {
+          matchStatus = "qty_discrepancy";
+        } else {
+          matchStatus = "matched";
+        }
+      }
+    }
+
+    await db
+      .update(vendorInvoiceLines)
+      .set({ matchStatus, updatedAt: new Date() })
+      .where(eq(vendorInvoiceLines.id, line.id));
+  }
+
+  // Return updated lines
+  return db
+    .select()
+    .from(vendorInvoiceLines)
+    .where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId))
+    .orderBy(asc(vendorInvoiceLines.lineNumber));
+}
+
+// ─── Attachments ──────────────────────────────────────────────────────────────
+
+export async function addAttachment(invoiceId: number, data: {
+  fileName: string;
+  fileType?: string;
+  fileSizeBytes?: number;
+  filePath: string;
+  uploadedBy?: string;
+  notes?: string;
+}) {
+  const [attachment] = await db
+    .insert(vendorInvoiceAttachments)
+    .values({
+      vendorInvoiceId: invoiceId,
+      fileName: data.fileName,
+      fileType: data.fileType,
+      fileSizeBytes: data.fileSizeBytes,
+      filePath: data.filePath,
+      uploadedBy: data.uploadedBy,
+      notes: data.notes,
+    })
+    .returning();
+  return attachment;
+}
+
+export async function getAttachments(invoiceId: number) {
+  return db
+    .select()
+    .from(vendorInvoiceAttachments)
+    .where(eq(vendorInvoiceAttachments.vendorInvoiceId, invoiceId))
+    .orderBy(desc(vendorInvoiceAttachments.uploadedAt));
+}
+
+export async function getAttachmentById(id: number) {
+  const [attachment] = await db
+    .select()
+    .from(vendorInvoiceAttachments)
+    .where(eq(vendorInvoiceAttachments.id, id));
+  return attachment ?? null;
+}
+
+export async function removeAttachment(id: number) {
+  await db.delete(vendorInvoiceAttachments).where(eq(vendorInvoiceAttachments.id, id));
 }

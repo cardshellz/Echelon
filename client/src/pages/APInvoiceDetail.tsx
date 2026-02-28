@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, Link, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +34,12 @@ import {
   Unlink,
   Pencil,
   Search,
+  Upload,
+  Download,
+  Trash2,
+  FileText,
+  RefreshCw,
+  Package,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -47,14 +53,28 @@ function formatDate(d: string | null | undefined) {
   try { return format(parseISO(d), "MMM d, yyyy"); } catch { return d; }
 }
 
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-slate-100 text-slate-600",
   received: "bg-blue-100 text-blue-700",
   approved: "bg-indigo-100 text-indigo-700",
   partially_paid: "bg-amber-100 text-amber-700",
   paid: "bg-green-100 text-green-700",
   disputed: "bg-red-100 text-red-700",
   voided: "bg-slate-100 text-slate-400",
+};
+
+const MATCH_COLORS: Record<string, { label: string; className: string }> = {
+  pending: { label: "Pending", className: "bg-slate-100 text-slate-600" },
+  matched: { label: "Matched", className: "bg-green-100 text-green-700" },
+  qty_discrepancy: { label: "Qty Mismatch", className: "bg-amber-100 text-amber-700" },
+  price_discrepancy: { label: "Price Mismatch", className: "bg-red-100 text-red-700" },
+  over_billed: { label: "Over-billed", className: "bg-red-100 text-red-700" },
 };
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -65,6 +85,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+// ── Link PO Dialog Content ──
 function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkAmount, setLinkAmount, linkPoMutation, onClose }: any) {
   const [poSearch, setPoSearch] = useState("");
   const { data: posData } = useQuery<any>({
@@ -120,26 +141,41 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkAmount, setLi
   );
 }
 
+// ── Main Component ──
 export default function APInvoiceDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [, params] = useRoute("/ap-invoices/:id");
   const invoiceId = params?.id ? Number(params.id) : null;
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Tabs
+  const [activeTab, setActiveTab] = useState<"lines" | "details" | "attachments">("lines");
+
+  // Dialogs
   const [showDisputeDialog, setShowDisputeDialog] = useState(false);
   const [showVoidDialog, setShowVoidDialog] = useState(false);
   const [showLinkPoDialog, setShowLinkPoDialog] = useState(false);
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
+  const [showImportPoDialog, setShowImportPoDialog] = useState(false);
+  const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [reason, setReason] = useState("");
   const [linkPoId, setLinkPoId] = useState("");
   const [linkAmount, setLinkAmount] = useState("");
+  const [importPoId, setImportPoId] = useState("");
+
+  // Editing
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({
-    invoiceNumber: "", ourReference: "", invoicedAmountDollars: "",
+    invoiceNumber: "", ourReference: "",
     invoiceDate: "", dueDate: "", paymentTermsDays: "", notes: "",
   });
 
+  // Add line form
+  const [newLine, setNewLine] = useState({ sku: "", productName: "", description: "", qtyInvoiced: "", unitCostDollars: "" });
+
+  // Payment form
   const [payment, setPayment] = useState({
     paymentDate: format(new Date(), "yyyy-MM-dd"),
     paymentMethod: "ach",
@@ -150,12 +186,11 @@ export default function APInvoiceDetail() {
     notes: "",
   });
 
+  // Queries
   const { data: invoice, isLoading } = useQuery<any>({
     queryKey: [`/api/vendor-invoices/${invoiceId}`],
     enabled: !!invoiceId,
   });
-
-  const { data: vendorsData } = useQuery<any>({ queryKey: ["/api/vendors"] });
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] });
@@ -174,11 +209,7 @@ export default function APInvoiceDetail() {
     });
   }
 
-  const receiveMutation = useMutation({
-    mutationFn: () => action("receive"),
-    onSuccess: () => { invalidate(); toast({ title: "Invoice received" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
-  });
+  // ── Mutations ──
 
   const approveMutation = useMutation({
     mutationFn: () => action("approve"),
@@ -226,7 +257,6 @@ export default function APInvoiceDetail() {
         body: JSON.stringify({
           invoiceNumber: editForm.invoiceNumber || undefined,
           ourReference: editForm.ourReference || undefined,
-          invoicedAmountCents: editForm.invoicedAmountDollars ? Math.round(parseFloat(editForm.invoicedAmountDollars) * 100) : undefined,
           invoiceDate: editForm.invoiceDate || undefined,
           dueDate: editForm.dueDate || undefined,
           paymentTermsDays: editForm.paymentTermsDays ? parseInt(editForm.paymentTermsDays) : undefined,
@@ -236,26 +266,9 @@ export default function APInvoiceDetail() {
       if (!res.ok) throw new Error((await res.json()).error);
       return res.json();
     },
-    onSuccess: () => {
-      invalidate();
-      setEditing(false);
-      toast({ title: "Invoice updated" });
-    },
+    onSuccess: () => { invalidate(); setEditing(false); toast({ title: "Invoice updated" }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
-
-  function startEditing() {
-    setEditForm({
-      invoiceNumber: invoice?.invoiceNumber || "",
-      ourReference: invoice?.ourReference || "",
-      invoicedAmountDollars: invoice?.invoicedAmountCents ? String(invoice.invoicedAmountCents / 100) : "",
-      invoiceDate: invoice?.invoiceDate ? invoice.invoiceDate.slice(0, 10) : "",
-      dueDate: invoice?.dueDate ? invoice.dueDate.slice(0, 10) : "",
-      paymentTermsDays: invoice?.paymentTermsDays ? String(invoice.paymentTermsDays) : "",
-      notes: invoice?.notes || "",
-    });
-    setEditing(true);
-  }
 
   const paymentMutation = useMutation({
     mutationFn: () => fetch("/api/ap-payments", {
@@ -286,6 +299,81 @@ export default function APInvoiceDetail() {
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
+  // ── Line Mutations ──
+
+  const importLinesMutation = useMutation({
+    mutationFn: () => action("lines/from-po", { purchaseOrderId: parseInt(importPoId) }),
+    onSuccess: () => { invalidate(); setShowImportPoDialog(false); setImportPoId(""); toast({ title: "Lines imported from PO" }); },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const addLineMutation = useMutation({
+    mutationFn: () => fetch(`/api/vendor-invoices/${invoiceId}/lines`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sku: newLine.sku || undefined,
+        productName: newLine.productName || undefined,
+        description: newLine.description || undefined,
+        qtyInvoiced: parseInt(newLine.qtyInvoiced) || 1,
+        unitCostCents: Math.round(parseFloat(newLine.unitCostDollars || "0") * 100),
+      }),
+    }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    onSuccess: () => {
+      invalidate();
+      setShowAddLineDialog(false);
+      setNewLine({ sku: "", productName: "", description: "", qtyInvoiced: "", unitCostDollars: "" });
+      toast({ title: "Line added" });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteLineMutation = useMutation({
+    mutationFn: (lineId: number) => fetch(`/api/vendor-invoice-lines/${lineId}`, { method: "DELETE" })
+      .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    onSuccess: () => { invalidate(); toast({ title: "Line removed" }); },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const matchMutation = useMutation({
+    mutationFn: () => action("match"),
+    onSuccess: () => { invalidate(); toast({ title: "Match completed" }); },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  // ── Attachment Mutations ──
+
+  const uploadMutation = useMutation({
+    mutationFn: async (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch(`/api/vendor-invoices/${invoiceId}/attachments`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error((await res.json()).error);
+      return res.json();
+    },
+    onSuccess: () => { invalidate(); toast({ title: "File uploaded" }); },
+    onError: (e: Error) => toast({ title: "Upload failed", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteAttachmentMutation = useMutation({
+    mutationFn: (id: number) => fetch(`/api/vendor-invoice-attachments/${id}`, { method: "DELETE" })
+      .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    onSuccess: () => { invalidate(); toast({ title: "Attachment removed" }); },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  function startEditing() {
+    setEditForm({
+      invoiceNumber: invoice?.invoiceNumber || "",
+      ourReference: invoice?.ourReference || "",
+      invoiceDate: invoice?.invoiceDate ? invoice.invoiceDate.slice(0, 10) : "",
+      dueDate: invoice?.dueDate ? invoice.dueDate.slice(0, 10) : "",
+      paymentTermsDays: invoice?.paymentTermsDays ? String(invoice.paymentTermsDays) : "",
+      notes: invoice?.notes || "",
+    });
+    setEditing(true);
+  }
+
   if (isLoading) {
     return <div className="flex items-center justify-center h-64"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>;
   }
@@ -295,16 +383,18 @@ export default function APInvoiceDetail() {
   }
 
   const status = invoice.status;
-  const canReceive = status === "draft";
   const canApprove = ["received", "disputed"].includes(status);
   const canDispute = ["received", "approved", "partially_paid"].includes(status);
   const canVoid = status !== "voided";
   const canPay = ["approved", "partially_paid"].includes(status);
+  const canEdit = status !== "voided" && status !== "paid";
+  const lines: any[] = invoice.lines ?? [];
+  const attachments: any[] = invoice.attachments ?? [];
 
   return (
-    <div className="p-6 max-w-5xl mx-auto space-y-6">
-      {/* Back + Header */}
-      <div className="flex items-start justify-between">
+    <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6">
+      {/* ── Header ── */}
+      <div className="flex flex-col sm:flex-row items-start justify-between gap-3">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => navigate("/ap-invoices")}>
             <ChevronLeft className="h-4 w-4 mr-1" />
@@ -312,7 +402,7 @@ export default function APInvoiceDetail() {
           </Button>
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-xl font-bold">Invoice #{invoice.invoiceNumber}</h1>
+              <h1 className="text-lg md:text-xl font-bold">Invoice #{invoice.invoiceNumber}</h1>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? ""}`}>
                 {status.replace("_", " ")}
               </span>
@@ -322,11 +412,6 @@ export default function APInvoiceDetail() {
         </div>
 
         <div className="flex gap-2 flex-wrap justify-end">
-          {canReceive && (
-            <Button size="sm" variant="outline" onClick={() => receiveMutation.mutate()} disabled={receiveMutation.isPending}>
-              Mark Received
-            </Button>
-          )}
           {canApprove && (
             <Button size="sm" onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending}>
               <CheckCircle className="h-4 w-4 mr-1" />
@@ -357,101 +442,288 @@ export default function APInvoiceDetail() {
         </div>
       </div>
 
-      {/* Amounts Card */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* ── Amount Cards ── */}
+      <div className="grid grid-cols-3 gap-3 md:gap-4">
         <Card>
-          <CardContent className="pt-5 text-center">
+          <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Invoiced</p>
-            <p className="text-2xl font-bold">{formatCents(invoice.invoicedAmountCents)}</p>
+            <p className="text-xl md:text-2xl font-bold">{formatCents(invoice.invoicedAmountCents)}</p>
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="pt-5 text-center">
+          <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Paid</p>
-            <p className="text-2xl font-bold text-green-600">{formatCents(invoice.paidAmountCents)}</p>
+            <p className="text-xl md:text-2xl font-bold text-green-600">{formatCents(invoice.paidAmountCents)}</p>
           </CardContent>
         </Card>
         <Card className={invoice.balanceCents > 0 ? "border-amber-200" : ""}>
-          <CardContent className="pt-5 text-center">
+          <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Balance</p>
-            <p className={`text-2xl font-bold ${invoice.balanceCents > 0 ? "text-amber-700" : "text-muted-foreground"}`}>
+            <p className={`text-xl md:text-2xl font-bold ${invoice.balanceCents > 0 ? "text-amber-700" : "text-muted-foreground"}`}>
               {formatCents(invoice.balanceCents)}
             </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Details */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between py-3">
-          <CardTitle className="text-sm">Invoice Details</CardTitle>
-          {!editing && status !== "voided" && (
-            <Button size="sm" variant="ghost" onClick={startEditing}>
-              <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
-            </Button>
-          )}
-        </CardHeader>
-        <CardContent>
-          {editing ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="space-y-1">
-                  <Label className="text-xs">Invoice Number</Label>
-                  <Input value={editForm.invoiceNumber} onChange={e => setEditForm(f => ({ ...f, invoiceNumber: e.target.value }))} />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Our Reference</Label>
-                  <Input value={editForm.ourReference} onChange={e => setEditForm(f => ({ ...f, ourReference: e.target.value }))} placeholder="Internal ref" />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Amount ($)</Label>
-                  <Input type="number" step="0.01" value={editForm.invoicedAmountDollars} onChange={e => setEditForm(f => ({ ...f, invoicedAmountDollars: e.target.value }))} />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Payment Terms (days)</Label>
-                  <Input type="number" value={editForm.paymentTermsDays} onChange={e => setEditForm(f => ({ ...f, paymentTermsDays: e.target.value }))} placeholder="30" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="space-y-1">
-                  <Label className="text-xs">Invoice Date</Label>
-                  <Input type="date" value={editForm.invoiceDate} onChange={e => setEditForm(f => ({ ...f, invoiceDate: e.target.value }))} />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Due Date</Label>
-                  <Input type="date" value={editForm.dueDate} onChange={e => setEditForm(f => ({ ...f, dueDate: e.target.value }))} />
-                </div>
-                <div className="space-y-1 col-span-2">
-                  <Label className="text-xs">Notes</Label>
-                  <Input value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} placeholder="Optional notes" />
-                </div>
-              </div>
-              <div className="flex gap-2 justify-end">
-                <Button size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
-                <Button size="sm" onClick={() => updateInvoiceMutation.mutate()} disabled={updateInvoiceMutation.isPending}>
-                  {updateInvoiceMutation.isPending ? "Saving..." : "Save Changes"}
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-              <div><p className="text-muted-foreground">Invoice Date</p><p className="font-medium">{formatDate(invoice.invoiceDate)}</p></div>
-              <div><p className="text-muted-foreground">Due Date</p><p className="font-medium">{formatDate(invoice.dueDate)}</p></div>
-              <div><p className="text-muted-foreground">Our Reference</p><p className="font-medium">{invoice.ourReference || "—"}</p></div>
-              <div><p className="text-muted-foreground">Payment Terms</p><p className="font-medium">{invoice.paymentTermsDays ? `Net ${invoice.paymentTermsDays}` : "—"}</p></div>
-              {invoice.approvedAt && <div><p className="text-muted-foreground">Approved</p><p className="font-medium">{formatDate(invoice.approvedAt)}</p></div>}
-              {invoice.disputeReason && <div className="col-span-2"><p className="text-muted-foreground">Dispute Reason</p><p className="font-medium text-red-600">{invoice.disputeReason}</p></div>}
-              {invoice.notes && <div className="col-span-2"><p className="text-muted-foreground">Notes</p><p className="font-medium">{invoice.notes}</p></div>}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {/* ── Tabs ── */}
+      <div className="flex gap-1 border-b">
+        {(["lines", "details", "attachments"] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {tab === "lines" ? `Lines (${lines.length})` : tab === "attachments" ? `Attachments (${attachments.length})` : "Details"}
+          </button>
+        ))}
+      </div>
 
-      {/* Linked POs */}
+      {/* ── Lines Tab ── */}
+      {activeTab === "lines" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between py-3">
+            <CardTitle className="text-sm">Invoice Line Items</CardTitle>
+            {canEdit && (
+              <div className="flex gap-2">
+                {invoice.poLinks?.length > 0 && (
+                  <Button size="sm" variant="outline" onClick={() => setShowImportPoDialog(true)}>
+                    <Package className="h-4 w-4 mr-1" />
+                    Import from PO
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" onClick={() => setShowAddLineDialog(true)}>
+                  <Plus className="h-4 w-4 mr-1" />
+                  Add Line
+                </Button>
+                {lines.length > 0 && (
+                  <Button size="sm" variant="outline" onClick={() => matchMutation.mutate()} disabled={matchMutation.isPending}>
+                    <RefreshCw className={`h-4 w-4 mr-1 ${matchMutation.isPending ? "animate-spin" : ""}`} />
+                    Run Match
+                  </Button>
+                )}
+              </div>
+            )}
+          </CardHeader>
+          <CardContent className="p-0">
+            {lines.length === 0 ? (
+              <p className="px-6 py-4 text-sm text-muted-foreground">
+                No line items yet. {invoice.poLinks?.length > 0 ? 'Click "Import from PO" to pull in PO lines.' : 'Link a PO first, then import lines.'}
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-8">#</TableHead>
+                      <TableHead>SKU</TableHead>
+                      <TableHead className="hidden md:table-cell">Product</TableHead>
+                      <TableHead className="text-right">Qty Invoiced</TableHead>
+                      <TableHead className="text-right hidden md:table-cell">Qty Ordered</TableHead>
+                      <TableHead className="text-right hidden md:table-cell">Qty Received</TableHead>
+                      <TableHead className="text-right">Unit Cost</TableHead>
+                      <TableHead className="text-right">Line Total</TableHead>
+                      <TableHead>Match</TableHead>
+                      {canEdit && <TableHead></TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {lines.map((line: any) => {
+                      const match = MATCH_COLORS[line.matchStatus] ?? MATCH_COLORS.pending;
+                      return (
+                        <TableRow key={line.id}>
+                          <TableCell className="text-muted-foreground text-xs">{line.lineNumber}</TableCell>
+                          <TableCell className="font-mono text-xs">{line.sku || "—"}</TableCell>
+                          <TableCell className="hidden md:table-cell text-sm max-w-[200px] truncate">{line.productName || "—"}</TableCell>
+                          <TableCell className="text-right font-mono">{line.qtyInvoiced}</TableCell>
+                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyOrdered ?? "—"}</TableCell>
+                          <TableCell className="text-right font-mono text-muted-foreground hidden md:table-cell">{line.qtyReceived ?? "—"}</TableCell>
+                          <TableCell className="text-right font-mono text-sm">{formatCents(line.unitCostCents)}</TableCell>
+                          <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
+                          <TableCell>
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
+                          </TableCell>
+                          {canEdit && (
+                            <TableCell>
+                              <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
+                                onClick={() => deleteLineMutation.mutate(line.id)}
+                                disabled={deleteLineMutation.isPending}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                    {/* Summary row */}
+                    <TableRow className="bg-muted/30 font-medium">
+                      <TableCell colSpan={3} className="hidden md:table-cell" />
+                      <TableCell className="text-right font-mono">{lines.reduce((s: number, l: any) => s + l.qtyInvoiced, 0)}</TableCell>
+                      <TableCell className="hidden md:table-cell" />
+                      <TableCell className="hidden md:table-cell" />
+                      <TableCell />
+                      <TableCell className="text-right font-mono">{formatCents(lines.reduce((s: number, l: any) => s + Number(l.lineTotalCents), 0))}</TableCell>
+                      <TableCell />
+                      {canEdit && <TableCell />}
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Details Tab ── */}
+      {activeTab === "details" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between py-3">
+            <CardTitle className="text-sm">Invoice Details</CardTitle>
+            {!editing && canEdit && (
+              <Button size="sm" variant="ghost" onClick={startEditing}>
+                <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent>
+            {editing ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Invoice Number</Label>
+                    <Input value={editForm.invoiceNumber} onChange={e => setEditForm(f => ({ ...f, invoiceNumber: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Our Reference</Label>
+                    <Input value={editForm.ourReference} onChange={e => setEditForm(f => ({ ...f, ourReference: e.target.value }))} placeholder="Internal ref" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Payment Terms (days)</Label>
+                    <Input type="number" value={editForm.paymentTermsDays} onChange={e => setEditForm(f => ({ ...f, paymentTermsDays: e.target.value }))} placeholder="30" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Invoice Date</Label>
+                    <Input type="date" value={editForm.invoiceDate} onChange={e => setEditForm(f => ({ ...f, invoiceDate: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Due Date</Label>
+                    <Input type="date" value={editForm.dueDate} onChange={e => setEditForm(f => ({ ...f, dueDate: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1 col-span-2">
+                    <Label className="text-xs">Notes</Label>
+                    <Input value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))} placeholder="Optional notes" />
+                  </div>
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Button size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+                  <Button size="sm" onClick={() => updateInvoiceMutation.mutate()} disabled={updateInvoiceMutation.isPending}>
+                    {updateInvoiceMutation.isPending ? "Saving..." : "Save Changes"}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div><p className="text-muted-foreground">Invoice Date</p><p className="font-medium">{formatDate(invoice.invoiceDate)}</p></div>
+                <div><p className="text-muted-foreground">Due Date</p><p className="font-medium">{formatDate(invoice.dueDate)}</p></div>
+                <div><p className="text-muted-foreground">Our Reference</p><p className="font-medium">{invoice.ourReference || "—"}</p></div>
+                <div><p className="text-muted-foreground">Payment Terms</p><p className="font-medium">{invoice.paymentTermsDays ? `Net ${invoice.paymentTermsDays}` : "—"}</p></div>
+                {invoice.approvedAt && <div><p className="text-muted-foreground">Approved</p><p className="font-medium">{formatDate(invoice.approvedAt)}</p></div>}
+                {invoice.disputeReason && <div className="col-span-2"><p className="text-muted-foreground">Dispute Reason</p><p className="font-medium text-red-600">{invoice.disputeReason}</p></div>}
+                {invoice.notes && <div className="col-span-2"><p className="text-muted-foreground">Notes</p><p className="font-medium">{invoice.notes}</p></div>}
+                {invoice.internalNotes && <div className="col-span-2"><p className="text-muted-foreground">Internal Notes</p><p className="font-medium text-muted-foreground">{invoice.internalNotes}</p></div>}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Attachments Tab ── */}
+      {activeTab === "attachments" && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between py-3">
+            <CardTitle className="text-sm">Attachments</CardTitle>
+            {canEdit && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) uploadMutation.mutate(file);
+                    e.target.value = "";
+                  }}
+                />
+                <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={uploadMutation.isPending}>
+                  <Upload className="h-4 w-4 mr-1" />
+                  {uploadMutation.isPending ? "Uploading..." : "Upload File"}
+                </Button>
+              </>
+            )}
+          </CardHeader>
+          <CardContent className="p-0">
+            {attachments.length === 0 ? (
+              <p className="px-6 py-4 text-sm text-muted-foreground">No attachments. Upload vendor invoices (Excel, PDF) for record keeping.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>File</TableHead>
+                    <TableHead>Size</TableHead>
+                    <TableHead>Uploaded</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {attachments.map((att: any) => (
+                    <TableRow key={att.id}>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <span className="text-sm truncate max-w-[250px]">{att.fileName}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{formatBytes(att.fileSizeBytes)}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{formatDate(att.uploadedAt)}</TableCell>
+                      <TableCell>
+                        <div className="flex gap-1 justify-end">
+                          <Button size="sm" variant="ghost" className="h-7" asChild>
+                            <a href={`/api/vendor-invoice-attachments/${att.id}/download`} download>
+                              <Download className="h-3.5 w-3.5" />
+                            </a>
+                          </Button>
+                          {canEdit && (
+                            <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
+                              onClick={() => deleteAttachmentMutation.mutate(att.id)}
+                              disabled={deleteAttachmentMutation.isPending}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ── Linked POs ── */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between py-3">
           <CardTitle className="text-sm">Linked Purchase Orders</CardTitle>
-          {status !== "voided" && (
+          {canEdit && (
             <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
               <Link2 className="h-4 w-4 mr-1" />
               Link PO
@@ -484,7 +756,7 @@ export default function APInvoiceDetail() {
                     <TableCell className="text-right font-mono">{formatCents(link.poTotalCents)}</TableCell>
                     <TableCell className="text-right font-mono">{link.allocatedAmountCents ? formatCents(link.allocatedAmountCents) : "—"}</TableCell>
                     <TableCell>
-                      {status !== "voided" && (
+                      {canEdit && (
                         <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
                           onClick={() => unlinkPoMutation.mutate(link.purchaseOrderId)}
                           disabled={unlinkPoMutation.isPending}
@@ -501,7 +773,7 @@ export default function APInvoiceDetail() {
         </CardContent>
       </Card>
 
-      {/* Payment History */}
+      {/* ── Payment History ── */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between py-3">
           <CardTitle className="text-sm">Payment History</CardTitle>
@@ -551,7 +823,7 @@ export default function APInvoiceDetail() {
         </CardContent>
       </Card>
 
-      {/* Dispute Dialog */}
+      {/* ── Dispute Dialog ── */}
       <Dialog open={showDisputeDialog} onOpenChange={setShowDisputeDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -570,7 +842,7 @@ export default function APInvoiceDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* Void Dialog */}
+      {/* ── Void Dialog ── */}
       <Dialog open={showVoidDialog} onOpenChange={setShowVoidDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -589,7 +861,7 @@ export default function APInvoiceDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* Link PO Dialog */}
+      {/* ── Link PO Dialog ── */}
       <Dialog open={showLinkPoDialog} onOpenChange={setShowLinkPoDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -608,7 +880,82 @@ export default function APInvoiceDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* Record Payment Dialog */}
+      {/* ── Import Lines from PO Dialog ── */}
+      <Dialog open={showImportPoDialog} onOpenChange={setShowImportPoDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Import Lines from PO</DialogTitle>
+            <DialogDescription>Select which linked PO to import line items from.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              {invoice.poLinks?.map((link: any) => (
+                <button
+                  key={link.purchaseOrderId}
+                  type="button"
+                  className={`w-full text-left px-3 py-2 text-sm border rounded-md hover:bg-muted/50 flex items-center justify-between ${
+                    String(link.purchaseOrderId) === importPoId ? "bg-primary/10 border-primary" : ""
+                  }`}
+                  onClick={() => setImportPoId(String(link.purchaseOrderId))}
+                >
+                  <span className="font-mono">{link.poNumber}</span>
+                  <span className="text-muted-foreground">{formatCents(link.poTotalCents)}</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowImportPoDialog(false)}>Cancel</Button>
+              <Button onClick={() => importLinesMutation.mutate()} disabled={!importPoId || importLinesMutation.isPending}>
+                {importLinesMutation.isPending ? "Importing..." : "Import Lines"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Add Line Dialog ── */}
+      <Dialog open={showAddLineDialog} onOpenChange={setShowAddLineDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Invoice Line</DialogTitle>
+            <DialogDescription>Manually add a line item.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>SKU</Label>
+                <Input value={newLine.sku} onChange={e => setNewLine(f => ({ ...f, sku: e.target.value }))} placeholder="Optional" className="font-mono" />
+              </div>
+              <div className="space-y-2">
+                <Label>Product Name</Label>
+                <Input value={newLine.productName} onChange={e => setNewLine(f => ({ ...f, productName: e.target.value }))} placeholder="Optional" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Description</Label>
+              <Input value={newLine.description} onChange={e => setNewLine(f => ({ ...f, description: e.target.value }))} placeholder="Optional" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Quantity *</Label>
+                <Input type="number" min="1" value={newLine.qtyInvoiced} onChange={e => setNewLine(f => ({ ...f, qtyInvoiced: e.target.value }))} placeholder="1" />
+              </div>
+              <div className="space-y-2">
+                <Label>Unit Cost ($) *</Label>
+                <Input type="number" step="0.01" min="0" value={newLine.unitCostDollars} onChange={e => setNewLine(f => ({ ...f, unitCostDollars: e.target.value }))} placeholder="0.00" />
+              </div>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
+              <Button onClick={() => addLineMutation.mutate()} disabled={!newLine.qtyInvoiced || !newLine.unitCostDollars || addLineMutation.isPending}>
+                {addLineMutation.isPending ? "Adding..." : "Add Line"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Record Payment Dialog ── */}
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -632,12 +979,10 @@ export default function APInvoiceDetail() {
                 </select>
               </div>
             </div>
-
             <div className="space-y-2">
               <Label>Amount ($) *</Label>
               <Input type="number" step="0.01" min="0" value={payment.amountDollars} onChange={(e) => setPayment(p => ({ ...p, amountDollars: e.target.value }))} />
             </div>
-
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Reference # <span className="text-muted-foreground text-xs">(ACH/wire)</span></Label>
@@ -648,17 +993,14 @@ export default function APInvoiceDetail() {
                 <Input placeholder="If paying by check" value={payment.checkNumber} onChange={(e) => setPayment(p => ({ ...p, checkNumber: e.target.value }))} />
               </div>
             </div>
-
             <div className="space-y-2">
               <Label>Bank Account</Label>
               <Input placeholder="e.g. Chase Operating" value={payment.bankAccountLabel} onChange={(e) => setPayment(p => ({ ...p, bankAccountLabel: e.target.value }))} />
             </div>
-
             <div className="space-y-2">
               <Label>Notes</Label>
               <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
             </div>
-
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
               <Button onClick={() => paymentMutation.mutate()} disabled={!payment.amountDollars || paymentMutation.isPending}>

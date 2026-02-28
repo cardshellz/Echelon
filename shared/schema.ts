@@ -2324,7 +2324,7 @@ export const vendorInvoices = pgTable("vendor_invoices", {
 
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
 
-  status: varchar("status", { length: 20 }).notNull().default("draft"),
+  status: varchar("status", { length: 20 }).notNull().default("received"),
 
   // Dates
   invoiceDate: timestamp("invoice_date"), // Date on the vendor's invoice
@@ -2444,3 +2444,56 @@ export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAlloc
 
 export type InsertApPaymentAllocation = z.infer<typeof insertApPaymentAllocationSchema>;
 export type ApPaymentAllocation = typeof apPaymentAllocations.$inferSelect;
+
+// ===== VENDOR INVOICE LINES =====
+
+export const vendorInvoiceLines = pgTable("vendor_invoice_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
+  purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  lineNumber: integer("line_number").notNull(),
+  sku: varchar("sku", { length: 100 }),
+  productName: text("product_name"),
+  description: text("description"),
+  qtyInvoiced: integer("qty_invoiced").notNull(),
+  qtyOrdered: integer("qty_ordered"),
+  qtyReceived: integer("qty_received"),
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(),
+  lineTotalCents: bigint("line_total_cents", { mode: "number" }).notNull(),
+  matchStatus: varchar("match_status", { length: 20 }).notNull().default("pending"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertVendorInvoiceLineSchema = createInsertSchema(vendorInvoiceLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertVendorInvoiceLine = z.infer<typeof insertVendorInvoiceLineSchema>;
+export type VendorInvoiceLine = typeof vendorInvoiceLines.$inferSelect;
+
+// ===== VENDOR INVOICE ATTACHMENTS =====
+
+export const vendorInvoiceAttachments = pgTable("vendor_invoice_attachments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
+  fileName: varchar("file_name", { length: 255 }).notNull(),
+  fileType: varchar("file_type", { length: 100 }),
+  fileSizeBytes: integer("file_size_bytes"),
+  filePath: text("file_path").notNull(),
+  uploadedBy: varchar("uploaded_by").references(() => users.id, { onDelete: "set null" }),
+  uploadedAt: timestamp("uploaded_at").defaultNow().notNull(),
+  notes: text("notes"),
+});
+
+export const insertVendorInvoiceAttachmentSchema = createInsertSchema(vendorInvoiceAttachments).omit({
+  id: true,
+  uploadedAt: true,
+});
+
+export type InsertVendorInvoiceAttachment = z.infer<typeof insertVendorInvoiceAttachmentSchema>;
+export type VendorInvoiceAttachment = typeof vendorInvoiceAttachments.$inferSelect;

@@ -260,7 +260,6 @@ export default function PurchaseOrderDetail() {
         body: JSON.stringify({
           vendorId: po.vendorId,
           invoiceNumber: invoiceForm.invoiceNumber,
-          invoicedAmountCents: Math.round(parseFloat(invoiceForm.amountDollars || "0") * 100),
           currency: po.currency || "USD",
           paymentTermsDays: po.paymentTermsDays,
           paymentTermsType: po.paymentTermsType,
@@ -1778,25 +1777,13 @@ export default function PurchaseOrderDetail() {
               <Label>Vendor</Label>
               <div className="text-sm font-medium p-2 bg-muted rounded-md">{po?.vendor?.name || `Vendor #${po?.vendorId}`}</div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Invoice Number *</Label>
-                <Input
-                  value={invoiceForm.invoiceNumber}
-                  onChange={(e) => setInvoiceForm(f => ({ ...f, invoiceNumber: e.target.value }))}
-                  placeholder="INV-..."
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Invoice Amount ($) *</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={invoiceForm.amountDollars}
-                  onChange={(e) => setInvoiceForm(f => ({ ...f, amountDollars: e.target.value }))}
-                />
-              </div>
+            <div className="space-y-2">
+              <Label>Invoice Number *</Label>
+              <Input
+                value={invoiceForm.invoiceNumber}
+                onChange={(e) => setInvoiceForm(f => ({ ...f, invoiceNumber: e.target.value }))}
+                placeholder="INV-..."
+              />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -1825,13 +1812,13 @@ export default function PurchaseOrderDetail() {
               />
             </div>
             <div className="p-2 bg-muted/50 rounded text-xs text-muted-foreground">
-              This invoice will be automatically linked to {po?.poNumber}.
+              This invoice will be linked to {po?.poNumber} and PO line items will be auto-imported.
             </div>
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowCreateInvoiceDialog(false)}>Cancel</Button>
               <Button
                 onClick={() => createInvoiceMutation.mutate()}
-                disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim() || !invoiceForm.amountDollars}
+                disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
               >
                 {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
               </Button>

@@ -31,7 +31,6 @@ function formatCents(cents: number | null | undefined): string {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-slate-100 text-slate-600",
   received: "bg-blue-100 text-blue-700",
   approved: "bg-indigo-100 text-indigo-700",
   partially_paid: "bg-amber-100 text-amber-700",
