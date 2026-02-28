@@ -1482,7 +1482,7 @@ export default function PurchaseOrderDetail() {
                                     </div>
                                   </div>
                                   <div className="text-right shrink-0">
-                                    <div className="text-sm font-mono font-medium">{formatCents(entry.unitCostCents)}</div>
+                                    <div className="text-sm font-mono font-medium">{formatCents(entry.unitCostCents, { unitCost: true })}</div>
                                     {entry.isPreferred ? (
                                       <div className="text-xs text-green-600">Preferred</div>
                                     ) : null}
