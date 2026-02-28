@@ -31,7 +31,6 @@ import {
   Link2,
   Plus,
   CreditCard,
-  Unlink,
   Pencil,
   Search,
   Upload,
@@ -39,7 +38,6 @@ import {
   Trash2,
   FileText,
   RefreshCw,
-  Package,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -86,7 +84,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 };
 
 // ── Link PO Dialog Content ──
-function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkAmount, setLinkAmount, linkPoMutation, onClose }: any) {
+function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, onClose }: any) {
   const [poSearch, setPoSearch] = useState("");
   const { data: posData } = useQuery<any>({
     queryKey: [`/api/purchase-orders?vendorId=${invoice.vendorId}&limit=100`],
@@ -127,14 +125,11 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkAmount, setLi
           )}
         </div>
       </div>
-      <div className="space-y-2">
-        <Label>Allocated Amount ($) <span className="text-muted-foreground">(optional)</span></Label>
-        <Input type="number" step="0.01" min="0" placeholder="Leave blank for full invoice" value={linkAmount} onChange={(e) => setLinkAmount(e.target.value)} />
-      </div>
+      <p className="text-xs text-muted-foreground">PO line items will be automatically imported.</p>
       <div className="flex gap-2 justify-end">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
         <Button onClick={() => linkPoMutation.mutate()} disabled={!linkPoId || linkPoMutation.isPending}>
-          {linkPoMutation.isPending ? "Linking..." : "Link PO"}
+          {linkPoMutation.isPending ? "Linking..." : "Link & Import Lines"}
         </Button>
       </div>
     </div>
@@ -158,12 +153,9 @@ export default function APInvoiceDetail() {
   const [showVoidDialog, setShowVoidDialog] = useState(false);
   const [showLinkPoDialog, setShowLinkPoDialog] = useState(false);
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
-  const [showImportPoDialog, setShowImportPoDialog] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [reason, setReason] = useState("");
   const [linkPoId, setLinkPoId] = useState("");
-  const [linkAmount, setLinkAmount] = useState("");
-  const [importPoId, setImportPoId] = useState("");
 
   // Editing
   const [editing, setEditing] = useState(false);
@@ -233,12 +225,9 @@ export default function APInvoiceDetail() {
     mutationFn: () => fetch(`/api/vendor-invoices/${invoiceId}/po-links`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        purchaseOrderId: parseInt(linkPoId),
-        allocatedAmountCents: linkAmount ? Math.round(parseFloat(linkAmount) * 100) : undefined,
-      }),
+      body: JSON.stringify({ purchaseOrderId: parseInt(linkPoId) }),
     }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
-    onSuccess: () => { invalidate(); setShowLinkPoDialog(false); setLinkPoId(""); setLinkAmount(""); toast({ title: "PO linked" }); },
+    onSuccess: () => { invalidate(); setShowLinkPoDialog(false); setLinkPoId(""); toast({ title: "PO linked & lines imported" }); },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
@@ -300,12 +289,6 @@ export default function APInvoiceDetail() {
   });
 
   // ── Line Mutations ──
-
-  const importLinesMutation = useMutation({
-    mutationFn: () => action("lines/from-po", { purchaseOrderId: parseInt(importPoId) }),
-    onSuccess: () => { invalidate(); setShowImportPoDialog(false); setImportPoId(""); toast({ title: "Lines imported from PO" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
-  });
 
   const addLineMutation = useMutation({
     mutationFn: () => fetch(`/api/vendor-invoices/${invoiceId}/lines`, {
@@ -490,12 +473,10 @@ export default function APInvoiceDetail() {
             <CardTitle className="text-sm">Invoice Line Items</CardTitle>
             {canEdit && (
               <div className="flex gap-2">
-                {invoice.poLinks?.length > 0 && (
-                  <Button size="sm" variant="outline" onClick={() => setShowImportPoDialog(true)}>
-                    <Package className="h-4 w-4 mr-1" />
-                    Import from PO
-                  </Button>
-                )}
+                <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
+                  <Link2 className="h-4 w-4 mr-1" />
+                  Link PO
+                </Button>
                 <Button size="sm" variant="outline" onClick={() => setShowAddLineDialog(true)}>
                   <Plus className="h-4 w-4 mr-1" />
                   Add Line
@@ -509,10 +490,33 @@ export default function APInvoiceDetail() {
               </div>
             )}
           </CardHeader>
+          {/* Linked POs */}
+          {invoice.poLinks?.length > 0 && (
+            <div className="px-6 pb-2 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-muted-foreground">POs:</span>
+              {invoice.poLinks.map((link: any) => (
+                <span key={link.id} className="inline-flex items-center gap-1 text-xs bg-muted/60 rounded px-2 py-0.5">
+                  <Link href={`/purchase-orders/${link.purchaseOrderId}`} className="font-mono text-blue-600 hover:underline">
+                    {link.poNumber}
+                  </Link>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:text-red-500 ml-0.5"
+                      onClick={() => unlinkPoMutation.mutate(link.purchaseOrderId)}
+                      title="Unlink PO"
+                    >
+                      <XCircle className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
           <CardContent className="p-0">
             {lines.length === 0 ? (
               <p className="px-6 py-4 text-sm text-muted-foreground">
-                No line items yet. {invoice.poLinks?.length > 0 ? 'Click "Import from PO" to pull in PO lines.' : 'Link a PO first, then import lines.'}
+                No line items yet. Click "Link PO" to import lines from a purchase order.
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -719,60 +723,6 @@ export default function APInvoiceDetail() {
         </Card>
       )}
 
-      {/* ── Linked POs ── */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between py-3">
-          <CardTitle className="text-sm">Linked Purchase Orders</CardTitle>
-          {canEdit && (
-            <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
-              <Link2 className="h-4 w-4 mr-1" />
-              Link PO
-            </Button>
-          )}
-        </CardHeader>
-        <CardContent className="p-0">
-          {invoice.poLinks?.length === 0 ? (
-            <p className="px-6 py-4 text-sm text-muted-foreground">No POs linked yet.</p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>PO Number</TableHead>
-                  <TableHead>PO Status</TableHead>
-                  <TableHead className="text-right">PO Total</TableHead>
-                  <TableHead className="text-right">Allocated Amount</TableHead>
-                  <TableHead></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {invoice.poLinks.map((link: any) => (
-                  <TableRow key={link.id}>
-                    <TableCell>
-                      <Link href={`/purchase-orders/${link.purchaseOrderId}`} className="font-mono text-blue-600 hover:underline">
-                        {link.poNumber}
-                      </Link>
-                    </TableCell>
-                    <TableCell><Badge variant="outline" className="text-xs">{link.poStatus}</Badge></TableCell>
-                    <TableCell className="text-right font-mono">{formatCents(link.poTotalCents)}</TableCell>
-                    <TableCell className="text-right font-mono">{link.allocatedAmountCents ? formatCents(link.allocatedAmountCents) : "—"}</TableCell>
-                    <TableCell>
-                      {canEdit && (
-                        <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
-                          onClick={() => unlinkPoMutation.mutate(link.purchaseOrderId)}
-                          disabled={unlinkPoMutation.isPending}
-                        >
-                          <Unlink className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
-
       {/* ── Payment History ── */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between py-3">
@@ -866,50 +816,15 @@ export default function APInvoiceDetail() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Link Purchase Order</DialogTitle>
-            <DialogDescription>Select a PO from {invoice.vendorName} to link to this invoice.</DialogDescription>
+            <DialogDescription>Select a PO from {invoice.vendorName}. Line items will be imported automatically.</DialogDescription>
           </DialogHeader>
           <LinkPoDialogContent
             invoice={invoice}
             linkPoId={linkPoId}
             setLinkPoId={setLinkPoId}
-            linkAmount={linkAmount}
-            setLinkAmount={setLinkAmount}
             linkPoMutation={linkPoMutation}
             onClose={() => setShowLinkPoDialog(false)}
           />
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Import Lines from PO Dialog ── */}
-      <Dialog open={showImportPoDialog} onOpenChange={setShowImportPoDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Import Lines from PO</DialogTitle>
-            <DialogDescription>Select which linked PO to import line items from.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              {invoice.poLinks?.map((link: any) => (
-                <button
-                  key={link.purchaseOrderId}
-                  type="button"
-                  className={`w-full text-left px-3 py-2 text-sm border rounded-md hover:bg-muted/50 flex items-center justify-between ${
-                    String(link.purchaseOrderId) === importPoId ? "bg-primary/10 border-primary" : ""
-                  }`}
-                  onClick={() => setImportPoId(String(link.purchaseOrderId))}
-                >
-                  <span className="font-mono">{link.poNumber}</span>
-                  <span className="text-muted-foreground">{formatCents(link.poTotalCents)}</span>
-                </button>
-              ))}
-            </div>
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowImportPoDialog(false)}>Cancel</Button>
-              <Button onClick={() => importLinesMutation.mutate()} disabled={!importPoId || importLinesMutation.isPending}>
-                {importLinesMutation.isPending ? "Importing..." : "Import Lines"}
-              </Button>
-            </div>
-          </div>
         </DialogContent>
       </Dialog>
 

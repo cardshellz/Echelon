@@ -363,10 +363,16 @@ export async function linkPoToInvoice(
       set: { allocatedAmountCents, notes },
     })
     .returning();
+
+  // Auto-import PO lines and recalculate invoice total
+  await importLinesFromPO(invoiceId, purchaseOrderId);
+  await recalculateInvoiceFromLines(invoiceId);
+
   return link;
 }
 
 export async function unlinkPoFromInvoice(invoiceId: number, purchaseOrderId: number) {
+  // Remove the link
   await db
     .delete(vendorInvoicePoLinks)
     .where(
@@ -375,6 +381,24 @@ export async function unlinkPoFromInvoice(invoiceId: number, purchaseOrderId: nu
         eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrderId)
       )
     );
+
+  // Remove imported lines that came from this PO
+  const poLineIds = await db
+    .select({ id: purchaseOrderLines.id })
+    .from(purchaseOrderLines)
+    .where(eq(purchaseOrderLines.purchaseOrderId, purchaseOrderId));
+
+  if (poLineIds.length > 0) {
+    await db
+      .delete(vendorInvoiceLines)
+      .where(
+        and(
+          eq(vendorInvoiceLines.vendorInvoiceId, invoiceId),
+          inArray(vendorInvoiceLines.purchaseOrderLineId, poLineIds.map(p => p.id))
+        )
+      );
+    await recalculateInvoiceFromLines(invoiceId);
+  }
 }
 
 export async function getInvoicesForPo(purchaseOrderId: number) {
@@ -636,6 +660,10 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
     lineNum++;
     const unitCost = Math.round(Number(pol.unitCostCents || 0));
     const qty = pol.orderQty;
+    // Use the actual PO line total — it includes discounts + tax, no recomputation
+    const lineTotal = pol.lineTotalCents != null
+      ? Math.round(Number(pol.lineTotalCents))
+      : qty * unitCost; // Fallback only if PO line has no total
     const [line] = await db
       .insert(vendorInvoiceLines)
       .values({
@@ -650,7 +678,7 @@ export async function importLinesFromPO(invoiceId: number, purchaseOrderId: numb
         qtyOrdered: qty,
         qtyReceived: pol.receivedQty ?? 0,
         unitCostCents: unitCost,
-        lineTotalCents: qty * unitCost,
+        lineTotalCents: lineTotal,
         matchStatus: "pending",
       })
       .returning();
