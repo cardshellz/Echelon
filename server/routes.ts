@@ -10207,7 +10207,7 @@ export async function registerRoutes(
         ) order_uom ON true
         LEFT JOIN (
           SELECT pv.product_id,
-                 SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pv.units_per_variant) AS on_order_pieces,
+                 SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
                  COUNT(DISTINCT po.id) AS open_po_count,
                  MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
           FROM purchase_order_lines pol
