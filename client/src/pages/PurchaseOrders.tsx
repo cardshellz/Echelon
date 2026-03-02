@@ -67,7 +67,7 @@ export default function PurchaseOrders() {
   const [, navigate] = useLocation();
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("active");
   const [searchQuery, setSearchQuery] = useState("");
   const [vendorFilter, setVendorFilter] = useState<number | null>(null);
 
@@ -94,7 +94,7 @@ export default function PurchaseOrders() {
     queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (statusFilter !== "all" && statusFilter !== "active") params.set("status", statusFilter);
       if (searchQuery) params.set("search", searchQuery);
       if (vendorFilter) params.set("vendorId", String(vendorFilter));
       params.set("limit", "100");
@@ -108,7 +108,9 @@ export default function PurchaseOrders() {
     queryKey: ["/api/vendors"],
   });
 
-  const purchaseOrders = poData?.purchaseOrders ?? [];
+  const purchaseOrders = statusFilter === "active"
+    ? (poData?.purchaseOrders ?? []).filter(po => !["cancelled", "void"].includes(po.status))
+    : (poData?.purchaseOrders ?? []);
 
   // Stats
   const stats = {
@@ -265,6 +267,7 @@ export default function PurchaseOrders() {
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
+            <SelectItem value="active">Active</SelectItem>
             <SelectItem value="all">All Status</SelectItem>
             <SelectItem value="draft">Draft</SelectItem>
             <SelectItem value="pending_approval">Pending Approval</SelectItem>

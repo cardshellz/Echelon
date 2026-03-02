@@ -2143,6 +2143,8 @@ export const inboundShipments = pgTable("inbound_shipments", {
   totalWeightKg: numeric("total_weight_kg", { precision: 12, scale: 3 }),
   totalVolumeCbm: numeric("total_volume_cbm", { precision: 12, scale: 6 }),
   totalGrossVolumeCbm: numeric("total_gross_volume_cbm", { precision: 12, scale: 6 }),
+  grossWeightKg: numeric("gross_weight_kg", { precision: 12, scale: 3 }),
+  palletCount: integer("pallet_count"),
   totalPieces: integer("total_pieces"),
   totalCartons: integer("total_cartons"),
   estimatedTotalCostCents: bigint("estimated_total_cost_cents", { mode: "number" }),

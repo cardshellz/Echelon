@@ -41,7 +41,6 @@ import {
   Calendar,
   FileText,
   CheckCircle,
-  XCircle,
   BarChart3,
 } from "lucide-react";
 
@@ -137,9 +136,17 @@ export default function InboundShipmentDetail() {
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
 
-  // Inline editing state for lines
-  const [editingLineId, setEditingLineId] = useState<number | null>(null);
-  const [editingLineData, setEditingLineData] = useState<any>({});
+  // Edit line dialog state
+  const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
+  const [lineEditForm, setLineEditForm] = useState({
+    cartonCount: "",
+    qtyShipped: "",
+    weightPerCarton: "",
+    lengthCm: "",
+    widthCm: "",
+    heightCm: "",
+    notes: "",
+  });
 
   // Edit shipment form
   const [editForm, setEditForm] = useState<any>({});
@@ -337,8 +344,7 @@ export default function InboundShipmentDetail() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
-      setEditingLineId(null);
-      setEditingLineData({});
+      setEditDialogLine(null);
       toast({ title: "Line updated" });
     },
     onError: (err: Error) => {
@@ -469,7 +475,7 @@ export default function InboundShipmentDetail() {
         setImportParsed(result.data as any[]);
         // Auto-map common column names
         const autoMap: Record<string, string> = {};
-        const mappableFields = ["sku", "qty_shipped", "weight_kg", "length_cm", "width_cm", "height_cm", "gross_volume_cbm", "carton_count", "pallet_count"];
+        const mappableFields = ["sku", "qty_shipped", "weight_kg", "length_cm", "width_cm", "height_cm", "carton_count"];
         for (const field of mappableFields) {
           const match = headers.find((h: string) =>
             h.toLowerCase().replace(/[\s\-]/g, "_") === field ||
@@ -495,6 +501,64 @@ export default function InboundShipmentDetail() {
         }
       }
       return mapped;
+    });
+  }
+
+  // ── Edit line dialog helpers ──
+
+  function openEditDialog(line: any) {
+    setEditDialogLine(line);
+    setLineEditForm({
+      cartonCount: line.cartonCount != null ? String(line.cartonCount) : "",
+      qtyShipped: String(line.qtyShipped || ""),
+      weightPerCarton: Number(line.weightKg || 0) > 0 ? String(Number(line.weightKg)) : "",
+      lengthCm: line.lengthCm ? String(Number(line.lengthCm)) : "",
+      widthCm: line.widthCm ? String(Number(line.widthCm)) : "",
+      heightCm: line.heightCm ? String(Number(line.heightCm)) : "",
+      notes: line.notes || "",
+    });
+  }
+
+  function computeEditPieces(): number {
+    const upc = editDialogLine?.unitsPerVariant ?? 1;
+    if (upc <= 1) return Number(lineEditForm.qtyShipped) || 0;
+    const cases = Number(lineEditForm.cartonCount) || 0;
+    return cases * upc;
+  }
+
+  function computeEditMultiplier(): number {
+    const cartons = Number(lineEditForm.cartonCount) || 0;
+    return cartons > 0 ? cartons : (Number(lineEditForm.qtyShipped) || 0);
+  }
+
+  function computeEditTotalWeight(): number {
+    return (Number(lineEditForm.weightPerCarton) || 0) * computeEditMultiplier();
+  }
+
+  function computeEditTotalVolume(): number {
+    const l = Number(lineEditForm.lengthCm) || 0;
+    const w = Number(lineEditForm.widthCm) || 0;
+    const h = Number(lineEditForm.heightCm) || 0;
+    return computeEditMultiplier() * (l * w * h) / 1_000_000;
+  }
+
+  function handleSaveLineEdit() {
+    if (!editDialogLine) return;
+    const upc = editDialogLine.unitsPerVariant ?? 1;
+    const cartons = lineEditForm.cartonCount ? Number(lineEditForm.cartonCount) : null;
+    const qtyShipped = upc > 1 ? computeEditPieces() : (Number(lineEditForm.qtyShipped) || editDialogLine.qtyShipped);
+
+    updateLineMutation.mutate({
+      lineId: editDialogLine.id,
+      data: {
+        qtyShipped,
+        cartonCount: cartons,
+        weightKg: lineEditForm.weightPerCarton || null,
+        lengthCm: lineEditForm.lengthCm || null,
+        widthCm: lineEditForm.widthCm || null,
+        heightCm: lineEditForm.heightCm || null,
+        notes: lineEditForm.notes || null,
+      },
     });
   }
 
@@ -623,6 +687,9 @@ export default function InboundShipmentDetail() {
                   houseBol: shipment.houseBol || "",
                   bookingReference: shipment.bookingReference || "",
                   trackingNumber: shipment.trackingNumber || "",
+                  grossWeightKg: shipment.grossWeightKg || "",
+                  totalGrossVolumeCbm: shipment.totalGrossVolumeCbm || "",
+                  palletCount: shipment.palletCount ?? "",
                   etd: shipment.etd ? format(new Date(shipment.etd), "yyyy-MM-dd") : "",
                   eta: shipment.eta ? format(new Date(shipment.eta), "yyyy-MM-dd") : "",
                   notes: shipment.notes || "",
@@ -709,20 +776,25 @@ export default function InboundShipmentDetail() {
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4">
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Lines</div>
-            <div className="font-mono font-medium">{lines.length}</div>
+            <div className="text-xs text-muted-foreground">Lines / Cartons</div>
+            <div className="font-mono font-medium">{lines.length} / {shipment.totalCartons ?? 0}</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total Weight</div>
+            <div className="text-xs text-muted-foreground">Net Weight / CBM</div>
             <div className="font-mono font-medium">{formatNumber(shipment.totalWeightKg, 1)} kg</div>
+            <div className="font-mono text-xs text-muted-foreground">{formatNumber(shipment.totalVolumeCbm, 4)} CBM</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total Volume</div>
-            <div className="font-mono font-medium">{formatNumber(shipment.totalGrossVolumeCbm || shipment.totalVolumeCbm, 3)} CBM</div>
+            <div className="text-xs text-muted-foreground">Gross (BOL)</div>
+            <div className="font-mono font-medium">{shipment.grossWeightKg ? `${formatNumber(shipment.grossWeightKg, 1)} kg` : "—"}</div>
+            <div className="font-mono text-xs text-muted-foreground">
+              {shipment.totalGrossVolumeCbm ? `${formatNumber(shipment.totalGrossVolumeCbm, 3)} CBM` : "—"}
+              {shipment.palletCount ? ` · ${shipment.palletCount} plt` : ""}
+            </div>
           </CardContent>
         </Card>
         <Card>
@@ -781,37 +853,42 @@ export default function InboundShipmentDetail() {
                 </CardContent>
               </Card>
             ) : (
-              lines.map((line: any) => (
-                <Card key={line.id}>
-                  <CardContent className="p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-mono text-sm">{line.sku || "—"}</div>
-                        <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-                          <span>Qty: {line.qtyShipped}</span>
-                          <span>{formatNumber(line.totalWeightKg, 1)} kg</span>
-                          <span>{formatNumber(line.grossVolumeCbm, 4)} CBM</span>
-                        </div>
-                        {line.allocatedCostCents != null && (
-                          <div className="text-xs mt-1">
-                            Allocated: {formatCents(line.allocatedCostCents)} | Landed: {formatCents(line.landedUnitCostCents)}
+              lines.map((line: any) => {
+                const upc = line.unitsPerVariant ?? 1;
+                return (
+                  <Card key={line.id} className={isEditable ? "cursor-pointer hover:border-primary/50 transition-colors" : ""} onClick={() => isEditable && openEditDialog(line)}>
+                    <CardContent className="p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-sm">{line.sku || "—"}</div>
+                          {line.productName && <div className="text-xs text-muted-foreground truncate">{line.productName}</div>}
+                          <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
+                            {upc > 1 && <span>{line.cartonCount ?? "—"} cases</span>}
+                            <span>{line.qtyShipped} pcs</span>
+                            <span>{formatNumber(line.totalWeightKg, 1)} kg</span>
+                            <span>{formatNumber(line.totalVolumeCbm, 4)} CBM</span>
                           </div>
+                          {line.allocatedCostCents != null && (
+                            <div className="text-xs mt-1">
+                              Allocated: {formatCents(line.allocatedCostCents)} | Landed: {formatCents(line.landedUnitCostCents)}
+                            </div>
+                          )}
+                        </div>
+                        {isEditable && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="min-h-[44px] min-w-[44px] p-0"
+                            onClick={(e) => { e.stopPropagation(); if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
+                          >
+                            <Trash2 className="h-4 w-4 text-red-500" />
+                          </Button>
                         )}
                       </div>
-                      {isEditable && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="min-h-[44px] min-w-[44px] p-0"
-                          onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
-                        >
-                          <Trash2 className="h-4 w-4 text-red-500" />
-                        </Button>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              ))
+                    </CardContent>
+                  </Card>
+                );
+              })
             )}
           </div>
 
@@ -822,13 +899,12 @@ export default function InboundShipmentDetail() {
                 <TableRow>
                   <TableHead>SKU</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Qty Shipped</TableHead>
-                  <TableHead className="text-right">Weight (kg)</TableHead>
-                  <TableHead className="text-right">Net Vol (CBM)</TableHead>
-                  <TableHead className="text-right">Gross Vol (CBM)</TableHead>
-                  <TableHead className="text-right">Cartons</TableHead>
-                  <TableHead className="text-right">Pallets</TableHead>
-                  <TableHead className="text-right">Allocated Cost</TableHead>
+                  <TableHead className="text-right">Cases</TableHead>
+                  <TableHead className="text-right">Pieces</TableHead>
+                  <TableHead className="text-right">Wt/Carton</TableHead>
+                  <TableHead className="text-right">Net Weight</TableHead>
+                  <TableHead className="text-right">Net CBM</TableHead>
+                  <TableHead className="text-right">Alloc. Cost</TableHead>
                   <TableHead className="text-right">Landed $/unit</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
@@ -836,126 +912,42 @@ export default function InboundShipmentDetail() {
               <TableBody>
                 {lines.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 11 : 10} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 10 : 9} className="text-center text-muted-foreground py-8">
                       No lines. Click "Add from PO" or "Import Packing List" to add items.
                     </TableCell>
                   </TableRow>
                 ) : (
                   lines.map((line: any) => {
-                    const isEditing = editingLineId === line.id;
+                    const upc = line.unitsPerVariant ?? 1;
                     return (
                       <TableRow key={line.id}>
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{line.productName || "—"}</TableCell>
+                        <TableCell className="text-right">{upc > 1 ? (line.cartonCount ?? "—") : "—"}</TableCell>
                         <TableCell className="text-right">{line.qtyShipped}</TableCell>
-                        <TableCell className="text-right">
-                          {isEditing ? (
-                            <Input
-                              type="number"
-                              step="0.001"
-                              className="w-20 h-8 text-right"
-                              value={editingLineData.totalWeightKg ?? ""}
-                              onChange={(e) => setEditingLineData((prev: any) => ({ ...prev, totalWeightKg: e.target.value }))}
-                            />
-                          ) : (
-                            formatNumber(line.totalWeightKg, 1)
-                          )}
-                        </TableCell>
+                        <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
+                        <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
-                        <TableCell className="text-right">
-                          {isEditing ? (
-                            <Input
-                              type="number"
-                              step="0.0001"
-                              className="w-24 h-8 text-right"
-                              value={editingLineData.grossVolumeCbm ?? ""}
-                              onChange={(e) => setEditingLineData((prev: any) => ({ ...prev, grossVolumeCbm: e.target.value }))}
-                            />
-                          ) : (
-                            formatNumber(line.grossVolumeCbm, 4)
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {isEditing ? (
-                            <Input
-                              type="number"
-                              className="w-16 h-8 text-right"
-                              value={editingLineData.cartonCount ?? ""}
-                              onChange={(e) => setEditingLineData((prev: any) => ({ ...prev, cartonCount: e.target.value }))}
-                            />
-                          ) : (
-                            line.cartonCount ?? "—"
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {isEditing ? (
-                            <Input
-                              type="number"
-                              className="w-16 h-8 text-right"
-                              value={editingLineData.palletCount ?? ""}
-                              onChange={(e) => setEditingLineData((prev: any) => ({ ...prev, palletCount: e.target.value }))}
-                            />
-                          ) : (
-                            line.palletCount ?? "—"
-                          )}
-                        </TableCell>
                         <TableCell className="text-right font-mono">{line.allocatedCostCents != null ? formatCents(line.allocatedCostCents) : "—"}</TableCell>
                         <TableCell className="text-right font-mono">{line.landedUnitCostCents != null ? formatCents(line.landedUnitCostCents) : "—"}</TableCell>
                         {isEditable && (
                           <TableCell>
                             <div className="flex gap-1">
-                              {isEditing ? (
-                                <>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => {
-                                      const data: any = {};
-                                      if (editingLineData.totalWeightKg !== undefined) data.totalWeightKg = editingLineData.totalWeightKg;
-                                      if (editingLineData.grossVolumeCbm !== undefined) data.grossVolumeCbm = editingLineData.grossVolumeCbm;
-                                      if (editingLineData.cartonCount !== undefined) data.cartonCount = editingLineData.cartonCount ? Number(editingLineData.cartonCount) : null;
-                                      if (editingLineData.palletCount !== undefined) data.palletCount = editingLineData.palletCount ? Number(editingLineData.palletCount) : null;
-                                      updateLineMutation.mutate({ lineId: line.id, data });
-                                    }}
-                                    disabled={updateLineMutation.isPending}
-                                  >
-                                    <Check className="h-4 w-4 text-green-600" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => { setEditingLineId(null); setEditingLineData({}); }}
-                                  >
-                                    <XCircle className="h-4 w-4 text-muted-foreground" />
-                                  </Button>
-                                </>
-                              ) : (
-                                <>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => {
-                                      setEditingLineId(line.id);
-                                      setEditingLineData({
-                                        totalWeightKg: line.totalWeightKg ?? "",
-                                        grossVolumeCbm: line.grossVolumeCbm ?? "",
-                                        cartonCount: line.cartonCount ?? "",
-                                        palletCount: line.palletCount ?? "",
-                                      });
-                                    }}
-                                  >
-                                    <Pencil className="h-4 w-4" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
-                                    disabled={deleteLineMutation.isPending}
-                                  >
-                                    <Trash2 className="h-4 w-4 text-red-500" />
-                                  </Button>
-                                </>
-                              )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => openEditDialog(line)}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
+                                disabled={deleteLineMutation.isPending}
+                              >
+                                <Trash2 className="h-4 w-4 text-red-500" />
+                              </Button>
                             </div>
                           </TableCell>
                         )}
@@ -1432,6 +1424,46 @@ export default function InboundShipmentDetail() {
 
             <Separator />
 
+            {/* Gross totals from BOL */}
+            <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Gross Totals (from BOL)</h4>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <Label>Gross Weight (kg)</Label>
+                <Input
+                  type="number"
+                  step="0.001"
+                  value={editForm.grossWeightKg}
+                  onChange={(e) => setEditForm((prev: any) => ({ ...prev, grossWeightKg: e.target.value }))}
+                  className="h-10"
+                  placeholder="0.000"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Gross Volume (CBM)</Label>
+                <Input
+                  type="number"
+                  step="0.001"
+                  value={editForm.totalGrossVolumeCbm}
+                  onChange={(e) => setEditForm((prev: any) => ({ ...prev, totalGrossVolumeCbm: e.target.value }))}
+                  className="h-10"
+                  placeholder="0.000"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Pallets</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={editForm.palletCount}
+                  onChange={(e) => setEditForm((prev: any) => ({ ...prev, palletCount: e.target.value }))}
+                  className="h-10"
+                  placeholder="0"
+                />
+              </div>
+            </div>
+
+            <Separator />
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>ETD</Label>
@@ -1476,10 +1508,14 @@ export default function InboundShipmentDetail() {
               <Button
                 onClick={() => {
                   const data: any = { ...editForm };
-                  // Convert empty date strings to null
+                  // Convert empty strings to null
                   if (!data.etd) data.etd = null;
                   if (!data.eta) data.eta = null;
                   if (data.containerCapacityCbm === "") data.containerCapacityCbm = null;
+                  if (data.grossWeightKg === "") data.grossWeightKg = null;
+                  if (data.totalGrossVolumeCbm === "") data.totalGrossVolumeCbm = null;
+                  if (data.palletCount === "") data.palletCount = null;
+                  else data.palletCount = Number(data.palletCount);
                   updateShipmentMutation.mutate(data);
                 }}
                 disabled={updateShipmentMutation.isPending}
@@ -2030,6 +2066,189 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══════ Edit Line Dialog ═══════ */}
+      <Dialog open={!!editDialogLine} onOpenChange={(open) => { if (!open) setEditDialogLine(null); }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Package className="h-5 w-5" />
+              Edit Line — {editDialogLine?.sku || "Unknown"}
+            </DialogTitle>
+            <DialogDescription>
+              {editDialogLine?.productName || "Update shipping quantities, weight, and volume."}
+            </DialogDescription>
+          </DialogHeader>
+
+          {editDialogLine && (() => {
+            const upc = editDialogLine.unitsPerVariant ?? 1;
+            const isCaseSku = upc > 1;
+            const computedPieces = computeEditPieces();
+            const computedWeight = computeEditTotalWeight();
+            const computedVolume = computeEditTotalVolume();
+            const multiplier = computeEditMultiplier();
+
+            return (
+              <div className="space-y-5">
+                {/* Section 1: Shipping Quantity */}
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Shipping Quantity</h4>
+                  {isCaseSku ? (
+                    <div className="space-y-2">
+                      <Label>Cases Shipped</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        value={lineEditForm.cartonCount}
+                        onChange={(e) => setLineEditForm(prev => ({ ...prev, cartonCount: e.target.value }))}
+                        className="h-10"
+                        placeholder="Number of cases"
+                      />
+                      <p className="text-sm text-muted-foreground">
+                        {"\u00d7"} {upc} pcs/case = <span className="font-mono font-medium text-foreground">{computedPieces.toLocaleString()} pieces</span>
+                      </p>
+                      {editDialogLine.poQtyOrdered != null && (
+                        <p className="text-xs text-muted-foreground">
+                          PO ordered: {editDialogLine.poQtyOrdered.toLocaleString()} pcs
+                          ({Math.ceil(editDialogLine.poQtyOrdered / upc)} cases)
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <Label>Qty Shipped (pieces)</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            value={lineEditForm.qtyShipped}
+                            onChange={(e) => setLineEditForm(prev => ({ ...prev, qtyShipped: e.target.value }))}
+                            className="h-10 mt-1"
+                            placeholder="Pieces"
+                          />
+                        </div>
+                        <div>
+                          <Label>Cartons</Label>
+                          <Input
+                            type="number"
+                            min="0"
+                            value={lineEditForm.cartonCount}
+                            onChange={(e) => setLineEditForm(prev => ({ ...prev, cartonCount: e.target.value }))}
+                            className="h-10 mt-1"
+                            placeholder="Optional"
+                          />
+                        </div>
+                      </div>
+                      {editDialogLine.poQtyOrdered != null && (
+                        <p className="text-xs text-muted-foreground">
+                          PO ordered: {editDialogLine.poQtyOrdered.toLocaleString()} pcs
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <Separator />
+
+                {/* Section 2: Carton Specs */}
+                <div className="space-y-3">
+                  <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Carton Specs</h4>
+                  <div className="space-y-2">
+                    <Label>Weight per Carton (kg)</Label>
+                    <Input
+                      type="number"
+                      step="0.001"
+                      min="0"
+                      value={lineEditForm.weightPerCarton}
+                      onChange={(e) => setLineEditForm(prev => ({ ...prev, weightPerCarton: e.target.value }))}
+                      className="h-10"
+                      placeholder="0.000"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Carton Dimensions L {"\u00d7"} W {"\u00d7"} H (cm)</Label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={lineEditForm.lengthCm}
+                        onChange={(e) => setLineEditForm(prev => ({ ...prev, lengthCm: e.target.value }))}
+                        className="h-10"
+                        placeholder="L"
+                      />
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={lineEditForm.widthCm}
+                        onChange={(e) => setLineEditForm(prev => ({ ...prev, widthCm: e.target.value }))}
+                        className="h-10"
+                        placeholder="W"
+                      />
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={lineEditForm.heightCm}
+                        onChange={(e) => setLineEditForm(prev => ({ ...prev, heightCm: e.target.value }))}
+                        className="h-10"
+                        placeholder="H"
+                      />
+                    </div>
+                  </div>
+                  {multiplier > 0 && (Number(lineEditForm.weightPerCarton) > 0 || Number(lineEditForm.lengthCm) > 0) && (
+                    <p className="text-xs text-muted-foreground">
+                      {"\u00d7"} {multiplier} {isCaseSku ? "cases" : "cartons"} = {computedWeight.toFixed(1)} kg net, {computedVolume.toFixed(4)} CBM net
+                    </p>
+                  )}
+                </div>
+
+                <Separator />
+
+                {/* Section 3: Notes */}
+                <div className="space-y-2">
+                  <Label>Notes</Label>
+                  <Textarea
+                    value={lineEditForm.notes}
+                    onChange={(e) => setLineEditForm(prev => ({ ...prev, notes: e.target.value }))}
+                    rows={2}
+                    placeholder="Line notes..."
+                  />
+                </div>
+
+                {/* Summary bar */}
+                <div className="bg-muted/50 rounded-md p-3 text-sm space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Pieces</span>
+                    <span className="font-mono font-medium">{(isCaseSku ? computedPieces : Number(lineEditForm.qtyShipped) || 0).toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Net Weight</span>
+                    <span className="font-mono font-medium">{computedWeight.toFixed(1)} kg</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Net CBM</span>
+                    <span className="font-mono font-medium">{computedVolume.toFixed(4)} CBM</span>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={() => setEditDialogLine(null)}>Cancel</Button>
+                  <Button
+                    onClick={handleSaveLineEdit}
+                    disabled={updateLineMutation.isPending}
+                  >
+                    {updateLineMutation.isPending ? "Saving..." : "Save"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
     </div>

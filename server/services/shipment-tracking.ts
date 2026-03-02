@@ -74,6 +74,8 @@ interface Storage {
   getVendorProducts(filters?: any): Promise<any[]>;
   // Product variant dimensions
   getProductVariantById?(id: number): Promise<any>;
+  // Product (for product title)
+  getProductById?(id: number): Promise<any>;
   // Inventory lots
   updateInventoryLot(id: number, updates: any): Promise<any>;
 }
@@ -159,16 +161,15 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
     const costs = await storage.getShipmentCosts(shipmentId);
 
+    // Aggregate NET totals from lines (weight/volume computed from per-carton values × cartonCount)
     let totalWeightKg = 0;
     let totalVolumeCbm = 0;
-    let totalGrossVolumeCbm = 0;
     let totalPieces = 0;
     let totalCartons = 0;
 
     for (const line of lines) {
       totalWeightKg += Number(line.totalWeightKg || 0);
       totalVolumeCbm += Number(line.totalVolumeCbm || 0);
-      totalGrossVolumeCbm += Number(line.grossVolumeCbm || 0);
       totalPieces += line.qtyShipped;
       totalCartons += line.cartonCount || 0;
     }
@@ -180,10 +181,10 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       actualTotalCostCents += cost.actualCents || 0;
     }
 
+    // NOTE: grossWeightKg, totalGrossVolumeCbm, palletCount are user-entered at shipment level (from BOL) — never overwritten here
     await storage.updateInboundShipment(shipmentId, {
       totalWeightKg: String(totalWeightKg),
       totalVolumeCbm: String(totalVolumeCbm),
-      totalGrossVolumeCbm: String(totalGrossVolumeCbm),
       totalPieces,
       totalCartons,
       estimatedTotalCostCents,
@@ -191,26 +192,78 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     } as any);
   }
 
-  function computeLineTotals(line: { qtyShipped: number; weightKg?: string | null; lengthCm?: string | null; widthCm?: string | null; heightCm?: string | null }) {
-    const qty = line.qtyShipped;
+  function computeLineTotals(line: { qtyShipped: number; cartonCount?: number | null; weightKg?: string | null; lengthCm?: string | null; widthCm?: string | null; heightCm?: string | null }) {
+    // Multiplier: cartonCount for case SKUs (weight/dims are per-carton), qtyShipped for piece items
+    const multiplier = (line.cartonCount && line.cartonCount > 0) ? line.cartonCount : line.qtyShipped;
     const weightKg = Number(line.weightKg || 0);
     const lengthCm = Number(line.lengthCm || 0);
     const widthCm = Number(line.widthCm || 0);
     const heightCm = Number(line.heightCm || 0);
 
-    const totalWeightKg = qty * weightKg;
+    const totalWeightKg = multiplier * weightKg;
     // Net volume: L * W * H in cm → CBM (divide by 1,000,000)
     const unitVolumeCbm = (lengthCm * widthCm * heightCm) / 1_000_000;
-    const totalVolumeCbm = qty * unitVolumeCbm;
+    const totalVolumeCbm = multiplier * unitVolumeCbm;
     // Chargeable weight: max(actual, volumetric) — IATA formula: L*W*H / 5000 per unit
     const volumetricWeightKg = (lengthCm * widthCm * heightCm) / 5000;
-    const chargeableWeightKg = qty * Math.max(weightKg, volumetricWeightKg);
+    const chargeableWeightKg = multiplier * Math.max(weightKg, volumetricWeightKg);
 
     return {
       totalWeightKg: String(totalWeightKg),
       totalVolumeCbm: String(totalVolumeCbm),
       chargeableWeightKg: String(chargeableWeightKg),
     };
+  }
+
+  // ─── Enrich lines with variant + PO data ────────────────────────
+
+  async function getEnrichedLines(shipmentId: number) {
+    const lines = await storage.getInboundShipmentLines(shipmentId);
+
+    // Batch-fetch unique variant IDs and PO line IDs
+    const variantIds = Array.from(new Set(lines.map(l => l.productVariantId).filter(Boolean))) as number[];
+    const poLineIds = Array.from(new Set(lines.map(l => l.purchaseOrderLineId).filter(Boolean))) as number[];
+
+    const variantMap = new Map<number, any>();
+    const productMap = new Map<number, any>();
+    const poLineMap = new Map<number, any>();
+
+    // Fetch variants
+    if (storage.getProductVariantById) {
+      await Promise.all(variantIds.map(async (id) => {
+        const pv = await storage.getProductVariantById!(id);
+        if (pv) variantMap.set(id, pv);
+      }));
+    }
+
+    // Fetch products (for real product title) from variant.productId
+    if (storage.getProductById) {
+      const productIds = Array.from(new Set(
+        Array.from(variantMap.values()).map((pv: any) => pv.productId).filter(Boolean)
+      )) as number[];
+      await Promise.all(productIds.map(async (id) => {
+        const product = await storage.getProductById!(id);
+        if (product) productMap.set(id, product);
+      }));
+    }
+
+    // Fetch PO lines
+    await Promise.all(poLineIds.map(async (id) => {
+      const pol = await storage.getPurchaseOrderLineById(id);
+      if (pol) poLineMap.set(id, pol);
+    }));
+
+    return lines.map(line => {
+      const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
+      const product = pv?.productId ? productMap.get(pv.productId) : null;
+      const pol = line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : null;
+      return {
+        ...line,
+        unitsPerVariant: pv?.unitsPerVariant ?? 1,
+        productName: product?.title || product?.name || pv?.name || line.sku || null,
+        poQtyOrdered: pol?.orderQty ?? null,
+      };
+    });
   }
 
   // ─── CRUD ───────────────────────────────────────────────────────
@@ -384,8 +437,21 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       // Try to resolve dimensions: vendor_products first, then product_variants
       const dims = await resolveDimensionsForVariant(poLine.productVariantId, po.vendorId);
 
+      const qtyPieces = poLine.orderQty ?? 0;
+
+      // Auto-compute cartonCount from SKU hierarchy (cases → pieces)
+      let cartonCount: number | null = null;
+      if (poLine.productVariantId && storage.getProductVariantById) {
+        const pv = await storage.getProductVariantById(poLine.productVariantId);
+        const unitsPerCase = pv?.unitsPerVariant ?? 1;
+        if (unitsPerCase > 1) {
+          cartonCount = Math.ceil(qtyPieces / unitsPerCase);
+        }
+      }
+
       const computed = computeLineTotals({
-        qtyShipped: poLine.qtyOrdered ?? poLine.qty ?? 0,
+        qtyShipped: qtyPieces,
+        cartonCount,
         weightKg: dims.weightKg,
         lengthCm: dims.lengthCm,
         widthCm: dims.widthCm,
@@ -398,7 +464,8 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         purchaseOrderLineId: poLine.id,
         productVariantId: poLine.productVariantId,
         sku: poLine.sku || null,
-        qtyShipped: poLine.qtyOrdered ?? poLine.qty ?? 0,
+        qtyShipped: qtyPieces,
+        cartonCount,
         weightKg: dims.weightKg,
         lengthCm: dims.lengthCm,
         widthCm: dims.widthCm,
@@ -431,26 +498,31 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     lengthCm?: string;
     widthCm?: string;
     heightCm?: string;
-    grossVolumeCbm?: string;
     cartonCount?: number;
-    palletCount?: number;
     qtyShipped?: number;
     notes?: string;
   }) {
     const line = await storage.getInboundShipmentLineById(lineId);
     if (!line) throw new ShipmentTrackingError("Shipment line not found", 404);
 
-    // Recompute totals if quantity or dimensions changed
+    // Recompute totals from per-carton values × cartonCount
     const qtyShipped = updates.qtyShipped ?? line.qtyShipped;
+    const cartonCount = updates.cartonCount ?? line.cartonCount;
     const weightKg = updates.weightKg ?? line.weightKg;
     const lengthCm = updates.lengthCm ?? line.lengthCm;
     const widthCm = updates.widthCm ?? line.widthCm;
     const heightCm = updates.heightCm ?? line.heightCm;
 
-    const computed = computeLineTotals({ qtyShipped, weightKg, lengthCm, widthCm, heightCm });
+    const computed = computeLineTotals({ qtyShipped, cartonCount, weightKg, lengthCm, widthCm, heightCm });
 
     await storage.updateInboundShipmentLine(lineId, {
-      ...updates,
+      qtyShipped: updates.qtyShipped,
+      weightKg: updates.weightKg,
+      lengthCm: updates.lengthCm,
+      widthCm: updates.widthCm,
+      heightCm: updates.heightCm,
+      cartonCount: cartonCount,
+      notes: updates.notes,
       ...computed,
     } as any);
 
@@ -516,6 +588,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
       const computed = computeLineTotals({
         qtyShipped: line.qtyShipped,
+        cartonCount: line.cartonCount,
         weightKg: dims.weightKg,
         lengthCm: dims.lengthCm,
         widthCm: dims.widthCm,
@@ -546,9 +619,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     lengthCm?: number;
     widthCm?: number;
     heightCm?: number;
-    grossVolumeCbm?: number;
     cartonCount?: number;
-    palletCount?: number;
   }>) {
     const shipment = await getShipment(shipmentId);
     if (shipment.status === "closed" || shipment.status === "cancelled") {
@@ -567,6 +638,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
       const computed = computeLineTotals({
         qtyShipped: row.qtyShipped,
+        cartonCount: row.cartonCount,
         weightKg: row.weightKg != null ? String(row.weightKg) : null,
         lengthCm: row.lengthCm != null ? String(row.lengthCm) : null,
         widthCm: row.widthCm != null ? String(row.widthCm) : null,
@@ -585,9 +657,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         widthCm: row.widthCm != null ? String(row.widthCm) : null,
         heightCm: row.heightCm != null ? String(row.heightCm) : null,
         ...computed,
-        grossVolumeCbm: row.grossVolumeCbm != null ? String(row.grossVolumeCbm) : null,
         cartonCount: row.cartonCount || null,
-        palletCount: row.palletCount || null,
       } as any);
     }
 
@@ -719,8 +789,8 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
         let basis = 0;
         switch (method) {
           case "by_volume":
-            // Prefer gross volume, fall back to net volume
-            basis = Number(line.grossVolumeCbm || 0) || Number(line.totalVolumeCbm || 0);
+            // Net volume from per-carton dims × cartonCount (gross is shipment-level only)
+            basis = Number(line.totalVolumeCbm || 0);
             break;
           case "by_chargeable_weight":
             basis = Number(line.chargeableWeightKg || 0);
@@ -1004,6 +1074,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     resolveDimensionsForShipment,
     importPackingList,
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
+    getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),
 
     // Costs
