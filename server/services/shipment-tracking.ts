@@ -72,10 +72,9 @@ interface Storage {
   getPurchaseOrderLineById(id: number): Promise<any>;
   // Vendor product dimensions
   getVendorProducts(filters?: any): Promise<any[]>;
-  // Product variant dimensions
-  getProductVariantById?(id: number): Promise<any>;
-  // Product (for product title)
-  getProductById?(id: number): Promise<any>;
+  // Product variant + product lookups
+  getProductVariantById(id: number): Promise<any>;
+  getProductById(id: number): Promise<any>;
   // Inventory lots
   updateInventoryLot(id: number, updates: any): Promise<any>;
 }
@@ -229,23 +228,19 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     const poLineMap = new Map<number, any>();
 
     // Fetch variants
-    if (storage.getProductVariantById) {
-      await Promise.all(variantIds.map(async (id) => {
-        const pv = await storage.getProductVariantById!(id);
-        if (pv) variantMap.set(id, pv);
-      }));
-    }
+    await Promise.all(variantIds.map(async (id) => {
+      const pv = await storage.getProductVariantById(id);
+      if (pv) variantMap.set(id, pv);
+    }));
 
-    // Fetch products (for real product title) from variant.productId
-    if (storage.getProductById) {
-      const productIds = Array.from(new Set(
-        Array.from(variantMap.values()).map((pv: any) => pv.productId).filter(Boolean)
-      )) as number[];
-      await Promise.all(productIds.map(async (id) => {
-        const product = await storage.getProductById!(id);
-        if (product) productMap.set(id, product);
-      }));
-    }
+    // Fetch products (for real product title) via variant.productId
+    const productIds = Array.from(new Set(
+      Array.from(variantMap.values()).map((pv: any) => pv.productId).filter(Boolean)
+    )) as number[];
+    await Promise.all(productIds.map(async (id) => {
+      const product = await storage.getProductById(id);
+      if (product) productMap.set(id, product);
+    }));
 
     // Fetch PO lines
     await Promise.all(poLineIds.map(async (id) => {
@@ -441,7 +436,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
       // Auto-compute cartonCount from SKU hierarchy (cases → pieces)
       let cartonCount: number | null = null;
-      if (poLine.productVariantId && storage.getProductVariantById) {
+      if (poLine.productVariantId) {
         const pv = await storage.getProductVariantById(poLine.productVariantId);
         const unitsPerCase = pv?.unitsPerVariant ?? 1;
         if (unitsPerCase > 1) {
@@ -551,7 +546,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     }
 
     // Fall back to product_variants dimensions (convert mm→cm, g→kg)
-    if (productVariantId && storage.getProductVariantById) {
+    if (productVariantId) {
       const pv = await storage.getProductVariantById(productVariantId);
       if (pv) {
         const weightKg = pv.weightGrams ? String(Number(pv.weightGrams) / 1000) : null;
