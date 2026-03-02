@@ -81,7 +81,7 @@ export default function InboundShipments() {
   const [, navigate] = useLocation();
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("active");
   const [modeFilter, setModeFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -103,7 +103,7 @@ export default function InboundShipments() {
     queryKey: ["/api/inbound-shipments", statusFilter, modeFilter, searchQuery],
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (statusFilter !== "all" && statusFilter !== "active") params.set("status", statusFilter);
       if (modeFilter !== "all") params.set("mode", modeFilter);
       if (searchQuery) params.set("search", searchQuery);
       params.set("limit", "100");
@@ -122,7 +122,9 @@ export default function InboundShipments() {
     },
   });
 
-  const shipments = shipmentData?.shipments ?? [];
+  const shipments = statusFilter === "active"
+    ? (shipmentData?.shipments ?? []).filter(s => !["cancelled"].includes(s.status))
+    : (shipmentData?.shipments ?? []);
 
   // Stats
   const stats = {
@@ -196,6 +198,7 @@ export default function InboundShipments() {
 
   // Status filter buttons
   const statusOptions = [
+    { value: "active", label: "Active" },
     { value: "all", label: "All" },
     { value: "draft", label: "Draft" },
     { value: "booked", label: "Booked" },
