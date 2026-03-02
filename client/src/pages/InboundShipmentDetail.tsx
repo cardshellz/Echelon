@@ -87,12 +87,6 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_line_count", label: "By Line Count" },
 ];
 
-const COST_STATUS_OPTIONS = [
-  { value: "estimated", label: "Estimated" },
-  { value: "invoiced", label: "Invoiced" },
-  { value: "paid", label: "Paid" },
-];
-
 // ── Helpers ──
 
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
@@ -170,7 +164,6 @@ export default function InboundShipmentDetail() {
     description: "",
     amount: "",
     allocationMethod: "default",
-    costStatus: "estimated",
     shipmentNumber: "",
     vendorName: "",
   });
@@ -382,7 +375,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", costStatus: "estimated", shipmentNumber: "", vendorName: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", shipmentNumber: "", vendorName: "" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -992,10 +985,7 @@ export default function InboundShipmentDetail() {
                     <CardContent className="p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
-                            <Badge variant="outline" className="text-xs">{cost.costStatus}</Badge>
-                          </div>
+                          <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
                           <div className="text-sm font-mono mt-1">{formatCents(cost.estimatedCents || cost.actualCents)}</div>
                           {cost.vendorName && <div className="text-xs text-muted-foreground mt-0.5">{cost.vendorName}</div>}
@@ -1013,7 +1003,6 @@ export default function InboundShipmentDetail() {
                                   description: cost.description || "",
                                   amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
-                                  costStatus: cost.costStatus || "estimated",
                                   shipmentNumber: cost.invoiceNumber || "",
                                   vendorName: cost.vendorName || "",
                                 });
@@ -1058,7 +1047,6 @@ export default function InboundShipmentDetail() {
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Method</TableHead>
-                  <TableHead>Status</TableHead>
                   <TableHead>Shipment #</TableHead>
                   <TableHead>Vendor</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
@@ -1067,7 +1055,7 @@ export default function InboundShipmentDetail() {
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 8 : 7} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 7 : 6} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1081,9 +1069,6 @@ export default function InboundShipmentDetail() {
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
                         <TableCell className="text-xs">{cost.allocationMethod?.replace(/_/g, " ") || "default"}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="text-xs capitalize">{cost.costStatus}</Badge>
-                        </TableCell>
                         <TableCell className="font-mono text-xs">{cost.invoiceNumber || "—"}</TableCell>
                         <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
                         {isEditable && (
@@ -1097,11 +1082,9 @@ export default function InboundShipmentDetail() {
                                     id: cost.id,
                                     costType: cost.costType,
                                     description: cost.description || "",
-                                    estimatedCents: cost.estimatedCents || 0,
-                                    actualCents: cost.actualCents || 0,
+                                    amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                     allocationMethod: cost.allocationMethod || "default",
-                                    costStatus: cost.costStatus || "estimated",
-                                    invoiceNumber: cost.invoiceNumber || "",
+                                    shipmentNumber: cost.invoiceNumber || "",
                                     vendorName: cost.vendorName || "",
                                   });
                                   setShowEditCostDialog(true);
@@ -1128,7 +1111,7 @@ export default function InboundShipmentDetail() {
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 5 : 4} />
+                      <TableCell colSpan={isEditable ? 4 : 3} />
                     </TableRow>
                   </>
                 )}
@@ -1828,33 +1811,18 @@ export default function InboundShipmentDetail() {
             <DialogDescription>Record a cost associated with this shipment.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Cost Type *</Label>
-                <Select value={newCost.costType} onValueChange={(v) => setNewCost((prev) => ({ ...prev, costType: v }))}>
-                  <SelectTrigger className="h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {COST_TYPE_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>Status</Label>
-                <Select value={newCost.costStatus} onValueChange={(v) => setNewCost((prev) => ({ ...prev, costStatus: v }))}>
-                  <SelectTrigger className="h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {COST_STATUS_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-2">
+              <Label>Cost Type *</Label>
+              <Select value={newCost.costType} onValueChange={(v) => setNewCost((prev) => ({ ...prev, costType: v }))}>
+                <SelectTrigger className="h-10">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {COST_TYPE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-2">
@@ -1936,33 +1904,18 @@ export default function InboundShipmentDetail() {
           </DialogHeader>
           {editingCost && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Cost Type</Label>
-                  <Select value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, costType: v }))}>
-                    <SelectTrigger className="h-10">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {COST_TYPE_OPTIONS.map((opt) => (
-                        <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Status</Label>
-                  <Select value={editingCost.costStatus} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, costStatus: v }))}>
-                    <SelectTrigger className="h-10">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {COST_STATUS_OPTIONS.map((opt) => (
-                        <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+              <div className="space-y-2">
+                <Label>Cost Type</Label>
+                <Select value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, costType: v }))}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {COST_TYPE_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="space-y-2">
