@@ -922,8 +922,8 @@ export default function InboundShipmentDetail() {
                     return (
                       <TableRow key={line.id}>
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
-                        <TableCell className="max-w-[180px] truncate">{line.productName || "—"}</TableCell>
-                        <TableCell className="text-right">{upc > 1 ? (line.cartonCount ?? "—") : "—"}</TableCell>
+                        <TableCell className="max-w-[180px] truncate">{line.productName || line.sku || "—"}</TableCell>
+                        <TableCell className="text-right">{line.cartonCount ? line.cartonCount : "—"}</TableCell>
                         <TableCell className="text-right">{line.qtyShipped}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
