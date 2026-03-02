@@ -2130,6 +2130,7 @@ export const inboundShipments = pgTable("inbound_shipments", {
   mode: varchar("mode", { length: 20 }),
   carrierName: varchar("carrier_name", { length: 100 }),
   forwarderName: varchar("forwarder_name", { length: 100 }),
+  shipperName: varchar("shipper_name", { length: 200 }),
   bookingReference: varchar("booking_reference", { length: 100 }),
   originPort: varchar("origin_port", { length: 100 }),
   destinationPort: varchar("destination_port", { length: 100 }),

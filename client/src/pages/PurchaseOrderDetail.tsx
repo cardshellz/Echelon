@@ -496,7 +496,10 @@ export default function PurchaseOrderDetail() {
       const res = await fetch("/api/inbound-shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: mode || undefined }),
+        body: JSON.stringify({
+          mode: mode || undefined,
+          shipperName: po?.vendor?.name || undefined,
+        }),
       });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
       const shipment = await res.json();

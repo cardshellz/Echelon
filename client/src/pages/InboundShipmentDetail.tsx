@@ -164,7 +164,6 @@ export default function InboundShipmentDetail() {
     description: "",
     amount: "",
     allocationMethod: "default",
-    shipmentNumber: "",
     vendorName: "",
   });
 
@@ -360,13 +359,12 @@ export default function InboundShipmentDetail() {
   // Cost mutations
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
-      const { amount, shipmentNumber, ...rest } = data;
+      const { amount, ...rest } = data;
       const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
         estimatedCents: cents,
         actualCents: cents,
-        invoiceNumber: shipmentNumber || null,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
@@ -375,7 +373,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", shipmentNumber: "", vendorName: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -385,13 +383,12 @@ export default function InboundShipmentDetail() {
 
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
-      const { amount, shipmentNumber, ...rest } = data;
+      const { amount, ...rest } = data;
       const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
         estimatedCents: cents,
         actualCents: cents,
-        invoiceNumber: shipmentNumber || null,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
@@ -609,8 +606,10 @@ export default function InboundShipmentDetail() {
             )}
           </div>
 
-          {/* Carrier / Container / BOL */}
+          {/* Shipper / Carrier / Container / BOL */}
           <div className="flex items-center gap-4 mt-1 text-sm text-muted-foreground flex-wrap">
+            {shipment.shipperName && <span>Shipper: {shipment.shipperName}</span>}
+            {shipment.forwarderName && <span>Fwd: {shipment.forwarderName}</span>}
             {shipment.carrierName && <span>{shipment.carrierName}</span>}
             {shipment.containerNumber && (
               <span className="flex items-center gap-1">
@@ -675,6 +674,7 @@ export default function InboundShipmentDetail() {
                 setEditForm({
                   carrierName: shipment.carrierName || "",
                   forwarderName: shipment.forwarderName || "",
+                  shipperName: shipment.shipperName || "",
                   mode: shipment.mode || "",
                   originPort: shipment.originPort || "",
                   destinationPort: shipment.destinationPort || "",
@@ -1003,7 +1003,6 @@ export default function InboundShipmentDetail() {
                                   description: cost.description || "",
                                   amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
-                                  shipmentNumber: cost.invoiceNumber || "",
                                   vendorName: cost.vendorName || "",
                                 });
                                 setShowEditCostDialog(true);
@@ -1047,7 +1046,6 @@ export default function InboundShipmentDetail() {
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Method</TableHead>
-                  <TableHead>Shipment #</TableHead>
                   <TableHead>Vendor</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
@@ -1055,7 +1053,7 @@ export default function InboundShipmentDetail() {
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 7 : 6} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 6 : 5} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1069,7 +1067,6 @@ export default function InboundShipmentDetail() {
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
                         <TableCell className="text-xs">{cost.allocationMethod?.replace(/_/g, " ") || "default"}</TableCell>
-                        <TableCell className="font-mono text-xs">{cost.invoiceNumber || "—"}</TableCell>
                         <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
                         {isEditable && (
                           <TableCell>
@@ -1084,8 +1081,7 @@ export default function InboundShipmentDetail() {
                                     description: cost.description || "",
                                     amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                     allocationMethod: cost.allocationMethod || "default",
-                                    shipmentNumber: cost.invoiceNumber || "",
-                                    vendorName: cost.vendorName || "",
+                                      vendorName: cost.vendorName || "",
                                   });
                                   setShowEditCostDialog(true);
                                 }}
@@ -1111,7 +1107,7 @@ export default function InboundShipmentDetail() {
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 4 : 3} />
+                      <TableCell colSpan={isEditable ? 3 : 2} />
                     </TableRow>
                   </>
                 )}
@@ -1239,6 +1235,16 @@ export default function InboundShipmentDetail() {
             <DialogDescription>Update shipment information.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Shipper (Origin Supplier)</Label>
+              <Input
+                value={editForm.shipperName}
+                onChange={(e) => setEditForm((prev: any) => ({ ...prev, shipperName: e.target.value }))}
+                placeholder="e.g. factory name"
+                className="h-10"
+              />
+            </div>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Carrier</Label>
@@ -1863,23 +1869,14 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Shipment #</Label>
-                <Input
-                  value={newCost.shipmentNumber}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, shipmentNumber: e.target.value }))}
-                  className="h-10"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label>Vendor</Label>
-                <Input
-                  value={newCost.vendorName}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, vendorName: e.target.value }))}
-                  className="h-10"
-                />
-              </div>
+            <div className="space-y-2">
+              <Label>Vendor</Label>
+              <Input
+                value={newCost.vendorName}
+                onChange={(e) => setNewCost((prev) => ({ ...prev, vendorName: e.target.value }))}
+                placeholder="e.g. Freightos, customs broker"
+                className="h-10"
+              />
             </div>
 
             <div className="flex gap-2 justify-end">
@@ -1955,23 +1952,14 @@ export default function InboundShipmentDetail() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label>Shipment #</Label>
-                  <Input
-                    value={editingCost.shipmentNumber}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, shipmentNumber: e.target.value }))}
-                    className="h-10"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Vendor</Label>
-                  <Input
-                    value={editingCost.vendorName}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, vendorName: e.target.value }))}
-                    className="h-10"
-                  />
-                </div>
+              <div className="space-y-2">
+                <Label>Vendor</Label>
+                <Input
+                  value={editingCost.vendorName}
+                  onChange={(e) => setEditingCost((prev: any) => ({ ...prev, vendorName: e.target.value }))}
+                  placeholder="e.g. Freightos, customs broker"
+                  className="h-10"
+                />
               </div>
 
               <div className="flex gap-2 justify-end">
