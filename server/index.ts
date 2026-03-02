@@ -192,6 +192,12 @@ function startChannelSyncScheduler(services: ReturnType<typeof createServices>, 
 
       const defaultSettings = settings.find((s: any) => s.warehouseCode === "DEFAULT") || settings[0];
 
+      // Master kill switch — don't start scheduler if channel sync is disabled
+      if (!defaultSettings?.channelSyncEnabled) {
+        log("[Channel Sync Scheduler] Disabled (channel_sync_enabled = 0)", "channel-sync");
+        return;
+      }
+
       // Use channel_sync_interval_minutes from settings, default 15 min
       // Setting to 0 disables the scheduler
       const intervalMinutes = (defaultSettings as any)?.channelSyncIntervalMinutes ?? 15;

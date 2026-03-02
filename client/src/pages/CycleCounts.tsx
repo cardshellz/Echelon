@@ -151,6 +151,11 @@ export default function CycleCounts() {
   const [foundItemForm, setFoundItemForm] = useState({ sku: "", quantity: "" });
   const skuInputRef = useRef<HTMLInputElement>(null);
   const [approveForm, setApproveForm] = useState({ reasonCode: "", notes: "" });
+  const [transferDialogOpen, setTransferDialogOpen] = useState(false);
+  const [transferForm, setTransferForm] = useState({ destinationLocationId: "", qty: "", notes: "" });
+  const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
+  const [resolveForm, setResolveForm] = useState({ reasonCode: "", notes: "" });
+  const [locationSearch, setLocationSearch] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "needs_review" | "done">("all");
   const [varianceSummaryOpen, setVarianceSummaryOpen] = useState(false);
@@ -475,6 +480,80 @@ export default function CycleCounts() {
     },
   });
 
+  // Warehouse locations for transfer destination picker
+  interface WarehouseLocationOption { id: number; code: string; zone: string | null; locationType: string; }
+  const { data: warehouseLocations = [] } = useQuery<WarehouseLocationOption[]>({
+    queryKey: ["/api/warehouse/locations"],
+    queryFn: async () => {
+      const res = await fetch("/api/warehouse/locations", { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: transferDialogOpen,
+  });
+
+  const filteredLocations = warehouseLocations.filter((loc) => {
+    if (!locationSearch || locationSearch.length < 1) return false;
+    const q = locationSearch.toLowerCase();
+    return loc.code.toLowerCase().includes(q) || (loc.zone?.toLowerCase().includes(q) ?? false);
+  }).slice(0, 15);
+
+  const resolveTransferMutation = useMutation({
+    mutationFn: async (params: { itemId: number; data: { destinationLocationId: number; qty: number; notes?: string } }) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${params.itemId}/resolve-transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(params.data),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        throw new Error(err.error || "Failed");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setTransferDialogOpen(false);
+      setTransferForm({ destinationLocationId: "", qty: "", notes: "" });
+      setLocationSearch("");
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"] });
+      toast({
+        title: data.autoResolved ? "Transfer recorded & item resolved" : "Transfer recorded",
+        description: `Transferred ${data.transferredQty} units. ${data.autoResolved ? "Variance resolved." : `Remaining variance: ${data.newVarianceQty}`}`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Transfer failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const resolveNoAdjustMutation = useMutation({
+    mutationFn: async (params: { itemId: number; data: { reasonCode: string; notes?: string } }) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${params.itemId}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(params.data),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        throw new Error(err.error || "Failed");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      setResolveDialogOpen(false);
+      setResolveForm({ reasonCode: "", notes: "" });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"] });
+      toast({ title: "Item resolved (no adjustment)" });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Resolve failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const parseSku = (sku: string | null): { baseSku: string; typeName: string; units: number } | null => {
     if (!sku) return null;
     const match = sku.match(/^(.+)-(P|B|C)(\d+)$/i);
@@ -503,6 +582,7 @@ export default function CycleCounts() {
     if (item.status === "investigate") return <Badge className="bg-yellow-100 text-yellow-800">Investigating</Badge>;
     if (item.varianceType && item.status === "approved" && item.varianceReason === "within_tolerance") return <Badge className="bg-sky-100 text-sky-700">Auto-Approved</Badge>;
     if (item.varianceType && item.status === "approved") return <Badge className="bg-blue-100 text-blue-700">Adjusted</Badge>;
+    if (item.status === "resolved") return <Badge className="bg-emerald-100 text-emerald-700">Resolved</Badge>;
     if (item.varianceType) return <Badge className="bg-amber-100 text-amber-700">Variance</Badge>;
     return <Badge variant="outline">{item.status}</Badge>;
   };
@@ -548,7 +628,7 @@ export default function CycleCounts() {
       const id = Number(locId);
       if (items.some(i => i.status === "pending")) {
         pending.add(id);
-      } else if (items.some(i => (i.varianceType && i.status !== "approved") || i.status === "investigate")) {
+      } else if (items.some(i => (i.varianceType && i.status !== "approved" && i.status !== "resolved") || i.status === "investigate")) {
         needsReview.add(id);
       } else {
         done.add(id);
@@ -1371,6 +1451,9 @@ export default function CycleCounts() {
             <div className="flex items-center gap-2">
               <h1 className="text-lg md:text-2xl font-bold truncate">{cycleCountDetail.name}</h1>
               {getStatusBadge(cycleCountDetail.status)}
+              {cycleCountDetail.status === "in_progress" && (
+                <Badge className="bg-cyan-100 text-cyan-700 text-xs">Locations Frozen</Badge>
+              )}
             </div>
             <p className="text-muted-foreground text-xs">{totalBins - pendingCount}/{totalBins} counted</p>
           </div>
@@ -1614,9 +1697,26 @@ export default function CycleCounts() {
                     {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                       <>
                         {item.status === "investigate" && (
-                          <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
-                            <Pencil className="h-3 w-3 mr-1" /> Recount
-                          </Button>
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
+                              <Pencil className="h-3 w-3 mr-1" /> Recount
+                            </Button>
+                            <Button size="sm" variant="outline" className="text-blue-700" onClick={() => {
+                              setSelectedItem(item);
+                              setTransferForm({ destinationLocationId: "", qty: String(Math.abs(item.varianceQty ?? 0)), notes: "" });
+                              setLocationSearch("");
+                              setTransferDialogOpen(true);
+                            }}>
+                              <ArrowRight className="h-3 w-3 mr-1" /> Transfer
+                            </Button>
+                            <Button size="sm" variant="outline" className="text-emerald-700" onClick={() => {
+                              setSelectedItem(item);
+                              setResolveForm({ reasonCode: "", notes: "" });
+                              setResolveDialogOpen(true);
+                            }}>
+                              <Check className="h-3 w-3 mr-1" /> Resolve
+                            </Button>
+                          </>
                         )}
                         {item.status !== "investigate" && (
                           <Button size="sm" variant="ghost" className="text-yellow-700"
@@ -1627,7 +1727,7 @@ export default function CycleCounts() {
                           </Button>
                         )}
                         <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
-                          {item.relatedItemId ? "Approve Pair" : "Approve"}
+                          {item.relatedItemId ? "Approve Pair" : "Approve & Adjust"}
                         </Button>
                       </>
                     )}
@@ -1702,9 +1802,26 @@ export default function CycleCounts() {
                       {item.varianceType && (item.status === "variance" || item.status === "investigate") && (
                         <>
                           {item.status === "investigate" && (
-                            <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
-                              <Pencil className="h-3 w-3 mr-1" /> Recount
-                            </Button>
+                            <>
+                              <Button size="sm" variant="ghost" onClick={() => handleCountClick(item)}>
+                                <Pencil className="h-3 w-3 mr-1" /> Recount
+                              </Button>
+                              <Button size="sm" variant="outline" className="text-blue-700" onClick={() => {
+                                setSelectedItem(item);
+                                setTransferForm({ destinationLocationId: "", qty: String(Math.abs(item.varianceQty ?? 0)), notes: "" });
+                                setLocationSearch("");
+                                setTransferDialogOpen(true);
+                              }}>
+                                <ArrowRight className="h-3 w-3 mr-1" /> Transfer
+                              </Button>
+                              <Button size="sm" variant="outline" className="text-emerald-700" onClick={() => {
+                                setSelectedItem(item);
+                                setResolveForm({ reasonCode: "", notes: "" });
+                                setResolveDialogOpen(true);
+                              }}>
+                                <Check className="h-3 w-3 mr-1" /> Resolve
+                              </Button>
+                            </>
                           )}
                           {item.status !== "investigate" && (
                             <Button size="sm" variant="ghost" className="text-yellow-700"
@@ -1715,7 +1832,7 @@ export default function CycleCounts() {
                             </Button>
                           )}
                           <Button size="sm" variant="outline" onClick={() => handleApproveClick(item)}>
-                            Approve
+                            {item.status === "investigate" ? "Approve & Adjust" : "Approve"}
                           </Button>
                         </>
                       )}
@@ -2746,6 +2863,198 @@ export default function CycleCounts() {
               Create
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Transfer Resolution Dialog */}
+      <Dialog open={transferDialogOpen} onOpenChange={setTransferDialogOpen}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Record Transfer Resolution</DialogTitle>
+            <DialogDescription>
+              Move inventory from {selectedItem?.locationCode} to another location to fix the books.
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedItem && (
+            <div className="space-y-4">
+              <div className="rounded-md border p-3 space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">SKU</span>
+                  <span className="font-mono font-medium">{selectedItem.expectedSku}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Expected</span>
+                  <span className="font-mono">{selectedItem.expectedQty}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Counted</span>
+                  <span className="font-mono">{selectedItem.countedQty ?? "\u2014"}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Variance</span>
+                  <span className={`font-mono font-bold ${(selectedItem.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                    {(selectedItem.varianceQty ?? 0) > 0 ? "+" : ""}{selectedItem.varianceQty}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <Label>Destination Location</Label>
+                <div className="relative mt-1">
+                  <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    value={locationSearch}
+                    onChange={(e) => setLocationSearch(e.target.value)}
+                    placeholder="Search location code..."
+                    className="pl-8"
+                  />
+                  {locationSearch.length >= 1 && filteredLocations.length > 0 && !transferForm.destinationLocationId && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                      {filteredLocations.map((loc) => (
+                        <button
+                          key={loc.id}
+                          type="button"
+                          className="w-full px-3 py-2 text-left hover:bg-slate-100 border-b last:border-b-0"
+                          onClick={() => {
+                            setTransferForm({ ...transferForm, destinationLocationId: String(loc.id) });
+                            setLocationSearch(loc.code);
+                          }}
+                        >
+                          <div className="font-mono font-medium">{loc.code}</div>
+                          <div className="text-xs text-muted-foreground">{loc.zone} / {loc.locationType}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {transferForm.destinationLocationId && (
+                  <button
+                    type="button"
+                    className="text-xs text-blue-600 mt-1"
+                    onClick={() => { setTransferForm({ ...transferForm, destinationLocationId: "" }); setLocationSearch(""); }}
+                  >
+                    Change location
+                  </button>
+                )}
+              </div>
+
+              <div>
+                <Label>Quantity to Transfer</Label>
+                <Input
+                  type="number"
+                  inputMode="numeric"
+                  value={transferForm.qty}
+                  onChange={(e) => setTransferForm({ ...transferForm, qty: e.target.value })}
+                  placeholder="Quantity"
+                />
+              </div>
+
+              {transferForm.qty && parseInt(transferForm.qty) > 0 && (
+                <div className="rounded-md bg-blue-50 border border-blue-200 p-3 text-sm space-y-1">
+                  <div className="font-medium text-blue-800">Transfer Preview</div>
+                  <div className="text-blue-700">
+                    {parseInt(transferForm.qty)} units: {selectedItem.locationCode} {"\u2192"} {locationSearch || "?"}
+                  </div>
+                  <div className="text-blue-700">
+                    New expected at {selectedItem.locationCode}: {(selectedItem.expectedQty ?? 0) - parseInt(transferForm.qty || "0")}
+                  </div>
+                  {(() => {
+                    const newVariance = (selectedItem.countedQty ?? 0) - ((selectedItem.expectedQty ?? 0) - parseInt(transferForm.qty || "0"));
+                    return (
+                      <div className="text-blue-700">
+                        New variance: {newVariance}
+                        {newVariance === 0 && (
+                          <span className="ml-1 text-emerald-600 font-bold">Will auto-resolve!</span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              <div>
+                <Label>Notes (optional)</Label>
+                <Textarea
+                  value={transferForm.notes}
+                  onChange={(e) => setTransferForm({ ...transferForm, notes: e.target.value })}
+                  placeholder="Why was this item here?"
+                  rows={2}
+                />
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTransferDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => selectedItem && resolveTransferMutation.mutate({
+                itemId: selectedItem.id,
+                data: {
+                  destinationLocationId: parseInt(transferForm.destinationLocationId),
+                  qty: parseInt(transferForm.qty),
+                  notes: transferForm.notes || undefined,
+                },
+              })}
+              disabled={resolveTransferMutation.isPending || !transferForm.destinationLocationId || !transferForm.qty || parseInt(transferForm.qty) <= 0}
+            >
+              {resolveTransferMutation.isPending ? "Transferring..." : "Record Transfer"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Resolve Without Adjustment Dialog */}
+      <Dialog open={resolveDialogOpen} onOpenChange={setResolveDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Resolve Without Adjustment</DialogTitle>
+            <DialogDescription>
+              Close this variance without changing inventory. Use when the issue was already fixed via transfer or no adjustment is needed.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div>
+              <Label>Reason</Label>
+              <Select value={resolveForm.reasonCode} onValueChange={(v) => setResolveForm({ ...resolveForm, reasonCode: v })}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select reason" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="transfer_already_recorded">Transfer already recorded</SelectItem>
+                  <SelectItem value="no_adjustment_needed">No adjustment needed</SelectItem>
+                  <SelectItem value="investigation_complete">Investigation complete</SelectItem>
+                  <SelectItem value="counting_error">Counting error confirmed</SelectItem>
+                  <SelectItem value="other">Other</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Notes (optional)</Label>
+              <Textarea
+                value={resolveForm.notes}
+                onChange={(e) => setResolveForm({ ...resolveForm, notes: e.target.value })}
+                placeholder="Explain resolution..."
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResolveDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => selectedItem && resolveNoAdjustMutation.mutate({
+                itemId: selectedItem.id,
+                data: {
+                  reasonCode: resolveForm.reasonCode,
+                  notes: resolveForm.notes || undefined,
+                },
+              })}
+              disabled={resolveNoAdjustMutation.isPending || !resolveForm.reasonCode}
+            >
+              {resolveNoAdjustMutation.isPending ? "Resolving..." : "Resolve"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

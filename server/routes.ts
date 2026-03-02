@@ -7874,6 +7874,47 @@ export async function registerRoutes(
     }
   });
 
+  // Resolve variance by recording a transfer (move stock to correct location)
+  app.post("/api/cycle-counts/:id/items/:itemId/resolve-transfer", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.resolveWithTransfer(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        {
+          destinationLocationId: parseInt(req.body.destinationLocationId),
+          qty: parseInt(req.body.qty),
+          notes: req.body.notes,
+        },
+        req.session.user?.id,
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error resolving with transfer:", error);
+      res.status(500).json({ error: error.message || "Failed to resolve with transfer" });
+    }
+  });
+
+  // Resolve variance without inventory adjustment
+  app.post("/api/cycle-counts/:id/items/:itemId/resolve", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.resolveItem(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        {
+          reasonCode: req.body.reasonCode,
+          notes: req.body.notes,
+        },
+        req.session.user?.id,
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error resolving item:", error);
+      res.status(500).json({ error: error.message || "Failed to resolve item" });
+    }
+  });
+
   app.post("/api/cycle-counts/:id/add-found-item", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services as any;
@@ -9630,6 +9671,16 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/channel-sync/refresh-enabled", requirePermission("warehouse", "manage"), async (req, res) => {
+    try {
+      const { channelSync } = req.app.locals.services;
+      const enabled = await channelSync.refreshSyncEnabled();
+      res.json({ enabled });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to refresh sync status" });
+    }
+  });
+
   // --- Channel Product Allocation (product-level rules per channel) ---
 
   app.get("/api/channel-product-allocation", requirePermission("channels", "view"), async (req, res) => {
@@ -11227,7 +11278,7 @@ export async function registerRoutes(
     try {
       const shipment = await shipmentTracking.getShipment(Number(req.params.id));
       const [lines, costs, history] = await Promise.all([
-        shipmentTracking.getLines(shipment.id),
+        shipmentTracking.getEnrichedLines(shipment.id),
         shipmentTracking.getCosts(shipment.id),
         shipmentTracking.getStatusHistory(shipment.id),
       ]);

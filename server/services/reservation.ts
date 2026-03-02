@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, isNull } from "drizzle-orm";
 import {
   orders,
   orderItems,
@@ -129,6 +129,8 @@ class ReservationService {
           sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
           // Belt-and-suspenders: only reserve against pickable locations (even if productLocations JOIN should filter)
           eq(warehouseLocations.isPickable, 1),
+          // Skip locations frozen for cycle counting
+          isNull(warehouseLocations.cycleCountFreezeId),
         ];
         if (warehouseId) {
           locationFilters.push(eq(warehouseLocations.warehouseId, warehouseId));
@@ -497,6 +499,8 @@ class ReservationService {
             sql`${inventoryLevels.warehouseLocationId} != ${warehouseLocationId}`,
             // Only pickable locations
             eq(warehouseLocations.isPickable, 1),
+            // Skip locations frozen for cycle counting
+            isNull(warehouseLocations.cycleCountFreezeId),
           ];
 
           const altLevels = await this.db

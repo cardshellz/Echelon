@@ -398,7 +398,7 @@ class PickingService {
       const sortedLevels = levels
         .filter((l: any) => {
           const loc = allLocations.find(loc => loc.id === l.warehouseLocationId);
-          return loc?.isPickable === 1 && l.variantQty >= pickedQty;
+          return loc?.isPickable === 1 && !loc.cycleCountFreezeId && l.variantQty >= pickedQty;
         })
         .sort((a: any, b: any) => {
           const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
@@ -865,7 +865,7 @@ class PickingService {
         const levels = await this.storage.getInventoryLevelsByProductVariantId(variant.id);
         const pickLevel = levels.find((l: any) => {
           const loc = allLocs.find(wl => wl.id === l.warehouseLocationId);
-          return loc && loc.locationType === "pick" && loc.isPickable === 1;
+          return loc && loc.locationType === "pick" && loc.isPickable === 1 && !loc.cycleCountFreezeId;
         });
 
         const systemQty = pickLevel?.variantQty ?? 0;

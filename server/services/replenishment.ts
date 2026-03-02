@@ -113,6 +113,7 @@ class ReplenishmentService {
       .where(
         and(
           eq(warehouseLocations.isPickable, 1),
+          isNull(warehouseLocations.cycleCountFreezeId), // Skip locations frozen for cycle counting
           ...(warehouseId != null
             ? [eq(warehouseLocations.warehouseId, warehouseId)]
             : []),
@@ -409,16 +410,56 @@ class ReplenishmentService {
         0, // qtyTargetUnits not known yet for blocked tasks — recalculated below
       );
 
-      // Find a source location with stock (try dedicated parent first)
-      const sourceLocation = await this.findSourceLocation(
-        sourceVariantId ?? level.productVariantId,
-        location.warehouseId ?? undefined,
-        sourceLocationType,
-        location.parentLocationId,
-        sourcePriority,
-      );
+      // --- Find source location: try intermediate levels first, then configured level ---
+      // Walk from closest hierarchy level (pick+1) up to the configured source level.
+      // At each level, if an active variant exists with stock, use it.
+      // This ensures replen pulls from box (Level 2) before case (Level 3) when possible.
+      let sourceLocation: WarehouseLocation | null = null;
+      let effectiveSourceVariantId = sourceVariantId;
+      const configuredSourceLevel = tierDefault?.sourceHierarchyLevel ?? (variant.hierarchyLevel + 1);
+
+      if (!rule?.sourceProductVariantId && tierDefault && configuredSourceLevel > variant.hierarchyLevel + 1) {
+        // There are intermediate levels to try
+        const siblings = productVariantsCache?.get(variant.productId ?? 0) ?? [];
+        for (let tryLevel = variant.hierarchyLevel + 1; tryLevel < configuredSourceLevel; tryLevel++) {
+          const candidate = siblings.find(
+            (v) => v.hierarchyLevel === tryLevel && v.isActive,
+          );
+          if (!candidate) continue; // No variant at this level, skip
+
+          // Look up the tier default for THIS intermediate level to get the right sourceLocationType
+          const intermediateTD = this.findTierDefault(tierDefaults, tryLevel, location.warehouseId ?? undefined);
+          const intermediateLocType = intermediateTD?.sourceLocationType ?? sourceLocationType;
+
+          const found = await this.findSourceLocation(
+            candidate.id,
+            location.warehouseId ?? undefined,
+            intermediateLocType,
+            location.parentLocationId,
+            sourcePriority,
+          );
+          if (found) {
+            sourceLocation = found;
+            effectiveSourceVariantId = candidate.id;
+            break;
+          }
+        }
+      }
+
+      // If no intermediate level had stock, try the configured source level (original behavior)
       if (!sourceLocation) {
-        // No stock at immediate parent — try cascade (walk up one more level)
+        sourceLocation = await this.findSourceLocation(
+          sourceVariantId ?? level.productVariantId,
+          location.warehouseId ?? undefined,
+          sourceLocationType,
+          location.parentLocationId,
+          sourcePriority,
+        );
+        effectiveSourceVariantId = sourceVariantId;
+      }
+
+      if (!sourceLocation) {
+        // No stock at any level — try cascade (walk up one more level beyond configured)
         if (sourceVariantId) {
           const cascadeResult = await this.tryCascadeReplen({
             sourceVariantId,
@@ -470,8 +511,9 @@ class ReplenishmentService {
 
       // Calculate target quantity (how many base units to move)
       const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
-      const sourceVariant = sourceVariantId != null
-        ? variantMap.get(sourceVariantId) ?? variant
+      const resolvedSourceId = effectiveSourceVariantId ?? sourceVariantId;
+      const sourceVariant = resolvedSourceId != null
+        ? variantMap.get(resolvedSourceId) ?? variant
         : variant;
       const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
       const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
@@ -492,7 +534,7 @@ class ReplenishmentService {
           fromLocationId: sourceLocation.id,
           toLocationId: level.warehouseLocationId,
           productId: rule?.productId ?? null,
-          sourceProductVariantId: sourceVariantId ?? level.productVariantId,
+          sourceProductVariantId: resolvedSourceId ?? level.productVariantId,
           pickProductVariantId: level.productVariantId,
           qtySourceUnits,
           qtyTargetUnits,

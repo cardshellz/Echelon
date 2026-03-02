@@ -80,16 +80,46 @@ class ChannelSyncService {
   private readonly DEBOUNCE_MS = 2000;
   private readonly MAX_RETRIES = 3;
 
+  /** Cached kill switch — loaded once, refreshed on demand */
+  private _syncEnabled: boolean | null = null;
+
   constructor(
     private readonly db: DrizzleDb,
     private readonly atpService: InventoryAtpService,
   ) {}
+
+  /** Check if channel sync is enabled (cached, lazy-loaded) */
+  private async isSyncEnabled(): Promise<boolean> {
+    if (this._syncEnabled !== null) return this._syncEnabled;
+    await this.refreshSyncEnabled();
+    return this._syncEnabled!;
+  }
+
+  /** Reload the kill switch from warehouse_settings */
+  async refreshSyncEnabled(): Promise<boolean> {
+    try {
+      const settings = await this.db
+        .select({ channelSyncEnabled: warehouseSettings.channelSyncEnabled })
+        .from(warehouseSettings)
+        .where(eq(warehouseSettings.isActive, 1))
+        .limit(1);
+      this._syncEnabled = settings[0]?.channelSyncEnabled === 1;
+    } catch {
+      this._syncEnabled = false; // Fail safe: don't push if we can't read settings
+    }
+    return this._syncEnabled;
+  }
 
   // ---------------------------------------------------------------------------
   // 1. SYNC PRODUCT — compute effective ATP and push to all active channels
   // ---------------------------------------------------------------------------
 
   async syncProduct(productId: number, triggeredBy?: string): Promise<SyncResult> {
+    // Master kill switch — skip all pushes when disabled
+    if (!(await this.isSyncEnabled())) {
+      return { productId, synced: 0, errors: [], variants: [] };
+    }
+
     const result: SyncResult = {
       productId,
       synced: 0,
@@ -271,6 +301,9 @@ class ChannelSyncService {
   ): Promise<{ total: number; synced: number; errors: string[] }> {
     const aggregated = { total: 0, synced: 0, errors: [] as string[] };
 
+    // Master kill switch — skip all pushes when disabled
+    if (!(await this.isSyncEnabled())) return aggregated;
+
     const allActiveFeeds = await this.db
       .select({ productVariantId: channelFeeds.productVariantId })
       .from(channelFeeds)
@@ -336,6 +369,9 @@ class ChannelSyncService {
     productVariantId: number,
     triggeredBy?: string,
   ): Promise<void> {
+    // Master kill switch — skip entirely when disabled
+    if (!(await this.isSyncEnabled())) return;
+
     const [variant] = await this.db
       .select()
       .from(productVariants)

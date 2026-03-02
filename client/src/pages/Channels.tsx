@@ -14,7 +14,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle,
-  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload
+  Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload,
+  ShieldAlert, Radio,
 } from "lucide-react";
 
 interface ChannelConnection {
@@ -233,6 +234,50 @@ export default function Channels() {
     },
   });
 
+  // Warehouse settings for channel sync kill switch
+  const { data: warehouseSettings } = useQuery<any>({
+    queryKey: ["/api/warehouse-settings/default"],
+    queryFn: async () => {
+      const res = await fetch("/api/warehouse-settings/default", { credentials: "include" });
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: canView,
+  });
+
+  const channelSyncEnabled = warehouseSettings?.channelSyncEnabled === 1;
+
+  const toggleChannelSyncMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      if (!warehouseSettings?.id) throw new Error("No warehouse settings found");
+      const res = await fetch(`/api/warehouse-settings/${warehouseSettings.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ channelSyncEnabled: enabled ? 1 : 0 }),
+      });
+      if (!res.ok) throw new Error("Failed to update settings");
+      // Refresh the cached kill switch in the service
+      await fetch("/api/channel-sync/refresh-enabled", {
+        method: "POST",
+        credentials: "include",
+      });
+      return res.json();
+    },
+    onSuccess: (_data, enabled) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings/default"] });
+      toast({
+        title: enabled ? "Channel sync enabled" : "Channel sync disabled",
+        description: enabled
+          ? "Inventory will now push to connected sales channels."
+          : "All inventory pushes to sales channels are paused.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const syncInventoryMutation = useMutation({
     mutationFn: async (channelId: number) => {
       const res = await fetch("/api/channel-sync/all", {
@@ -380,6 +425,35 @@ export default function Channels() {
           </Dialog>
         )}
       </div>
+
+      {/* Channel Sync Kill Switch */}
+      {warehouseSettings && canEdit && (
+        <Card className={`border-l-4 ${channelSyncEnabled ? 'border-l-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20' : 'border-l-amber-500 bg-amber-50/50 dark:bg-amber-950/20'}`}>
+          <CardContent className="flex items-center justify-between py-3 px-4">
+            <div className="flex items-center gap-3">
+              {channelSyncEnabled
+                ? <Radio className="h-5 w-5 text-emerald-600" />
+                : <ShieldAlert className="h-5 w-5 text-amber-600" />
+              }
+              <div>
+                <p className="font-medium text-sm">
+                  Inventory Push to Channels: {channelSyncEnabled ? "Active" : "Disabled"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {channelSyncEnabled
+                    ? "ATP quantities are being pushed to connected sales channels."
+                    : "No inventory data is being sent to any sales channel."}
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={channelSyncEnabled}
+              onCheckedChange={(checked) => toggleChannelSyncMutation.mutate(checked)}
+              disabled={toggleChannelSyncMutation.isPending}
+            />
+          </CardContent>
+        </Card>
+      )}
 
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
@@ -566,7 +640,8 @@ export default function Channels() {
                         variant="outline"
                         className="w-full min-h-[44px]"
                         onClick={() => syncInventoryMutation.mutate(selectedChannel.id)}
-                        disabled={syncInventoryMutation.isPending}
+                        disabled={syncInventoryMutation.isPending || !channelSyncEnabled}
+                        title={!channelSyncEnabled ? "Channel sync is disabled — enable it above" : undefined}
                       >
                         <Upload className={`h-4 w-4 mr-2 ${syncInventoryMutation.isPending ? 'animate-spin' : ''}`} />
                         {syncInventoryMutation.isPending ? "Pushing inventory..." : "Push Inventory to Shopify"}

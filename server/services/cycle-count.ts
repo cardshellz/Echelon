@@ -40,6 +40,14 @@ type InventoryCore = {
     userId: string | undefined;
     allowNegative: boolean;
   }): Promise<any>;
+  transfer(params: {
+    productVariantId: number;
+    fromLocationId: number;
+    toLocationId: number;
+    qty: number;
+    userId?: string;
+    notes?: string;
+  }): Promise<void>;
 };
 
 type ChannelSync = {
@@ -360,6 +368,17 @@ class CycleCountService {
     }
   }
 
+  /**
+   * Clear cycle count freeze from all locations frozen by this count.
+   */
+  private async unfreezeLocations(cycleCountId: number): Promise<void> {
+    await this.db.execute(sql`
+      UPDATE warehouse_locations
+      SET cycle_count_freeze_id = NULL, updated_at = NOW()
+      WHERE cycle_count_freeze_id = ${cycleCountId}
+    `);
+  }
+
   // =========================================================================
   // Public methods
   // =========================================================================
@@ -575,6 +594,21 @@ class CycleCountService {
 
     if (items.length > 0) {
       await this.storage.bulkCreateCycleCountItems(items);
+    }
+
+    // Soft-freeze all in-scope locations — picks/reservations/replen will skip them
+    const locationIds = locations.map(l => l.id);
+    if (locationIds.length > 0) {
+      const chunkSize = 500;
+      for (let i = 0; i < locationIds.length; i += chunkSize) {
+        const chunk = locationIds.slice(i, i + chunkSize);
+        await this.db.execute(sql`
+          UPDATE warehouse_locations
+          SET cycle_count_freeze_id = ${id}, updated_at = NOW()
+          WHERE id IN (${sql.join(chunk.map((cid: number) => sql`${cid}`), sql`, `)})
+            AND cycle_count_freeze_id IS NULL
+        `);
+      }
     }
 
     await this.storage.updateCycleCount(id, {
@@ -813,6 +847,153 @@ class CycleCountService {
     return { success: true };
   }
 
+  /**
+   * Resolve a variance item by recording a transfer from the item's location
+   * to a destination. Updates expectedQty, recalculates variance, and
+   * auto-resolves if variance becomes 0.
+   */
+  async resolveWithTransfer(
+    cycleCountId: number,
+    itemId: number,
+    params: {
+      destinationLocationId: number;
+      qty: number;
+      notes?: string;
+    },
+    userId?: string,
+  ): Promise<{
+    success: boolean;
+    transferredQty: number;
+    newExpectedQty: number;
+    newVarianceQty: number;
+    autoResolved: boolean;
+  }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (item.status !== "investigate" && item.status !== "variance") {
+      throw new CycleCountError("Item must be in 'investigate' or 'variance' status to resolve with transfer");
+    }
+    if (!item.productVariantId) {
+      throw new CycleCountError("Item must have a linked product variant for transfer");
+    }
+    if (params.qty <= 0) {
+      throw new CycleCountError("Transfer quantity must be positive");
+    }
+    if (params.destinationLocationId === item.warehouseLocationId) {
+      throw new CycleCountError("Destination must be different from source");
+    }
+
+    // Look up destination location code for notes
+    const destLoc = await this.storage.getWarehouseLocationById(params.destinationLocationId);
+    const destCode = destLoc?.code || String(params.destinationLocationId);
+
+    // Execute the transfer via inventory core
+    const transferNotes = `Cycle count #${cycleCountId} transfer resolution: ${item.expectedSku || 'unknown'} x ${params.qty} → ${destCode}. ${params.notes || ''}`.trim();
+
+    await this.inventoryCore.transfer({
+      productVariantId: item.productVariantId,
+      fromLocationId: item.warehouseLocationId,
+      toLocationId: params.destinationLocationId,
+      qty: params.qty,
+      userId,
+      notes: transferNotes,
+    });
+
+    // Update expectedQty: the transfer reduced system qty at this location
+    const newExpectedQty = (item.expectedQty ?? 0) - params.qty;
+    const newVarianceQty = (item.countedQty ?? 0) - newExpectedQty;
+    const autoResolved = newVarianceQty === 0;
+
+    const noteEntry = `[Transfer] ${params.qty} units → ${destCode}${params.notes ? ': ' + params.notes : ''}`;
+    const updatedNotes = item.varianceNotes
+      ? `${item.varianceNotes}\n${noteEntry}`
+      : noteEntry;
+
+    const updateData: Record<string, any> = {
+      expectedQty: newExpectedQty,
+      varianceQty: newVarianceQty,
+      varianceNotes: updatedNotes,
+    };
+
+    if (autoResolved) {
+      updateData.varianceType = null;
+      updateData.status = "resolved";
+      updateData.varianceReason = "transfer_resolution";
+      updateData.resolvedBy = userId;
+      updateData.resolvedAt = new Date();
+    } else {
+      // Update variance type based on new variance direction
+      updateData.varianceType = newVarianceQty > 0 ? "quantity_over" : "quantity_under";
+    }
+
+    await this.storage.updateCycleCountItem(itemId, updateData);
+
+    // Refresh bin stats
+    await this.refreshBinStats(cycleCountId);
+
+    // Fire channel sync for the transferred variant
+    this.channelSync.queueSyncAfterInventoryChange(item.productVariantId).catch(() => {});
+
+    return {
+      success: true,
+      transferredQty: params.qty,
+      newExpectedQty,
+      newVarianceQty,
+      autoResolved,
+    };
+  }
+
+  /**
+   * Resolve a variance item without applying any inventory adjustment.
+   * Use when a transfer already fixed the issue, or investigation determined
+   * no adjustment is needed.
+   */
+  async resolveItem(
+    cycleCountId: number,
+    itemId: number,
+    params: {
+      reasonCode: string;
+      notes?: string;
+    },
+    userId?: string,
+  ): Promise<{ success: boolean }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (item.status === "approved" || item.status === "adjusted" || item.status === "resolved") {
+      throw new CycleCountError("Item is already in a terminal status");
+    }
+
+    const noteEntry = `[Resolved without adjustment] ${params.reasonCode}${params.notes ? ': ' + params.notes : ''}`;
+    const updatedNotes = item.varianceNotes
+      ? `${item.varianceNotes}\n${noteEntry}`
+      : noteEntry;
+
+    await this.storage.updateCycleCountItem(itemId, {
+      status: "resolved",
+      varianceReason: params.reasonCode,
+      varianceNotes: updatedNotes,
+      resolvedBy: userId,
+      resolvedAt: new Date(),
+    });
+
+    // Update resolved/approved count on cycle count header
+    const allItems = await this.storage.getCycleCountItems(cycleCountId);
+    const resolvedOrApproved = allItems.filter(i =>
+      i.status === "approved" || i.status === "adjusted" || i.status === "resolved"
+    ).length;
+    await this.storage.updateCycleCount(cycleCountId, { approvedVariances: resolvedOrApproved });
+
+    await this.refreshBinStats(cycleCountId);
+
+    return { success: true };
+  }
+
   async addFoundItem(
     id: number,
     params: { sku: string; quantity: number; warehouseLocationId: number; notes?: string },
@@ -903,7 +1084,7 @@ class CycleCountService {
 
     // Update approved count on cycle count header
     const allItems = await this.storage.getCycleCountItems(item.cycleCountId);
-    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
+    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
     await this.storage.updateCycleCount(item.cycleCountId, { approvedVariances: approvedCount });
 
     // Fire channel sync + replen (fire-and-forget)
@@ -978,7 +1159,7 @@ class CycleCountService {
 
     // Update cycle count approved count
     const allItems = await this.storage.getCycleCountItems(cycleCountId);
-    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted").length;
+    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
     await this.storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
 
     // BUG FIX: Fire channel sync + replen for ALL adjustments (was missing channelSync)
@@ -1112,9 +1293,11 @@ class CycleCountService {
       throw new CycleCountError(`${investigatingItems.length} items still under investigation`);
     }
 
-    const unapprovedVariances = items.filter(i => i.varianceType && i.status !== "approved" && i.status !== "adjusted");
+    const unapprovedVariances = items.filter(i =>
+      i.varianceType && i.status !== "approved" && i.status !== "adjusted" && i.status !== "resolved"
+    );
     if (unapprovedVariances.length > 0) {
-      throw new CycleCountError(`${unapprovedVariances.length} variances not approved`);
+      throw new CycleCountError(`${unapprovedVariances.length} variances not approved/resolved`);
     }
 
     await this.storage.updateCycleCount(id, {
@@ -1122,10 +1305,15 @@ class CycleCountService {
       completedAt: new Date(),
     });
 
+    // Unfreeze all locations that were frozen by this cycle count
+    await this.unfreezeLocations(id);
+
     return { success: true };
   }
 
   async delete(id: number) {
+    // Unfreeze locations before cascade delete removes the FK reference
+    await this.unfreezeLocations(id);
     const deleted = await this.storage.deleteCycleCount(id);
     if (!deleted) throw new CycleCountError("Cycle count not found", 404);
     return { success: true };

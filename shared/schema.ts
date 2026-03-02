@@ -447,6 +447,7 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   locationType: varchar("location_type", { length: 30 }).notNull().default("pick"), // pick, reserve, receiving, staging
   binType: varchar("bin_type", { length: 30 }).notNull().default("bin"), // bin, shelf, pallet, carton_flow, floor
   isPickable: integer("is_pickable").notNull().default(1), // 1 = contributes to ATP
+  cycleCountFreezeId: integer("cycle_count_freeze_id"), // When set, location is frozen for cycle counting — picks/replen/reservations skip it
 
   // Replenishment chain
   parentLocationId: integer("parent_location_id"), // Specific location that feeds this one (optional)
@@ -727,6 +728,10 @@ export const warehouseSettings = pgTable("warehouse_settings", {
   
   // Order combining settings
   enableOrderCombining: integer("enable_order_combining").notNull().default(1), // Show combine badges to pickers
+
+  // Channel sync
+  channelSyncEnabled: integer("channel_sync_enabled").notNull().default(0), // 0=disabled, 1=enabled — master kill switch for inventory push to sales channels
+  channelSyncIntervalMinutes: integer("channel_sync_interval_minutes").notNull().default(15), // 0=disable scheduled sync
 
   // Velocity calculation
   velocityLookbackDays: integer("velocity_lookback_days").notNull().default(14), // Days of pick history for SKU velocity
@@ -1431,7 +1436,7 @@ export const cycleCountItems = pgTable("cycle_count_items", {
   varianceNotes: text("variance_notes"),
   
   // Status
-  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, counted, variance, approved, adjusted
+  status: varchar("status", { length: 20 }).notNull().default("pending"), // pending, counted, variance, approved, adjusted, resolved, investigate
   
   // Related item for SKU mismatch workflow (links expected→found items)
   relatedItemId: integer("related_item_id"), // Points to the other half of a mismatch pair
@@ -1442,7 +1447,11 @@ export const cycleCountItems = pgTable("cycle_count_items", {
   approvedBy: varchar("approved_by", { length: 100 }),
   approvedAt: timestamp("approved_at"),
   adjustmentTransactionId: integer("adjustment_transaction_id").references(() => inventoryTransactions.id),
-  
+
+  // Resolution without adjustment
+  resolvedBy: varchar("resolved_by", { length: 100 }),
+  resolvedAt: timestamp("resolved_at"),
+
   // Audit
   countedBy: varchar("counted_by", { length: 100 }),
   countedAt: timestamp("counted_at"),
