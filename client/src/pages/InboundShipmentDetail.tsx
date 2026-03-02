@@ -169,8 +169,8 @@ export default function InboundShipmentDetail() {
   const [newCost, setNewCost] = useState({
     costType: "freight",
     description: "",
-    estimatedCents: 0,
-    actualCents: 0,
+    estimated: "",
+    actual: "",
     allocationMethod: "default",
     costStatus: "estimated",
     invoiceNumber: "",
@@ -369,8 +369,11 @@ export default function InboundShipmentDetail() {
   // Cost mutations
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
+      const { estimated, actual, ...rest } = data;
       const payload = {
-        ...data,
+        ...rest,
+        estimatedCents: Math.round(parseFloat(estimated || "0") * 100),
+        actualCents: Math.round(parseFloat(actual || "0") * 100),
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
@@ -379,7 +382,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", estimatedCents: 0, actualCents: 0, allocationMethod: "default", costStatus: "estimated", invoiceNumber: "", vendorName: "" });
+      setNewCost({ costType: "freight", description: "", estimated: "", actual: "", allocationMethod: "default", costStatus: "estimated", invoiceNumber: "", vendorName: "" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -389,8 +392,11 @@ export default function InboundShipmentDetail() {
 
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
+      const { estimated, actual, ...rest } = data;
       const payload = {
-        ...data,
+        ...rest,
+        estimatedCents: Math.round(parseFloat(estimated || "0") * 100),
+        actualCents: Math.round(parseFloat(actual || "0") * 100),
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
@@ -1006,8 +1012,8 @@ export default function InboundShipmentDetail() {
                                   id: cost.id,
                                   costType: cost.costType,
                                   description: cost.description || "",
-                                  estimatedCents: cost.estimatedCents || 0,
-                                  actualCents: cost.actualCents || 0,
+                                  estimated: cost.estimatedCents ? (cost.estimatedCents / 100).toFixed(2) : "",
+                                  actual: cost.actualCents ? (cost.actualCents / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
                                   costStatus: cost.costStatus || "estimated",
                                   invoiceNumber: cost.invoiceNumber || "",
@@ -1879,8 +1885,8 @@ export default function InboundShipmentDetail() {
                   type="number"
                   step="0.01"
                   min="0"
-                  value={newCost.estimatedCents ? (newCost.estimatedCents / 100).toFixed(2) : ""}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, estimatedCents: Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                  value={newCost.estimated}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, estimated: e.target.value }))}
                   placeholder="0.00"
                   className="h-10"
                 />
@@ -1891,8 +1897,8 @@ export default function InboundShipmentDetail() {
                   type="number"
                   step="0.01"
                   min="0"
-                  value={newCost.actualCents ? (newCost.actualCents / 100).toFixed(2) : ""}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, actualCents: Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                  value={newCost.actual}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, actual: e.target.value }))}
                   placeholder="0.00"
                   className="h-10"
                 />
@@ -1999,8 +2005,8 @@ export default function InboundShipmentDetail() {
                     type="number"
                     step="0.01"
                     min="0"
-                    value={editingCost.estimatedCents ? (editingCost.estimatedCents / 100).toFixed(2) : ""}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, estimatedCents: Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    value={editingCost.estimated}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, estimated: e.target.value }))}
                     placeholder="0.00"
                     className="h-10"
                   />
@@ -2011,8 +2017,8 @@ export default function InboundShipmentDetail() {
                     type="number"
                     step="0.01"
                     min="0"
-                    value={editingCost.actualCents ? (editingCost.actualCents / 100).toFixed(2) : ""}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, actualCents: Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                    value={editingCost.actual}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, actual: e.target.value }))}
                     placeholder="0.00"
                     className="h-10"
                   />
