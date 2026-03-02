@@ -257,11 +257,10 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
       const product = pv?.productId ? productMap.get(pv.productId) : null;
       const pol = line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : null;
-      console.log(`[enrichLine] sku=${line.sku} pvId=${line.productVariantId} pv.productId=${pv?.productId} product.title=${product?.title} product.name=${product?.name} pv.name=${pv?.name}`);
       return {
         ...line,
         unitsPerVariant: pv?.unitsPerVariant ?? 1,
-        productName: product?.title || product?.name || pv?.name || line.sku || null,
+        productName: product?.title || product?.name || pol?.productName || pv?.name || line.sku || null,
         poQtyOrdered: pol?.orderQty ?? null,
       };
     });
