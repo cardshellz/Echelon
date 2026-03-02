@@ -89,7 +89,6 @@ const ALLOCATION_METHOD_OPTIONS = [
 
 const COST_STATUS_OPTIONS = [
   { value: "estimated", label: "Estimated" },
-  { value: "quoted", label: "Quoted" },
   { value: "invoiced", label: "Invoiced" },
   { value: "paid", label: "Paid" },
 ];
@@ -169,11 +168,10 @@ export default function InboundShipmentDetail() {
   const [newCost, setNewCost] = useState({
     costType: "freight",
     description: "",
-    estimated: "",
-    actual: "",
+    amount: "",
     allocationMethod: "default",
     costStatus: "estimated",
-    invoiceNumber: "",
+    shipmentNumber: "",
     vendorName: "",
   });
 
@@ -369,11 +367,13 @@ export default function InboundShipmentDetail() {
   // Cost mutations
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
-      const { estimated, actual, ...rest } = data;
+      const { amount, shipmentNumber, ...rest } = data;
+      const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
-        estimatedCents: Math.round(parseFloat(estimated || "0") * 100),
-        actualCents: Math.round(parseFloat(actual || "0") * 100),
+        estimatedCents: cents,
+        actualCents: cents,
+        invoiceNumber: shipmentNumber || null,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
@@ -382,7 +382,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", estimated: "", actual: "", allocationMethod: "default", costStatus: "estimated", invoiceNumber: "", vendorName: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", costStatus: "estimated", shipmentNumber: "", vendorName: "" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -392,11 +392,13 @@ export default function InboundShipmentDetail() {
 
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
-      const { estimated, actual, ...rest } = data;
+      const { amount, shipmentNumber, ...rest } = data;
+      const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
-        estimatedCents: Math.round(parseFloat(estimated || "0") * 100),
-        actualCents: Math.round(parseFloat(actual || "0") * 100),
+        estimatedCents: cents,
+        actualCents: cents,
+        invoiceNumber: shipmentNumber || null,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
       };
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
@@ -995,10 +997,7 @@ export default function InboundShipmentDetail() {
                             <Badge variant="outline" className="text-xs">{cost.costStatus}</Badge>
                           </div>
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
-                          <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
-                            <span>Est: {formatCents(cost.estimatedCents)}</span>
-                            <span>Actual: {formatCents(cost.actualCents)}</span>
-                          </div>
+                          <div className="text-sm font-mono mt-1">{formatCents(cost.estimatedCents || cost.actualCents)}</div>
                           {cost.vendorName && <div className="text-xs text-muted-foreground mt-0.5">{cost.vendorName}</div>}
                         </div>
                         {isEditable && (
@@ -1012,11 +1011,10 @@ export default function InboundShipmentDetail() {
                                   id: cost.id,
                                   costType: cost.costType,
                                   description: cost.description || "",
-                                  estimated: cost.estimatedCents ? (cost.estimatedCents / 100).toFixed(2) : "",
-                                  actual: cost.actualCents ? (cost.actualCents / 100).toFixed(2) : "",
+                                  amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
                                   costStatus: cost.costStatus || "estimated",
-                                  invoiceNumber: cost.invoiceNumber || "",
+                                  shipmentNumber: cost.invoiceNumber || "",
                                   vendorName: cost.vendorName || "",
                                 });
                                 setShowEditCostDialog(true);
@@ -1042,12 +1040,8 @@ export default function InboundShipmentDetail() {
                 <Card>
                   <CardContent className="p-3">
                     <div className="flex justify-between text-sm font-medium">
-                      <span>Total Estimated</span>
-                      <span className="font-mono">{formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || 0), 0))}</span>
-                    </div>
-                    <div className="flex justify-between text-sm font-medium mt-1">
-                      <span>Total Actual</span>
-                      <span className="font-mono">{formatCents(costs.reduce((sum: number, c: any) => sum + (c.actualCents || 0), 0))}</span>
+                      <span>Total</span>
+                      <span className="font-mono">{formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -1062,11 +1056,10 @@ export default function InboundShipmentDetail() {
                 <TableRow>
                   <TableHead>Type</TableHead>
                   <TableHead>Description</TableHead>
-                  <TableHead className="text-right">Estimated</TableHead>
-                  <TableHead className="text-right">Actual</TableHead>
+                  <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Method</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Invoice #</TableHead>
+                  <TableHead>Shipment #</TableHead>
                   <TableHead>Vendor</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
@@ -1074,7 +1067,7 @@ export default function InboundShipmentDetail() {
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 9 : 8} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 8 : 7} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1086,8 +1079,7 @@ export default function InboundShipmentDetail() {
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents)}</TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(cost.actualCents)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
                         <TableCell className="text-xs">{cost.allocationMethod?.replace(/_/g, " ") || "default"}</TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-xs capitalize">{cost.costStatus}</Badge>
@@ -1132,12 +1124,9 @@ export default function InboundShipmentDetail() {
                     ))}
                     {/* Summary row */}
                     <TableRow className="bg-muted/50 font-medium">
-                      <TableCell colSpan={2} className="text-right">Totals</TableCell>
+                      <TableCell colSpan={2} className="text-right">Total</TableCell>
                       <TableCell className="text-right font-mono">
-                        {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || 0), 0))}
-                      </TableCell>
-                      <TableCell className="text-right font-mono">
-                        {formatCents(costs.reduce((sum: number, c: any) => sum + (c.actualCents || 0), 0))}
+                        {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
                       <TableCell colSpan={isEditable ? 5 : 4} />
                     </TableRow>
@@ -1880,51 +1869,38 @@ export default function InboundShipmentDetail() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>Estimated ($)</Label>
+                <Label>Amount ($) *</Label>
                 <Input
                   type="number"
                   step="0.01"
                   min="0"
-                  value={newCost.estimated}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, estimated: e.target.value }))}
+                  value={newCost.amount}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, amount: e.target.value }))}
                   placeholder="0.00"
                   className="h-10"
                 />
               </div>
               <div className="space-y-2">
-                <Label>Actual ($)</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={newCost.actual}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, actual: e.target.value }))}
-                  placeholder="0.00"
-                  className="h-10"
-                />
+                <Label>Allocation Method</Label>
+                <Select value={newCost.allocationMethod} onValueChange={(v) => setNewCost((prev) => ({ ...prev, allocationMethod: v }))}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ALLOCATION_METHOD_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Allocation Method</Label>
-              <Select value={newCost.allocationMethod} onValueChange={(v) => setNewCost((prev) => ({ ...prev, allocationMethod: v }))}>
-                <SelectTrigger className="h-10">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {ALLOCATION_METHOD_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>Invoice #</Label>
+                <Label>Shipment #</Label>
                 <Input
-                  value={newCost.invoiceNumber}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, invoiceNumber: e.target.value }))}
+                  value={newCost.shipmentNumber}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, shipmentNumber: e.target.value }))}
                   className="h-10"
                 />
               </div>
@@ -2000,51 +1976,38 @@ export default function InboundShipmentDetail() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Estimated ($)</Label>
+                  <Label>Amount ($) *</Label>
                   <Input
                     type="number"
                     step="0.01"
                     min="0"
-                    value={editingCost.estimated}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, estimated: e.target.value }))}
+                    value={editingCost.amount}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, amount: e.target.value }))}
                     placeholder="0.00"
                     className="h-10"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Actual ($)</Label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    value={editingCost.actual}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, actual: e.target.value }))}
-                    placeholder="0.00"
-                    className="h-10"
-                  />
+                  <Label>Allocation Method</Label>
+                  <Select value={editingCost.allocationMethod || "default"} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, allocationMethod: v }))}>
+                    <SelectTrigger className="h-10">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ALLOCATION_METHOD_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Allocation Method</Label>
-                <Select value={editingCost.allocationMethod || "default"} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, allocationMethod: v }))}>
-                  <SelectTrigger className="h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ALLOCATION_METHOD_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Invoice #</Label>
+                  <Label>Shipment #</Label>
                   <Input
-                    value={editingCost.invoiceNumber}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, invoiceNumber: e.target.value }))}
+                    value={editingCost.shipmentNumber}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, shipmentNumber: e.target.value }))}
                     className="h-10"
                   />
                 </div>
