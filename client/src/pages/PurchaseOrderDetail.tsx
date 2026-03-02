@@ -169,10 +169,11 @@ export default function PurchaseOrderDetail() {
     enabled: showAddLineDialog && !!po?.vendorId,
   });
 
-  const { data: linkedShipments = [] } = useQuery<any[]>({
+  const { data: linkedShipmentsRaw = [] } = useQuery<any[]>({
     queryKey: [`/api/purchase-orders/${poId}/shipments`],
     enabled: !!poId && activeTab === "shipments",
   });
+  const linkedShipments = linkedShipmentsRaw.filter((s: any) => s.status !== "cancelled");
 
   const { data: invoicesData } = useQuery<{ invoices: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/invoices`],
