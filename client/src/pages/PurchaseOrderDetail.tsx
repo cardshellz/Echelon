@@ -100,6 +100,14 @@ export default function PurchaseOrderDetail() {
   const [emailSending, setEmailSending] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [ackData, setAckData] = useState({ vendorRefNumber: "", confirmedDeliveryDate: "" });
+  const [showCreateShipmentDialog, setShowCreateShipmentDialog] = useState(false);
+  const [newShipmentForm, setNewShipmentForm] = useState({
+    mode: "sea_fcl",
+    shipmentNumber: "",
+    shipperName: "",
+    forwarderName: "",
+    carrierName: "",
+  });
 
   // Inline charge editing state
   const [editingIncoterms, setEditingIncoterms] = useState(false);
@@ -491,32 +499,25 @@ export default function PurchaseOrderDetail() {
   });
 
   const createShipmentMutation = useMutation({
-    mutationFn: async (mode: string) => {
-      // Create draft shipment
+    mutationFn: async (form: typeof newShipmentForm) => {
       const res = await fetch("/api/inbound-shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: mode || undefined,
-          shipperName: po?.vendor?.name || undefined,
+          mode: form.mode || undefined,
+          shipmentNumber: form.shipmentNumber || undefined,
+          shipperName: form.shipperName || undefined,
+          forwarderName: form.forwarderName || undefined,
+          carrierName: form.carrierName || undefined,
         }),
       });
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
-      const shipment = await res.json();
-      // Add all open PO lines to it
-      const openLineIds = lines.filter((l: any) => l.status !== "closed" && l.status !== "cancelled").map((l: any) => l.id);
-      if (openLineIds.length > 0) {
-        await fetch(`/api/inbound-shipments/${shipment.id}/lines/from-po`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ purchaseOrderId: poId, lineIds: openLineIds }),
-        });
-      }
-      return shipment;
+      return res.json();
     },
     onSuccess: (shipment) => {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/shipments`] });
-      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with PO lines` });
+      setShowCreateShipmentDialog(false);
+      toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created — add line items on the shipment page` });
       navigate(`/shipments/${shipment.id}`);
     },
     onError: (err: Error) => {
@@ -1115,32 +1116,23 @@ export default function PurchaseOrderDetail() {
               )}
             </p>
             {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
-              <div className="flex gap-2">
-                {(["sea_fcl", "sea_lcl", "air", "ground", "ltl", "courier"] as const).length > 0 && (
-                  <select
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                    defaultValue=""
-                    onChange={e => {
-                      if (e.target.value) {
-                        createShipmentMutation.mutate(e.target.value);
-                        e.target.value = "";
-                      }
-                    }}
-                    disabled={createShipmentMutation.isPending}
-                  >
-                    <option value="" disabled>
-                      {createShipmentMutation.isPending ? "Creating..." : "+ Create Shipment"}
-                    </option>
-                    <option value="sea_fcl">Sea — FCL</option>
-                    <option value="sea_lcl">Sea — LCL</option>
-                    <option value="air">Air</option>
-                    <option value="ground">Ground</option>
-                    <option value="ltl">LTL</option>
-                    <option value="ftl">FTL</option>
-                    <option value="courier">Courier</option>
-                  </select>
-                )}
-              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setNewShipmentForm({
+                    mode: "sea_fcl",
+                    shipmentNumber: "",
+                    shipperName: po?.vendor?.name || "",
+                    forwarderName: "",
+                    carrierName: "",
+                  });
+                  setShowCreateShipmentDialog(true);
+                }}
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Create Shipment
+              </Button>
             )}
           </div>
 
@@ -1150,7 +1142,7 @@ export default function PurchaseOrderDetail() {
                 <Ship className="h-8 w-8 mx-auto mb-2 opacity-30" />
                 <p>No shipments linked to this PO yet.</p>
                 {lines.length > 0 && !["closed", "cancelled"].includes(po.status) && (
-                  <p className="text-xs mt-1">Use "Create Shipment" above to start a new inbound shipment with this PO's open lines.</p>
+                  <p className="text-xs mt-1">Use "Create Shipment" above to start a new inbound shipment.</p>
                 )}
               </CardContent>
             </Card>
@@ -1972,6 +1964,84 @@ export default function PurchaseOrderDetail() {
                 disabled={createInvoiceMutation.isPending || !invoiceForm.invoiceNumber.trim()}
               >
                 {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {/* ═══════ Create Shipment Dialog ═══════ */}
+      <Dialog open={showCreateShipmentDialog} onOpenChange={setShowCreateShipmentDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create Inbound Shipment</DialogTitle>
+            <DialogDescription>Set up shipment details. Add line items after creation.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Shipment # (optional — auto-generated if blank)</Label>
+              <Input
+                value={newShipmentForm.shipmentNumber}
+                onChange={(e) => setNewShipmentForm(prev => ({ ...prev, shipmentNumber: e.target.value }))}
+                placeholder="e.g. SHP-2026-042"
+                className="h-10"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Mode *</Label>
+              <Select value={newShipmentForm.mode} onValueChange={(v) => setNewShipmentForm(prev => ({ ...prev, mode: v }))}>
+                <SelectTrigger className="h-10">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="sea_fcl">Sea — FCL</SelectItem>
+                  <SelectItem value="sea_lcl">Sea — LCL</SelectItem>
+                  <SelectItem value="air">Air</SelectItem>
+                  <SelectItem value="ground">Ground</SelectItem>
+                  <SelectItem value="ltl">LTL</SelectItem>
+                  <SelectItem value="ftl">FTL</SelectItem>
+                  <SelectItem value="courier">Courier</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Shipper (Origin Supplier)</Label>
+              <Input
+                value={newShipmentForm.shipperName}
+                onChange={(e) => setNewShipmentForm(prev => ({ ...prev, shipperName: e.target.value }))}
+                className="h-10"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Forwarder</Label>
+                <Input
+                  value={newShipmentForm.forwarderName}
+                  onChange={(e) => setNewShipmentForm(prev => ({ ...prev, forwarderName: e.target.value }))}
+                  placeholder="e.g. Freightos"
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Carrier</Label>
+                <Input
+                  value={newShipmentForm.carrierName}
+                  onChange={(e) => setNewShipmentForm(prev => ({ ...prev, carrierName: e.target.value }))}
+                  placeholder="e.g. Maersk"
+                  className="h-10"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowCreateShipmentDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => createShipmentMutation.mutate(newShipmentForm)}
+                disabled={createShipmentMutation.isPending}
+              >
+                {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
               </Button>
             </div>
           </div>

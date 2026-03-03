@@ -164,7 +164,6 @@ export default function InboundShipmentDetail() {
     description: "",
     amount: "",
     allocationMethod: "default",
-    vendorName: "",
   });
 
   // Edit cost form
@@ -373,7 +372,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -988,7 +987,6 @@ export default function InboundShipmentDetail() {
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
                           <div className="text-sm font-mono mt-1">{formatCents(cost.estimatedCents || cost.actualCents)}</div>
-                          {cost.vendorName && <div className="text-xs text-muted-foreground mt-0.5">{cost.vendorName}</div>}
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1003,7 +1001,6 @@ export default function InboundShipmentDetail() {
                                   description: cost.description || "",
                                   amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
-                                  vendorName: cost.vendorName || "",
                                 });
                                 setShowEditCostDialog(true);
                               }}
@@ -1046,14 +1043,13 @@ export default function InboundShipmentDetail() {
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Method</TableHead>
-                  <TableHead>Vendor</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 6 : 5} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 5 : 4} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1067,7 +1063,6 @@ export default function InboundShipmentDetail() {
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
                         <TableCell className="text-xs">{cost.allocationMethod?.replace(/_/g, " ") || "default"}</TableCell>
-                        <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
                         {isEditable && (
                           <TableCell>
                             <div className="flex gap-1">
@@ -1081,8 +1076,7 @@ export default function InboundShipmentDetail() {
                                     description: cost.description || "",
                                     amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                     allocationMethod: cost.allocationMethod || "default",
-                                      vendorName: cost.vendorName || "",
-                                  });
+                                      });
                                   setShowEditCostDialog(true);
                                 }}
                               >
@@ -1107,7 +1101,7 @@ export default function InboundShipmentDetail() {
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 3 : 2} />
+                      <TableCell colSpan={isEditable ? 2 : 1} />
                     </TableRow>
                   </>
                 )}
@@ -1869,16 +1863,6 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label>Vendor</Label>
-              <Input
-                value={newCost.vendorName}
-                onChange={(e) => setNewCost((prev) => ({ ...prev, vendorName: e.target.value }))}
-                placeholder="e.g. Freightos, customs broker"
-                className="h-10"
-              />
-            </div>
-
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowAddCostDialog(false)}>Cancel</Button>
               <Button
@@ -1950,16 +1934,6 @@ export default function InboundShipmentDetail() {
                     </SelectContent>
                   </Select>
                 </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Vendor</Label>
-                <Input
-                  value={editingCost.vendorName}
-                  onChange={(e) => setEditingCost((prev: any) => ({ ...prev, vendorName: e.target.value }))}
-                  placeholder="e.g. Freightos, customs broker"
-                  className="h-10"
-                />
               </div>
 
               <div className="flex gap-2 justify-end">

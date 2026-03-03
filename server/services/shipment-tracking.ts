@@ -285,7 +285,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     notes?: string;
     internalNotes?: string;
   }, userId?: string) {
-    const shipmentNumber = await storage.generateShipmentNumber();
+    const shipmentNumber = (data as any).shipmentNumber || await storage.generateShipmentNumber();
     const allocationMethodDefault = data.mode ? MODE_DEFAULT_ALLOCATION[data.mode] || "by_volume" : "by_volume";
 
     const shipment = await storage.createInboundShipment({
