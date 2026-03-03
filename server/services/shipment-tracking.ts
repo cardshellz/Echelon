@@ -702,6 +702,8 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     } as any);
 
     await recomputeShipmentTotals(shipmentId);
+    // Auto-run allocation so lines reflect updated costs immediately
+    try { await runAllocation(shipmentId); } catch (_) { /* no lines yet is ok */ }
     return cost;
   }
 
@@ -716,6 +718,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
     const updated = await storage.updateShipmentCost(costId, updates);
     await recomputeShipmentTotals(cost.inboundShipmentId);
+    try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
     return updated;
   }
 
@@ -730,6 +733,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
     await storage.deleteShipmentCost(costId);
     await recomputeShipmentTotals(cost.inboundShipmentId);
+    try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
     return true;
   }
 
