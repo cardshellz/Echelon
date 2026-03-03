@@ -1947,7 +1947,7 @@ export default function InboundShipmentDetail() {
                         ? `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`
                         : opt.label;
                       return <SelectItem key={opt.value} value={opt.value}>{label}</SelectItem>;
-                    ))}
+                    })}
                   </SelectContent>
                 </Select>
               </div>
