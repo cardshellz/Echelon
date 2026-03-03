@@ -697,9 +697,15 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       throw new ShipmentTrackingError("Cannot add costs to a closed or cancelled shipment");
     }
 
+    // Coerce date strings to Date objects for Drizzle timestamp columns
+    const coerced: any = { ...data };
+    if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
+    if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
+    if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
+
     const cost = await storage.createShipmentCost({
       inboundShipmentId: shipmentId,
-      ...data,
+      ...coerced,
     } as any);
 
     await recomputeShipmentTotals(shipmentId);
@@ -717,7 +723,13 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       throw new ShipmentTrackingError("Cannot edit costs on a closed shipment");
     }
 
-    const updated = await storage.updateShipmentCost(costId, updates);
+    // Coerce date strings to Date objects for Drizzle timestamp columns
+    const coerced: any = { ...updates };
+    if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
+    if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
+    if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
+
+    const updated = await storage.updateShipmentCost(costId, coerced);
     await recomputeShipmentTotals(cost.inboundShipmentId);
     try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
     return updated;
