@@ -1316,7 +1316,7 @@ export default function PurchaseOrderDetail() {
           setAddLineMode("catalog");
         }
       }}>
-        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Line Item</DialogTitle>
             <DialogDescription>
@@ -1498,10 +1498,10 @@ export default function PurchaseOrderDetail() {
                     <Label>Variant / Case Size *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
-                        <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                          {selectedVariant
+                        <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                          <span className="truncate">{selectedVariant
                             ? `${selectedVariant.sku} — ${selectedVariant.name}`
-                            : "Select variant..."}
+                            : "Select variant..."}</span>
                           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                         </Button>
                       </PopoverTrigger>
@@ -1548,8 +1548,8 @@ export default function PurchaseOrderDetail() {
                   <Label>Product *</Label>
                   <Popover open={productOpen} onOpenChange={setProductOpen}>
                     <PopoverTrigger asChild>
-                      <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                        {selectedProductForLine ? selectedProductForLine.name : "Search product..."}
+                      <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                        <span className="truncate">{selectedProductForLine ? selectedProductForLine.name : "Search product..."}</span>
                         <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                       </Button>
                     </PopoverTrigger>
@@ -1587,10 +1587,10 @@ export default function PurchaseOrderDetail() {
                     <Label>Variant / Case Size *</Label>
                     <Popover open={variantOpen} onOpenChange={setVariantOpen}>
                       <PopoverTrigger asChild>
-                        <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                          {selectedVariant
+                        <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                          <span className="truncate">{selectedVariant
                             ? `${selectedVariant.sku} — ${selectedVariant.name}`
-                            : "Select variant..."}
+                            : "Select variant..."}</span>
                           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                         </Button>
                       </PopoverTrigger>
