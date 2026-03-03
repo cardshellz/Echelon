@@ -78,6 +78,25 @@ const COST_TYPE_OPTIONS = [
   { value: "other", label: "Other" },
 ];
 
+const MODE_DEFAULT_ALLOCATION: Record<string, string> = {
+  sea_fcl: "by_volume",
+  sea_lcl: "by_volume",
+  air: "by_chargeable_weight",
+  ground: "by_weight",
+  ltl: "by_weight",
+  ftl: "by_weight",
+  parcel: "by_weight",
+  courier: "by_weight",
+};
+
+const ALLOCATION_METHOD_LABELS: Record<string, string> = {
+  by_volume: "By Volume",
+  by_weight: "By Weight",
+  by_chargeable_weight: "By Chargeable Weight",
+  by_value: "By Value",
+  by_line_count: "By Line Count",
+};
+
 const ALLOCATION_METHOD_OPTIONS = [
   { value: "default", label: "Default" },
   { value: "by_volume", label: "By Volume" },
@@ -1075,7 +1094,11 @@ export default function InboundShipmentDetail() {
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
-                        <TableCell className="text-xs">{cost.allocationMethod?.replace(/_/g, " ") || "default"}</TableCell>
+                        <TableCell className="text-xs">
+                          {cost.allocationMethod
+                            ? ALLOCATION_METHOD_LABELS[cost.allocationMethod] || cost.allocationMethod.replace(/_/g, " ")
+                            : `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`}
+                        </TableCell>
                         {isEditable && (
                           <TableCell>
                             <div className="flex gap-1">
@@ -1876,8 +1899,11 @@ export default function InboundShipmentDetail() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {ALLOCATION_METHOD_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    {ALLOCATION_METHOD_OPTIONS.map((opt) => {
+                      const label = opt.value === "default"
+                        ? `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`
+                        : opt.label;
+                      return <SelectItem key={opt.value} value={opt.value}>{label}</SelectItem>;
                     ))}
                   </SelectContent>
                 </Select>
@@ -1949,9 +1975,12 @@ export default function InboundShipmentDetail() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {ALLOCATION_METHOD_OPTIONS.map((opt) => (
-                        <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
-                      ))}
+                      {ALLOCATION_METHOD_OPTIONS.map((opt) => {
+                        const label = opt.value === "default"
+                          ? `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`
+                          : opt.label;
+                        return <SelectItem key={opt.value} value={opt.value}>{label}</SelectItem>;
+                      })}
                     </SelectContent>
                   </Select>
                 </div>
