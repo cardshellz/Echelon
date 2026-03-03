@@ -11497,13 +11497,19 @@ export async function registerRoutes(
 
   // ── Shipment Cost → AP Bridge ──
 
-  app.post("/api/inbound-shipments/:id/create-invoices", requirePermission("purchasing", "edit"), async (req, res) => {
+  app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const result = await apLedger.createInvoicesFromShipmentCosts(
+      const { vendorId, invoiceNumber, invoiceDate } = req.body;
+      if (!vendorId) return res.status(400).json({ error: "vendorId is required" });
+      const invoice = await apLedger.createInvoiceFromShipmentCosts(
         Number(req.params.id),
-        req.body.vendorMappings ? { vendorMappings: req.body.vendorMappings } : undefined
+        {
+          vendorId,
+          invoiceNumber,
+          invoiceDate: invoiceDate ? new Date(invoiceDate) : undefined,
+        }
       );
-      res.json(result);
+      res.json(invoice);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

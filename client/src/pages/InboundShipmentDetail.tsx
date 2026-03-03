@@ -214,8 +214,13 @@ export default function InboundShipmentDetail() {
   const [editCostVendorOpen, setEditCostVendorOpen] = useState(false);
   const [editCostVendorSearch, setEditCostVendorSearch] = useState("");
 
-  // Create invoices
+  // Create invoice from shipment costs
   const [showCreateInvoicesDialog, setShowCreateInvoicesDialog] = useState(false);
+  const [createInvVendorId, setCreateInvVendorId] = useState<number | null>(null);
+  const [createInvVendorName, setCreateInvVendorName] = useState("");
+  const [createInvVendorOpen, setCreateInvVendorOpen] = useState(false);
+  const [createInvVendorSearch, setCreateInvVendorSearch] = useState("");
+  const [createInvNumber, setCreateInvNumber] = useState("");
 
   // ── Queries ──
 
@@ -246,8 +251,9 @@ export default function InboundShipmentDetail() {
 
   const { data: vendorsData } = useQuery<any[]>({
     queryKey: ["/api/vendors"],
-    enabled: showAddCostDialog || !!editingCost,
+    enabled: showAddCostDialog || !!editingCost || showCreateInvoicesDialog,
   });
+  const vendorsForInvoice = vendorsData;
 
   const lines = shipment?.lines ?? [];
   const costs = shipment?.costs ?? [];
@@ -482,23 +488,18 @@ export default function InboundShipmentDetail() {
     },
   });
 
-  const createInvoicesMutation = useMutation({
-    mutationFn: async (vendorMappings?: Record<string, number>) => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/create-invoices`, {
-        vendorMappings,
-      });
+  const createInvoiceMutation = useMutation({
+    mutationFn: async (data: { vendorId: number; invoiceNumber?: string }) => {
+      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/create-invoice`, data);
       return res.json();
     },
-    onSuccess: (data: any) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowCreateInvoicesDialog(false);
-      if (data.invoices?.length > 0) {
-        toast({ title: `${data.invoices.length} invoice(s) created in AP` });
-      } else if (data.unmappedVendors?.length > 0) {
-        toast({ title: "Unmapped vendors", description: `Please map: ${data.unmappedVendors.join(", ")}`, variant: "destructive" });
-      } else {
-        toast({ title: "No costs to invoice" });
-      }
+      setCreateInvVendorId(null);
+      setCreateInvVendorName("");
+      setCreateInvNumber("");
+      toast({ title: "Invoice created in AP" });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -2232,45 +2233,86 @@ export default function InboundShipmentDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ═══════ Create Invoices Dialog ═══════ */}
+      {/* ═══════ Create Invoice Dialog ═══════ */}
       <Dialog open={showCreateInvoicesDialog} onOpenChange={setShowCreateInvoicesDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Create AP Invoices</DialogTitle>
+            <DialogTitle>Create AP Invoice</DialogTitle>
             <DialogDescription>
-              Create vendor invoices in Accounts Payable from unlinked shipment costs. Costs will be grouped by vendor.
+              Create a vendor invoice in Accounts Payable for all unlinked shipment costs.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            {(() => {
-              const unlinked = costs.filter((c: any) => !c.vendorInvoiceId);
-              const groups: Record<string, { vendorName: string; count: number; totalCents: number }> = {};
-              for (const c of unlinked) {
-                const key = c.vendorName || "Unknown";
-                if (!groups[key]) groups[key] = { vendorName: key, count: 0, totalCents: 0 };
-                groups[key].count++;
-                groups[key].totalCents += c.estimatedCents || c.actualCents || 0;
-              }
-              return Object.values(groups).map((g) => (
-                <div key={g.vendorName} className="flex justify-between items-center p-2 border rounded">
-                  <div>
-                    <div className="font-medium text-sm">{g.vendorName}</div>
-                    <div className="text-xs text-muted-foreground">{g.count} cost line{g.count !== 1 ? "s" : ""}</div>
-                  </div>
-                  <span className="font-mono text-sm">{formatCents(g.totalCents)}</span>
+          {(() => {
+            const unlinked = costs.filter((c: any) => !c.vendorInvoiceId);
+            const totalCents = unlinked.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0);
+            return (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center p-3 bg-muted/50 rounded">
+                  <span className="text-sm">{unlinked.length} cost line{unlinked.length !== 1 ? "s" : ""}</span>
+                  <span className="font-mono font-medium">{formatCents(totalCents)}</span>
                 </div>
-              ));
-            })()}
-          </div>
-          <div className="flex gap-2 justify-end mt-2">
-            <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(false)}>Cancel</Button>
-            <Button
-              onClick={() => createInvoicesMutation.mutate(undefined)}
-              disabled={createInvoicesMutation.isPending}
-            >
-              {createInvoicesMutation.isPending ? "Creating..." : "Create Invoices"}
-            </Button>
-          </div>
+                <div className="space-y-2">
+                  <Label>Invoice From (Vendor) *</Label>
+                  <Popover open={createInvVendorOpen} onOpenChange={setCreateInvVendorOpen}>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
+                        {createInvVendorName || "Select vendor..."}
+                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput placeholder="Search vendors..." value={createInvVendorSearch} onValueChange={setCreateInvVendorSearch} />
+                        <CommandList>
+                          <CommandEmpty>No vendors found</CommandEmpty>
+                          <CommandGroup>
+                            {(vendorsForInvoice ?? [])
+                              .filter((v: any) => !createInvVendorSearch || v.name?.toLowerCase().includes(createInvVendorSearch.toLowerCase()))
+                              .slice(0, 50)
+                              .map((v: any) => (
+                                <CommandItem
+                                  key={v.id}
+                                  onSelect={() => {
+                                    setCreateInvVendorId(v.id);
+                                    setCreateInvVendorName(v.name);
+                                    setCreateInvVendorOpen(false);
+                                    setCreateInvVendorSearch("");
+                                  }}
+                                >
+                                  <Check className={`mr-2 h-4 w-4 ${createInvVendorId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  {v.name}
+                                </CommandItem>
+                              ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="space-y-2">
+                  <Label>Invoice Number</Label>
+                  <Input
+                    value={createInvNumber}
+                    onChange={(e) => setCreateInvNumber(e.target.value)}
+                    placeholder={`Auto: ${shipment?.shipmentNumber || "SHP-XXX"}-${format(new Date(), "yyyyMMdd")}`}
+                    className="h-10"
+                  />
+                </div>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(false)}>Cancel</Button>
+                  <Button
+                    onClick={() => createInvoiceMutation.mutate({
+                      vendorId: createInvVendorId!,
+                      invoiceNumber: createInvNumber || undefined,
+                    })}
+                    disabled={createInvoiceMutation.isPending || !createInvVendorId}
+                  >
+                    {createInvoiceMutation.isPending ? "Creating..." : "Create Invoice"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 

@@ -943,13 +943,17 @@ export async function removeAttachment(id: number) {
 // ─── Shipment Cost → AP Bridge ──────────────────────────────────────────────
 
 /**
- * Create vendor invoices from unlinked shipment costs.
- * Groups costs by vendor_id (falls back to vendor_name text match).
- * Returns created invoices + any unmapped vendor names.
+ * Create a single vendor invoice from all unlinked shipment costs.
+ * The vendorId is the platform/forwarder who bills for the shipment (e.g. Freightos),
+ * NOT the individual service providers on each cost line.
  */
-export async function createInvoicesFromShipmentCosts(
+export async function createInvoiceFromShipmentCosts(
   shipmentId: number,
-  options?: { vendorMappings?: Record<string, number> } // vendorName → vendorId overrides
+  data: {
+    vendorId: number;
+    invoiceNumber?: string;
+    invoiceDate?: Date;
+  }
 ) {
   // Fetch shipment for reference number
   const [shipment] = await db
@@ -969,110 +973,57 @@ export async function createInvoicesFromShipmentCosts(
       )
     );
 
-  if (costs.length === 0) return { invoices: [], unmappedVendors: [] };
+  if (costs.length === 0) throw new Error("No unlinked costs on this shipment");
 
-  // Group costs by vendor
-  const groups: Record<string, { vendorId: number | null; vendorName: string; costs: typeof costs }> = {};
-  const unmappedVendors: string[] = [];
+  // Calculate total from actual (preferred) or estimated cents
+  const totalCents = costs.reduce(
+    (sum, c) => sum + (Number(c.actualCents) || Number(c.estimatedCents) || 0),
+    0
+  );
 
+  const invoiceNumber = data.invoiceNumber || `${shipment.shipmentNumber}-${format(new Date(), "yyyyMMdd")}`;
+
+  // Create one invoice for the whole shipment
+  const invoice = await createInvoice({
+    invoiceNumber,
+    ourReference: `Shipment ${shipment.shipmentNumber}`,
+    vendorId: data.vendorId,
+    invoiceDate: data.invoiceDate ?? new Date(),
+    invoicedAmountCents: totalCents,
+  });
+
+  // Set inboundShipmentId backreference
+  await db
+    .update(vendorInvoices)
+    .set({ inboundShipmentId: shipmentId, updatedAt: new Date() })
+    .where(eq(vendorInvoices.id, invoice.id));
+
+  // Create one invoice line per cost
+  let lineNum = 0;
   for (const cost of costs) {
-    let vendorId = cost.vendorId;
-    const vendorName = cost.vendorName ?? "Unknown";
+    lineNum++;
+    const costAmount = Number(cost.actualCents) || Number(cost.estimatedCents) || 0;
+    const label = cost.costType.replace(/_/g, " ");
 
-    // Apply user-provided mappings for unmatched vendors
-    if (!vendorId && options?.vendorMappings?.[vendorName]) {
-      vendorId = options.vendorMappings[vendorName];
-    }
-
-    // Try text match if still no vendorId
-    if (!vendorId && cost.vendorName) {
-      const [matched] = await db
-        .select({ id: vendors.id })
-        .from(vendors)
-        .where(sql`LOWER(TRIM(${vendors.name})) = LOWER(TRIM(${cost.vendorName}))`)
-        .limit(1);
-      if (matched) vendorId = matched.id;
-    }
-
-    const key = vendorId ? `v:${vendorId}` : `n:${vendorName}`;
-
-    if (!vendorId && !unmappedVendors.includes(vendorName)) {
-      unmappedVendors.push(vendorName);
-    }
-
-    if (!groups[key]) {
-      groups[key] = { vendorId, vendorName, costs: [] };
-    }
-    groups[key].costs.push(cost);
-  }
-
-  // Skip groups without a vendorId — they need mapping first
-  if (unmappedVendors.length > 0) {
-    return { invoices: [], unmappedVendors };
-  }
-
-  // Create one invoice per vendor group
-  const createdInvoices = [];
-  const dateStr = format(new Date(), "yyyyMMdd");
-
-  for (const [, group] of Object.entries(groups)) {
-    if (!group.vendorId) continue;
-
-    // Calculate total from actual (preferred) or estimated cents
-    const totalCents = group.costs.reduce(
-      (sum, c) => sum + (Number(c.actualCents) || Number(c.estimatedCents) || 0),
-      0
-    );
-
-    const invoiceNumber = `${shipment.shipmentNumber}-${dateStr}`;
-
-    // Create the invoice via existing createInvoice
-    const invoice = await createInvoice({
-      invoiceNumber,
-      ourReference: `Shipment ${shipment.shipmentNumber}`,
-      vendorId: group.vendorId,
-      invoiceDate: new Date(),
-      invoicedAmountCents: totalCents,
+    await db.insert(vendorInvoiceLines).values({
+      vendorInvoiceId: invoice.id,
+      lineNumber: lineNum,
+      description: cost.description || label,
+      productName: label,
+      qtyInvoiced: 1,
+      unitCostCents: costAmount,
+      lineTotalCents: costAmount,
+      matchStatus: "matched",
     });
 
-    // Set inboundShipmentId backreference
+    // Link shipment cost back to the invoice
     await db
-      .update(vendorInvoices)
-      .set({ inboundShipmentId: shipmentId, updatedAt: new Date() })
-      .where(eq(vendorInvoices.id, invoice.id));
-
-    // Create one invoice line per cost
-    let lineNum = 0;
-    for (const cost of group.costs) {
-      lineNum++;
-      const costAmount = Number(cost.actualCents) || Number(cost.estimatedCents) || 0;
-
-      await db.insert(vendorInvoiceLines).values({
-        vendorInvoiceId: invoice.id,
-        lineNumber: lineNum,
-        description: cost.description || cost.costType,
-        productName: cost.costType,
-        qtyInvoiced: 1,
-        unitCostCents: costAmount,
-        lineTotalCents: costAmount,
-        matchStatus: "matched",
-      });
-
-      // Link shipment cost back to the invoice
-      await db
-        .update(shipmentCosts)
-        .set({
-          vendorInvoiceId: invoice.id,
-          vendorId: group.vendorId,
-          updatedAt: new Date(),
-        })
-        .where(eq(shipmentCosts.id, cost.id));
-    }
-
-    createdInvoices.push({ ...invoice, inboundShipmentId: shipmentId });
+      .update(shipmentCosts)
+      .set({ vendorInvoiceId: invoice.id, updatedAt: new Date() })
+      .where(eq(shipmentCosts.id, cost.id));
   }
 
-  return { invoices: createdInvoices, unmappedVendors };
+  return { ...invoice, inboundShipmentId: shipmentId };
 }
 
 /**
