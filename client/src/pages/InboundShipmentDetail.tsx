@@ -99,6 +99,14 @@ const ALLOCATION_METHOD_LABELS: Record<string, string> = {
   by_line_count: "By Line Count",
 };
 
+// Cost types that force a specific allocation method
+const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
+  duty: "by_value",
+  brokerage: "by_line_count",
+  inspection: "by_line_count",
+  platform_fee: "by_line_count",
+};
+
 const ALLOCATION_METHOD_OPTIONS = [
   { value: "default", label: "Default" },
   { value: "by_volume", label: "By Volume" },
@@ -1879,7 +1887,11 @@ export default function InboundShipmentDetail() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>Cost Type *</Label>
-              <Select value={newCost.costType} onValueChange={(v) => setNewCost((prev) => ({ ...prev, costType: v }))}>
+              <Select value={newCost.costType} onValueChange={(v) => setNewCost((prev) => ({
+                ...prev,
+                costType: v,
+                allocationMethod: COST_TYPE_ALLOCATION_OVERRIDES[v] || "default",
+              }))}>
                 <SelectTrigger className="h-10">
                   <SelectValue />
                 </SelectTrigger>
@@ -1977,7 +1989,11 @@ export default function InboundShipmentDetail() {
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Cost Type</Label>
-                <Select value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, costType: v }))}>
+                <Select value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({
+                  ...prev,
+                  costType: v,
+                  allocationMethod: COST_TYPE_ALLOCATION_OVERRIDES[v] || prev.allocationMethod,
+                }))}>
                   <SelectTrigger className="h-10">
                     <SelectValue />
                   </SelectTrigger>
