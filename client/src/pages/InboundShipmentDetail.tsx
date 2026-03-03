@@ -222,6 +222,10 @@ export default function InboundShipmentDetail() {
   const [createInvVendorSearch, setCreateInvVendorSearch] = useState("");
   const [createInvNumber, setCreateInvNumber] = useState("");
 
+  // Quick-add vendor
+  const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
+  const [newVendor, setNewVendor] = useState({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
+
   // ── Queries ──
 
   const { data: shipment, isLoading } = useQuery<any>({
@@ -500,6 +504,31 @@ export default function InboundShipmentDetail() {
       setCreateInvVendorName("");
       setCreateInvNumber("");
       toast({ title: "Invoice created in AP" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const createVendorMutation = useMutation({
+    mutationFn: async (data: any) => {
+      const res = await apiRequest("POST", "/api/vendors", data);
+      return res.json();
+    },
+    onSuccess: (vendor: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendors"] });
+      setShowNewVendorDialog(false);
+      setNewVendor({ code: "", name: "", contactName: "", email: "", phone: "", address: "", notes: "" });
+      // Auto-select the new vendor in whichever dropdown is active
+      if (showAddCostDialog) {
+        setNewCost((prev) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
+      } else if (editingCost) {
+        setEditingCost((prev: any) => ({ ...prev, vendorId: vendor.id, vendorName: vendor.name }));
+      } else if (showCreateInvoicesDialog) {
+        setCreateInvVendorId(vendor.id);
+        setCreateInvVendorName(vendor.name);
+      }
+      toast({ title: "Vendor created", description: vendor.name });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -2039,6 +2068,12 @@ export default function InboundShipmentDetail() {
                               </CommandItem>
                             ))}
                         </CommandGroup>
+                        <CommandGroup>
+                          <CommandItem onSelect={() => { setCostVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
+                            <Plus className="mr-2 h-4 w-4" />
+                            Add New Vendor
+                          </CommandItem>
+                        </CommandGroup>
                       </CommandList>
                     </Command>
                   </PopoverContent>
@@ -2169,6 +2204,12 @@ export default function InboundShipmentDetail() {
                                 </CommandItem>
                               ))}
                           </CommandGroup>
+                          <CommandGroup>
+                            <CommandItem onSelect={() => { setEditCostVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
+                              <Plus className="mr-2 h-4 w-4" />
+                              Add New Vendor
+                            </CommandItem>
+                          </CommandGroup>
                         </CommandList>
                       </Command>
                     </PopoverContent>
@@ -2284,6 +2325,12 @@ export default function InboundShipmentDetail() {
                                 </CommandItem>
                               ))}
                           </CommandGroup>
+                          <CommandGroup>
+                            <CommandItem onSelect={() => { setCreateInvVendorOpen(false); setShowNewVendorDialog(true); }} className="text-primary">
+                              <Plus className="mr-2 h-4 w-4" />
+                              Add New Vendor
+                            </CommandItem>
+                          </CommandGroup>
                         </CommandList>
                       </Command>
                     </PopoverContent>
@@ -2313,6 +2360,91 @@ export default function InboundShipmentDetail() {
               </div>
             );
           })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══════ Quick Add Vendor Dialog ═══════ */}
+      <Dialog open={showNewVendorDialog} onOpenChange={setShowNewVendorDialog}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add New Vendor</DialogTitle>
+            <DialogDescription>Create a vendor to use for this shipment cost or invoice.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Code *</Label>
+                <Input
+                  value={newVendor.code}
+                  onChange={(e) => setNewVendor((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))}
+                  placeholder="e.g. MAERSK"
+                  className="h-10 font-mono"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Name *</Label>
+                <Input
+                  value={newVendor.name}
+                  onChange={(e) => setNewVendor((prev) => ({ ...prev, name: e.target.value }))}
+                  placeholder="Vendor name"
+                  className="h-10"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <Label>Contact Name</Label>
+                <Input
+                  value={newVendor.contactName}
+                  onChange={(e) => setNewVendor((prev) => ({ ...prev, contactName: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input
+                  type="email"
+                  value={newVendor.email}
+                  onChange={(e) => setNewVendor((prev) => ({ ...prev, email: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Phone</Label>
+                <Input
+                  value={newVendor.phone}
+                  onChange={(e) => setNewVendor((prev) => ({ ...prev, phone: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Address</Label>
+              <Input
+                value={newVendor.address}
+                onChange={(e) => setNewVendor((prev) => ({ ...prev, address: e.target.value }))}
+                className="h-10"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Notes</Label>
+              <Textarea
+                value={newVendor.notes}
+                onChange={(e) => setNewVendor((prev) => ({ ...prev, notes: e.target.value }))}
+                placeholder="Internal notes..."
+                rows={2}
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowNewVendorDialog(false)}>Cancel</Button>
+              <Button
+                onClick={() => createVendorMutation.mutate(newVendor)}
+                disabled={!newVendor.code || !newVendor.name || createVendorMutation.isPending}
+              >
+                {createVendorMutation.isPending ? "Creating..." : "Create Vendor"}
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 
