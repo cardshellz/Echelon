@@ -24,7 +24,8 @@ import {
   ArrowDown,
   ArrowLeftRight,
   Building2,
-  Trash2
+  Trash2,
+  Grid3x3
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -173,6 +174,36 @@ interface VariantLocationLevel {
     isPickable: number;
     warehouseId: number | null;
   } | null;
+}
+
+interface BinInventoryItem {
+  inventoryLevelId: number;
+  variantId: number;
+  sku: string | null;
+  variantName: string | null;
+  productName: string | null;
+  variantQty: number;
+  reservedQty: number;
+  pickedQty: number;
+  available: number;
+  isAssigned: boolean;
+}
+
+interface BinInventory {
+  locationId: number;
+  locationCode: string;
+  locationType: string;
+  zone: string | null;
+  isPickable: boolean;
+  warehouseId: number | null;
+  warehouseCode: string | null;
+  assignedSku: string | null;
+  items: BinInventoryItem[];
+  totalQty: number;
+  totalReserved: number;
+  totalAvailable: number;
+  skuCount: number;
+  hasUnassigned: boolean;
 }
 
 function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }: {
@@ -517,6 +548,10 @@ export default function Inventory() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | null>(null);
   const [stockFilter, setStockFilter] = useState<"all" | "order_now" | "order_soon" | "oos" | "duplicates" | "stray" | "no_bin" | "no_case_break" | "no_barcode" | "no_replen" | "over_reserved" | "negative_qty">("all");
+  const [binFilter, setBinFilter] = useState<"all" | "unassigned" | "pick" | "reserve">("all");
+  const [binSortField, setBinSortField] = useState<string>("code");
+  const [binSortDirection, setBinSortDirection] = useState<"asc" | "desc">("asc");
+  const [expandedBins, setExpandedBins] = useState<Set<number>>(new Set());
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -562,6 +597,21 @@ export default function Inventory() {
       if (!response.ok) throw new Error("Failed to fetch inventory levels");
       return response.json();
     },
+    staleTime: 30_000,
+  });
+
+  // Bin-centric inventory view
+  const { data: binInventory = [], isLoading: loadingBinInventory } = useQuery<BinInventory[]>({
+    queryKey: ["/api/inventory/by-bin", selectedWarehouseId, searchQuery],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (selectedWarehouseId) params.set("warehouseId", selectedWarehouseId.toString());
+      if (searchQuery) params.set("search", searchQuery);
+      const response = await fetch(`/api/inventory/by-bin?${params}`, { credentials: "include" });
+      if (!response.ok) throw new Error("Failed to fetch bin inventory");
+      return response.json();
+    },
+    enabled: activeTab === "by-bin",
     staleTime: 30_000,
   });
 
@@ -763,6 +813,45 @@ export default function Inventory() {
       return sortDirection === "asc" ? aVal - bVal : bVal - aVal;
     });
 
+  // Bin-centric view: sorting and filtering
+  const handleBinSort = (field: string) => {
+    if (binSortField === field) {
+      setBinSortDirection(binSortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setBinSortField(field);
+      setBinSortDirection("asc");
+    }
+  };
+
+  const binUnassignedCount = binInventory.filter(b => b.hasUnassigned).length;
+  const binPickCount = binInventory.filter(b => b.locationType === "pick").length;
+  const binReserveCount = binInventory.filter(b => b.locationType === "reserve").length;
+
+  const sortedBinInventory = [...binInventory]
+    .filter(b =>
+      binFilter === "unassigned" ? b.hasUnassigned :
+      binFilter === "pick" ? b.locationType === "pick" :
+      binFilter === "reserve" ? b.locationType === "reserve" :
+      true
+    )
+    .sort((a, b) => {
+      let aVal: any, bVal: any;
+      switch (binSortField) {
+        case "code": aVal = a.locationCode || ""; bVal = b.locationCode || ""; break;
+        case "zone": aVal = a.zone || ""; bVal = b.zone || ""; break;
+        case "sku": aVal = a.items[0]?.sku || ""; bVal = b.items[0]?.sku || ""; break;
+        case "qty": aVal = a.totalQty; bVal = b.totalQty; break;
+        case "reserved": aVal = a.totalReserved; bVal = b.totalReserved; break;
+        case "available": aVal = a.totalAvailable; bVal = b.totalAvailable; break;
+        case "skuCount": aVal = a.skuCount; bVal = b.skuCount; break;
+        default: aVal = a.locationCode || ""; bVal = b.locationCode || "";
+      }
+      if (typeof aVal === "string") {
+        return binSortDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return binSortDirection === "asc" ? aVal - bVal : bVal - aVal;
+    });
+
   const handleAdjustSubmit = () => {
     if (!selectedItem || !adjustmentQty || !adjustmentReason) return;
     adjustInventoryMutation.mutate({
@@ -894,7 +983,7 @@ export default function Inventory() {
       </div>
 
       <div className="flex-1 px-4 md:px-6 pt-2 pb-4 overflow-hidden flex flex-col min-h-0">
-        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); }} className="flex-1 flex flex-col min-h-0">
+        <Tabs value={activeTab} onValueChange={(v) => { setActiveTab(v); setStockFilter("all"); setBinFilter("all"); }} className="flex-1 flex flex-col min-h-0">
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="physical"
@@ -902,6 +991,13 @@ export default function Inventory() {
             >
               <Package className="h-4 w-4 mr-2" />
               Physical Inventory
+            </TabsTrigger>
+            <TabsTrigger
+              value="by-bin"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2 text-sm"
+            >
+              <Grid3x3 className="h-4 w-4 mr-2" />
+              By Bin
             </TabsTrigger>
             <TabsTrigger
               value="operations"
@@ -1050,6 +1146,50 @@ export default function Inventory() {
                       onClick={() => setStockFilter(stockFilter === "no_barcode" ? "all" : "no_barcode")}
                     >
                       {noBarcodeCount} no barcode
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+            {activeTab === "by-bin" && (
+              <>
+                <button
+                  className={`hover:underline ${binFilter === "all" ? "font-semibold" : ""}`}
+                  onClick={() => setBinFilter("all")}
+                >
+                  {binInventory.length} bins with stock
+                </button>
+                {binPickCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${binFilter === "pick" ? "underline font-semibold" : ""}`}
+                      onClick={() => setBinFilter(binFilter === "pick" ? "all" : "pick")}
+                    >
+                      {binPickCount} pick
+                    </button>
+                  </>
+                )}
+                {binReserveCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/40">·</span>
+                    <button
+                      className={`hover:underline ${binFilter === "reserve" ? "underline font-semibold" : ""}`}
+                      onClick={() => setBinFilter(binFilter === "reserve" ? "all" : "reserve")}
+                    >
+                      {binReserveCount} reserve
+                    </button>
+                  </>
+                )}
+                {binUnassignedCount > 0 && (
+                  <>
+                    <span className="text-muted-foreground/30 mx-0.5">|</span>
+                    <span className="text-muted-foreground/60 text-[10px] uppercase tracking-wide">Issues</span>
+                    <button
+                      className={`hover:underline ${binFilter === "unassigned" ? "underline font-semibold" : ""} text-amber-600 font-medium`}
+                      onClick={() => setBinFilter(binFilter === "unassigned" ? "all" : "unassigned")}
+                    >
+                      {binUnassignedCount} with unassigned stock
                     </button>
                   </>
                 )}
@@ -1351,7 +1491,225 @@ export default function Inventory() {
             )}
           </TabsContent>
 
-          {/* ====== TAB 2: Operations ====== */}
+          {/* ====== TAB 2: By Bin ====== */}
+          <TabsContent value="by-bin" className="flex-1 flex flex-col mt-0 min-h-0">
+            {loadingBinInventory ? (
+              <div className="flex-1 flex items-center justify-center">
+                <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              <>
+                {/* Mobile card layout */}
+                <div className="md:hidden space-y-3 flex-1 overflow-auto">
+                  {sortedBinInventory.map((bin) => (
+                    <div key={bin.locationId} className="rounded-md border bg-card p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
+                            {bin.locationCode}
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                              bin.isPickable
+                                ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                : "bg-muted text-muted-foreground"
+                            }`}>
+                              {bin.locationType.replace("_", " ")}
+                            </span>
+                            {bin.hasUnassigned && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                UNASSIGNED STOCK
+                              </span>
+                            )}
+                          </div>
+                          {bin.zone && <div className="text-xs text-muted-foreground mt-0.5">Zone {bin.zone}</div>}
+                        </div>
+                        <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
+                      </div>
+                      <div className="space-y-1.5 mt-2">
+                        {bin.items.map((item) => (
+                          <div key={item.inventoryLevelId} className={`flex items-center justify-between text-xs py-1 px-2 rounded ${item.isAssigned ? "bg-muted/30" : "bg-amber-50 dark:bg-amber-900/10"}`}>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono font-medium truncate">{item.sku}</span>
+                              {!item.isAssigned && (
+                                <span className="text-[9px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 shrink-0">
+                                  NOT ASSIGNED
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0 font-mono">
+                              <span>{item.variantQty}</span>
+                              <span className="text-muted-foreground">{item.reservedQty}</span>
+                              <span className="text-green-600">{item.available}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Desktop table */}
+                <div className="hidden md:block rounded-md border bg-card flex-1 overflow-auto min-h-0">
+                  <Table>
+                    <TableHeader className="bg-muted/40 sticky top-0 z-10">
+                      <TableRow>
+                        <TableHead className="min-w-[160px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("code")}>
+                          <div className="flex items-center gap-1">
+                            Bin
+                            {binSortField === "code" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("sku")}>
+                          <div className="flex items-center gap-1">
+                            SKU / Contents
+                            {binSortField === "sku" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("qty")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Physical
+                            {binSortField === "qty" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("reserved")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Reserved
+                            {binSortField === "reserved" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("available")}>
+                          <div className="flex items-center justify-end gap-1">
+                            Available
+                            {binSortField === "available" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                          </div>
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {sortedBinInventory.map((bin) => (
+                        <React.Fragment key={bin.locationId}>
+                          {bin.skuCount === 1 ? (
+                            // Single SKU in bin — flat row
+                            <TableRow className={bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}>
+                              <TableCell>
+                                <div className="flex items-center gap-1.5">
+                                  <MapPin className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                  <span className="font-mono font-medium">{bin.locationCode}</span>
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                    bin.isPickable
+                                      ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                      : "bg-muted text-muted-foreground"
+                                  }`}>
+                                    {bin.locationType.replace("_", " ")}
+                                  </span>
+                                  {bin.zone && <span className="text-[10px] text-muted-foreground">[{bin.zone}]</span>}
+                                  {bin.warehouseCode && <span className="text-[10px] text-muted-foreground">{bin.warehouseCode}</span>}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono text-sm">{bin.items[0].sku}</span>
+                                  {bin.items[0].variantName && (
+                                    <span className="text-xs text-muted-foreground truncate max-w-[200px]">{bin.items[0].variantName}</span>
+                                  )}
+                                  {!bin.items[0].isAssigned && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                      NOT ASSIGNED
+                                    </span>
+                                  )}
+                                  {bin.assignedSku && bin.items[0].sku !== bin.assignedSku && (
+                                    <span className="text-[10px] text-muted-foreground" title={`Assigned: ${bin.assignedSku}`}>
+                                      (assigned: {bin.assignedSku})
+                                    </span>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                            </TableRow>
+                          ) : (
+                            // Multiple SKUs in bin — expandable row
+                            <>
+                              <TableRow
+                                className={`cursor-pointer hover:bg-muted/50 ${bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}`}
+                                onClick={() => {
+                                  const newExpanded = new Set(expandedBins);
+                                  if (newExpanded.has(bin.locationId)) {
+                                    newExpanded.delete(bin.locationId);
+                                  } else {
+                                    newExpanded.add(bin.locationId);
+                                  }
+                                  setExpandedBins(newExpanded);
+                                }}
+                              >
+                                <TableCell>
+                                  <div className="flex items-center gap-1.5">
+                                    {expandedBins.has(bin.locationId) ?
+                                      <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
+                                      <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                                    }
+                                    <span className="font-mono font-medium">{bin.locationCode}</span>
+                                    <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                      bin.isPickable
+                                        ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                        : "bg-muted text-muted-foreground"
+                                    }`}>
+                                      {bin.locationType.replace("_", " ")}
+                                    </span>
+                                    {bin.zone && <span className="text-[10px] text-muted-foreground">[{bin.zone}]</span>}
+                                    {bin.hasUnassigned && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                        UNASSIGNED
+                                      </span>
+                                    )}
+                                  </div>
+                                </TableCell>
+                                <TableCell>
+                                  <span className="text-sm text-muted-foreground">{bin.skuCount} SKUs</span>
+                                </TableCell>
+                                <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
+                                <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
+                                <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                              </TableRow>
+                              {expandedBins.has(bin.locationId) && bin.items.map((item) => (
+                                <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
+                                  <TableCell></TableCell>
+                                  <TableCell className="pl-8">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-mono text-xs font-medium">{item.sku}</span>
+                                      {item.variantName && (
+                                        <span className="text-xs text-muted-foreground truncate max-w-[200px]">{item.variantName}</span>
+                                      )}
+                                      {!item.isAssigned && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                          NOT ASSIGNED
+                                        </span>
+                                      )}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
+                                  <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
+                                  <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                </TableRow>
+                              ))}
+                            </>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {sortedBinInventory.length > 0 && (
+                  <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                    <div>Showing {sortedBinInventory.length} of {binInventory.length} bins</div>
+                  </div>
+                )}
+              </>
+            )}
+          </TabsContent>
+
+          {/* ====== TAB 3: Operations ====== */}
           <TabsContent value="operations" className="flex-1 flex flex-col mt-0 min-h-0">
             <OperationsView warehouseId={selectedWarehouseId} searchQuery={searchQuery} />
           </TabsContent>

@@ -851,9 +851,12 @@ class PickingService {
     try {
       const tierDefaults = await this.storage.getActiveReplenTierDefaults();
       const allRules = await this.storage.getActiveReplenRules();
+      // Index rules by pickProductVariantId AND by productId (matching replenishment service)
       const ruleByPickVariant = new Map<number, any>();
+      const ruleByProduct = new Map<number, any>();
       for (const r of allRules) {
         if (r.pickProductVariantId) ruleByPickVariant.set(r.pickProductVariantId, r);
+        if (r.productId) ruleByProduct.set(r.productId, r);
       }
 
       const allLocs = await this.storage.getAllWarehouseLocations();
@@ -870,7 +873,9 @@ class PickingService {
 
         const systemQty = pickLevel?.variantQty ?? 0;
 
-        const rule = ruleByPickVariant.get(variant.id);
+        // Check variant-level rule first, then product-level rule (matches replenishment service)
+        const rule = ruleByPickVariant.get(variant.id)
+          || (variant.productId ? ruleByProduct.get(variant.productId) : undefined);
         const tierDefault = tierDefaults.find((td: any) =>
           td.hierarchyLevel === variant.hierarchyLevel && td.isActive === 1
         );

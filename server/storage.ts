@@ -713,7 +713,7 @@ export class DatabaseStorage implements IStorage {
     imageUrl: string | null;
   } | undefined> {
     // PRIORITY 1: Check product_locations for assigned bin (respects manual bin assignments)
-    // JOIN with product_variants to get the canonical barcode (not the cached copy in product_locations)
+    // Match by product_variant_id FK (reliable) OR cached sku string (backwards compat)
     const assigned = await db.execute<{
       location_code: string;
       zone: string | null;
@@ -726,8 +726,8 @@ export class DatabaseStorage implements IStorage {
         pv.barcode,
         pl.image_url
       FROM product_locations pl
-      LEFT JOIN product_variants pv ON UPPER(pv.sku) = UPPER(pl.sku)
-      WHERE UPPER(pl.sku) = ${sku.toUpperCase()}
+      JOIN product_variants pv ON pv.id = pl.product_variant_id
+      WHERE (UPPER(pv.sku) = ${sku.toUpperCase()} OR UPPER(pl.sku) = ${sku.toUpperCase()})
         AND pl.is_primary = 1
         AND pl.status = 'active'
       ORDER BY pl.updated_at DESC

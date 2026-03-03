@@ -7451,6 +7451,143 @@ export async function registerRoutes(
     }
   });
 
+  // Bin-centric inventory view: one row per bin that has stock, showing what's in it
+  app.get("/api/inventory/by-bin", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const search = (req.query.search as string || "").trim();
+
+      // Get all bins that have actual inventory (variant_qty != 0), with the SKUs in them
+      // Also flag whether each SKU is assigned to that bin via product_locations
+      const result = await db.execute<{
+        warehouse_location_id: number;
+        location_code: string;
+        location_type: string;
+        zone: string | null;
+        is_pickable: number;
+        warehouse_id: number | null;
+        warehouse_code: string | null;
+        inventory_level_id: number;
+        product_variant_id: number;
+        sku: string | null;
+        variant_name: string | null;
+        product_name: string | null;
+        variant_qty: number;
+        reserved_qty: number;
+        picked_qty: number;
+        is_assigned: number;
+        assigned_sku: string | null;
+      }>(sql`
+        SELECT
+          wl.id as warehouse_location_id,
+          wl.code as location_code,
+          wl.location_type,
+          wl.zone,
+          wl.is_pickable,
+          wl.warehouse_id,
+          w.code as warehouse_code,
+          il.id as inventory_level_id,
+          il.product_variant_id,
+          pv.sku,
+          pv.name as variant_name,
+          COALESCE(p.title, p.name) as product_name,
+          il.variant_qty,
+          il.reserved_qty,
+          il.picked_qty,
+          CASE WHEN pl.id IS NOT NULL THEN 1 ELSE 0 END as is_assigned,
+          (SELECT pv2.sku FROM product_locations pl2
+           JOIN product_variants pv2 ON pl2.product_variant_id = pv2.id
+           WHERE pl2.warehouse_location_id = wl.id LIMIT 1) as assigned_sku
+        FROM inventory_levels il
+        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        JOIN product_variants pv ON il.product_variant_id = pv.id
+        LEFT JOIN products p ON pv.product_id = p.id
+        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
+        LEFT JOIN warehouses w ON wl.warehouse_id = w.id
+        WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
+          ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
+          ${search ? sql`AND (wl.code LIKE ${'%' + search + '%'} OR pv.sku LIKE ${'%' + search + '%'} OR pv.name LIKE ${'%' + search + '%'})` : sql``}
+        ORDER BY wl.code, pv.sku
+      `);
+
+      // Group by bin: each bin gets an array of SKUs
+      const binMap = new Map<number, {
+        locationId: number;
+        locationCode: string;
+        locationType: string;
+        zone: string | null;
+        isPickable: boolean;
+        warehouseId: number | null;
+        warehouseCode: string | null;
+        assignedSku: string | null;
+        items: Array<{
+          inventoryLevelId: number;
+          variantId: number;
+          sku: string | null;
+          variantName: string | null;
+          productName: string | null;
+          variantQty: number;
+          reservedQty: number;
+          pickedQty: number;
+          available: number;
+          isAssigned: boolean;
+        }>;
+        totalQty: number;
+        totalReserved: number;
+        totalAvailable: number;
+        skuCount: number;
+        hasUnassigned: boolean;
+      }>();
+
+      for (const row of result.rows) {
+        const locId = row.warehouse_location_id;
+        if (!binMap.has(locId)) {
+          binMap.set(locId, {
+            locationId: locId,
+            locationCode: row.location_code,
+            locationType: row.location_type,
+            zone: row.zone,
+            isPickable: row.is_pickable === 1,
+            warehouseId: row.warehouse_id,
+            warehouseCode: row.warehouse_code,
+            assignedSku: row.assigned_sku,
+            items: [],
+            totalQty: 0,
+            totalReserved: 0,
+            totalAvailable: 0,
+            skuCount: 0,
+            hasUnassigned: false,
+          });
+        }
+        const bin = binMap.get(locId)!;
+        const available = row.variant_qty - row.reserved_qty;
+        const isAssigned = row.is_assigned === 1;
+        bin.items.push({
+          inventoryLevelId: row.inventory_level_id,
+          variantId: row.product_variant_id,
+          sku: row.sku,
+          variantName: row.variant_name,
+          productName: row.product_name,
+          variantQty: row.variant_qty,
+          reservedQty: row.reserved_qty,
+          pickedQty: row.picked_qty,
+          available,
+          isAssigned,
+        });
+        bin.totalQty += row.variant_qty;
+        bin.totalReserved += row.reserved_qty;
+        bin.totalAvailable += available;
+        bin.skuCount++;
+        if (!isAssigned) bin.hasUnassigned = true;
+      }
+
+      res.json(Array.from(binMap.values()));
+    } catch (error) {
+      console.error("Error fetching inventory by bin:", error);
+      res.status(500).json({ error: "Failed to fetch inventory by bin" });
+    }
+  });
+
   // Get inventory breakdown by location for a specific variant
   app.get("/api/inventory/levels/:variantId/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {

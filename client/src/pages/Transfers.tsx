@@ -139,6 +139,9 @@ export default function Transfers() {
       toast({ title: "Transfer Complete", description: "Inventory moved successfully" });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/transfers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/skus/search"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/sku-locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/by-bin"] });
       resetForm();
     },
     onError: (error: Error) => {
@@ -157,6 +160,9 @@ export default function Transfers() {
       toast({ title: "Transfer Undone", description: "Inventory restored to original location" });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/transfers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/skus/search"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/sku-locations"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/by-bin"] });
     },
     onError: (error: Error) => {
       toast({ title: "Undo Failed", description: error.message, variant: "destructive" });
