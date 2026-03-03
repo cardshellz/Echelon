@@ -395,7 +395,7 @@ export default function InboundShipmentDetail() {
         estimatedCents: cents,
         actualCents: cents,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
-        invoiceDate: costDate || null,
+        invoiceDate: costDate ? new Date(costDate + "T00:00:00").toISOString() : null,
       };
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
       return res.json();
@@ -420,7 +420,7 @@ export default function InboundShipmentDetail() {
         estimatedCents: cents,
         actualCents: cents,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
-        invoiceDate: costDate || null,
+        invoiceDate: costDate ? new Date(costDate + "T00:00:00").toISOString() : null,
       };
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
       return res.json();
