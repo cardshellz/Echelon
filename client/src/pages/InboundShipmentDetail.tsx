@@ -68,9 +68,11 @@ const MODE_BADGES: Record<string, { label: string; icon: React.ReactNode }> = {
 
 const COST_TYPE_OPTIONS = [
   { value: "freight", label: "Freight" },
+  { value: "dimensions_adjustment", label: "Dimensions Adjustment" },
   { value: "duty", label: "Duty" },
   { value: "insurance", label: "Insurance" },
   { value: "brokerage", label: "Brokerage" },
+  { value: "platform_fee", label: "Platform Fee" },
   { value: "port_handling", label: "Port Handling" },
   { value: "drayage", label: "Drayage" },
   { value: "warehousing", label: "Warehousing" },
@@ -183,6 +185,8 @@ export default function InboundShipmentDetail() {
     description: "",
     amount: "",
     allocationMethod: "default",
+    vendorName: "",
+    costDate: "",
   });
 
   // Edit cost form
@@ -384,13 +388,14 @@ export default function InboundShipmentDetail() {
   // Cost mutations
   const addCostMutation = useMutation({
     mutationFn: async (data: any) => {
-      const { amount, ...rest } = data;
+      const { amount, costDate, ...rest } = data;
       const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
         estimatedCents: cents,
         actualCents: cents,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
+        invoiceDate: costDate || null,
       };
       const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
       return res.json();
@@ -398,7 +403,7 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", costDate: "" });
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -408,13 +413,14 @@ export default function InboundShipmentDetail() {
 
   const updateCostMutation = useMutation({
     mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
-      const { amount, ...rest } = data;
+      const { amount, costDate, ...rest } = data;
       const cents = Math.round(parseFloat(amount || "0") * 100);
       const payload = {
         ...rest,
         estimatedCents: cents,
         actualCents: cents,
         allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
+        invoiceDate: costDate || null,
       };
       const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
       return res.json();
@@ -1016,9 +1022,15 @@ export default function InboundShipmentDetail() {
                     <CardContent className="p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex-1 min-w-0">
-                          <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
+                            {cost.invoiceDate && <span className="text-xs text-muted-foreground">{format(new Date(cost.invoiceDate), "MMM d, yyyy")}</span>}
+                          </div>
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
-                          <div className="text-sm font-mono mt-1">{formatCents(cost.estimatedCents || cost.actualCents)}</div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-sm font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</span>
+                            {cost.vendorName && <span className="text-xs text-muted-foreground">{cost.vendorName}</span>}
+                          </div>
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1033,6 +1045,8 @@ export default function InboundShipmentDetail() {
                                   description: cost.description || "",
                                   amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
+                                  vendorName: cost.vendorName || "",
+                                  costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
                                 });
                                 setShowEditCostDialog(true);
                               }}
@@ -1071,9 +1085,11 @@ export default function InboundShipmentDetail() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Date</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead>
+                  <TableHead>Provider</TableHead>
                   <TableHead>Method</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
@@ -1081,7 +1097,7 @@ export default function InboundShipmentDetail() {
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 5 : 4} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 7 : 6} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1089,11 +1105,15 @@ export default function InboundShipmentDetail() {
                   <>
                     {costs.map((cost: any) => (
                       <TableRow key={cost.id}>
+                        <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+                          {cost.invoiceDate ? format(new Date(cost.invoiceDate), "MMM d, yyyy") : "—"}
+                        </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
+                        <TableCell className="text-sm">{cost.vendorName || "—"}</TableCell>
                         <TableCell className="text-xs">
                           {cost.allocationMethod
                             ? ALLOCATION_METHOD_LABELS[cost.allocationMethod] || cost.allocationMethod.replace(/_/g, " ")
@@ -1112,6 +1132,8 @@ export default function InboundShipmentDetail() {
                                     description: cost.description || "",
                                     amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                     allocationMethod: cost.allocationMethod || "default",
+                                    vendorName: cost.vendorName || "",
+                                    costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
                                       });
                                   setShowEditCostDialog(true);
                                 }}
@@ -1133,11 +1155,11 @@ export default function InboundShipmentDetail() {
                     ))}
                     {/* Summary row */}
                     <TableRow className="bg-muted/50 font-medium">
-                      <TableCell colSpan={2} className="text-right">Total</TableCell>
+                      <TableCell colSpan={3} className="text-right">Total</TableCell>
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 2 : 1} />
+                      <TableCell colSpan={isEditable ? 3 : 2} />
                     </TableRow>
                   </>
                 )}
@@ -1869,6 +1891,27 @@ export default function InboundShipmentDetail() {
               </Select>
             </div>
 
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Date</Label>
+                <Input
+                  type="date"
+                  value={newCost.costDate}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, costDate: e.target.value }))}
+                  className="h-10"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Service Provider</Label>
+                <Input
+                  value={newCost.vendorName}
+                  onChange={(e) => setNewCost((prev) => ({ ...prev, vendorName: e.target.value }))}
+                  placeholder="e.g. Freightos, Clearit"
+                  className="h-10"
+                />
+              </div>
+            </div>
+
             <div className="space-y-2">
               <Label>Description</Label>
               <Input
@@ -1944,6 +1987,27 @@ export default function InboundShipmentDetail() {
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Date</Label>
+                  <Input
+                    type="date"
+                    value={editingCost.costDate}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, costDate: e.target.value }))}
+                    className="h-10"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Service Provider</Label>
+                  <Input
+                    value={editingCost.vendorName}
+                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, vendorName: e.target.value }))}
+                    placeholder="e.g. Freightos, Clearit"
+                    className="h-10"
+                  />
+                </div>
               </div>
 
               <div className="space-y-2">

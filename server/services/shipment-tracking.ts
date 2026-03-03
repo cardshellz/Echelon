@@ -120,6 +120,7 @@ const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
   brokerage: "by_line_count",
   inspection: "by_line_count",
+  platform_fee: "by_line_count",
 };
 
 // ── Service factory ─────────────────────────────────────────────────
@@ -917,8 +918,8 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
   }
 
   function getCostCategory(costType: string): "freight" | "duty" | "insurance" | "other" {
-    if (costType === "freight" || costType === "drayage" || costType === "port_handling") return "freight";
-    if (costType === "duty") return "duty";
+    if (costType === "freight" || costType === "drayage" || costType === "port_handling" || costType === "dimensions_adjustment") return "freight";
+    if (costType === "duty" || costType === "brokerage") return "duty";
     if (costType === "insurance") return "insurance";
     return "other";
   }
