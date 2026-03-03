@@ -116,6 +116,15 @@ const ALLOCATION_METHOD_OPTIONS = [
   { value: "by_line_count", label: "By Line Count" },
 ];
 
+const PAYMENT_STATUS_BADGES: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive"; className?: string }> = {
+  unlinked: { label: "—", variant: "outline" },
+  unpaid: { label: "Unpaid", variant: "outline", className: "border-amber-500 text-amber-600" },
+  partial: { label: "Partial", variant: "outline", className: "border-yellow-500 text-yellow-600" },
+  paid: { label: "Paid", variant: "outline", className: "border-green-500 text-green-600" },
+  disputed: { label: "Disputed", variant: "destructive" },
+  voided: { label: "Voided", variant: "secondary" },
+};
+
 // ── Helpers ──
 
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
@@ -194,11 +203,19 @@ export default function InboundShipmentDetail() {
     amount: "",
     allocationMethod: "default",
     vendorName: "",
+    vendorId: null as number | null,
     costDate: "",
   });
+  const [costVendorOpen, setCostVendorOpen] = useState(false);
+  const [costVendorSearch, setCostVendorSearch] = useState("");
 
   // Edit cost form
   const [editingCost, setEditingCost] = useState<any>(null);
+  const [editCostVendorOpen, setEditCostVendorOpen] = useState(false);
+  const [editCostVendorSearch, setEditCostVendorSearch] = useState("");
+
+  // Create invoices
+  const [showCreateInvoicesDialog, setShowCreateInvoicesDialog] = useState(false);
 
   // ── Queries ──
 
@@ -227,8 +244,14 @@ export default function InboundShipmentDetail() {
     },
   });
 
+  const { data: vendorsData } = useQuery<any[]>({
+    queryKey: ["/api/vendors"],
+    enabled: showAddCostDialog || !!editingCost,
+  });
+
   const lines = shipment?.lines ?? [];
   const costs = shipment?.costs ?? [];
+  const paymentStatus = shipment?.paymentStatus ?? null;
   const statusHistory = shipment?.statusHistory ?? [];
   const purchaseOrders = posData?.pos ?? posData?.purchaseOrders ?? [];
   const poLines = selectedPo?.lines ?? [];
@@ -411,7 +434,8 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       setShowAddCostDialog(false);
-      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", costDate: "" });
+      setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, costDate: "" });
+      setCostVendorSearch("");
       toast({ title: "Cost added" });
     },
     onError: (err: Error) => {
@@ -452,6 +476,29 @@ export default function InboundShipmentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
       toast({ title: "Cost removed" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const createInvoicesMutation = useMutation({
+    mutationFn: async (vendorMappings?: Record<string, number>) => {
+      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/create-invoices`, {
+        vendorMappings,
+      });
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+      setShowCreateInvoicesDialog(false);
+      if (data.invoices?.length > 0) {
+        toast({ title: `${data.invoices.length} invoice(s) created in AP` });
+      } else if (data.unmappedVendors?.length > 0) {
+        toast({ title: "Unmapped vendors", description: `Please map: ${data.unmappedVendors.join(", ")}`, variant: "destructive" });
+      } else {
+        toast({ title: "No costs to invoice" });
+      }
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1008,11 +1055,29 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 2: Costs ══ */}
         <TabsContent value="costs" className="space-y-4">
-          {isEditable && (
-            <Button variant="outline" onClick={() => setShowAddCostDialog(true)} className="min-h-[44px]">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Cost
-            </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {isEditable && (
+              <Button variant="outline" onClick={() => setShowAddCostDialog(true)} className="min-h-[44px]">
+                <Plus className="h-4 w-4 mr-2" />
+                Add Cost
+              </Button>
+            )}
+            {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId) && (
+              <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(true)} className="min-h-[44px]">
+                <FileText className="h-4 w-4 mr-2" />
+                Create Invoices
+              </Button>
+            )}
+          </div>
+
+          {/* Payment summary bar */}
+          {paymentStatus?.summary && costs.length > 0 && (
+            <div className="flex flex-wrap gap-4 text-sm px-1">
+              <span>Total: <strong className="font-mono">{formatCents(paymentStatus.summary.totalCents)}</strong></span>
+              <span>Linked: <strong className="font-mono">{formatCents(paymentStatus.summary.linkedCents)}</strong></span>
+              <span className="text-green-600">Paid: <strong className="font-mono">{formatCents(paymentStatus.summary.paidCents)}</strong></span>
+              <span className="text-amber-600">Outstanding: <strong className="font-mono">{formatCents(paymentStatus.summary.outstandingCents)}</strong></span>
+            </div>
           )}
 
           {/* Mobile cards */}
@@ -1038,6 +1103,13 @@ export default function InboundShipmentDetail() {
                           <div className="flex items-center gap-2 mt-1">
                             <span className="text-sm font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</span>
                             {cost.vendorName && <span className="text-xs text-muted-foreground">{cost.vendorName}</span>}
+                            {(() => {
+                              const costStatus = paymentStatus?.costs?.find((ps: any) => ps.costId === cost.id);
+                              if (!costStatus || costStatus.paymentStatus === "unlinked") return null;
+                              const badge = PAYMENT_STATUS_BADGES[costStatus.paymentStatus];
+                              if (!badge) return null;
+                              return <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>;
+                            })()}
                           </div>
                         </div>
                         {isEditable && (
@@ -1053,6 +1125,7 @@ export default function InboundShipmentDetail() {
                                   description: cost.description || "",
                                   amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
                                   allocationMethod: cost.allocationMethod || "default",
+                                  vendorId: cost.vendorId || null,
                                   vendorName: cost.vendorName || "",
                                   costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
                                 });
@@ -1099,13 +1172,14 @@ export default function InboundShipmentDetail() {
                   <TableHead className="text-right">Amount</TableHead>
                   <TableHead>Provider</TableHead>
                   <TableHead>Method</TableHead>
+                  <TableHead>Payment</TableHead>
                   {isEditable && <TableHead className="w-20"></TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {costs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={isEditable ? 7 : 6} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={isEditable ? 8 : 7} className="text-center text-muted-foreground py-8">
                       No costs recorded yet. Click "Add Cost" to add shipment costs.
                     </TableCell>
                   </TableRow>
@@ -1126,6 +1200,25 @@ export default function InboundShipmentDetail() {
                           {cost.allocationMethod
                             ? ALLOCATION_METHOD_LABELS[cost.allocationMethod] || cost.allocationMethod.replace(/_/g, " ")
                             : `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`}
+                        </TableCell>
+                        <TableCell>
+                          {(() => {
+                            const costStatus = paymentStatus?.costs?.find((ps: any) => ps.costId === cost.id);
+                            if (!costStatus || costStatus.paymentStatus === "unlinked") return <span className="text-xs text-muted-foreground">—</span>;
+                            const badge = PAYMENT_STATUS_BADGES[costStatus.paymentStatus];
+                            if (!badge) return null;
+                            return costStatus.vendorInvoiceId ? (
+                              <Badge
+                                variant={badge.variant}
+                                className={`text-xs cursor-pointer ${badge.className || ""}`}
+                                onClick={() => navigate(`/ap-invoices/${costStatus.vendorInvoiceId}`)}
+                              >
+                                {badge.label}
+                              </Badge>
+                            ) : (
+                              <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>
+                            );
+                          })()}
                         </TableCell>
                         {isEditable && (
                           <TableCell>
@@ -1167,7 +1260,7 @@ export default function InboundShipmentDetail() {
                       <TableCell className="text-right font-mono">
                         {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
                       </TableCell>
-                      <TableCell colSpan={isEditable ? 3 : 2} />
+                      <TableCell colSpan={isEditable ? 4 : 3} />
                     </TableRow>
                   </>
                 )}
@@ -1915,12 +2008,40 @@ export default function InboundShipmentDetail() {
               </div>
               <div className="space-y-2">
                 <Label>Service Provider</Label>
-                <Input
-                  value={newCost.vendorName}
-                  onChange={(e) => setNewCost((prev) => ({ ...prev, vendorName: e.target.value }))}
-                  placeholder="e.g. Freightos, Clearit"
-                  className="h-10"
-                />
+                <Popover open={costVendorOpen} onOpenChange={setCostVendorOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
+                      {newCost.vendorName || "Select vendor..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search vendors..." value={costVendorSearch} onValueChange={setCostVendorSearch} />
+                      <CommandList>
+                        <CommandEmpty>No vendors found</CommandEmpty>
+                        <CommandGroup>
+                          {(vendorsData ?? [])
+                            .filter((v: any) => !costVendorSearch || v.name?.toLowerCase().includes(costVendorSearch.toLowerCase()))
+                            .slice(0, 50)
+                            .map((v: any) => (
+                              <CommandItem
+                                key={v.id}
+                                onSelect={() => {
+                                  setNewCost((prev) => ({ ...prev, vendorId: v.id, vendorName: v.name }));
+                                  setCostVendorOpen(false);
+                                  setCostVendorSearch("");
+                                }}
+                              >
+                                <Check className={`mr-2 h-4 w-4 ${newCost.vendorId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                {v.name}
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
               </div>
             </div>
 
@@ -2017,12 +2138,40 @@ export default function InboundShipmentDetail() {
                 </div>
                 <div className="space-y-2">
                   <Label>Service Provider</Label>
-                  <Input
-                    value={editingCost.vendorName}
-                    onChange={(e) => setEditingCost((prev: any) => ({ ...prev, vendorName: e.target.value }))}
-                    placeholder="e.g. Freightos, Clearit"
-                    className="h-10"
-                  />
+                  <Popover open={editCostVendorOpen} onOpenChange={setEditCostVendorOpen}>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
+                        {editingCost.vendorName || "Select vendor..."}
+                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                      <Command shouldFilter={false}>
+                        <CommandInput placeholder="Search vendors..." value={editCostVendorSearch} onValueChange={setEditCostVendorSearch} />
+                        <CommandList>
+                          <CommandEmpty>No vendors found</CommandEmpty>
+                          <CommandGroup>
+                            {(vendorsData ?? [])
+                              .filter((v: any) => !editCostVendorSearch || v.name?.toLowerCase().includes(editCostVendorSearch.toLowerCase()))
+                              .slice(0, 50)
+                              .map((v: any) => (
+                                <CommandItem
+                                  key={v.id}
+                                  onSelect={() => {
+                                    setEditingCost((prev: any) => ({ ...prev, vendorId: v.id, vendorName: v.name }));
+                                    setEditCostVendorOpen(false);
+                                    setEditCostVendorSearch("");
+                                  }}
+                                >
+                                  <Check className={`mr-2 h-4 w-4 ${editingCost.vendorId === v.id ? "opacity-100" : "opacity-0"}`} />
+                                  {v.name}
+                                </CommandItem>
+                              ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
                 </div>
               </div>
 
@@ -2080,6 +2229,48 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══════ Create Invoices Dialog ═══════ */}
+      <Dialog open={showCreateInvoicesDialog} onOpenChange={setShowCreateInvoicesDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create AP Invoices</DialogTitle>
+            <DialogDescription>
+              Create vendor invoices in Accounts Payable from unlinked shipment costs. Costs will be grouped by vendor.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {(() => {
+              const unlinked = costs.filter((c: any) => !c.vendorInvoiceId);
+              const groups: Record<string, { vendorName: string; count: number; totalCents: number }> = {};
+              for (const c of unlinked) {
+                const key = c.vendorName || "Unknown";
+                if (!groups[key]) groups[key] = { vendorName: key, count: 0, totalCents: 0 };
+                groups[key].count++;
+                groups[key].totalCents += c.estimatedCents || c.actualCents || 0;
+              }
+              return Object.values(groups).map((g) => (
+                <div key={g.vendorName} className="flex justify-between items-center p-2 border rounded">
+                  <div>
+                    <div className="font-medium text-sm">{g.vendorName}</div>
+                    <div className="text-xs text-muted-foreground">{g.count} cost line{g.count !== 1 ? "s" : ""}</div>
+                  </div>
+                  <span className="font-mono text-sm">{formatCents(g.totalCents)}</span>
+                </div>
+              ));
+            })()}
+          </div>
+          <div className="flex gap-2 justify-end mt-2">
+            <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(false)}>Cancel</Button>
+            <Button
+              onClick={() => createInvoicesMutation.mutate(undefined)}
+              disabled={createInvoicesMutation.isPending}
+            >
+              {createInvoicesMutation.isPending ? "Creating..." : "Create Invoices"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

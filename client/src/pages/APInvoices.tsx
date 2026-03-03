@@ -216,7 +216,10 @@ export default function APInvoices() {
                       className={`cursor-pointer hover:bg-muted/50 ${inv.status === "voided" ? "opacity-40" : ""}`}
                       onClick={() => navigate(`/ap-invoices/${inv.id}`)}
                     >
-                      <TableCell className="font-mono font-medium">{inv.invoiceNumber}</TableCell>
+                      <TableCell className="font-mono font-medium">
+                        {inv.invoiceNumber}
+                        {inv.inboundShipmentId && <span className="ml-1.5 text-xs text-blue-500" title="From shipment">SHP</span>}
+                      </TableCell>
                       <TableCell>{inv.vendorName ?? "—"}</TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {inv.poNumbers?.length > 0 ? inv.poNumbers.join(", ") : "—"}

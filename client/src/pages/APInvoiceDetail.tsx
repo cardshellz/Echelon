@@ -38,6 +38,7 @@ import {
   Trash2,
   FileText,
   RefreshCw,
+  Ship,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 
@@ -416,6 +417,12 @@ export default function APInvoiceDetail() {
               </span>
             </div>
             <p className="text-sm text-muted-foreground">{invoice.vendorName}</p>
+            {invoice.inboundShipmentId && (
+              <Link href={`/shipments/${invoice.inboundShipmentId}`} className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline mt-0.5">
+                <Ship className="h-3 w-3" />
+                Source: Shipment
+              </Link>
+            )}
           </div>
         </div>
 

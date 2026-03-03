@@ -2232,6 +2232,8 @@ export const shipmentCosts = pgTable("shipment_costs", {
   dueDate: timestamp("due_date"),
   paidDate: timestamp("paid_date"),
   vendorName: text("vendor_name"),
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  vendorInvoiceId: integer("vendor_invoice_id").references(() => vendorInvoices.id, { onDelete: "set null" }),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -2335,6 +2337,7 @@ export const vendorInvoices = pgTable("vendor_invoices", {
   ourReference: varchar("our_reference", { length: 100 }), // Internal reference
 
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
+  inboundShipmentId: integer("inbound_shipment_id").references(() => inboundShipments.id, { onDelete: "set null" }),
 
   status: varchar("status", { length: 20 }).notNull().default("received"),
 

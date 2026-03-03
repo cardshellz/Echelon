@@ -14,6 +14,8 @@ import {
   purchaseOrders,
   purchaseOrderLines,
   vendors,
+  shipmentCosts,
+  inboundShipments,
 } from "../../shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc } from "drizzle-orm";
 import { format } from "date-fns";
@@ -936,4 +938,261 @@ export async function getAttachmentById(id: number) {
 
 export async function removeAttachment(id: number) {
   await db.delete(vendorInvoiceAttachments).where(eq(vendorInvoiceAttachments.id, id));
+}
+
+// ─── Shipment Cost → AP Bridge ──────────────────────────────────────────────
+
+/**
+ * Create vendor invoices from unlinked shipment costs.
+ * Groups costs by vendor_id (falls back to vendor_name text match).
+ * Returns created invoices + any unmapped vendor names.
+ */
+export async function createInvoicesFromShipmentCosts(
+  shipmentId: number,
+  options?: { vendorMappings?: Record<string, number> } // vendorName → vendorId overrides
+) {
+  // Fetch shipment for reference number
+  const [shipment] = await db
+    .select({ shipmentNumber: inboundShipments.shipmentNumber })
+    .from(inboundShipments)
+    .where(eq(inboundShipments.id, shipmentId));
+  if (!shipment) throw new Error("Shipment not found");
+
+  // Fetch unlinked costs
+  const costs = await db
+    .select()
+    .from(shipmentCosts)
+    .where(
+      and(
+        eq(shipmentCosts.inboundShipmentId, shipmentId),
+        sql`${shipmentCosts.vendorInvoiceId} IS NULL`
+      )
+    );
+
+  if (costs.length === 0) return { invoices: [], unmappedVendors: [] };
+
+  // Group costs by vendor
+  const groups: Record<string, { vendorId: number | null; vendorName: string; costs: typeof costs }> = {};
+  const unmappedVendors: string[] = [];
+
+  for (const cost of costs) {
+    let vendorId = cost.vendorId;
+    const vendorName = cost.vendorName ?? "Unknown";
+
+    // Apply user-provided mappings for unmatched vendors
+    if (!vendorId && options?.vendorMappings?.[vendorName]) {
+      vendorId = options.vendorMappings[vendorName];
+    }
+
+    // Try text match if still no vendorId
+    if (!vendorId && cost.vendorName) {
+      const [matched] = await db
+        .select({ id: vendors.id })
+        .from(vendors)
+        .where(sql`LOWER(TRIM(${vendors.name})) = LOWER(TRIM(${cost.vendorName}))`)
+        .limit(1);
+      if (matched) vendorId = matched.id;
+    }
+
+    const key = vendorId ? `v:${vendorId}` : `n:${vendorName}`;
+
+    if (!vendorId && !unmappedVendors.includes(vendorName)) {
+      unmappedVendors.push(vendorName);
+    }
+
+    if (!groups[key]) {
+      groups[key] = { vendorId, vendorName, costs: [] };
+    }
+    groups[key].costs.push(cost);
+  }
+
+  // Skip groups without a vendorId — they need mapping first
+  if (unmappedVendors.length > 0) {
+    return { invoices: [], unmappedVendors };
+  }
+
+  // Create one invoice per vendor group
+  const createdInvoices = [];
+  const dateStr = format(new Date(), "yyyyMMdd");
+
+  for (const [, group] of Object.entries(groups)) {
+    if (!group.vendorId) continue;
+
+    // Calculate total from actual (preferred) or estimated cents
+    const totalCents = group.costs.reduce(
+      (sum, c) => sum + (Number(c.actualCents) || Number(c.estimatedCents) || 0),
+      0
+    );
+
+    const invoiceNumber = `${shipment.shipmentNumber}-${dateStr}`;
+
+    // Create the invoice via existing createInvoice
+    const invoice = await createInvoice({
+      invoiceNumber,
+      ourReference: `Shipment ${shipment.shipmentNumber}`,
+      vendorId: group.vendorId,
+      invoiceDate: new Date(),
+      invoicedAmountCents: totalCents,
+    });
+
+    // Set inboundShipmentId backreference
+    await db
+      .update(vendorInvoices)
+      .set({ inboundShipmentId: shipmentId, updatedAt: new Date() })
+      .where(eq(vendorInvoices.id, invoice.id));
+
+    // Create one invoice line per cost
+    let lineNum = 0;
+    for (const cost of group.costs) {
+      lineNum++;
+      const costAmount = Number(cost.actualCents) || Number(cost.estimatedCents) || 0;
+
+      await db.insert(vendorInvoiceLines).values({
+        vendorInvoiceId: invoice.id,
+        lineNumber: lineNum,
+        description: cost.description || cost.costType,
+        productName: cost.costType,
+        qtyInvoiced: 1,
+        unitCostCents: costAmount,
+        lineTotalCents: costAmount,
+        matchStatus: "matched",
+      });
+
+      // Link shipment cost back to the invoice
+      await db
+        .update(shipmentCosts)
+        .set({
+          vendorInvoiceId: invoice.id,
+          vendorId: group.vendorId,
+          updatedAt: new Date(),
+        })
+        .where(eq(shipmentCosts.id, cost.id));
+    }
+
+    createdInvoices.push({ ...invoice, inboundShipmentId: shipmentId });
+  }
+
+  return { invoices: createdInvoices, unmappedVendors };
+}
+
+/**
+ * Get payment status for each shipment cost + summary totals.
+ */
+export async function getShipmentCostPaymentStatus(shipmentId: number) {
+  const costs = await db
+    .select({
+      costId: shipmentCosts.id,
+      costType: shipmentCosts.costType,
+      description: shipmentCosts.description,
+      vendorName: shipmentCosts.vendorName,
+      actualCents: shipmentCosts.actualCents,
+      estimatedCents: shipmentCosts.estimatedCents,
+      vendorInvoiceId: shipmentCosts.vendorInvoiceId,
+      invoiceStatus: vendorInvoices.status,
+      invoiceNumber: vendorInvoices.invoiceNumber,
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents,
+      paidAmountCents: vendorInvoices.paidAmountCents,
+      balanceCents: vendorInvoices.balanceCents,
+    })
+    .from(shipmentCosts)
+    .leftJoin(vendorInvoices, eq(shipmentCosts.vendorInvoiceId, vendorInvoices.id))
+    .where(eq(shipmentCosts.inboundShipmentId, shipmentId));
+
+  let totalCents = 0;
+  let linkedCents = 0;
+  let paidCents = 0;
+  let outstandingCents = 0;
+
+  const costStatuses = costs.map((c) => {
+    const amount = Number(c.actualCents) || Number(c.estimatedCents) || 0;
+    totalCents += amount;
+
+    let paymentStatus: "unlinked" | "unpaid" | "partial" | "paid" | "disputed" | "voided" = "unlinked";
+
+    if (c.vendorInvoiceId && c.invoiceStatus) {
+      linkedCents += amount;
+      const paid = Number(c.paidAmountCents) || 0;
+      const balance = Number(c.balanceCents) || 0;
+
+      if (c.invoiceStatus === "voided") {
+        paymentStatus = "voided";
+      } else if (c.invoiceStatus === "disputed") {
+        paymentStatus = "disputed";
+        outstandingCents += amount;
+      } else if (c.invoiceStatus === "paid") {
+        paymentStatus = "paid";
+        paidCents += amount;
+      } else if (paid > 0) {
+        paymentStatus = "partial";
+        // Proportional: this cost's share of paid
+        const invoiceTotal = Number(c.invoicedAmountCents) || 1;
+        const costPaid = Math.round((amount / invoiceTotal) * paid);
+        paidCents += costPaid;
+        outstandingCents += amount - costPaid;
+      } else {
+        paymentStatus = "unpaid";
+        outstandingCents += amount;
+      }
+    } else {
+      outstandingCents += amount;
+    }
+
+    return {
+      costId: c.costId,
+      costType: c.costType,
+      description: c.description,
+      vendorName: c.vendorName,
+      amountCents: amount,
+      vendorInvoiceId: c.vendorInvoiceId,
+      invoiceNumber: c.invoiceNumber,
+      invoiceStatus: c.invoiceStatus,
+      paymentStatus,
+    };
+  });
+
+  return {
+    costs: costStatuses,
+    summary: {
+      totalCents,
+      linkedCents,
+      paidCents,
+      outstandingCents,
+    },
+  };
+}
+
+/**
+ * Link a single shipment cost to an existing vendor invoice.
+ */
+export async function linkCostToInvoice(costId: number, vendorInvoiceId: number) {
+  const [cost] = await db.select().from(shipmentCosts).where(eq(shipmentCosts.id, costId));
+  if (!cost) throw new Error("Shipment cost not found");
+
+  const [invoice] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, vendorInvoiceId));
+  if (!invoice) throw new Error("Vendor invoice not found");
+
+  await db
+    .update(shipmentCosts)
+    .set({ vendorInvoiceId, vendorId: invoice.vendorId, updatedAt: new Date() })
+    .where(eq(shipmentCosts.id, costId));
+
+  // Set shipment backreference if not already set
+  if (!invoice.inboundShipmentId) {
+    await db
+      .update(vendorInvoices)
+      .set({ inboundShipmentId: cost.inboundShipmentId, updatedAt: new Date() })
+      .where(eq(vendorInvoices.id, vendorInvoiceId));
+  }
+
+  return { costId, vendorInvoiceId };
+}
+
+/**
+ * Unlink a shipment cost from its vendor invoice.
+ */
+export async function unlinkCostFromInvoice(costId: number) {
+  await db
+    .update(shipmentCosts)
+    .set({ vendorInvoiceId: null, updatedAt: new Date() })
+    .where(eq(shipmentCosts.id, costId));
 }

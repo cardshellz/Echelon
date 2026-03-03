@@ -11277,12 +11277,13 @@ export async function registerRoutes(
   app.get("/api/inbound-shipments/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const shipment = await shipmentTracking.getShipment(Number(req.params.id));
-      const [lines, costs, history] = await Promise.all([
+      const [lines, costs, history, paymentStatus] = await Promise.all([
         shipmentTracking.getEnrichedLines(shipment.id),
         shipmentTracking.getCosts(shipment.id),
         shipmentTracking.getStatusHistory(shipment.id),
+        apLedger.getShipmentCostPaymentStatus(shipment.id),
       ]);
-      res.json({ ...shipment, lines, costs, statusHistory: history });
+      res.json({ ...shipment, lines, costs, statusHistory: history, paymentStatus });
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
@@ -11490,6 +11491,49 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Shipment Cost → AP Bridge ──
+
+  app.post("/api/inbound-shipments/:id/create-invoices", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const result = await apLedger.createInvoicesFromShipmentCosts(
+        Number(req.params.id),
+        req.body.vendorMappings ? { vendorMappings: req.body.vendorMappings } : undefined
+      );
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbound-shipments/:id/payment-status", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const status = await apLedger.getShipmentCostPaymentStatus(Number(req.params.id));
+      res.json(status);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/costs/:costId/link-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const { vendorInvoiceId } = req.body;
+      if (!vendorInvoiceId) return res.status(400).json({ error: "vendorInvoiceId required" });
+      const result = await apLedger.linkCostToInvoice(Number(req.params.costId), vendorInvoiceId);
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      await apLedger.unlinkCostFromInvoice(Number(req.params.costId));
+      res.json({ success: true });
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
