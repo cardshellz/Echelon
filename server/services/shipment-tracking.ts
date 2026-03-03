@@ -419,12 +419,19 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     if (!po) throw new ShipmentTrackingError("Purchase order not found", 404);
 
     const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
-    const linesToAdd = lineIds
+    const candidateLines = lineIds
       ? poLines.filter((l: any) => lineIds.includes(l.id))
       : poLines;
 
+    // Deduplicate: skip PO lines already on this shipment
+    const existingLines = await storage.getInboundShipmentLines(shipmentId);
+    const existingPoLineIds = new Set(
+      existingLines.filter((l: any) => l.purchaseOrderLineId).map((l: any) => l.purchaseOrderLineId)
+    );
+    const linesToAdd = candidateLines.filter((l: any) => !existingPoLineIds.has(l.id));
+
     if (linesToAdd.length === 0) {
-      throw new ShipmentTrackingError("No PO lines to add");
+      throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
     }
 
     const newLines: InsertInboundShipmentLine[] = [];

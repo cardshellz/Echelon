@@ -202,6 +202,13 @@ export default function InboundShipmentDetail() {
   const purchaseOrders = posData?.pos ?? posData?.purchaseOrders ?? [];
   const poLines = selectedPo?.lines ?? [];
 
+  // Track which PO line IDs are already on this shipment (for duplicate detection)
+  const existingPoLineIds = new Set(
+    lines.filter((l: any) => l.purchaseOrderLineId).map((l: any) => l.purchaseOrderLineId)
+  );
+  // PO lines not yet added to this shipment
+  const availablePoLines = poLines.filter((l: any) => !existingPoLineIds.has(l.id));
+
   const isEditable = !["closed", "cancelled"].includes(shipment?.status || "");
   const isPreClosed = !["closed", "cancelled"].includes(shipment?.status || "");
 
@@ -824,7 +831,13 @@ export default function InboundShipmentDetail() {
         <TabsContent value="lines" className="space-y-4">
           {isEditable && (
             <div className="flex gap-2 flex-wrap">
-              <Button variant="outline" onClick={() => setShowAddFromPoDialog(true)} className="min-h-[44px]">
+              <Button variant="outline" onClick={() => {
+                // Auto-select linked PO if shipment was created from one
+                if (shipment?.purchaseOrderId) {
+                  setSelectedPoId(shipment.purchaseOrderId);
+                }
+                setShowAddFromPoDialog(true);
+              }} className="min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add from PO
               </Button>
@@ -1547,77 +1560,85 @@ export default function InboundShipmentDetail() {
         <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Lines from Purchase Order</DialogTitle>
-            <DialogDescription>Search for a PO and select lines to add to this shipment.</DialogDescription>
+            <DialogDescription>
+              {shipment?.purchaseOrderId
+                ? "Select lines from the linked PO to add to this shipment."
+                : "Search for a PO and select lines to add to this shipment."}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            {/* PO Search */}
-            <div className="space-y-2">
-              <Label>Purchase Order</Label>
-              <Popover open={poOpen} onOpenChange={setPoOpen}>
-                <PopoverTrigger asChild>
-                  <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                    {selectedPoId
-                      ? (Array.isArray(purchaseOrders) ? purchaseOrders : []).find((po: any) => po.id === selectedPoId)?.poNumber || `PO #${selectedPoId}`
-                      : "Search PO number..."}
-                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                  <Command shouldFilter={false}>
-                    <CommandInput placeholder="Search PO number..." value={poSearch} onValueChange={setPoSearch} />
-                    <CommandList>
-                      <CommandEmpty>No purchase orders found.</CommandEmpty>
-                      <CommandGroup>
-                        {filteredPOs.map((po: any) => (
-                          <CommandItem
-                            key={po.id}
-                            value={String(po.id)}
-                            onSelect={() => {
-                              setSelectedPoId(po.id);
-                              setSelectedPoLineIds([]);
-                              setPoOpen(false);
-                              setPoSearch("");
-                            }}
-                          >
-                            <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
-                            <span className="font-mono text-sm mr-2">{po.poNumber}</span>
-                            <span className="text-muted-foreground text-xs">{po.vendor?.name || po.vendorName || ""}</span>
-                            <Badge variant="outline" className="ml-auto text-xs">{po.status}</Badge>
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    </CommandList>
-                  </Command>
-                </PopoverContent>
-              </Popover>
-            </div>
+            {/* PO Search — only show if shipment isn't linked to a PO */}
+            {!shipment?.purchaseOrderId && (
+              <div className="space-y-2">
+                <Label>Purchase Order</Label>
+                <Popover open={poOpen} onOpenChange={setPoOpen}>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" className="w-full justify-between h-10 font-normal">
+                      {selectedPoId
+                        ? (Array.isArray(purchaseOrders) ? purchaseOrders : []).find((po: any) => po.id === selectedPoId)?.poNumber || `PO #${selectedPoId}`
+                        : "Search PO number..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search PO number..." value={poSearch} onValueChange={setPoSearch} />
+                      <CommandList>
+                        <CommandEmpty>No purchase orders found.</CommandEmpty>
+                        <CommandGroup>
+                          {filteredPOs.map((po: any) => (
+                            <CommandItem
+                              key={po.id}
+                              value={String(po.id)}
+                              onSelect={() => {
+                                setSelectedPoId(po.id);
+                                setSelectedPoLineIds([]);
+                                setPoOpen(false);
+                                setPoSearch("");
+                              }}
+                            >
+                              <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
+                              <span className="font-mono text-sm mr-2">{po.poNumber}</span>
+                              <span className="text-muted-foreground text-xs">{po.vendor?.name || po.vendorName || ""}</span>
+                              <Badge variant="outline" className="ml-auto text-xs">{po.status}</Badge>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
+            )}
 
             {/* PO Lines selection */}
             {selectedPoId && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label>Select Lines</Label>
-                  {poLines.length > 0 && (
+                  <Label>Select Lines {availablePoLines.length < poLines.length && `(${poLines.length - availablePoLines.length} already added)`}</Label>
+                  {availablePoLines.length > 0 && (
                     <Button
                       variant="ghost"
                       size="sm"
                       onClick={() => {
-                        if (selectedPoLineIds.length === poLines.length) {
+                        if (selectedPoLineIds.length === availablePoLines.length) {
                           setSelectedPoLineIds([]);
                         } else {
-                          setSelectedPoLineIds(poLines.map((l: any) => l.id));
+                          setSelectedPoLineIds(availablePoLines.map((l: any) => l.id));
                         }
                       }}
                     >
-                      {selectedPoLineIds.length === poLines.length ? "Deselect All" : "Select All"}
+                      {selectedPoLineIds.length === availablePoLines.length ? "Deselect All" : "Select All"}
                     </Button>
                   )}
                 </div>
-                {poLines.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No lines found for this PO.</p>
+                {availablePoLines.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {poLines.length === 0 ? "No lines found for this PO." : "All PO lines have already been added to this shipment."}
+                  </p>
                 ) : (
                   <div className="border rounded-md divide-y max-h-60 overflow-y-auto">
-                    {poLines.map((line: any) => (
+                    {availablePoLines.map((line: any) => (
                       <div
                         key={line.id}
                         className="flex items-center gap-3 p-2 hover:bg-muted/50 cursor-pointer"
