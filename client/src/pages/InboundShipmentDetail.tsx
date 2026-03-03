@@ -732,8 +732,8 @@ export default function InboundShipmentDetail() {
 
           {shipment.status === "draft" && (
             <Button onClick={() => bookMutation.mutate({})} disabled={bookMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
-              <Anchor className="h-4 w-4 mr-2" />
-              Book
+              <CheckCircle className="h-4 w-4 mr-2" />
+              Confirm
             </Button>
           )}
 
