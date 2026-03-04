@@ -10836,7 +10836,11 @@ export async function registerRoutes(
 
   app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const po = await purchasing.acknowledge(Number(req.params.id), req.body, req.session.user?.id);
+      const data = {
+        ...req.body,
+        confirmedDeliveryDate: req.body.confirmedDeliveryDate ? new Date(req.body.confirmedDeliveryDate) : undefined,
+      };
+      const po = await purchasing.acknowledge(Number(req.params.id), data, req.session.user?.id);
       res.json(po);
     } catch (error: any) {
       if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
