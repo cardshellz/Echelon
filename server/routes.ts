@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, orderItems, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials } from "@shared/schema";
 import { createOrderCombiningService } from "./services/order-combining";
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import { createProductImportService } from "./services/product-import";
@@ -3497,14 +3497,71 @@ export async function registerRoutes(
     }
   });
 
-  app.put("/api/products/:id", requirePermission("inventory", "update"), async (req, res) => {
+  app.put("/api/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
+
+      // Capture old SKU before update for cascade
+      let oldProductSku: string | null = null;
+      const newProductSku: string | undefined = updates.sku;
+      if (newProductSku) {
+        const existing = await storage.getProductById(id);
+        if (existing) oldProductSku = existing.sku ?? null;
+      }
+
       const product = await storage.updateProduct(id, updates);
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
+
+      // Cascade base SKU rename to variants and all downstream tables
+      if (newProductSku && oldProductSku && newProductSku !== oldProductSku) {
+        const now = new Date();
+        const productVariantsList = await storage.getProductVariantsByProductId(id);
+
+        for (const v of productVariantsList) {
+          if (!v.sku) continue;
+
+          // Derive new variant SKU by replacing old base prefix with new one
+          let newVariantSku: string;
+          if (v.sku === oldProductSku) {
+            // Variant SKU matches base exactly (standalone product)
+            newVariantSku = newProductSku;
+          } else if (v.sku.startsWith(oldProductSku + "-")) {
+            // Variant SKU has suffix like -P25, -C1000
+            newVariantSku = newProductSku + v.sku.slice(oldProductSku.length);
+          } else {
+            // Variant SKU doesn't follow base pattern — skip
+            continue;
+          }
+
+          const oldVariantSku = v.sku;
+          if (newVariantSku === oldVariantSku) continue;
+
+          // Update the variant itself
+          await storage.updateProductVariant(v.id, { sku: newVariantSku });
+
+          // Cascade to downstream tables with productVariantId FK
+          try {
+            await db.update(purchaseOrderLines).set({ sku: newVariantSku }).where(eq(purchaseOrderLines.productVariantId, v.id));
+            await db.update(inboundShipmentLines).set({ sku: newVariantSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, v.id));
+            await db.update(receivingLines).set({ sku: newVariantSku }).where(eq(receivingLines.productVariantId, v.id));
+            await db.update(productLocations).set({ sku: newVariantSku }).where(eq(productLocations.productVariantId, v.id));
+            await db.update(vendorInvoiceLines).set({ sku: newVariantSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, v.id));
+
+            // Tables without productVariantId FK — match by old SKU string
+            await db.update(orderItems).set({ sku: newVariantSku }).where(eq(orderItems.sku, oldVariantSku));
+            await db.update(pickingLogs).set({ sku: newVariantSku }).where(eq(pickingLogs.sku, oldVariantSku));
+            await db.update(orderItemFinancials).set({ sku: newVariantSku }).where(eq(orderItemFinancials.sku, oldVariantSku));
+          } catch (err: any) {
+            console.warn(`[SKU CASCADE] Partial failure renaming variant ${oldVariantSku} → ${newVariantSku}: ${err.message}`);
+          }
+        }
+
+        console.log(`[SKU CASCADE] Product base SKU ${oldProductSku} → ${newProductSku}, updated ${productVariantsList.length} variants + downstream`);
+      }
+
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...product, variants: existingVariants });
     } catch (error) {
@@ -3863,9 +3920,11 @@ export async function registerRoutes(
   app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
+      const newSku: string | undefined = req.body.sku;
+
       // Check for SKU conflict when SKU is being changed
-      if (req.body.sku) {
-        const conflict = await storage.getActiveVariantBySku(req.body.sku, id);
+      if (newSku) {
+        const conflict = await storage.getActiveVariantBySku(newSku, id);
         if (conflict) {
           const conflictProduct = conflict.productId ? await storage.getProductById(conflict.productId) : null;
           return res.status(409).json({
@@ -3874,10 +3933,41 @@ export async function registerRoutes(
           });
         }
       }
+
+      // Capture old SKU before update for cascade
+      let oldSku: string | null = null;
+      if (newSku) {
+        const existing = await storage.getProductVariantById(id);
+        if (existing) oldSku = existing.sku;
+      }
+
       const variant = await storage.updateProductVariant(id, req.body);
       if (!variant) {
         return res.status(404).json({ error: "Variant not found" });
       }
+
+      // Cascade SKU rename to all downstream tables with cached sku columns
+      if (newSku && oldSku && newSku !== oldSku) {
+        const now = new Date();
+        try {
+          // Tables with productVariantId FK — match by variant ID
+          await db.update(purchaseOrderLines).set({ sku: newSku }).where(eq(purchaseOrderLines.productVariantId, id));
+          await db.update(inboundShipmentLines).set({ sku: newSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, id));
+          await db.update(receivingLines).set({ sku: newSku }).where(eq(receivingLines.productVariantId, id));
+          await db.update(productLocations).set({ sku: newSku }).where(eq(productLocations.productVariantId, id));
+          await db.update(vendorInvoiceLines).set({ sku: newSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, id));
+
+          // Tables without productVariantId FK — match by old SKU string
+          await db.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
+          await db.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
+          await db.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
+
+          console.log(`[SKU CASCADE] Renamed ${oldSku} → ${newSku} across all downstream tables`);
+        } catch (err: any) {
+          console.warn(`[SKU CASCADE] Partial failure renaming ${oldSku} → ${newSku}: ${err.message}`);
+        }
+      }
+
       res.json(variant);
     } catch (error) {
       console.error("Error updating variant:", error);
