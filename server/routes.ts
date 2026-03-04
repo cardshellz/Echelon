@@ -3564,9 +3564,9 @@ export async function registerRoutes(
 
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...product, variants: existingVariants });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error updating product:", error);
-      res.status(500).json({ error: "Failed to update product" });
+      res.status(500).json({ error: "Failed to update product", detail: error?.message || String(error) });
     }
   });
 
