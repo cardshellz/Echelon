@@ -11,6 +11,9 @@
  * - Reorder-to-PO generation
  */
 
+import { eq } from "drizzle-orm";
+import { inboundShipmentLines, landedCostSnapshots, vendorInvoiceLines } from "@shared/schema";
+
 // ── Minimal dependency interfaces ───────────────────────────────────
 
 interface Storage {
@@ -446,6 +449,30 @@ export function createPurchasingService(db: any, storage: Storage) {
     }
 
     const updated = await storage.updatePurchaseOrderLine(lineId, updates);
+
+    // Cascade variant/SKU changes to downstream records
+    if (updates.productVariantId || updates.sku) {
+      const newVariantId = updates.productVariantId ?? line.productVariantId;
+      const newSku = updates.sku ?? line.sku;
+      try {
+        // Inbound shipment lines linked to this PO line
+        await db.update(inboundShipmentLines)
+          .set({ productVariantId: newVariantId, sku: newSku, updatedAt: new Date() })
+          .where(eq(inboundShipmentLines.purchaseOrderLineId, lineId));
+        // Landed cost snapshots
+        await db.update(landedCostSnapshots)
+          .set({ productVariantId: newVariantId })
+          .where(eq(landedCostSnapshots.purchaseOrderLineId, lineId));
+        // Vendor invoice lines
+        await db.update(vendorInvoiceLines)
+          .set({ productVariantId: newVariantId })
+          .where(eq(vendorInvoiceLines.purchaseOrderLineId, lineId));
+        console.log(`[Purchasing] Cascaded variant change on PO line ${lineId}: variant=${newVariantId} sku=${newSku}`);
+      } catch (err: any) {
+        console.warn(`[Purchasing] Failed to cascade variant change for PO line ${lineId}: ${err.message}`);
+      }
+    }
+
     await recalculateTotals(line.purchaseOrderId, userId);
     return updated;
   }
