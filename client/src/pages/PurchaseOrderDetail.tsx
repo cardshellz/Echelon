@@ -141,7 +141,7 @@ export default function PurchaseOrderDetail() {
   const [productOpen, setProductOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
   const [selectedProductForLine, setSelectedProductForLine] = useState<any>(null);
-  const [unitCostDollars, setUnitCostDollars] = useState("");
+  const [totalCostDollars, setTotalCostDollars] = useState("");
   const [saveToVendorCatalog, setSaveToVendorCatalog] = useState(true);
   const [setAsPreferred, setSetAsPreferred] = useState(false);
   const [addLineMode, setAddLineMode] = useState<"catalog" | "search">("catalog");
@@ -396,12 +396,14 @@ export default function PurchaseOrderDetail() {
     },
     onSuccess: () => {
       // Capture before state reset
+      const totalCents = dollarsToCents(totalCostDollars || "0");
+      const derivedUnitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
       const catalogData = saveToVendorCatalog && po?.vendorId && newLine.productVariantId ? {
         vendorId: po.vendorId,
         productId: newLine.productId,
         productVariantId: newLine.productVariantId,
         vendorSku: newLine.vendorSku,
-        unitCostCents: dollarsToCents(unitCostDollars || "0"),
+        unitCostCents: derivedUnitCostCents,
         packSize: newLine.unitsPerUom,
         isPreferred: setAsPreferred,
       } : null;
@@ -411,7 +413,7 @@ export default function PurchaseOrderDetail() {
       setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
       setProductSearch("");
       setSelectedProductForLine(null);
-      setUnitCostDollars("");
+      setTotalCostDollars("");
       setSaveToVendorCatalog(true);
       setSetAsPreferred(false);
       setCatalogSearch("");
@@ -1408,7 +1410,7 @@ export default function PurchaseOrderDetail() {
         if (!open) {
           setProductSearch("");
           setSelectedProductForLine(null);
-          setUnitCostDollars("");
+          setTotalCostDollars("");
           setSaveToVendorCatalog(true);
           setSetAsPreferred(false);
           setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
@@ -1441,7 +1443,7 @@ export default function PurchaseOrderDetail() {
                     setSelectedProductForLine(null);
                     setSelectedCatalogEntry(null);
                     setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
-                    setUnitCostDollars("");
+                    setTotalCostDollars("");
                   }}
                 >
                   Supplier Catalog{vendorCatalog.length > 0 ? ` (${vendorCatalog.length})` : ""}
@@ -1454,7 +1456,7 @@ export default function PurchaseOrderDetail() {
                     setAddLineMode("search");
                     setSelectedCatalogEntry(null);
                     setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
-                    setUnitCostDollars("");
+                    setTotalCostDollars("");
                     setSelectedProductForLine(null);
                   }}
                 >
@@ -1493,7 +1495,7 @@ export default function PurchaseOrderDetail() {
                         setSelectedCatalogEntry(null);
                         setSelectedProductForLine(null);
                         setNewLine({ productId: 0, productVariantId: 0, orderQty: 1, unitCostCents: 0, unitsPerUom: 1, vendorSku: "", description: "" });
-                        setUnitCostDollars("");
+                        setTotalCostDollars("");
                       }}
                     >
                       <XCircle className="h-4 w-4" />
@@ -1561,9 +1563,7 @@ export default function PurchaseOrderDetail() {
                                     vendorSku: entry.vendorSku || "",
                                     unitsPerUom: entry.packSize || 1,
                                   }));
-                                  setUnitCostDollars(
-                                    entry.unitCostCents ? String(entry.unitCostCents / 100) : ""
-                                  );
+                                  setTotalCostDollars("");
                                   setSaveToVendorCatalog(false);
                                 }}
                               >
@@ -1751,19 +1751,19 @@ export default function PurchaseOrderDetail() {
                     )}
                   </div>
                   <div className="space-y-2">
-                    <Label>Unit Cost ($/pc) *</Label>
+                    <Label>Total Cost ($) *</Label>
                     <Input
                       type="number"
                       min="0"
-                      step="0.001"
-                      placeholder="0.05"
-                      value={unitCostDollars}
-                      onChange={e => setUnitCostDollars(e.target.value)}
+                      step="0.01"
+                      placeholder="26320.00"
+                      value={totalCostDollars}
+                      onChange={e => setTotalCostDollars(e.target.value)}
                       className="h-10"
                     />
-                    {unitCostDollars && newLine.orderQty > 0 && (
+                    {totalCostDollars && newLine.orderQty > 0 && (
                       <p className="text-xs text-muted-foreground">
-                        Total: {formatCents(dollarsToCents(unitCostDollars || "0") * newLine.orderQty)}
+                        Unit Cost: {formatCents(dollarsToCents(totalCostDollars || "0") / newLine.orderQty, { unitCost: true })}/pc
                       </p>
                     )}
                   </div>
@@ -1809,11 +1809,12 @@ export default function PurchaseOrderDetail() {
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
               <Button
-                onClick={() => addLineMutation.mutate({
-                  ...newLine,
-                  unitCostCents: dollarsToCents(unitCostDollars || "0"),
-                })}
-                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
+                onClick={() => {
+                  const totalCents = dollarsToCents(totalCostDollars || "0");
+                  const unitCostCents = newLine.orderQty > 0 ? totalCents / newLine.orderQty : 0;
+                  addLineMutation.mutate({ ...newLine, unitCostCents });
+                }}
+                disabled={!newLine.productVariantId || newLine.orderQty < 1 || !totalCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
