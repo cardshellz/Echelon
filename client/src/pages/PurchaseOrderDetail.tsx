@@ -68,13 +68,24 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
   cancelled: { variant: "destructive", label: "Cancelled" },
 };
 
+/** Convert a dollar string to cents without floating-point artifacts */
+function dollarsToCents(dollars: string): number {
+  const parts = dollars.split(".");
+  const whole = parseInt(parts[0] || "0", 10) * 100;
+  if (!parts[1]) return whole;
+  // Pad or trim fractional part to work in cents
+  const frac = parts[1].padEnd(2, "0");
+  const cents = parseInt(frac.slice(0, 2), 10);
+  const subCent = frac.length > 2 ? parseInt(frac.slice(2), 10) / Math.pow(10, frac.length - 2) : 0;
+  return whole + cents + subCent;
+}
+
 function formatCents(cents: number | null | undefined, opts?: { unitCost?: boolean }): string {
   if (!cents && cents !== 0) return "$0.00";
   const n = Number(cents) / 100;
   if (opts?.unitCost && n > 0 && n !== parseFloat(n.toFixed(2))) {
-    // Has sub-cent precision: show all significant decimals, no rounding
-    const s = String(n);
-    return `$${s}`;
+    // Sub-cent precision: show up to 4 decimal places
+    return `$${n.toFixed(4).replace(/0+$/, "")}`;
   }
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -389,7 +400,7 @@ export default function PurchaseOrderDetail() {
         productId: newLine.productId,
         productVariantId: newLine.productVariantId,
         vendorSku: newLine.vendorSku,
-        unitCostCents: parseFloat(unitCostDollars || "0") * 100,
+        unitCostCents: dollarsToCents(unitCostDollars || "0"),
         packSize: newLine.unitsPerUom,
         isPreferred: setAsPreferred,
       } : null;
@@ -463,7 +474,7 @@ export default function PurchaseOrderDetail() {
       return;
     }
     const updates = editingLineField === "unitCost"
-      ? { unitCostCents: val * 100 }
+      ? { unitCostCents: dollarsToCents(editLineValue) }
       : { orderQty: Math.round(val) };
     updateLineMutation.mutate({ lineId, updates });
   }
@@ -1662,7 +1673,7 @@ export default function PurchaseOrderDetail() {
                     />
                     {unitCostDollars && newLine.orderQty > 0 && (
                       <p className="text-xs text-muted-foreground">
-                        Total: {formatCents(parseFloat(unitCostDollars || "0") * 100 * newLine.orderQty)}
+                        Total: {formatCents(dollarsToCents(unitCostDollars || "0") * newLine.orderQty)}
                       </p>
                     )}
                   </div>
@@ -1710,7 +1721,7 @@ export default function PurchaseOrderDetail() {
               <Button
                 onClick={() => addLineMutation.mutate({
                   ...newLine,
-                  unitCostCents: parseFloat(unitCostDollars || "0") * 100,
+                  unitCostCents: dollarsToCents(unitCostDollars || "0"),
                 })}
                 disabled={!newLine.productVariantId || newLine.orderQty < 1 || !unitCostDollars || addLineMutation.isPending || catalogUpsertMutation.isPending}
               >
