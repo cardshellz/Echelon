@@ -488,7 +488,10 @@ export default function ProductDetail() {
           status: contentForm.status || "active",
         }),
       });
-      if (!res.ok) throw new Error("Failed to update product");
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || body?.error || "Failed to update product");
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -497,8 +500,8 @@ export default function ProductDetail() {
       setIsDirty(false);
       setContentDirty(false);
     },
-    onError: () => {
-      toast({ title: "Failed to update product", variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: "Failed to update product", description: err.message, variant: "destructive" });
     },
   });
 
