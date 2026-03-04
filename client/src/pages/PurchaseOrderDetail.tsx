@@ -132,8 +132,9 @@ export default function PurchaseOrderDetail() {
 
   // Inline line editing state
   const [editingLineId, setEditingLineId] = useState<number | null>(null);
-  const [editingLineField, setEditingLineField] = useState<"unitCost" | "qty" | null>(null);
+  const [editingLineField, setEditingLineField] = useState<"unitCost" | "qty" | "sku" | null>(null);
   const [editLineValue, setEditLineValue] = useState("");
+  const [skuVariants, setSkuVariants] = useState<Array<{ id: number; sku: string; name: string; unitsPerVariant: number }>>([]);
 
   // Add line form
   const [productSearch, setProductSearch] = useState("");
@@ -453,6 +454,7 @@ export default function PurchaseOrderDetail() {
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
       setEditingLineId(null);
       setEditingLineField(null);
+      setSkuVariants([]);
       toast({ title: "Line updated" });
     },
     onError: (err: Error) => {
@@ -464,6 +466,29 @@ export default function PurchaseOrderDetail() {
     setEditingLineId(lineId);
     setEditingLineField(field);
     setEditLineValue(field === "unitCost" ? String(Number(currentValue) / 100) : String(currentValue));
+  }
+
+  async function startSkuEdit(line: any) {
+    setEditingLineId(line.id);
+    setEditingLineField("sku");
+    try {
+      const res = await fetch(`/api/products/${line.productId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSkuVariants(data.variants || []);
+      }
+    } catch { /* ignore */ }
+  }
+
+  function saveSkuEdit(lineId: number, variant: { id: number; sku: string; unitsPerVariant: number }) {
+    updateLineMutation.mutate({
+      lineId,
+      updates: {
+        productVariantId: variant.id,
+        sku: variant.sku,
+        unitsPerUom: variant.unitsPerVariant,
+      },
+    });
   }
 
   function saveLineEdit(lineId: number) {
@@ -483,6 +508,7 @@ export default function PurchaseOrderDetail() {
     setEditingLineId(null);
     setEditingLineField(null);
     setEditLineValue("");
+    setSkuVariants([]);
   }
 
   const updateChargesMutation = useMutation({
@@ -881,15 +907,46 @@ export default function PurchaseOrderDetail() {
             ) : (
               lines.map((line: any) => {
                 const isEditingCostMobile = editingLineId === line.id && editingLineField === "unitCost";
+                const isEditingSkuMobile = editingLineId === line.id && editingLineField === "sku";
                 return (
                 <Card key={line.id}>
                   <CardContent className="p-3">
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex-1 min-w-0">
+                        {isEditingSkuMobile ? (
+                          <div className="space-y-1 mb-2">
+                            {skuVariants.length === 0 ? (
+                              <span className="text-xs text-muted-foreground">Loading...</span>
+                            ) : (
+                              skuVariants.map((v) => (
+                                <div
+                                  key={v.id}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  onClick={() => {
+                                    if (v.id !== line.productVariantId) {
+                                      saveSkuEdit(line.id, v);
+                                    } else {
+                                      cancelLineEdit();
+                                    }
+                                  }}
+                                >
+                                  {v.sku} — {v.name} ({v.unitsPerVariant}pc)
+                                </div>
+                              ))
+                            )}
+                            <Button variant="ghost" size="sm" className="h-6 text-xs w-full" onClick={cancelLineEdit}>Cancel</Button>
+                          </div>
+                        ) : (
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm">{line.sku || "—"}</span>
+                          <span
+                            className={`font-mono text-sm ${canEditLines ? "cursor-pointer underline decoration-dotted" : ""}`}
+                            onClick={() => canEditLines && startSkuEdit(line)}
+                          >
+                            {line.sku || "—"}
+                          </span>
                           <Badge variant="outline" className="text-xs">{line.status}</Badge>
                         </div>
+                        )}
                         <div className="text-sm mt-1 truncate">{line.productName || "—"}</div>
                         <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
                           <span>
@@ -965,10 +1022,43 @@ export default function PurchaseOrderDetail() {
                   lines.map((line: any) => {
                     const isEditingCost = editingLineId === line.id && editingLineField === "unitCost";
                     const isEditingQty = editingLineId === line.id && editingLineField === "qty";
+                    const isEditingSku = editingLineId === line.id && editingLineField === "sku";
                     return (
                     <TableRow key={line.id}>
                       <TableCell className="text-muted-foreground">{line.lineNumber}</TableCell>
-                      <TableCell className="font-mono">{line.sku || "—"}</TableCell>
+                      <TableCell className="font-mono">
+                        {isEditingSku ? (
+                          <div className="space-y-1">
+                            {skuVariants.length === 0 ? (
+                              <span className="text-xs text-muted-foreground">Loading...</span>
+                            ) : (
+                              skuVariants.map((v) => (
+                                <div
+                                  key={v.id}
+                                  className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-muted ${v.id === line.productVariantId ? "bg-muted font-bold" : ""}`}
+                                  onClick={() => {
+                                    if (v.id !== line.productVariantId) {
+                                      saveSkuEdit(line.id, v);
+                                    } else {
+                                      cancelLineEdit();
+                                    }
+                                  }}
+                                >
+                                  {v.sku} — {v.name} ({v.unitsPerVariant}pc)
+                                </div>
+                              ))
+                            )}
+                            <Button variant="ghost" size="sm" className="h-6 text-xs w-full" onClick={cancelLineEdit}>Cancel</Button>
+                          </div>
+                        ) : (
+                          <span
+                            className={canEditLines ? "cursor-pointer hover:bg-muted/50 rounded px-1 -mx-1" : ""}
+                            onClick={() => canEditLines && startSkuEdit(line)}
+                          >
+                            {line.sku || "—"}
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell className="max-w-[200px] truncate">{line.productName || "—"}</TableCell>
                       <TableCell className="font-mono text-xs">{line.vendorSku || "—"}</TableCell>
                       <TableCell className="text-right">
