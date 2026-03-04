@@ -455,10 +455,20 @@ export function createPurchasingService(db: any, storage: Storage) {
       const newVariantId = updates.productVariantId ?? line.productVariantId;
       const newSku = updates.sku ?? line.sku;
       try {
-        // Inbound shipment lines linked to this PO line
-        await db.update(inboundShipmentLines)
-          .set({ productVariantId: newVariantId, sku: newSku, updatedAt: new Date() })
+        // Look up the new variant's units-per-case for carton recalc
+        const newVariant = await storage.getProductVariantById(newVariantId);
+        const newUpc = newVariant?.unitsPerVariant ?? 1;
+
+        // Inbound shipment lines linked to this PO line — update variant, SKU, and recalc cartons
+        const affectedShipmentLines = await db.select()
+          .from(inboundShipmentLines)
           .where(eq(inboundShipmentLines.purchaseOrderLineId, lineId));
+        for (const sl of affectedShipmentLines) {
+          const newCartons = newUpc > 1 ? Math.ceil(sl.qtyShipped / newUpc) : null;
+          await db.update(inboundShipmentLines)
+            .set({ productVariantId: newVariantId, sku: newSku, cartonCount: newCartons, updatedAt: new Date() })
+            .where(eq(inboundShipmentLines.id, sl.id));
+        }
         // Landed cost snapshots
         await db.update(landedCostSnapshots)
           .set({ productVariantId: newVariantId })
@@ -467,7 +477,7 @@ export function createPurchasingService(db: any, storage: Storage) {
         await db.update(vendorInvoiceLines)
           .set({ productVariantId: newVariantId })
           .where(eq(vendorInvoiceLines.purchaseOrderLineId, lineId));
-        console.log(`[Purchasing] Cascaded variant change on PO line ${lineId}: variant=${newVariantId} sku=${newSku}`);
+        console.log(`[Purchasing] Cascaded variant change on PO line ${lineId}: variant=${newVariantId} sku=${newSku} upc=${newUpc}`);
       } catch (err: any) {
         console.warn(`[Purchasing] Failed to cascade variant change for PO line ${lineId}: ${err.message}`);
       }
