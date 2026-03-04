@@ -505,6 +505,26 @@ export default function ProductDetail() {
     },
   });
 
+  // --- Delete product (hard delete) ---
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const deleteProductMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/products/${product?.productId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.detail || body?.error || "Failed to delete product");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Product deleted" });
+      setLocation("/products");
+    },
+    onError: (err: Error) => {
+      toast({ title: "Failed to delete product", description: err.message, variant: "destructive" });
+    },
+  });
+
   // --- Archive: variant search for SKU correction transfer ---
   const variantSearchResults = useQuery<{ sku: string; name: string; productVariantId: number; productId: number; unitsPerVariant: number }[]>({
     queryKey: ["/api/inventory/skus/search", variantSearchQuery],
@@ -1162,8 +1182,39 @@ export default function ProductDetail() {
               Archive
             </Button>
           )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-[44px] text-destructive hover:bg-destructive hover:text-destructive-foreground"
+            onClick={() => setDeleteConfirmOpen(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
         </div>
       </div>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Product</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Permanently delete <strong>{product.name}</strong> ({product.sku}) and all its variants? This cannot be undone.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => { deleteProductMutation.mutate(); setDeleteConfirmOpen(false); }}
+              disabled={deleteProductMutation.isPending}
+            >
+              {deleteProductMutation.isPending ? "Deleting..." : "Delete Permanently"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
         <div className="lg:col-span-2 order-2 lg:order-1">
