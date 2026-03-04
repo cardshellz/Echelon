@@ -1316,7 +1316,8 @@ export default function PurchaseOrderDetail() {
           setAddLineMode("catalog");
         }
       }}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-lg max-h-[85vh] flex flex-col overflow-hidden">
+          <style>{`.add-line-scroll [data-radix-popper-content-wrapper] { z-index: 9999 !important; }`}</style>
           <DialogHeader>
             <DialogTitle>Add Line Item</DialogTitle>
             <DialogDescription>
@@ -1325,7 +1326,7 @@ export default function PurchaseOrderDetail() {
                 : "Search all products. You can save new items to the supplier's catalog."}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-4 overflow-y-auto flex-1 pr-1 add-line-scroll">
 
             {/* Mode toggle — only when PO has a vendor */}
             {po.vendorId && (

@@ -2223,7 +2223,17 @@ export async function registerRoutes(
   app.post("/api/shopify/sync-products", async (req, res) => {
     try {
       const result = await productImport.syncProductsWithMultiUOM();
-      res.json(result);
+      // Also sync content + images now that products exist
+      const contentResult = await productImport.syncContentAndAssets();
+      res.json({
+        ...result,
+        contentSync: {
+          productsUpdated: contentResult.productsUpdated,
+          assets: contentResult.assets,
+          skuMatched: contentResult.skuMatched,
+          skuNotFound: contentResult.skuNotFound,
+        },
+      });
     } catch (error: any) {
       console.error("Shopify product sync error:", error);
       res.status(500).json({
