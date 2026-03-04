@@ -153,8 +153,8 @@ export function createPurchasingService(db: any, storage: Storage) {
     const total = subtotal - headerDiscount + headerTax + headerShipping;
 
     return await storage.updatePurchaseOrder(purchaseOrderId, {
-      subtotalCents: subtotal,
-      totalCents: total,
+      subtotalCents: Math.round(subtotal),
+      totalCents: Math.round(total),
       lineCount,
       receivedLineCount,
       updatedBy: userId,
