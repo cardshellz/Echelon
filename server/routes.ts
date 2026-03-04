@@ -3502,12 +3502,21 @@ export async function registerRoutes(
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
 
-      // Capture old SKU before update for cascade
+      // Check for SKU conflict when SKU is being changed
       let oldProductSku: string | null = null;
       const newProductSku: string | undefined = updates.sku;
       if (newProductSku) {
         const existing = await storage.getProductById(id);
         if (existing) oldProductSku = existing.sku ?? null;
+
+        if (newProductSku !== oldProductSku) {
+          const conflict = await storage.getProductBySku(newProductSku);
+          if (conflict && conflict.id !== id) {
+            return res.status(409).json({
+              error: `SKU "${newProductSku}" already belongs to product "${conflict.name}" (id ${conflict.id})`,
+            });
+          }
+        }
       }
 
       const product = await storage.updateProduct(id, updates);
