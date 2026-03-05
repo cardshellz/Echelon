@@ -11858,6 +11858,15 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/vendor-invoices/next-number", requirePermission("purchasing", "view"), async (_req, res) => {
+    try {
+      const invoiceNumber = await apLedger.generateInvoiceNumber();
+      res.json({ invoiceNumber });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/vendor-invoices", requirePermission("purchasing", "create"), async (req, res) => {
     try {
       const body = req.body;

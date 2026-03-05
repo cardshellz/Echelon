@@ -1093,7 +1093,16 @@ export default function InboundShipmentDetail() {
               </Button>
             )}
             {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId) && (
-              <Button variant="outline" onClick={() => setShowCreateInvoicesDialog(true)} className="min-h-[44px]">
+              <Button variant="outline" onClick={async () => {
+                try {
+                  const res = await fetch("/api/vendor-invoices/next-number");
+                  if (res.ok) {
+                    const data = await res.json();
+                    setCreateInvNumber(data.invoiceNumber);
+                  }
+                } catch {}
+                setShowCreateInvoicesDialog(true);
+              }} className="min-h-[44px]">
                 <FileText className="h-4 w-4 mr-2" />
                 Create Invoices
               </Button>

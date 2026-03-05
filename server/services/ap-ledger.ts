@@ -17,7 +17,7 @@ import {
   shipmentCosts,
   inboundShipments,
 } from "../../shared/schema";
-import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc } from "drizzle-orm";
+import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
 import { format } from "date-fns";
 
 // ─── Status Transition Validation ────────────────────────────────────────────
@@ -102,6 +102,29 @@ async function recalculateInvoiceBalance(invoiceId: number): Promise<void> {
       updatedAt: new Date(),
     })
     .where(eq(vendorInvoices.id, invoiceId));
+}
+
+// ─── Invoice Number Generation ───────────────────────────────────────────────
+
+export async function generateInvoiceNumber(): Promise<string> {
+  const today = new Date();
+  const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
+  const prefix = `INV-${dateStr}-`;
+
+  const existing = await db
+    .select({ invoiceNumber: vendorInvoices.invoiceNumber })
+    .from(vendorInvoices)
+    .where(like(vendorInvoices.invoiceNumber, `${prefix}%`))
+    .orderBy(desc(vendorInvoices.invoiceNumber))
+    .limit(1);
+
+  let nextNum = 1;
+  if (existing.length > 0 && existing[0].invoiceNumber) {
+    const lastNum = parseInt(existing[0].invoiceNumber.replace(prefix, ""), 10);
+    if (!isNaN(lastNum)) nextNum = lastNum + 1;
+  }
+
+  return `${prefix}${String(nextNum).padStart(3, "0")}`;
 }
 
 // ─── Invoice CRUD ─────────────────────────────────────────────────────────────
@@ -981,7 +1004,7 @@ export async function createInvoiceFromShipmentCosts(
     0
   );
 
-  const invoiceNumber = data.invoiceNumber || `${shipment.shipmentNumber}-${format(new Date(), "yyyyMMdd")}`;
+  const invoiceNumber = data.invoiceNumber || await generateInvoiceNumber();
 
   // Create one invoice for the whole shipment
   const invoice = await createInvoice({

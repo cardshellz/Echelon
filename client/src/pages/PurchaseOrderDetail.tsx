@@ -714,17 +714,16 @@ export default function PurchaseOrderDetail() {
           )}
           {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
             <Button variant="outline" onClick={async () => {
-              // Fetch existing invoices to determine next sequence number
-              let seq = 1;
+              let invoiceNumber = "";
               try {
-                const res = await fetch(`/api/purchase-orders/${poId}/invoices`);
+                const res = await fetch("/api/vendor-invoices/next-number");
                 if (res.ok) {
                   const data = await res.json();
-                  seq = (data.invoices?.length ?? 0) + 1;
+                  invoiceNumber = data.invoiceNumber;
                 }
               } catch {}
               setInvoiceForm({
-                invoiceNumber: `INV-${po.poNumber}-${String(seq).padStart(3, "0")}`,
+                invoiceNumber,
                 amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
                 invoiceDate: new Date().toISOString().slice(0, 10),
                 dueDate: "",

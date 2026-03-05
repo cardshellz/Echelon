@@ -154,7 +154,16 @@ export default function APInvoices() {
           <h1 className="text-2xl font-bold">Vendor Invoices</h1>
           <p className="text-muted-foreground text-sm">Track and approve vendor invoices</p>
         </div>
-        <Button size="sm" onClick={() => setShowNewDialog(true)}>
+        <Button size="sm" onClick={async () => {
+          try {
+            const res = await fetch("/api/vendor-invoices/next-number");
+            if (res.ok) {
+              const data = await res.json();
+              setNewInvoice(f => ({ ...f, invoiceNumber: data.invoiceNumber }));
+            }
+          } catch {}
+          setShowNewDialog(true);
+        }}>
           <Plus className="h-4 w-4 mr-2" />
           New Invoice
         </Button>
@@ -280,7 +289,6 @@ export default function APInvoices() {
                     setNewInvoice((f) => ({
                       ...f,
                       linkedPoId: poId,
-                      invoiceNumber: po ? `INV-${po.poNumber}` : f.invoiceNumber,
                       invoicedAmountDollars: "", // Lines become source of truth
                     }));
                   }}
