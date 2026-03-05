@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,7 +18,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useToast } from "@/hooks/use-toast";
-import { RefreshCw, Loader2, Search } from "lucide-react";
+import { useDebounce } from "@/hooks/use-debounce";
+import { RefreshCw, Loader2, Search, ChevronLeft, ChevronRight, Layers, Radio } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // --- Types ---
@@ -57,6 +58,9 @@ interface AllocationRow {
 interface AllocationGrid {
   channels: Channel[];
   rows: AllocationRow[];
+  totalCount: number;
+  page: number;
+  limit: number;
 }
 
 // --- Inline helper: cell edit popover ---
@@ -109,7 +113,32 @@ function CellEditPopover({
     },
   });
 
-  // Determine cell display
+  const enableFeedMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/channel-feeds/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          channelId,
+          productVariantId: row.productVariantId,
+        }),
+      });
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(text);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+      toast({ title: "Sync enabled for this variant" });
+    },
+    onError: (err: Error) => {
+      toast({ title: err.message, variant: "destructive" });
+    },
+  });
+
   const display = getCellDisplay(cellData);
 
   return (
@@ -132,7 +161,35 @@ function CellEditPopover({
       </PopoverTrigger>
       <PopoverContent className="w-64 p-4" align="start">
         <div className="space-y-3">
-          <p className="text-sm font-medium">{row.sku}</p>
+          <div>
+            <p className="text-sm font-medium">{row.sku}</p>
+            <p className="text-xs text-muted-foreground">
+              ATP: {cellData.effectiveAtp.toLocaleString()} units
+            </p>
+          </div>
+
+          {!cellData.hasFeed && (
+            <div className="border-b pb-3">
+              <p className="text-xs text-muted-foreground mb-2">
+                Not synced to this channel yet.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => enableFeedMutation.mutate()}
+                disabled={enableFeedMutation.isPending}
+              >
+                {enableFeedMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <Radio className="h-4 w-4 mr-2" />
+                )}
+                Enable Sync
+              </Button>
+            </div>
+          )}
+
           <div className="space-y-2">
             <label className="text-xs text-muted-foreground">Variant Floor</label>
             <Input
@@ -178,10 +235,32 @@ function getCellDisplay(cellData: ChannelCellData): {
   content: React.ReactNode;
   colorClass: string;
 } {
-  // No feed or unlisted
-  if (!cellData.hasFeed || cellData.isListed === 0) {
+  // Hard-blocked (isListed = 0)
+  if (cellData.isListed === 0) {
     return {
-      content: <span className="text-muted-foreground">&mdash;</span>,
+      content: (
+        <span className="flex items-center gap-1.5">
+          <span>0</span>
+          <Badge variant="outline" className="text-[10px] px-1 py-0 leading-tight border-red-300 text-red-500">
+            BLOCKED
+          </Badge>
+        </span>
+      ),
+      colorClass: "text-red-500",
+    };
+  }
+
+  // No feed — show ATP in muted style
+  if (!cellData.hasFeed) {
+    return {
+      content: (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <span>{cellData.effectiveAtp.toLocaleString()}</span>
+          <Badge variant="outline" className="text-[10px] px-1 py-0 leading-tight">
+            NO FEED
+          </Badge>
+        </span>
+      ),
       colorClass: "text-muted-foreground",
     };
   }
@@ -240,11 +319,23 @@ export default function ChannelAllocation() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
+  const debouncedSearch = useDebounce(search, 300);
+
+  // Reset page when search changes
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
 
   const { data, isLoading } = useQuery<AllocationGrid>({
-    queryKey: ["/api/channel-allocation/grid"],
+    queryKey: ["/api/channel-allocation/grid", debouncedSearch, page],
     queryFn: async () => {
-      const res = await fetch("/api/channel-allocation/grid", {
+      const params = new URLSearchParams();
+      if (debouncedSearch) params.set("search", debouncedSearch);
+      params.set("page", String(page));
+      params.set("limit", String(pageSize));
+      const res = await fetch(`/api/channel-allocation/grid?${params}`, {
         credentials: "include",
       });
       if (!res.ok) throw new Error("Failed to fetch allocation grid");
@@ -275,16 +366,8 @@ export default function ChannelAllocation() {
 
   const channels = data?.channels ?? [];
   const rows = data?.rows ?? [];
-
-  const filteredRows = useMemo(() => {
-    if (!search.trim()) return rows;
-    const q = search.toLowerCase();
-    return rows.filter(
-      (r) =>
-        r.sku.toLowerCase().includes(q) ||
-        r.productName.toLowerCase().includes(q)
-    );
-  }, [rows, search]);
+  const totalCount = data?.totalCount ?? 0;
+  const totalPages = Math.ceil(totalCount / pageSize);
 
   return (
     <div className="space-y-4 p-2 md:p-6">
@@ -319,6 +402,30 @@ export default function ChannelAllocation() {
         </div>
       </div>
 
+      {/* Summary stats */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Variants with Stock</p>
+            <p className="text-2xl font-bold">{totalCount.toLocaleString()}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Active Channels</p>
+            <p className="text-2xl font-bold">{channels.length}</p>
+          </CardContent>
+        </Card>
+        <Card className="hidden md:block">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Showing</p>
+            <p className="text-2xl font-bold">
+              {rows.length} <span className="text-sm font-normal text-muted-foreground">of {totalCount}</span>
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
       {/* Grid */}
       <Card>
         <CardContent className="p-0">
@@ -326,12 +433,13 @@ export default function ChannelAllocation() {
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
-          ) : filteredRows.length === 0 ? (
+          ) : rows.length === 0 ? (
             <div className="text-center py-16">
+              <Layers className="h-12 w-12 mx-auto text-muted-foreground/30 mb-3" />
               <p className="text-muted-foreground">
                 {search.trim()
                   ? "No variants match your search."
-                  : "No allocation data available."}
+                  : "No variants with inventory found."}
               </p>
             </div>
           ) : (
@@ -356,7 +464,7 @@ export default function ChannelAllocation() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredRows.map((row) => (
+                  {rows.map((row) => (
                     <TableRow key={row.productVariantId}>
                       <TableCell className="sticky left-0 bg-card z-10 font-mono text-sm">
                         {row.sku}
@@ -394,6 +502,38 @@ export default function ChannelAllocation() {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          )}
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t">
+              <span className="text-sm text-muted-foreground">
+                {((page - 1) * pageSize + 1).toLocaleString()}-{Math.min(page * pageSize, totalCount).toLocaleString()} of {totalCount.toLocaleString()}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page <= 1}
+                  onClick={() => setPage((p) => p - 1)}
+                >
+                  <ChevronLeft className="h-4 w-4 mr-1" />
+                  Previous
+                </Button>
+                <span className="text-sm text-muted-foreground px-2">
+                  Page {page} of {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page >= totalPages}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4 ml-1" />
+                </Button>
+              </div>
             </div>
           )}
         </CardContent>

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
-import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, orderItems, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, orderItems, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes } from "@shared/schema";
 import { createOrderCombiningService } from "./services/order-combining";
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
 import { createProductImportService } from "./services/product-import";
@@ -16,6 +16,7 @@ import * as apLedger from "./services/ap-ledger";
 import { renderPoHtml } from "./services/po-document";
 import * as emailService from "./services/email";
 import { broadcastOrdersUpdated } from "./websocket";
+import * as notificationService from "./services/notifications";
 import type { InsertOrderItem, SafeUser, InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import bcrypt from "bcrypt";
@@ -5857,6 +5858,62 @@ export async function registerRoutes(
     }
   });
 
+  // Enable a channel feed for a variant (create the link so sync can push inventory)
+  app.post("/api/channel-feeds/enable", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { channelId, productVariantId } = req.body;
+      if (!channelId || !productVariantId) {
+        return res.status(400).json({ error: "channelId and productVariantId are required" });
+      }
+
+      // Check if feed already exists
+      const { channelFeeds: cf } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const [existing] = await db.select().from(cf)
+        .where(and(eq(cf.channelId, channelId), eq(cf.productVariantId, productVariantId)))
+        .limit(1);
+      if (existing) {
+        // Reactivate if disabled
+        if (existing.isActive !== 1) {
+          await db.update(cf).set({ isActive: 1, updatedAt: new Date() }).where(eq(cf.id, existing.id));
+        }
+        return res.json(existing);
+      }
+
+      // Look up channel and variant
+      const channel = await storage.getChannelById(channelId);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+
+      const variant = await storage.getProductVariantById(productVariantId);
+      if (!variant) return res.status(404).json({ error: "Variant not found" });
+
+      // Use shopifyVariantId for Shopify channels, SKU for others
+      const channelVariantId = channel.provider === "shopify" && variant.shopifyVariantId
+        ? variant.shopifyVariantId
+        : variant.sku || String(variant.id);
+
+      const product = await storage.getProductById(variant.productId);
+      const channelProductId = channel.provider === "shopify" && product?.shopifyProductId
+        ? product.shopifyProductId
+        : null;
+
+      const [feed] = await db.insert(cf).values({
+        channelId,
+        productVariantId,
+        channelType: channel.provider || "manual",
+        channelVariantId,
+        channelProductId,
+        channelSku: variant.sku || null,
+        isActive: 1,
+      }).returning();
+
+      res.json(feed);
+    } catch (error: any) {
+      console.error("Error enabling channel feed:", error);
+      res.status(500).json({ error: error.message || "Failed to enable feed" });
+    }
+  });
+
   // Full inventory summary with all items and their variant availability
   // Optional query params: warehouseId (filter by warehouse)
   app.get("/api/inventory/summary", async (req, res) => {
@@ -8446,6 +8503,11 @@ export async function registerRoutes(
     try {
       const { receiving: rcvService } = req.app.locals.services as any;
       const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null);
+      notificationService.notify("po_received", {
+        title: `Receiving Complete: ${result.orderNumber || `#${req.params.id}`}`,
+        message: result.totalUnitsReceived ? `${result.totalUnitsReceived} units received` : undefined,
+        data: { receivingOrderId: parseInt(req.params.id) },
+      }).catch(() => {});
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
@@ -10068,46 +10130,72 @@ export async function registerRoutes(
 
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelSync, inventoryAtp } = req.app.locals.services;
+      const { inventoryAtp } = req.app.locals.services;
       const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p } = await import("@shared/schema");
-      const { eq, and, inArray } = await import("drizzle-orm");
+      const { eq, and, inArray, gt, like, or } = await import("drizzle-orm");
+
+      const search = ((req.query.search as string) || "").trim().toLowerCase();
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
 
       // Get all active channels
       const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
 
-      // Get all active feeds with variant + product info
+      // Get ALL variants that have inventory (not just ones with feeds)
+      const variantsWithInventoryRaw = await db
+        .selectDistinct({ id: pv.id })
+        .from(pv)
+        .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, pv.id))
+        .where(and(eq(pv.isActive, true), gt(inventoryLevels.variantQty, 0)));
+
+      const allVariantIds = variantsWithInventoryRaw.map((v: any) => v.id);
+      if (allVariantIds.length === 0) {
+        return res.json({ channels: activeChannels, rows: [], totalCount: 0, page, limit });
+      }
+
+      // Load all variants and products
+      const allVariants = await db.select().from(pv).where(inArray(pv.id, allVariantIds));
+      const productIds = Array.from(new Set(allVariants.map((v: any) => v.productId)));
+      const prods = await db.select().from(p).where(inArray(p.id, productIds));
+      const prodMap = new Map(prods.map((pr: any) => [pr.id, pr]));
+
+      // Server-side search filter
+      let filteredVariants = allVariants;
+      if (search) {
+        filteredVariants = allVariants.filter((v: any) => {
+          const prod = prodMap.get(v.productId);
+          return (v.sku || "").toLowerCase().includes(search)
+            || (v.name || "").toLowerCase().includes(search)
+            || (prod?.name || "").toLowerCase().includes(search)
+            || (prod?.sku || "").toLowerCase().includes(search);
+        });
+      }
+
+      const totalCount = filteredVariants.length;
+      const paginatedVariants = filteredVariants.slice((page - 1) * limit, page * limit);
+
+      // Load active feeds (for hasFeed display per cell)
       const feeds = await db.select({
         feedId: cf.id,
         channelId: cf.channelId,
-        channelType: cf.channelType,
         productVariantId: cf.productVariantId,
         lastSyncedQty: cf.lastSyncedQty,
         lastSyncedAt: cf.lastSyncedAt,
       }).from(cf).where(eq(cf.isActive, 1));
 
-      // Get all variants that have feeds
-      const feedVariantIds = Array.from(new Set(feeds.map((f: any) => f.productVariantId)));
-      if (feedVariantIds.length === 0) {
-        return res.json({ channels: activeChannels, rows: [] });
-      }
-
-      const variants = await db.select().from(pv).where(inArray(pv.id, feedVariantIds));
-      const productIds = Array.from(new Set(variants.map((v: any) => v.productId)));
-      const prods = await db.select().from(p).where(inArray(p.id, productIds));
-
       // Load all allocation rules
       const productAllocs = await db.select().from(cpa);
-      const variantReservations = await db.select().from(cr).where(inArray(cr.productVariantId, feedVariantIds));
+      const paginatedVariantIds = paginatedVariants.map((v: any) => v.id);
+      const variantReservations = paginatedVariantIds.length > 0
+        ? await db.select().from(cr).where(inArray(cr.productVariantId, paginatedVariantIds))
+        : [];
 
       // Batch ATP
-      const atpMap = new Map<number, number>();
-      for (const pid of productIds) {
-        const atpBase = await inventoryAtp.getAtpBase(pid);
-        atpMap.set(pid, atpBase);
-      }
+      const paginatedProductIds = Array.from(new Set(paginatedVariants.map((v: any) => v.productId)));
+      const atpMap = await inventoryAtp.getBulkAtp(paginatedProductIds);
 
       const variantAtpMap = new Map<number, any>();
-      for (const pid of productIds) {
+      for (const pid of paginatedProductIds) {
         const variantAtp = await inventoryAtp.getAtpPerVariant(pid);
         for (const v of variantAtp) {
           variantAtpMap.set(v.productVariantId, v);
@@ -10115,18 +10203,18 @@ export async function registerRoutes(
       }
 
       // Build grid rows
-      const rows = variants.map((v: any) => {
-        const prod = prods.find((p: any) => p.id === v.productId);
+      const rows = paginatedVariants.map((v: any) => {
+        const prod = prodMap.get(v.productId);
         const vatpInfo = variantAtpMap.get(v.id);
         const atpBase = atpMap.get(v.productId) ?? 0;
 
         const channelData: Record<number, any> = {};
-        for (const ch of activeChannels) {
-          const feed = feeds.find((f: any) => f.channelId === ch.id && f.productVariantId === v.id);
-          const prodAlloc = productAllocs.find((pa: any) => pa.channelId === ch.id && pa.productId === v.productId);
-          const varRes = variantReservations.find((r: any) => (r as any).channelId === ch.id && (r as any).productVariantId === v.id);
+        for (const c of activeChannels) {
+          const feed = feeds.find((f: any) => f.channelId === c.id && f.productVariantId === v.id);
+          const prodAlloc = productAllocs.find((pa: any) => pa.channelId === c.id && pa.productId === v.productId);
+          const varRes = variantReservations.find((r: any) => (r as any).channelId === c.id && (r as any).productVariantId === v.id);
 
-          channelData[ch.id] = {
+          channelData[c.id] = {
             hasFeed: !!feed,
             lastSyncedQty: feed?.lastSyncedQty ?? null,
             lastSyncedAt: feed?.lastSyncedAt ?? null,
@@ -10149,7 +10237,7 @@ export async function registerRoutes(
               effective = Math.min(effective, maxUnits);
             }
           }
-          channelData[ch.id].effectiveAtp = Math.max(effective, 0);
+          channelData[c.id].effectiveAtp = Math.max(effective, 0);
         }
 
         return {
@@ -10165,7 +10253,7 @@ export async function registerRoutes(
         };
       });
 
-      res.json({ channels: activeChannels, rows });
+      res.json({ channels: activeChannels, rows, totalCount, page, limit });
     } catch (error: any) {
       console.error("Error building allocation grid:", error);
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
@@ -11615,6 +11703,11 @@ export async function registerRoutes(
   app.post("/api/inbound-shipments/:id/delivered", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const shipment = await shipmentTracking.markDelivered(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.deliveredDate ? new Date(req.body.deliveredDate) : undefined);
+      notificationService.notify("shipment_arrived", {
+        title: `Shipment Delivered: ${shipment.referenceNumber || `#${shipment.id}`}`,
+        message: shipment.shipperName ? `From ${shipment.shipperName}` : undefined,
+        data: { shipmentId: shipment.id },
+      }).catch(() => {});
       res.json(shipment);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
@@ -12156,6 +12249,105 @@ export async function registerRoutes(
     try {
       const summary = await apLedger.getApSummary();
       res.json(summary);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================================
+  // NOTIFICATIONS
+  // ============================================================
+
+  // Get notifications for the current user
+  app.get("/api/notifications", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      const unreadOnly = req.query.unreadOnly === "true";
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+      const offset = parseInt(req.query.offset as string) || 0;
+      const rows = await notificationService.getUserNotifications(userId, { unreadOnly, limit, offset });
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get unread count (for badge)
+  app.get("/api/notifications/unread-count", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      const count = await notificationService.getUnreadCount(userId);
+      res.json({ count });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Mark single notification as read
+  app.post("/api/notifications/:id/read", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      await notificationService.markRead(parseInt(req.params.id), userId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Mark all notifications as read
+  app.post("/api/notifications/read-all", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      await notificationService.markAllRead(userId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Get notification preferences for the current user
+  app.get("/api/notification-preferences", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      const prefs = await notificationService.getPreferencesForUser(userId);
+      res.json(prefs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Set a user-specific notification preference
+  app.put("/api/notification-preferences/:typeId", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      const typeId = parseInt(req.params.typeId);
+      const { enabled } = req.body;
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled (boolean) is required" });
+      }
+      await notificationService.setUserPreference(userId, typeId, enabled);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Reset user's notification preferences to role defaults
+  app.delete("/api/notification-preferences", requireAuth, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id ?? req.session.user!.id;
+      await notificationService.resetUserPreferences(userId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // List all notification types (admin only, for settings)
+  app.get("/api/notification-types", requirePermission("settings", "view"), async (req, res) => {
+    try {
+      const types = await db.select().from(notificationTypes).orderBy(notificationTypes.category, notificationTypes.label);
+      res.json(types);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
