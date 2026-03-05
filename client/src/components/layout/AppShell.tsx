@@ -55,6 +55,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { NotificationBell } from "@/components/NotificationBell";
 
 // --- Navigation types ---
 
@@ -419,10 +420,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" className="text-muted-foreground relative min-h-[44px] min-w-[44px]">
-              <Bell size={18} />
-              <span className="absolute top-2 right-2.5 w-2 h-2 bg-destructive rounded-full border-2 border-card"></span>
-            </Button>
+            <NotificationBell />
             {isAdmin && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -443,6 +441,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                     <Link href="/integrations" className="w-full cursor-pointer">
                       <Cable className="mr-2 h-4 w-4" />
                       Integrations
+                    </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <Link href="/notification-preferences" className="w-full cursor-pointer">
+                      <Bell className="mr-2 h-4 w-4" />
+                      Notifications
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />

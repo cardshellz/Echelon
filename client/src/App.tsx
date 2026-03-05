@@ -41,6 +41,7 @@ import APInvoiceDetail from "@/pages/APInvoiceDetail";
 import APPayments from "@/pages/APPayments";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
+import NotificationPreferences from "@/pages/NotificationPreferences";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ 
@@ -209,6 +210,7 @@ function Router() {
         <Route path="/settings">
           <ProtectedRoute component={Settings} allowedRoles={["admin"]} />
         </Route>
+        <Route path="/notification-preferences" component={NotificationPreferences} />
         {/* Redirects for old URLs */}
         <Route path="/products"><Redirect to="/catalog" /></Route>
         <Route path="/variants"><Redirect to="/catalog/variants" /></Route>

@@ -17,6 +17,7 @@ import {
   cycleCountItems,
 } from "@shared/schema";
 import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
+import { notify } from "./notifications";
 import type {
   ReplenTask,
   InsertReplenTask,
@@ -1137,6 +1138,11 @@ class ReplenishmentService {
         } satisfies InsertReplenTask)
         .returning();
       // Return null — blocked tasks are for warehouse queue, not picker inline dialog
+      notify("stockout", {
+        title: `Stockout: ${variant.sku ?? `variant #${productVariantId}`}`,
+        message: `No source stock found in ${sourceLocationType} locations for ${location.code}`,
+        data: { productVariantId, locationId: warehouseLocationId, locationCode: location.code },
+      }).catch(() => {});
       return null;
     }
 
@@ -1194,6 +1200,16 @@ class ReplenishmentService {
         notes: taskNotes,
       } satisfies InsertReplenTask)
       .returning();
+
+    // Notify for pallet drops and case breaks (require lead/admin intervention)
+    if (replenMethod === "pallet_drop" || replenMethod === "case_break") {
+      const typeKey = replenMethod === "pallet_drop" ? "pallet_drop_needed" : "case_break_needed";
+      notify(typeKey, {
+        title: `${replenMethod === "pallet_drop" ? "Pallet Drop" : "Case Break"} Needed`,
+        message: `${variant.sku ?? `variant #${productVariantId}`} at ${location.code}`,
+        data: { taskId: task.id, productVariantId, locationCode: location.code },
+      }).catch(() => {});
+    }
 
     // CHANGED: Don't auto-execute yet - wait for picker confirmation to avoid drift issues
     // Task will be executed via confirmPickerReplen() if picker confirms they actually did it
