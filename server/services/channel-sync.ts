@@ -304,6 +304,9 @@ class ChannelSyncService {
     // Master kill switch — skip all pushes when disabled
     if (!(await this.isSyncEnabled())) return aggregated;
 
+    // Auto-discover feeds for any channel+variant combos that are missing
+    await this.discoverFeeds();
+
     const allActiveFeeds = await this.db
       .select({ productVariantId: channelFeeds.productVariantId })
       .from(channelFeeds)
@@ -331,15 +334,15 @@ class ChannelSyncService {
         return aggregated;
       }
 
-      const channelFeedsForProvider: ChannelFeed[] = await this.db
+      const channelFeedsForChannel: ChannelFeed[] = await this.db
         .select()
         .from(channelFeeds)
         .where(and(
           eq(channelFeeds.isActive, 1),
-          eq(channelFeeds.channelType, channel.provider),
+          eq(channelFeeds.channelId, channelId),
         ));
 
-      const channelVariantIds = new Set(channelFeedsForProvider.map((f) => f.productVariantId));
+      const channelVariantIds = new Set(channelFeedsForChannel.map((f) => f.productVariantId));
       const channelVariantRows = variantRows.filter((v) => channelVariantIds.has(v.id));
       productIds = Array.from(new Set(channelVariantRows.map((v) => v.productId)));
     }
@@ -548,6 +551,89 @@ class ChannelSyncService {
     }
 
     return divergent;
+  }
+
+  // ---------------------------------------------------------------------------
+  // FEED DISCOVERY — auto-create feeds for active channels
+  // ---------------------------------------------------------------------------
+
+  /**
+   * For each active channel, ensure every active variant with a shopifyVariantId
+   * has a channelFeed record linking it to that channel. Creates missing feeds
+   * so the sync can push inventory without manual setup.
+   */
+  async discoverFeeds(): Promise<{ created: number; channels: number }> {
+    const activeChannels: Channel[] = await this.db
+      .select()
+      .from(channels)
+      .where(eq(channels.status, "active"));
+
+    if (activeChannels.length === 0) return { created: 0, channels: 0 };
+
+    // All active variants with a Shopify variant ID
+    const allVariants: ProductVariant[] = await this.db
+      .select()
+      .from(productVariants)
+      .where(and(
+        eq(productVariants.isActive, true),
+        sql`${productVariants.shopifyVariantId} IS NOT NULL`,
+      ));
+
+    if (allVariants.length === 0) return { created: 0, channels: 0 };
+
+    // Load all existing feeds keyed by channelId:variantId
+    const existingFeeds: ChannelFeed[] = await this.db
+      .select()
+      .from(channelFeeds);
+
+    const existingSet = new Set(
+      existingFeeds.map((f) => `${f.channelId}:${f.productVariantId}`),
+    );
+
+    let created = 0;
+    let channelsProcessed = 0;
+
+    for (const channel of activeChannels) {
+      // Only auto-discover for Shopify channels (they share variant IDs from the catalog)
+      if (channel.provider !== "shopify") continue;
+
+      channelsProcessed++;
+      const newFeeds: Array<{
+        channelId: number;
+        productVariantId: number;
+        channelType: string;
+        channelVariantId: string;
+        channelSku: string | null;
+        isActive: number;
+      }> = [];
+
+      for (const v of allVariants) {
+        if (existingSet.has(`${channel.id}:${v.id}`)) continue;
+
+        newFeeds.push({
+          channelId: channel.id,
+          productVariantId: v.id,
+          channelType: channel.provider,
+          channelVariantId: v.shopifyVariantId!,
+          channelSku: v.sku || null,
+          isActive: 1,
+        });
+      }
+
+      if (newFeeds.length > 0) {
+        // Batch insert in chunks of 100
+        for (let i = 0; i < newFeeds.length; i += 100) {
+          const chunk = newFeeds.slice(i, i + 100);
+          await this.db.insert(channelFeeds).values(chunk);
+        }
+        created += newFeeds.length;
+        console.log(
+          `[ChannelSync] Discovered ${newFeeds.length} new feeds for channel "${channel.name}" (${channel.id})`,
+        );
+      }
+    }
+
+    return { created, channels: channelsProcessed };
   }
 
   // ---------------------------------------------------------------------------
