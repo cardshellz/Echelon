@@ -10149,6 +10149,43 @@ export async function registerRoutes(
     }
   });
 
+  // --- SKU typeahead for channel allocation ---
+  app.get("/api/channel-allocation/search", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { productVariants: pv, products: p, inventoryLevels: il } = await import("@shared/schema");
+      const { eq, and, gt, or, ilike } = await import("drizzle-orm");
+
+      const q = ((req.query.q as string) || "").trim();
+      if (q.length < 2) return res.json([]);
+
+      const pattern = `%${q}%`;
+      const results = await db
+        .selectDistinct({
+          variantId: pv.id,
+          sku: pv.sku,
+          variantName: pv.name,
+          productName: p.name,
+        })
+        .from(pv)
+        .innerJoin(p, eq(p.id, pv.productId))
+        .innerJoin(il, eq(il.productVariantId, pv.id))
+        .where(and(
+          eq(pv.isActive, true),
+          gt(il.variantQty, 0),
+          or(
+            ilike(pv.sku, pattern),
+            ilike(pv.name, pattern),
+            ilike(p.name, pattern),
+          ),
+        ))
+        .limit(15);
+
+      res.json(results);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- Channel Allocation View (grid data for UI) ---
 
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
@@ -10239,6 +10276,49 @@ export async function registerRoutes(
           unfed: allVariants.length - fedSet.size,
           blocked,
           overrides,
+        };
+      }
+
+      // Sync stats per channel (last sync, recent errors)
+      const { channelSyncLog: csl, channelConnections: cc } = await import("@shared/schema");
+      const { desc, sql: sqlTag, max } = await import("drizzle-orm");
+      const syncStatsPerChannel: Record<number, { lastSyncAt: string | null; lastError: string | null; recentErrors: number; syncStatus: string | null }> = {};
+      for (const c of activeChannels) {
+        // Last successful sync from feeds
+        const fedSet = feedsByChannel.get(c.id) ?? new Set();
+        let lastSyncAt: string | null = null;
+        for (const f of feeds) {
+          if (f.channelId === c.id && f.lastSyncedAt) {
+            const ts = new Date(f.lastSyncedAt).toISOString();
+            if (!lastSyncAt || ts > lastSyncAt) lastSyncAt = ts;
+          }
+        }
+
+        // Recent errors (last 24h)
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const [errorRow] = await db.select({ cnt: sqlTag`COUNT(*)::int` }).from(csl)
+          .where(and(eq(csl.channelId, c.id), eq(csl.status, "error"), gt(csl.createdAt, oneDayAgo)));
+        const recentErrors = (errorRow as any)?.cnt ?? 0;
+
+        // Last error message
+        let lastError: string | null = null;
+        if (recentErrors > 0) {
+          const [lastErrRow] = await db.select({ errorMessage: csl.errorMessage }).from(csl)
+            .where(and(eq(csl.channelId, c.id), eq(csl.status, "error")))
+            .orderBy(desc(csl.createdAt)).limit(1);
+          lastError = (lastErrRow as any)?.errorMessage ?? null;
+          // Truncate long HTML errors
+          if (lastError && lastError.length > 200) lastError = lastError.substring(0, 200) + "...";
+        }
+
+        // Connection status
+        const [conn] = await db.select({ syncStatus: cc.syncStatus }).from(cc).where(eq(cc.channelId, c.id)).limit(1);
+
+        syncStatsPerChannel[c.id] = {
+          lastSyncAt,
+          lastError,
+          recentErrors,
+          syncStatus: (conn as any)?.syncStatus ?? null,
         };
       }
 
@@ -10393,6 +10473,7 @@ export async function registerRoutes(
         stats: {
           totalVariants: allVariants.length,
           channels: channelStats,
+          sync: syncStatsPerChannel,
         },
       });
     } catch (error: any) {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,6 +45,9 @@ import {
   Lock,
   X,
   AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -92,6 +95,20 @@ interface AllocationRow {
   channels: Record<string, ChannelCellData>;
 }
 
+interface SyncStats {
+  lastSyncAt: string | null;
+  lastError: string | null;
+  recentErrors: number;
+  syncStatus: string | null;
+}
+
+interface SearchResult {
+  variantId: number;
+  sku: string;
+  variantName: string;
+  productName: string;
+}
+
 interface AllocationGrid {
   channels: Channel[];
   rows: AllocationRow[];
@@ -101,6 +118,7 @@ interface AllocationGrid {
   stats: {
     totalVariants: number;
     channels: Record<string, ChannelStats>;
+    sync: Record<string, SyncStats>;
   };
 }
 
@@ -446,6 +464,99 @@ function getCellDisplay(cellData: ChannelCellData): { content: React.ReactNode; 
   };
 }
 
+// --- Helpers ---
+
+function formatRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+// --- Typeahead search ---
+
+function SkuTypeahead({ value, onChange }: { value: string; onChange: (val: string) => void }) {
+  const [input, setInput] = useState(value);
+  const [open, setOpen] = useState(false);
+  const debouncedInput = useDebounce(input, 250);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const { data: suggestions } = useQuery<SearchResult[]>({
+    queryKey: ["/api/channel-allocation/search", debouncedInput],
+    queryFn: async () => {
+      if (debouncedInput.length < 2) return [];
+      const res = await fetch(`/api/channel-allocation/search?q=${encodeURIComponent(debouncedInput)}`, { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: debouncedInput.length >= 2,
+  });
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // Sync external value changes
+  useEffect(() => { setInput(value); }, [value]);
+
+  const selectItem = useCallback((item: SearchResult) => {
+    setInput(item.sku);
+    onChange(item.sku);
+    setOpen(false);
+  }, [onChange]);
+
+  const handleClear = useCallback(() => {
+    setInput("");
+    onChange("");
+    setOpen(false);
+  }, [onChange]);
+
+  return (
+    <div ref={containerRef} className="relative flex-1 md:w-72">
+      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      <Input
+        placeholder="Search SKU or product..."
+        value={input}
+        onChange={(e) => { setInput(e.target.value); setOpen(true); if (!e.target.value) onChange(""); }}
+        onFocus={() => { if (input.length >= 2) setOpen(true); }}
+        onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
+        className="pl-9 h-10 pr-8"
+        autoComplete="off"
+      />
+      {input && (
+        <button
+          onClick={handleClear}
+          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {open && suggestions && suggestions.length > 0 && (
+        <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-popover border rounded-md shadow-lg max-h-64 overflow-y-auto">
+          {suggestions.map((item) => (
+            <button
+              key={item.variantId}
+              onClick={() => selectItem(item)}
+              className="w-full text-left px-3 py-2 hover:bg-muted/50 flex flex-col border-b last:border-b-0"
+            >
+              <span className="font-mono text-sm font-medium">{item.sku}</span>
+              <span className="text-xs text-muted-foreground truncate">{item.productName} — {item.variantName}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Main component ---
 
 export default function ChannelAllocation() {
@@ -505,10 +616,7 @@ export default function ChannelAllocation() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="relative flex-1 md:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input placeholder="Search SKU or product..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 h-10" autoComplete="off" />
-          </div>
+          <SkuTypeahead value={search} onChange={setSearch} />
           <Button variant="outline" onClick={() => syncAllMutation.mutate()} disabled={syncAllMutation.isPending}>
             {syncAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
             Sync All
@@ -524,13 +632,17 @@ export default function ChannelAllocation() {
             ? `${ch.allocationFixedQty.toLocaleString()} units`
             : ch.allocationPct != null ? `${ch.allocationPct}%` : "No limit";
 
+          const syncInfo = stats?.sync?.[ch.id];
+
           return (
             <Card key={ch.id}>
               <CardContent className="p-4">
                 <div className="flex items-center justify-between mb-2">
-                  <div>
-                    <p className="font-medium">{ch.name}</p>
-                    <p className="text-xs text-muted-foreground">{ch.provider}</p>
+                  <div className="flex items-center gap-2">
+                    <div>
+                      <p className="font-medium">{ch.name}</p>
+                      <p className="text-xs text-muted-foreground">{ch.provider}</p>
+                    </div>
                   </div>
                   <div className="flex items-center gap-1">
                     <Badge variant={ch.allocationPct != null || ch.allocationFixedQty != null ? "default" : "outline"} className="text-xs">
@@ -539,6 +651,37 @@ export default function ChannelAllocation() {
                     <ChannelAllocationDialog channel={ch} />
                   </div>
                 </div>
+
+                {/* Sync status row */}
+                {syncInfo && (
+                  <div className="flex items-center gap-2 mb-2 text-xs">
+                    {syncInfo.recentErrors > 0 ? (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button className="flex items-center gap-1 text-red-500 hover:underline cursor-pointer">
+                            <XCircle className="h-3 w-3" />
+                            {syncInfo.recentErrors} errors (24h)
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-80 text-xs">
+                          <p className="font-medium mb-1">Last error:</p>
+                          <p className="text-muted-foreground break-words">{syncInfo.lastError || "Unknown"}</p>
+                        </PopoverContent>
+                      </Popover>
+                    ) : (
+                      <span className="flex items-center gap-1 text-green-600">
+                        <CheckCircle2 className="h-3 w-3" /> No errors
+                      </span>
+                    )}
+                    {syncInfo.lastSyncAt && (
+                      <span className="flex items-center gap-1 text-muted-foreground ml-auto">
+                        <Clock className="h-3 w-3" />
+                        {formatRelativeTime(syncInfo.lastSyncAt)}
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {s && (
                   <div className="flex flex-wrap gap-2 text-xs">
                     <span className="text-green-600">{s.fed} synced</span>
