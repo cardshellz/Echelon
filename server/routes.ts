@@ -10160,6 +10160,8 @@ export async function registerRoutes(
       const search = ((req.query.search as string) || "").trim().toLowerCase();
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+      // Filter: "all" | "unfed:<channelId>" | "override" | "blocked"
+      const filter = ((req.query.filter as string) || "").trim();
 
       // Get all active channels
       const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
@@ -10173,7 +10175,11 @@ export async function registerRoutes(
 
       const allVariantIds = variantsWithInventoryRaw.map((v: any) => v.id);
       if (allVariantIds.length === 0) {
-        return res.json({ channels: activeChannels, rows: [], totalCount: 0, page, limit });
+        const emptyStats = activeChannels.reduce((acc: any, c: any) => {
+          acc[c.id] = { fed: 0, unfed: 0, blocked: 0, overrides: 0 };
+          return acc;
+        }, {});
+        return res.json({ channels: activeChannels, rows: [], totalCount: 0, page, limit, stats: { totalVariants: 0, channels: emptyStats } });
       }
 
       // Load all variants and products
@@ -10181,21 +10187,6 @@ export async function registerRoutes(
       const productIds = Array.from(new Set(allVariants.map((v: any) => v.productId)));
       const prods = await db.select().from(p).where(inArray(p.id, productIds));
       const prodMap = new Map(prods.map((pr: any) => [pr.id, pr]));
-
-      // Server-side search filter
-      let filteredVariants = allVariants;
-      if (search) {
-        filteredVariants = allVariants.filter((v: any) => {
-          const prod = prodMap.get(v.productId);
-          return (v.sku || "").toLowerCase().includes(search)
-            || (v.name || "").toLowerCase().includes(search)
-            || (prod?.name || "").toLowerCase().includes(search)
-            || (prod?.sku || "").toLowerCase().includes(search);
-        });
-      }
-
-      const totalCount = filteredVariants.length;
-      const paginatedVariants = filteredVariants.slice((page - 1) * limit, page * limit);
 
       // Load active feeds (for hasFeed display per cell)
       const feeds = await db.select({
@@ -10206,12 +10197,80 @@ export async function registerRoutes(
         lastSyncedAt: cf.lastSyncedAt,
       }).from(cf).where(eq(cf.isActive, 1));
 
-      // Load all allocation rules
+      // Load all allocation rules + reservations (needed for stats and filtering)
       const productAllocs = await db.select().from(cpa);
-      const paginatedVariantIds = paginatedVariants.map((v: any) => v.id);
-      const variantReservations = paginatedVariantIds.length > 0
-        ? await db.select().from(cr).where(inArray(cr.productVariantId, paginatedVariantIds))
-        : [];
+      const allReservations = await db.select().from(cr);
+
+      // Build feed lookup: channelId -> Set of variantIds
+      const feedsByChannel = new Map<number, Set<number>>();
+      for (const f of feeds) {
+        if (!f.channelId) continue;
+        if (!feedsByChannel.has(f.channelId)) feedsByChannel.set(f.channelId, new Set());
+        feedsByChannel.get(f.channelId)!.add(f.productVariantId);
+      }
+
+      // Build reservation lookup
+      const reservationMap = new Map<string, any>();
+      for (const r of allReservations) {
+        if ((r as any).channelId) {
+          reservationMap.set(`${(r as any).channelId}:${(r as any).productVariantId}`, r);
+        }
+      }
+
+      // Build product alloc lookup
+      const productAllocMap = new Map<string, any>();
+      for (const pa of productAllocs) {
+        productAllocMap.set(`${pa.channelId}:${pa.productId}`, pa);
+      }
+
+      // Compute global stats (across ALL variants, not filtered)
+      const channelStats: Record<number, { fed: number; unfed: number; blocked: number; overrides: number }> = {};
+      for (const c of activeChannels) {
+        const fedSet = feedsByChannel.get(c.id) ?? new Set();
+        let blocked = 0, overrides = 0;
+        for (const v of allVariants) {
+          const pa = productAllocMap.get(`${c.id}:${v.productId}`);
+          if (pa?.isListed === 0) blocked++;
+          const res = reservationMap.get(`${c.id}:${v.id}`);
+          if (res?.overrideQty != null) overrides++;
+        }
+        channelStats[c.id] = {
+          fed: fedSet.size,
+          unfed: allVariants.length - fedSet.size,
+          blocked,
+          overrides,
+        };
+      }
+
+      // Server-side search filter
+      let filteredVariants = allVariants;
+      if (search) {
+        filteredVariants = filteredVariants.filter((v: any) => {
+          const prod = prodMap.get(v.productId);
+          return (v.sku || "").toLowerCase().includes(search)
+            || (v.name || "").toLowerCase().includes(search)
+            || (prod?.name || "").toLowerCase().includes(search)
+            || (prod?.sku || "").toLowerCase().includes(search);
+        });
+      }
+
+      // Apply status filter
+      if (filter.startsWith("unfed:")) {
+        const channelId = parseInt(filter.split(":")[1]);
+        const fedSet = feedsByChannel.get(channelId) ?? new Set();
+        filteredVariants = filteredVariants.filter((v: any) => !fedSet.has(v.id));
+      } else if (filter === "override") {
+        filteredVariants = filteredVariants.filter((v: any) =>
+          activeChannels.some((c: any) => reservationMap.get(`${c.id}:${v.id}`)?.overrideQty != null)
+        );
+      } else if (filter === "blocked") {
+        filteredVariants = filteredVariants.filter((v: any) =>
+          activeChannels.some((c: any) => productAllocMap.get(`${c.id}:${v.productId}`)?.isListed === 0)
+        );
+      }
+
+      const totalCount = filteredVariants.length;
+      const paginatedVariants = filteredVariants.slice((page - 1) * limit, page * limit);
 
       // Batch ATP
       const paginatedProductIds = Array.from(new Set(paginatedVariants.map((v: any) => v.productId)));
@@ -10236,8 +10295,8 @@ export async function registerRoutes(
         const channelData: Record<number, any> = {};
         for (const c of activeChannels) {
           const feed = feeds.find((f: any) => f.channelId === c.id && f.productVariantId === v.id);
-          const prodAlloc = productAllocs.find((pa: any) => pa.channelId === c.id && pa.productId === v.productId);
-          const varRes = variantReservations.find((r: any) => (r as any).channelId === c.id && (r as any).productVariantId === v.id);
+          const prodAlloc = productAllocMap.get(`${c.id}:${v.productId}`);
+          const varRes = reservationMap.get(`${c.id}:${v.id}`);
 
           let effective = rawAtpUnits;
           let status = "normal";
@@ -10325,7 +10384,17 @@ export async function registerRoutes(
         allocationFixedQty: c.allocationFixedQty ?? null,
       }));
 
-      res.json({ channels: channelsWithAllocation, rows, totalCount, page, limit });
+      res.json({
+        channels: channelsWithAllocation,
+        rows,
+        totalCount,
+        page,
+        limit,
+        stats: {
+          totalVariants: allVariants.length,
+          channels: channelStats,
+        },
+      });
     } catch (error: any) {
       console.error("Error building allocation grid:", error);
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
