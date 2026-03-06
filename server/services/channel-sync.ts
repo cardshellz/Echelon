@@ -301,11 +301,11 @@ class ChannelSyncService {
   ): Promise<{ total: number; synced: number; errors: string[] }> {
     const aggregated = { total: 0, synced: 0, errors: [] as string[] };
 
+    // Auto-discover feeds regardless of kill switch (feeds ≠ pushing)
+    await this.discoverFeeds();
+
     // Master kill switch — skip all pushes when disabled
     if (!(await this.isSyncEnabled())) return aggregated;
-
-    // Auto-discover feeds for any channel+variant combos that are missing
-    await this.discoverFeeds();
 
     const allActiveFeeds = await this.db
       .select({ productVariantId: channelFeeds.productVariantId })
