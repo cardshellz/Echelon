@@ -239,6 +239,9 @@ export default function Orders() {
       if (statusFilter === "active" || statusFilter === "combined") {
         params.append("status", "ready");
         params.append("status", "in_progress");
+      } else if (statusFilter === "completed") {
+        params.append("status", "shipped");
+        params.append("status", "packed");
       } else if (statusFilter !== "all") {
         params.append("status", statusFilter);
       }
@@ -440,7 +443,7 @@ export default function Orders() {
           id: o.id,
           orderNumber: o.orderNumber,
           itemCount: o.itemCount,
-          status: o.status,
+          status: o.warehouseStatus,
         }));
 
         result.push({
@@ -461,9 +464,9 @@ export default function Orders() {
     return result;
   })();
 
-  const activeCount = orders.filter(o => o.status === "ready" || o.status === "in_progress").length;
-  const exceptionCount = orders.filter(o => o.status === "exception").length;
-  const completedCount = orders.filter(o => o.status === "completed" || o.status === "shipped").length;
+  const activeCount = orders.filter(o => o.warehouseStatus === "ready" || o.warehouseStatus === "in_progress").length;
+  const exceptionCount = orders.filter(o => o.warehouseStatus === "exception").length;
+  const completedCount = orders.filter(o => o.warehouseStatus === "shipped" || o.warehouseStatus === "packed").length;
   const combinedCount = groupedOrders.filter(o => o.isCombinedGroup).length;
 
   // Apply combined filter if active
