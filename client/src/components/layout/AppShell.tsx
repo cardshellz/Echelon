@@ -36,6 +36,7 @@ import {
   Receipt,
   CreditCard,
   DollarSign,
+  Tag,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -124,6 +125,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Catalog", icon: Package, href: "/catalog" },
+      { label: "Product Lines", icon: Tag, href: "/product-lines" },
       { label: "Channels", icon: Store, href: "/channels" },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Dropship Network", icon: Globe, href: "/dropship" },

@@ -5893,6 +5893,21 @@ export async function registerRoutes(
         : variant.sku || String(variant.id);
 
       const product = await storage.getProductById(variant.productId);
+
+      // Product line gate: check if this product's lines match the channel's lines
+      if (product) {
+        const { productLineProducts: plp, channelProductLines: cpl } = await import("@shared/schema");
+        const { inArray } = await import("drizzle-orm");
+        const prodLines = (await db.select({ plId: plp.productLineId }).from(plp).where(eq(plp.productId, product.id))).map((r: any) => r.plId);
+        if (prodLines.length > 0) {
+          const chLines = (await db.select({ plId: cpl.productLineId }).from(cpl).where(and(eq(cpl.channelId, channelId), eq(cpl.isActive, true)))).map((r: any) => r.plId);
+          const overlap = prodLines.some((pl: number) => chLines.includes(pl));
+          if (!overlap) {
+            return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
+          }
+        }
+      }
+
       const channelProductId = channel.provider === "shopify" && product?.shopifyProductId
         ? product.shopifyProductId
         : null;
@@ -10186,12 +10201,227 @@ export async function registerRoutes(
     }
   });
 
+  // --- Product Lines CRUD ---
+
+  // List all product lines
+  app.get("/api/product-lines", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { productLines, productLineProducts, channelProductLines } = await import("@shared/schema");
+      const { eq, sql, count } = await import("drizzle-orm");
+
+      const lines = await db.select().from(productLines).orderBy(productLines.sortOrder, productLines.name);
+
+      // Get product counts per line
+      const productCounts = await db
+        .select({ productLineId: productLineProducts.productLineId, count: count() })
+        .from(productLineProducts)
+        .groupBy(productLineProducts.productLineId);
+      const countMap = new Map(productCounts.map((r: any) => [r.productLineId, Number(r.count)]));
+
+      // Get channel counts per line
+      const channelCounts = await db
+        .select({ productLineId: channelProductLines.productLineId, count: count() })
+        .from(channelProductLines)
+        .where(eq(channelProductLines.isActive, true))
+        .groupBy(channelProductLines.productLineId);
+      const chCountMap = new Map(channelCounts.map((r: any) => [r.productLineId, Number(r.count)]));
+
+      const result = lines.map((l: any) => ({
+        ...l,
+        productCount: countMap.get(l.id) ?? 0,
+        channelCount: chCountMap.get(l.id) ?? 0,
+      }));
+
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get single product line with details
+  app.get("/api/product-lines/:id", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { productLines, productLineProducts, channelProductLines, products, channels } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const lineId = parseInt(req.params.id);
+
+      const [line] = await db.select().from(productLines).where(eq(productLines.id, lineId));
+      if (!line) return res.status(404).json({ error: "Product line not found" });
+
+      // Get assigned products
+      const assignedProducts = await db
+        .select({ productId: productLineProducts.productId, productName: products.name, sku: products.sku })
+        .from(productLineProducts)
+        .innerJoin(products, eq(products.id, productLineProducts.productId))
+        .where(eq(productLineProducts.productLineId, lineId))
+        .orderBy(products.name);
+
+      // Get assigned channels
+      const assignedChannels = await db
+        .select({ channelId: channelProductLines.channelId, channelName: channels.name, provider: channels.provider, isActive: channelProductLines.isActive })
+        .from(channelProductLines)
+        .innerJoin(channels, eq(channels.id, channelProductLines.channelId))
+        .where(eq(channelProductLines.productLineId, lineId))
+        .orderBy(channels.name);
+
+      res.json({ ...line, products: assignedProducts, channels: assignedChannels });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Create product line
+  app.post("/api/product-lines", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { productLines } = await import("@shared/schema");
+      const { code, name, description } = req.body;
+      if (!code || !name) return res.status(400).json({ error: "code and name required" });
+
+      const [created] = await db.insert(productLines).values({
+        code: code.toUpperCase().replace(/\s+/g, "_"),
+        name,
+        description: description || null,
+      }).returning();
+
+      res.json(created);
+    } catch (error: any) {
+      if (error.code === "23505") return res.status(409).json({ error: "Product line code already exists" });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update product line
+  app.put("/api/product-lines/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { productLines } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const lineId = parseInt(req.params.id);
+      const { name, description, isActive, sortOrder } = req.body;
+
+      const updates: any = { updatedAt: new Date() };
+      if (name !== undefined) updates.name = name;
+      if (description !== undefined) updates.description = description;
+      if (isActive !== undefined) updates.isActive = isActive;
+      if (sortOrder !== undefined) updates.sortOrder = sortOrder;
+
+      const [updated] = await db.update(productLines).set(updates).where(eq(productLines.id, lineId)).returning();
+      if (!updated) return res.status(404).json({ error: "Product line not found" });
+
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Assign products to a product line (bulk)
+  app.put("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { productLineProducts } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const lineId = parseInt(req.params.id);
+      const { productIds } = req.body as { productIds: number[] };
+      if (!Array.isArray(productIds)) return res.status(400).json({ error: "productIds array required" });
+
+      // Replace all assignments: delete existing, insert new
+      await db.delete(productLineProducts).where(eq(productLineProducts.productLineId, lineId));
+      if (productIds.length > 0) {
+        await db.insert(productLineProducts).values(
+          productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
+        ).onConflictDoNothing();
+      }
+
+      res.json({ productLineId: lineId, productCount: productIds.length });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Add single product to a product line
+  app.post("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { productLineProducts } = await import("@shared/schema");
+      const lineId = parseInt(req.params.id);
+      const { productId } = req.body;
+      if (!productId) return res.status(400).json({ error: "productId required" });
+
+      const [created] = await db.insert(productLineProducts).values({
+        productLineId: lineId,
+        productId,
+      }).onConflictDoNothing().returning();
+
+      res.json(created || { productLineId: lineId, productId, alreadyAssigned: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Remove product from a product line
+  app.delete("/api/product-lines/:lineId/products/:productId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { productLineProducts } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const lineId = parseInt(req.params.lineId);
+      const productId = parseInt(req.params.productId);
+
+      await db.delete(productLineProducts).where(
+        and(eq(productLineProducts.productLineId, lineId), eq(productLineProducts.productId, productId))
+      );
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Assign product lines to a channel
+  app.put("/api/channels/:id/product-lines", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const { channelProductLines } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const channelId = parseInt(req.params.id);
+      const { productLineIds } = req.body as { productLineIds: number[] };
+      if (!Array.isArray(productLineIds)) return res.status(400).json({ error: "productLineIds array required" });
+
+      // Replace all assignments
+      await db.delete(channelProductLines).where(eq(channelProductLines.channelId, channelId));
+      if (productLineIds.length > 0) {
+        await db.insert(channelProductLines).values(
+          productLineIds.map((plId: number) => ({ channelId, productLineId: plId }))
+        ).onConflictDoNothing();
+      }
+
+      res.json({ channelId, productLineCount: productLineIds.length });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get product lines assigned to a channel
+  app.get("/api/channels/:id/product-lines", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const { channelProductLines, productLines } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const channelId = parseInt(req.params.id);
+
+      const assigned = await db
+        .select({ id: productLines.id, code: productLines.code, name: productLines.name, isActive: channelProductLines.isActive })
+        .from(channelProductLines)
+        .innerJoin(productLines, eq(productLines.id, channelProductLines.productLineId))
+        .where(eq(channelProductLines.channelId, channelId))
+        .orderBy(productLines.sortOrder, productLines.name);
+
+      res.json(assigned);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // --- Channel Allocation View (grid data for UI) ---
 
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
     try {
       const { atp: inventoryAtp } = req.app.locals.services;
-      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p } = await import("@shared/schema");
+      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p, productLines: pl, productLineProducts: plp, channelProductLines: cpl } = await import("@shared/schema");
       const { eq, and, inArray, gt, like, or } = await import("drizzle-orm");
 
       const search = ((req.query.search as string) || "").trim().toLowerCase();
@@ -10199,6 +10429,10 @@ export async function registerRoutes(
       const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
       // Filter: "all" | "unfed:<channelId>" | "override" | "blocked"
       const filter = ((req.query.filter as string) || "").trim();
+      const productLineId = req.query.productLineId ? parseInt(req.query.productLineId as string) : null;
+
+      // Load available product lines for the dropdown
+      const allProductLines = await db.select({ id: pl.id, code: pl.code, name: pl.name }).from(pl).where(eq(pl.isActive, true)).orderBy(pl.sortOrder, pl.name);
 
       // Get all active channels
       const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
@@ -10210,7 +10444,25 @@ export async function registerRoutes(
         .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, pv.id))
         .where(and(eq(pv.isActive, true), gt(inventoryLevels.variantQty, 0)));
 
-      const allVariantIds = variantsWithInventoryRaw.map((v: any) => v.id);
+      let allVariantIds = variantsWithInventoryRaw.map((v: any) => v.id);
+
+      // Product line filter: restrict to products in the selected line
+      if (productLineId) {
+        const lineProductIds = (await db
+          .select({ productId: plp.productId })
+          .from(plp)
+          .where(eq(plp.productLineId, productLineId))
+        ).map((r: any) => r.productId);
+
+        if (lineProductIds.length > 0) {
+          const lineVariantIds = new Set(
+            (await db.select({ id: pv.id }).from(pv).where(inArray(pv.productId, lineProductIds))).map((v: any) => v.id)
+          );
+          allVariantIds = allVariantIds.filter((id: number) => lineVariantIds.has(id));
+        } else {
+          allVariantIds = [];
+        }
+      }
       if (allVariantIds.length === 0) {
         const emptyStats = activeChannels.reduce((acc: any, c: any) => {
           acc[c.id] = { fed: 0, unfed: 0, blocked: 0, overrides: 0 };
@@ -10470,6 +10722,8 @@ export async function registerRoutes(
         totalCount,
         page,
         limit,
+        productLines: allProductLines,
+        activeProductLineId: productLineId,
         stats: {
           totalVariants: allVariants.length,
           channels: channelStats,

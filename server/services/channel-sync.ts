@@ -9,6 +9,8 @@ import {
   productVariants,
   products,
   warehouses,
+  productLineProducts,
+  channelProductLines,
 } from "@shared/schema";
 import type {
   ChannelFeed,
@@ -193,8 +195,38 @@ class ChannelSyncService {
       }
     }
 
+    // Product line gate: check which channels this product is eligible for
+    const productLineRows = await this.db
+      .select({ productLineId: productLineProducts.productLineId })
+      .from(productLineProducts)
+      .where(eq(productLineProducts.productId, productId));
+    const productLineIds = new Set(productLineRows.map((r: any) => r.productLineId));
+
+    // Build set of channels that carry at least one of this product's lines
+    let eligibleChannelIds: Set<number> | null = null; // null = no gating (product has no line assignments)
+    if (productLineIds.size > 0) {
+      const channelLineRows = await this.db
+        .select({ channelId: channelProductLines.channelId, productLineId: channelProductLines.productLineId })
+        .from(channelProductLines)
+        .where(and(
+          inArray(channelProductLines.channelId, channelIds),
+          eq(channelProductLines.isActive, true),
+        ));
+      eligibleChannelIds = new Set<number>();
+      for (const row of channelLineRows) {
+        if (productLineIds.has(row.productLineId)) {
+          eligibleChannelIds.add(row.channelId);
+        }
+      }
+    }
+
     // Push each feed
     for (const feed of feeds) {
+      // Product line gate: skip channels that don't carry this product's lines
+      if (eligibleChannelIds !== null && feed.channelId && !eligibleChannelIds.has(feed.channelId)) {
+        continue;
+      }
+
       const atp = atpByVariantId.get(feed.productVariantId);
       const unitsPerVariant = atp?.unitsPerVariant ?? 1;
       let effectiveAtp = atp?.atpUnits ?? 0;
@@ -627,6 +659,27 @@ class ChannelSyncService {
       existingFeeds.map((f) => `${f.channelId}:${f.productVariantId}`),
     );
 
+    // Load product line assignments: which product lines each channel carries
+    const channelLineRows = await this.db
+      .select({ channelId: channelProductLines.channelId, productLineId: channelProductLines.productLineId })
+      .from(channelProductLines)
+      .where(eq(channelProductLines.isActive, true));
+    const channelLineMap = new Map<number, Set<number>>();
+    for (const row of channelLineRows) {
+      if (!channelLineMap.has(row.channelId)) channelLineMap.set(row.channelId, new Set());
+      channelLineMap.get(row.channelId)!.add(row.productLineId);
+    }
+
+    // Load product → product line mapping
+    const productLineRows = await this.db
+      .select({ productId: productLineProducts.productId, productLineId: productLineProducts.productLineId })
+      .from(productLineProducts);
+    const productLineMap = new Map<number, Set<number>>();
+    for (const row of productLineRows) {
+      if (!productLineMap.has(row.productId)) productLineMap.set(row.productId, new Set());
+      productLineMap.get(row.productId)!.add(row.productLineId);
+    }
+
     let created = 0;
     let channelsProcessed = 0;
 
@@ -635,6 +688,7 @@ class ChannelSyncService {
       if (channel.provider !== "shopify") continue;
 
       channelsProcessed++;
+      const channelLines = channelLineMap.get(channel.id);
       const newFeeds: Array<{
         channelId: number;
         productVariantId: number;
@@ -646,6 +700,12 @@ class ChannelSyncService {
 
       for (const v of allVariants) {
         if (existingSet.has(`${channel.id}:${v.id}`)) continue;
+
+        // Product line gate: skip if product's lines don't overlap with channel's lines
+        if (channelLines && channelLines.size > 0) {
+          const productLines = productLineMap.get(v.productId!);
+          if (!productLines || !hasOverlap(productLines, channelLines)) continue;
+        }
 
         newFeeds.push({
           channelId: channel.id,
@@ -866,6 +926,19 @@ class ChannelSyncService {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Check if two sets share at least one element */
+function hasOverlap(a: Set<number>, b: Set<number>): boolean {
+  const [smaller, larger] = a.size <= b.size ? [a, b] : [b, a];
+  for (const v of smaller) {
+    if (larger.has(v)) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

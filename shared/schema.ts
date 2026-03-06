@@ -1097,6 +1097,56 @@ export const channelSyncLog = pgTable("channel_sync_log", {
 export type ChannelSyncLogEntry = typeof channelSyncLog.$inferSelect;
 
 // ============================================
+// PRODUCT LINES — backend catalog groupings for channel gating
+// Distinct from Shopify collections (customer-facing merchandising).
+// ============================================
+
+export const productLines = pgTable("product_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  code: varchar("code", { length: 50 }).notNull().unique(),
+  name: varchar("name", { length: 100 }).notNull(),
+  description: text("description"),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertProductLineSchema = createInsertSchema(productLines).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertProductLine = z.infer<typeof insertProductLineSchema>;
+export type ProductLine = typeof productLines.$inferSelect;
+
+// Many-to-many: products → product lines
+export const productLineProducts = pgTable("product_line_products", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productLineId: integer("product_line_id").notNull().references(() => productLines.id, { onDelete: "cascade" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("plp_line_product_idx").on(table.productLineId, table.productId),
+]);
+
+export type ProductLineProduct = typeof productLineProducts.$inferSelect;
+
+// Many-to-many: channels → product lines (which lines a channel carries)
+export const channelProductLines = pgTable("channel_product_lines", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  productLineId: integer("product_line_id").notNull().references(() => productLines.id, { onDelete: "cascade" }),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("cpl_channel_line_idx").on(table.channelId, table.productLineId),
+]);
+
+export type ChannelProductLine = typeof channelProductLines.$inferSelect;
+
+// ============================================
 // CATALOG / LISTING MANAGEMENT
 // ============================================
 

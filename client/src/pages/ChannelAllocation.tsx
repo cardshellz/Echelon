@@ -31,6 +31,13 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   RefreshCw,
   Loader2,
   Search,
@@ -48,6 +55,7 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Tag,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -109,12 +117,20 @@ interface SearchResult {
   productName: string;
 }
 
+interface ProductLineOption {
+  id: number;
+  code: string;
+  name: string;
+}
+
 interface AllocationGrid {
   channels: Channel[];
   rows: AllocationRow[];
   totalCount: number;
   page: number;
   limit: number;
+  productLines: ProductLineOption[];
+  activeProductLineId: number | null;
   stats: {
     totalVariants: number;
     channels: Record<string, ChannelStats>;
@@ -565,17 +581,19 @@ export default function ChannelAllocation() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [activeFilter, setActiveFilter] = useState("");
+  const [productLineId, setProductLineId] = useState<number | null>(null);
   const pageSize = 100;
   const debouncedSearch = useDebounce(search, 300);
 
-  useEffect(() => { setPage(1); }, [debouncedSearch, activeFilter]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, activeFilter, productLineId]);
 
   const { data, isLoading } = useQuery<AllocationGrid>({
-    queryKey: ["/api/channel-allocation/grid", debouncedSearch, page, activeFilter],
+    queryKey: ["/api/channel-allocation/grid", debouncedSearch, page, activeFilter, productLineId],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("search", debouncedSearch);
       if (activeFilter) params.set("filter", activeFilter);
+      if (productLineId) params.set("productLineId", String(productLineId));
       params.set("page", String(page));
       params.set("limit", String(pageSize));
       const res = await fetch(`/api/channel-allocation/grid?${params}`, { credentials: "include" });
@@ -602,6 +620,7 @@ export default function ChannelAllocation() {
   const totalCount = data?.totalCount ?? 0;
   const totalPages = Math.ceil(totalCount / pageSize);
   const stats = data?.stats;
+  const productLines = data?.productLines ?? [];
 
   const toggleFilter = (f: string) => setActiveFilter(prev => prev === f ? "" : f);
 
@@ -616,6 +635,23 @@ export default function ChannelAllocation() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {productLines.length > 1 && (
+            <Select
+              value={productLineId ? String(productLineId) : "all"}
+              onValueChange={(v) => setProductLineId(v === "all" ? null : parseInt(v))}
+            >
+              <SelectTrigger className="w-[200px] h-10">
+                <Tag className="h-4 w-4 mr-2 text-muted-foreground" />
+                <SelectValue placeholder="All Product Lines" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Product Lines</SelectItem>
+                {productLines.map((pl) => (
+                  <SelectItem key={pl.id} value={String(pl.id)}>{pl.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <SkuTypeahead value={search} onChange={setSearch} />
           <Button variant="outline" onClick={() => syncAllMutation.mutate()} disabled={syncAllMutation.isPending}>
             {syncAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
