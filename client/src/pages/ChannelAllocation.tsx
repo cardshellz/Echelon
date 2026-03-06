@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Slider } from "@/components/ui/slider";
 import {
   Table,
   TableBody,
@@ -21,11 +22,12 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
@@ -37,10 +39,10 @@ import {
   Layers,
   Radio,
   Ban,
-  ShieldCheck,
-  ArrowUpDown,
   Eye,
   EyeOff,
+  Settings2,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +53,8 @@ interface Channel {
   name: string;
   provider: string;
   status: string;
+  allocationPct: number | null;
+  allocationFixedQty: number | null;
 }
 
 interface ChannelCellData {
@@ -62,7 +66,9 @@ interface ChannelCellData {
   isListed: number;
   variantFloor: number | null;
   variantCap: number | null;
+  overrideQty: number | null;
   effectiveAtp: number;
+  status: string;
 }
 
 interface AllocationRow {
@@ -85,6 +91,153 @@ interface AllocationGrid {
   limit: number;
 }
 
+// --- Channel allocation dialog ---
+
+function ChannelAllocationDialog({ channel }: { channel: Channel }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"none" | "pct" | "fixed">(
+    channel.allocationFixedQty != null ? "fixed" : channel.allocationPct != null ? "pct" : "none"
+  );
+  const [pct, setPct] = useState(channel.allocationPct ?? 100);
+  const [fixedQty, setFixedQty] = useState(String(channel.allocationFixedQty ?? ""));
+
+  useEffect(() => {
+    if (open) {
+      setMode(channel.allocationFixedQty != null ? "fixed" : channel.allocationPct != null ? "pct" : "none");
+      setPct(channel.allocationPct ?? 100);
+      setFixedQty(String(channel.allocationFixedQty ?? ""));
+    }
+  }, [open, channel]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      const body: any = {};
+      if (mode === "pct") {
+        body.allocationPct = pct;
+        body.allocationFixedQty = null;
+      } else if (mode === "fixed") {
+        body.allocationPct = null;
+        body.allocationFixedQty = fixedQty === "" ? null : parseInt(fixedQty, 10);
+      } else {
+        body.allocationPct = null;
+        body.allocationFixedQty = null;
+      }
+      const res = await fetch(`/api/channels/${channel.id}/allocation`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error((await res.text()) || res.statusText);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+      setOpen(false);
+      toast({ title: `${channel.name} allocation updated` });
+    },
+    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-6 px-2">
+          <Settings2 className="h-3 w-3" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{channel.name} — Allocation</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 pt-2">
+          <p className="text-sm text-muted-foreground">
+            Control how much of your total inventory pool this channel can see.
+          </p>
+
+          {/* Mode selector */}
+          <div className="grid grid-cols-3 gap-2">
+            <Button
+              variant={mode === "none" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setMode("none")}
+            >
+              No Limit
+            </Button>
+            <Button
+              variant={mode === "pct" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setMode("pct")}
+            >
+              Percentage
+            </Button>
+            <Button
+              variant={mode === "fixed" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setMode("fixed")}
+            >
+              Fixed Qty
+            </Button>
+          </div>
+
+          {mode === "pct" && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label>Allocation</Label>
+                <span className="text-2xl font-bold">{pct}%</span>
+              </div>
+              <Slider
+                value={[pct]}
+                onValueChange={([v]) => setPct(v)}
+                min={0}
+                max={100}
+                step={5}
+              />
+              <p className="text-xs text-muted-foreground">
+                This channel will see up to {pct}% of each product's available inventory.
+              </p>
+            </div>
+          )}
+
+          {mode === "fixed" && (
+            <div className="space-y-2">
+              <Label>Fixed quantity (base units)</Label>
+              <Input
+                type="number"
+                min={0}
+                placeholder="e.g. 500"
+                value={fixedQty}
+                onChange={(e) => setFixedQty(e.target.value)}
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                Cap each product's availability at this many base units for this channel.
+              </p>
+            </div>
+          )}
+
+          {mode === "none" && (
+            <p className="text-sm text-muted-foreground bg-muted/50 rounded-md p-3">
+              No allocation limit — this channel sees the full inventory pool.
+            </p>
+          )}
+
+          <Button
+            className="w-full"
+            onClick={() => saveMutation.mutate()}
+            disabled={saveMutation.isPending}
+          >
+            {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+            Save Allocation
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // --- Cell edit popover ---
 
 function CellEditPopover({
@@ -101,24 +254,35 @@ function CellEditPopover({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+
+  // Variant override
+  const [useOverride, setUseOverride] = useState(false);
+  const [overrideQty, setOverrideQty] = useState("");
+
+  // Variant floor/cap
   const [floor, setFloor] = useState("");
   const [cap, setCap] = useState("");
+
+  // Product-level
+  const [isListed, setIsListed] = useState(true);
   const [productFloor, setProductFloor] = useState("");
   const [productCap, setProductCap] = useState("");
-  const [isListed, setIsListed] = useState(true);
 
-  // Reset form on open
   useEffect(() => {
     if (open) {
+      setUseOverride(cellData.overrideQty != null);
+      setOverrideQty(cellData.overrideQty != null ? String(cellData.overrideQty) : "");
       setFloor(cellData.variantFloor != null ? String(cellData.variantFloor) : "");
       setCap(cellData.variantCap != null ? String(cellData.variantCap) : "");
+      setIsListed(cellData.isListed !== 0);
       setProductFloor(cellData.productFloor != null ? String(cellData.productFloor) : "");
       setProductCap(cellData.productCap != null ? String(cellData.productCap) : "");
-      setIsListed(cellData.isListed !== 0);
     }
   }, [open, cellData]);
 
-  // Save variant-level reservation (floor + cap)
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+
+  // Save variant reservation (override + floor + cap)
   const saveVariantMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/channel-reservations", {
@@ -128,22 +292,24 @@ function CellEditPopover({
         body: JSON.stringify({
           channelId,
           productVariantId: row.productVariantId,
+          reserveBaseQty: 0,
+          overrideQty: useOverride ? (overrideQty === "" ? 0 : parseInt(overrideQty, 10)) : null,
           minStockBase: floor === "" ? 0 : parseInt(floor, 10),
           maxStockBase: cap === "" ? null : parseInt(cap, 10),
-          reserveBaseQty: 0,
         }),
       });
       if (!res.ok) throw new Error((await res.text()) || res.statusText);
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
-      toast({ title: "Variant overrides saved" });
+      invalidate();
+      setOpen(false);
+      toast({ title: "Variant settings saved" });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  // Save product-level allocation (floor + cap + isListed)
+  // Save product allocation (isListed + floor + cap)
   const saveProductMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch("/api/channel-product-allocation", {
@@ -162,7 +328,8 @@ function CellEditPopover({
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+      invalidate();
+      setOpen(false);
       toast({ title: "Product rules saved" });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
@@ -181,7 +348,7 @@ function CellEditPopover({
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+      invalidate();
       toast({ title: "Feed enabled" });
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
@@ -205,22 +372,22 @@ function CellEditPopover({
       <PopoverContent className="w-80 p-0" align="start">
         {/* Header */}
         <div className="px-4 py-3 border-b bg-muted/30">
-          <p className="text-sm font-medium">{row.sku}</p>
-          <p className="text-xs text-muted-foreground">
-            {row.productName} — {channelName}
+          <p className="text-sm font-medium font-mono">{row.sku}</p>
+          <p className="text-xs text-muted-foreground truncate">
+            {row.productName} → {channelName}
           </p>
-          <div className="flex items-center gap-3 mt-1 text-xs">
-            <span>ATP: <strong>{cellData.effectiveAtp.toLocaleString()}</strong></span>
-            <span>Pool: <strong>{row.atpBase.toLocaleString()}</strong> base units</span>
+          <div className="flex items-center gap-3 mt-1.5 text-xs">
+            <span>Raw ATP: <strong>{row.atpUnits}</strong> units</span>
+            <span>Effective: <strong className={cellData.effectiveAtp === 0 ? "text-red-500" : "text-green-600"}>{cellData.effectiveAtp}</strong></span>
           </div>
         </div>
 
-        <div className="p-4 space-y-4">
+        <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
           {/* Feed status */}
           {!cellData.hasFeed && (
-            <div className="bg-muted/50 rounded-md p-3">
-              <p className="text-xs text-muted-foreground mb-2">
-                No feed — inventory not syncing to this channel.
+            <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md p-3">
+              <p className="text-xs text-amber-800 dark:text-amber-200 mb-2">
+                No feed — won't sync to this channel.
               </p>
               <Button
                 variant="outline"
@@ -239,7 +406,88 @@ function CellEditPopover({
             </div>
           )}
 
-          {/* Product-level controls */}
+          {/* === VARIANT OVERRIDE (top priority) === */}
+          <div className="border rounded-md p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs font-semibold uppercase tracking-wide flex items-center gap-1.5">
+                <Lock className="h-3 w-3" /> Hard Override
+              </Label>
+              <Switch
+                checked={useOverride}
+                onCheckedChange={setUseOverride}
+              />
+            </div>
+            {useOverride && (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Push exactly this quantity regardless of ATP. Set to 0 to stop selling this variant on this channel.
+                </p>
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder="0"
+                  value={overrideQty}
+                  onChange={(e) => setOverrideQty(e.target.value)}
+                  autoComplete="off"
+                  className="h-8 text-sm"
+                />
+              </>
+            )}
+            {!useOverride && (
+              <p className="text-xs text-muted-foreground">
+                Uses calculated allocation. Enable to force a specific quantity.
+              </p>
+            )}
+          </div>
+
+          {/* === VARIANT FLOOR / CAP === */}
+          {!useOverride && (
+            <div>
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2 block">
+                Variant Guards
+              </span>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-muted-foreground">Floor (min to show)</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    placeholder="None"
+                    value={floor}
+                    onChange={(e) => setFloor(e.target.value)}
+                    autoComplete="off"
+                    className="h-8 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground">Cap (max to show)</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    placeholder="None"
+                    value={cap}
+                    onChange={(e) => setCap(e.target.value)}
+                    autoComplete="off"
+                    className="h-8 text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <Button
+            className="w-full"
+            size="sm"
+            onClick={() => saveVariantMutation.mutate()}
+            disabled={saving}
+          >
+            {saveVariantMutation.isPending && <Loader2 className="h-3 w-3 animate-spin mr-2" />}
+            Save Variant Settings
+          </Button>
+
+          <Separator />
+
+          {/* === PRODUCT RULES (affects all variants) === */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -249,7 +497,7 @@ function CellEditPopover({
             </div>
 
             <div className="flex items-center justify-between mb-3">
-              <Label htmlFor={`listed-${channelId}-${row.productId}`} className="text-sm">
+              <Label className="text-sm">
                 {isListed ? (
                   <span className="flex items-center gap-1.5 text-green-600">
                     <Eye className="h-3.5 w-3.5" /> Listed
@@ -260,16 +508,12 @@ function CellEditPopover({
                   </span>
                 )}
               </Label>
-              <Switch
-                id={`listed-${channelId}-${row.productId}`}
-                checked={isListed}
-                onCheckedChange={setIsListed}
-              />
+              <Switch checked={isListed} onCheckedChange={setIsListed} />
             </div>
 
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-xs text-muted-foreground">Floor (base units)</label>
+                <label className="text-xs text-muted-foreground">Floor (base)</label>
                 <Input
                   type="number"
                   min={0}
@@ -281,7 +525,7 @@ function CellEditPopover({
                 />
               </div>
               <div>
-                <label className="text-xs text-muted-foreground">Cap (base units)</label>
+                <label className="text-xs text-muted-foreground">Cap (base)</label>
                 <Input
                   type="number"
                   min={0}
@@ -304,61 +548,6 @@ function CellEditPopover({
               Save Product Rules
             </Button>
           </div>
-
-          <Separator />
-
-          {/* Variant-level overrides */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Variant Overrides
-              </span>
-              <Badge variant="secondary" className="text-[10px]">{row.variantName}</Badge>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-muted-foreground">Floor (base units)</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="None"
-                  value={floor}
-                  onChange={(e) => setFloor(e.target.value)}
-                  autoComplete="off"
-                  className="h-8 text-sm"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Cap (base units)</label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="None"
-                  value={cap}
-                  onChange={(e) => setCap(e.target.value)}
-                  autoComplete="off"
-                  className="h-8 text-sm"
-                />
-              </div>
-            </div>
-            <Button
-              className="w-full mt-2"
-              size="sm"
-              onClick={() => saveVariantMutation.mutate()}
-              disabled={saving}
-            >
-              {saveVariantMutation.isPending && <Loader2 className="h-3 w-3 animate-spin mr-2" />}
-              Save Variant Overrides
-            </Button>
-          </div>
-
-          {/* Sync info */}
-          {cellData.hasFeed && cellData.lastSyncedAt && (
-            <p className="text-[11px] text-muted-foreground text-center">
-              Last synced: {new Date(cellData.lastSyncedAt).toLocaleString()}
-              {cellData.lastSyncedQty != null && ` (qty: ${cellData.lastSyncedQty})`}
-            </p>
-          )}
         </div>
       </PopoverContent>
     </Popover>
@@ -371,6 +560,22 @@ function getCellDisplay(cellData: ChannelCellData): {
   content: React.ReactNode;
   colorClass: string;
 } {
+  // Hard override active
+  if (cellData.overrideQty != null) {
+    return {
+      content: (
+        <span className="flex items-center justify-center gap-1.5">
+          <Lock className="h-3 w-3" />
+          <span className="font-bold tabular-nums">{cellData.overrideQty}</span>
+          <Badge variant="secondary" className="text-[10px] px-1 py-0 leading-tight bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+            OVERRIDE
+          </Badge>
+        </span>
+      ),
+      colorClass: cellData.overrideQty === 0 ? "text-red-500" : "text-blue-600 dark:text-blue-400",
+    };
+  }
+
   // Hard-blocked (isListed = 0)
   if (cellData.isListed === 0) {
     return {
@@ -386,7 +591,7 @@ function getCellDisplay(cellData: ChannelCellData): {
     };
   }
 
-  // No feed — show ATP in muted style
+  // No feed
   if (!cellData.hasFeed) {
     return {
       content: (
@@ -401,9 +606,8 @@ function getCellDisplay(cellData: ChannelCellData): {
     };
   }
 
-  // Floor hit (effectiveAtp is 0 due to floor)
-  const hasFloor = cellData.variantFloor != null || cellData.productFloor != null;
-  if (cellData.effectiveAtp === 0 && hasFloor) {
+  // Floor hit
+  if (cellData.status === "product_floor" || cellData.status === "variant_floor") {
     return {
       content: (
         <span className="flex items-center justify-center gap-1.5">
@@ -422,39 +626,25 @@ function getCellDisplay(cellData: ChannelCellData): {
   if (cellData.variantCap != null) {
     badges.push(
       <Badge key="cap" variant="secondary" className="text-[10px] px-1 py-0 leading-tight">
-        cap:{cellData.variantCap}
-      </Badge>
-    );
-  } else if (cellData.productCap != null) {
-    badges.push(
-      <Badge key="cap" variant="outline" className="text-[10px] px-1 py-0 leading-tight">
-        cap:{cellData.productCap}
+        ≤{cellData.variantCap}
       </Badge>
     );
   }
   if (cellData.variantFloor != null && cellData.variantFloor > 0) {
     badges.push(
       <Badge key="floor" variant="secondary" className="text-[10px] px-1 py-0 leading-tight">
-        floor:{cellData.variantFloor}
-      </Badge>
-    );
-  } else if (cellData.productFloor != null && cellData.productFloor > 0) {
-    badges.push(
-      <Badge key="floor" variant="outline" className="text-[10px] px-1 py-0 leading-tight">
-        floor:{cellData.productFloor}
+        ≥{cellData.variantFloor}
       </Badge>
     );
   }
 
-  // Determine sync freshness color
+  // Sync freshness
   let syncColor = "text-foreground";
   if (cellData.lastSyncedAt) {
     const syncAge = Date.now() - new Date(cellData.lastSyncedAt).getTime();
     if (syncAge <= 5 * 60 * 1000) {
       syncColor = "text-green-600 dark:text-green-400";
-    } else if (syncAge <= 60 * 60 * 1000) {
-      syncColor = "text-foreground";
-    } else {
+    } else if (syncAge > 60 * 60 * 1000) {
       syncColor = "text-amber-600 dark:text-amber-400";
     }
   }
@@ -520,20 +710,6 @@ export default function ChannelAllocation() {
   const totalCount = data?.totalCount ?? 0;
   const totalPages = Math.ceil(totalCount / pageSize);
 
-  // Compute stats per channel
-  const channelStats = channels.map((ch) => {
-    let fed = 0, blocked = 0, withRules = 0;
-    for (const row of rows) {
-      const cell = row.channels[String(ch.id)];
-      if (!cell) continue;
-      if (cell.hasFeed) fed++;
-      if (cell.isListed === 0) blocked++;
-      if (cell.variantFloor != null || cell.variantCap != null || cell.productFloor != null || cell.productCap != null) withRules++;
-    }
-    return { channelId: ch.id, fed, blocked, withRules };
-  });
-  const statsMap = new Map(channelStats.map((s) => [s.channelId, s]));
-
   return (
     <div className="space-y-4 p-2 md:p-6">
       {/* Header */}
@@ -543,7 +719,7 @@ export default function ChannelAllocation() {
             Channel Allocation
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Control inventory visibility per channel. Click any cell to set floors, caps, and listing rules.
+            Allocate inventory across channels. Click cells for variant overrides.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -572,54 +748,38 @@ export default function ChannelAllocation() {
         </div>
       </div>
 
-      {/* Channel summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Total Variants</p>
-            <p className="text-2xl font-bold">{totalCount.toLocaleString()}</p>
-          </CardContent>
-        </Card>
+      {/* Channel allocation cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {channels.map((ch) => {
-          const s = statsMap.get(ch.id);
+          const allocLabel = ch.allocationFixedQty != null
+            ? `${ch.allocationFixedQty.toLocaleString()} units`
+            : ch.allocationPct != null
+              ? `${ch.allocationPct}%`
+              : "No limit";
+
           return (
             <Card key={ch.id}>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">{ch.name}</p>
-                <p className="text-2xl font-bold">{s?.fed ?? 0} <span className="text-sm font-normal text-muted-foreground">synced</span></p>
-                <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-                  {(s?.blocked ?? 0) > 0 && (
-                    <span className="text-red-500">{s!.blocked} blocked</span>
-                  )}
-                  {(s?.withRules ?? 0) > 0 && (
-                    <span>{s!.withRules} with rules</span>
-                  )}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">{ch.name}</p>
+                    <p className="text-xs text-muted-foreground">{ch.provider}</p>
+                  </div>
+                  <ChannelAllocationDialog channel={ch} />
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Allocation:</span>
+                  <Badge
+                    variant={ch.allocationPct != null || ch.allocationFixedQty != null ? "default" : "outline"}
+                    className="text-xs"
+                  >
+                    {allocLabel}
+                  </Badge>
                 </div>
               </CardContent>
             </Card>
           );
         })}
-      </div>
-
-      {/* Legend */}
-      <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded bg-green-500/20 border border-green-500/40" />
-          Synced &lt;5m
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded bg-amber-500/20 border border-amber-500/40" />
-          Stale &gt;1h
-        </span>
-        <span className="flex items-center gap-1">
-          <Ban className="h-3 w-3 text-red-500" /> Blocked
-        </span>
-        <span className="flex items-center gap-1">
-          <Badge variant="secondary" className="text-[9px] px-1 py-0">cap:N</Badge> Cap set
-        </span>
-        <span className="flex items-center gap-1">
-          <Badge variant="secondary" className="text-[9px] px-1 py-0">floor:N</Badge> Floor set
-        </span>
       </div>
 
       {/* Grid */}
@@ -643,34 +803,19 @@ export default function ChannelAllocation() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="sticky left-0 bg-card z-10 min-w-[140px]">
-                      SKU
-                    </TableHead>
+                    <TableHead className="sticky left-0 bg-card z-10 min-w-[140px]">SKU</TableHead>
                     <TableHead className="min-w-[180px]">Product</TableHead>
                     <TableHead className="min-w-[120px]">Variant</TableHead>
-                    <TableHead className="text-right min-w-[80px]">ATP</TableHead>
+                    <TableHead className="text-right min-w-[70px]">ATP</TableHead>
                     {channels.map((ch) => (
-                      <TableHead
-                        key={ch.id}
-                        className="text-center min-w-[150px]"
-                      >
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="cursor-default">
-                                {ch.name}
-                                <span className="block text-[10px] font-normal text-muted-foreground">
-                                  {ch.provider}
-                                </span>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              <p>{statsMap.get(ch.id)?.fed ?? 0} feeds active</p>
-                              <p>{statsMap.get(ch.id)?.blocked ?? 0} blocked</p>
-                              <p>{statsMap.get(ch.id)?.withRules ?? 0} with rules</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
+                      <TableHead key={ch.id} className="text-center min-w-[130px]">
+                        <div>{ch.name}</div>
+                        {ch.allocationPct != null && (
+                          <span className="text-[10px] font-normal text-muted-foreground">{ch.allocationPct}% alloc</span>
+                        )}
+                        {ch.allocationFixedQty != null && (
+                          <span className="text-[10px] font-normal text-muted-foreground">{ch.allocationFixedQty} units</span>
+                        )}
                       </TableHead>
                     ))}
                   </TableRow>
@@ -681,32 +826,17 @@ export default function ChannelAllocation() {
                       <TableCell className="sticky left-0 bg-card z-10 font-mono text-xs">
                         {row.sku}
                       </TableCell>
-                      <TableCell className="text-sm truncate max-w-[200px]">
-                        {row.productName}
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {row.variantName}
-                      </TableCell>
-                      <TableCell className="text-right font-medium tabular-nums">
-                        {row.atpBase.toLocaleString()}
-                      </TableCell>
+                      <TableCell className="text-sm truncate max-w-[200px]">{row.productName}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">{row.variantName}</TableCell>
+                      <TableCell className="text-right font-medium tabular-nums">{row.atpBase.toLocaleString()}</TableCell>
                       {channels.map((ch) => {
                         const cellData = row.channels[String(ch.id)];
                         if (!cellData) {
-                          return (
-                            <TableCell key={ch.id} className="text-center text-muted-foreground">
-                              &mdash;
-                            </TableCell>
-                          );
+                          return <TableCell key={ch.id} className="text-center text-muted-foreground">&mdash;</TableCell>;
                         }
                         return (
                           <TableCell key={ch.id} className="text-center p-0">
-                            <CellEditPopover
-                              channelId={ch.id}
-                              channelName={ch.name}
-                              row={row}
-                              cellData={cellData}
-                            />
+                            <CellEditPopover channelId={ch.id} channelName={ch.name} row={row} cellData={cellData} />
                           </TableCell>
                         );
                       })}
@@ -726,32 +856,27 @@ export default function ChannelAllocation() {
                 {totalCount.toLocaleString()}
               </span>
               <div className="flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page <= 1}
-                  onClick={() => setPage((p) => p - 1)}
-                >
-                  <ChevronLeft className="h-4 w-4 mr-1" />
-                  Previous
+                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+                  <ChevronLeft className="h-4 w-4 mr-1" /> Previous
                 </Button>
-                <span className="text-sm text-muted-foreground px-2">
-                  Page {page} of {totalPages}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={page >= totalPages}
-                  onClick={() => setPage((p) => p + 1)}
-                >
-                  Next
-                  <ChevronRight className="h-4 w-4 ml-1" />
+                <span className="text-sm text-muted-foreground px-2">Page {page} of {totalPages}</span>
+                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+                  Next <ChevronRight className="h-4 w-4 ml-1" />
                 </Button>
               </div>
             </div>
           )}
         </CardContent>
       </Card>
+
+      {/* Legend */}
+      <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1"><Lock className="h-3 w-3 text-blue-500" /> Override set</span>
+        <span className="flex items-center gap-1"><Ban className="h-3 w-3 text-red-500" /> Blocked</span>
+        <span className="flex items-center gap-1"><Badge variant="destructive" className="text-[9px] px-1 py-0">FLOOR</Badge> Below minimum</span>
+        <span className="flex items-center gap-1 text-green-600">● Synced &lt;5m</span>
+        <span className="flex items-center gap-1 text-amber-600">● Stale &gt;1h</span>
+      </div>
     </div>
   );
 }

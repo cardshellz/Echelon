@@ -9918,6 +9918,29 @@ export async function registerRoutes(
     }
   });
 
+  // Update channel allocation settings (% or fixed qty)
+  app.put("/api/channels/:id/allocation", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.id);
+      const { allocationPct, allocationFixedQty } = req.body;
+      const { channels: ch } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+
+      const [channel] = await db.select().from(ch).where(eq(ch.id, channelId)).limit(1);
+      if (!channel) return res.status(404).json({ error: "Channel not found" });
+
+      const [updated] = await db.update(ch).set({
+        allocationPct: allocationPct != null ? Math.max(0, Math.min(100, allocationPct)) : null,
+        allocationFixedQty: allocationFixedQty != null ? Math.max(0, allocationFixedQty) : null,
+        updatedAt: new Date(),
+      }).where(eq(ch.id, channelId)).returning();
+
+      res.json(updated);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || "Failed to update channel allocation" });
+    }
+  });
+
   app.post("/api/channel-sync/all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { channelSync } = req.app.locals.services;
@@ -10202,17 +10225,70 @@ export async function registerRoutes(
         }
       }
 
-      // Build grid rows
+      // Build grid rows — effective ATP mirrors sync engine logic
       const rows = paginatedVariants.map((v: any) => {
         const prod = prodMap.get(v.productId);
         const vatpInfo = variantAtpMap.get(v.id);
         const atpBase = atpMap.get(v.productId) ?? 0;
+        const rawAtpUnits = vatpInfo?.atpUnits ?? 0;
+        const unitsPerVariant = vatpInfo?.unitsPerVariant ?? v.unitsPerVariant ?? 1;
 
         const channelData: Record<number, any> = {};
         for (const c of activeChannels) {
           const feed = feeds.find((f: any) => f.channelId === c.id && f.productVariantId === v.id);
           const prodAlloc = productAllocs.find((pa: any) => pa.channelId === c.id && pa.productId === v.productId);
           const varRes = variantReservations.find((r: any) => (r as any).channelId === c.id && (r as any).productVariantId === v.id);
+
+          let effective = rawAtpUnits;
+          let status = "normal";
+
+          // 1. VARIANT HARD OVERRIDE — absolute precedence
+          if ((varRes as any)?.overrideQty != null) {
+            effective = (varRes as any).overrideQty;
+            status = effective === 0 ? "override_zero" : "override";
+          } else {
+            // 2. PRODUCT BLOCK
+            if (prodAlloc?.isListed === 0) {
+              effective = 0;
+              status = "blocked";
+            }
+
+            // 3. CHANNEL ALLOCATION (% or fixed)
+            if (status === "normal") {
+              if ((c as any).allocationFixedQty != null) {
+                const allocUnits = Math.floor((c as any).allocationFixedQty / unitsPerVariant);
+                effective = Math.min(effective, allocUnits);
+              } else if ((c as any).allocationPct != null) {
+                const allocBase = Math.floor(atpBase * (c as any).allocationPct / 100);
+                const allocUnits = Math.floor(allocBase / unitsPerVariant);
+                effective = Math.min(effective, allocUnits);
+              }
+            }
+
+            // 4. PRODUCT FLOOR
+            if (status === "normal" && prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
+              effective = 0;
+              status = "product_floor";
+            }
+
+            // 5. PRODUCT CAP
+            if (status === "normal" && prodAlloc?.maxAtpBase != null) {
+              const capUnits = Math.floor(prodAlloc.maxAtpBase / unitsPerVariant);
+              effective = Math.min(effective, capUnits);
+            }
+
+            // 6. VARIANT FLOOR + CAP
+            if (status === "normal" && varRes) {
+              if ((varRes as any).minStockBase != null && (varRes as any).minStockBase > 0 && effective < (varRes as any).minStockBase) {
+                effective = 0;
+                status = "variant_floor";
+              }
+              if ((varRes as any).maxStockBase != null && effective > 0) {
+                const maxUnits = Math.floor((varRes as any).maxStockBase / unitsPerVariant);
+                effective = Math.min(effective, maxUnits);
+              }
+            }
+          }
 
           channelData[c.id] = {
             hasFeed: !!feed,
@@ -10223,21 +10299,10 @@ export async function registerRoutes(
             isListed: prodAlloc?.isListed ?? 1,
             variantFloor: (varRes as any)?.minStockBase ?? null,
             variantCap: (varRes as any)?.maxStockBase ?? null,
-            effectiveAtp: vatpInfo?.atpUnits ?? 0,
+            overrideQty: (varRes as any)?.overrideQty ?? null,
+            effectiveAtp: Math.max(effective, 0),
+            status,
           };
-
-          // Compute effective ATP with overrides
-          let effective = vatpInfo?.atpUnits ?? 0;
-          if (prodAlloc?.isListed === 0) effective = 0;
-          else if (prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) effective = 0;
-          else {
-            if ((varRes as any)?.minStockBase != null && (varRes as any).minStockBase > 0 && effective < (varRes as any).minStockBase) effective = 0;
-            if ((varRes as any)?.maxStockBase != null && effective > 0) {
-              const maxUnits = Math.floor((varRes as any).maxStockBase / (vatpInfo?.unitsPerVariant ?? 1));
-              effective = Math.min(effective, maxUnits);
-            }
-          }
-          channelData[c.id].effectiveAtp = Math.max(effective, 0);
         }
 
         return {
@@ -10248,12 +10313,19 @@ export async function registerRoutes(
           variantName: v.name || "",
           unitsPerVariant: v.unitsPerVariant,
           atpBase,
-          atpUnits: vatpInfo?.atpUnits ?? 0,
+          atpUnits: rawAtpUnits,
           channels: channelData,
         };
       });
 
-      res.json({ channels: activeChannels, rows, totalCount, page, limit });
+      // Include allocation config on channel objects
+      const channelsWithAllocation = activeChannels.map((c: any) => ({
+        ...c,
+        allocationPct: c.allocationPct ?? null,
+        allocationFixedQty: c.allocationFixedQty ?? null,
+      }));
+
+      res.json({ channels: channelsWithAllocation, rows, totalCount, page, limit });
     } catch (error: any) {
       console.error("Error building allocation grid:", error);
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });

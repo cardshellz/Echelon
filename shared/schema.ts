@@ -933,6 +933,8 @@ export const channels = pgTable("channels", {
   status: varchar("status", { length: 20 }).notNull().default("pending_setup"),
   isDefault: integer("is_default").notNull().default(0), // 1 = primary channel for this provider
   priority: integer("priority").notNull().default(0), // Higher = sync first
+  allocationPct: integer("allocation_pct"), // % of total ATP pool allocated to this channel (null = no limit)
+  allocationFixedQty: integer("allocation_fixed_qty"), // Fixed base-unit qty override (takes precedence over %)
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -1033,6 +1035,7 @@ export const channelReservations = pgTable("channel_reservations", {
   reserveBaseQty: integer("reserve_base_qty").notNull().default(0), // Base units reserved for this channel
   minStockBase: integer("min_stock_base").default(0), // Minimum stock to maintain (alert threshold)
   maxStockBase: integer("max_stock_base"), // Maximum to list (cap availability)
+  overrideQty: integer("override_qty"), // Hard override: push exactly this qty (null = use calculated, 0 = force zero)
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

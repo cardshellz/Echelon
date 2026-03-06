@@ -161,6 +161,12 @@ class ChannelSyncService {
     // Load allocation rules
     const channelIds = Array.from(new Set(feeds.map((f) => f.channelId).filter(Boolean))) as number[];
 
+    // Load channel records (for allocation %)
+    const channelRows: Channel[] = channelIds.length > 0
+      ? await this.db.select().from(channels).where(inArray(channels.id, channelIds))
+      : [];
+    const channelMap = new Map(channelRows.map((c) => [c.id, c]));
+
     // Product-level allocation rules
     const productAllocations: ChannelProductAllocation[] = channelIds.length > 0
       ? await this.db
@@ -175,7 +181,7 @@ class ChannelSyncService {
       productAllocations.map((pa) => [pa.channelId, pa]),
     );
 
-    // Variant-level reservation rules (floor + cap)
+    // Variant-level reservation rules (floor + cap + override)
     const reservations: ChannelReservation[] = await this.db
       .select()
       .from(channelReservations)
@@ -194,31 +200,62 @@ class ChannelSyncService {
       let effectiveAtp = atp?.atpUnits ?? 0;
       let status = "success";
 
-      // --- Apply channel overrides ---
       if (feed.channelId) {
-        // 1. Product-level: isListed check
-        const prodAlloc = productAllocMap.get(feed.channelId);
-        if (prodAlloc && prodAlloc.isListed === 0) {
-          effectiveAtp = 0;
-          status = "unlisted";
-        }
+        const reservation = reservationMap.get(`${feed.channelId}:${feed.productVariantId}`);
 
-        // 2. Product-level: floor check
-        if (status !== "unlisted" && prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
-          effectiveAtp = 0;
-          status = "product_floor";
-        }
+        // 1. VARIANT HARD OVERRIDE — takes absolute precedence
+        //    overrideQty = 0 means "stop selling this variant on this channel"
+        //    overrideQty = N means "push exactly N units"
+        if (reservation && reservation.overrideQty != null) {
+          effectiveAtp = reservation.overrideQty;
+          status = reservation.overrideQty === 0 ? "variant_override_zero" : "variant_override";
+        } else {
+          // 2. PRODUCT BLOCK (isListed = 0)
+          const prodAlloc = productAllocMap.get(feed.channelId);
+          if (prodAlloc && prodAlloc.isListed === 0) {
+            effectiveAtp = 0;
+            status = "unlisted";
+          }
 
-        // 3. Variant-level rules
-        if (status === "success") {
-          const reservation = reservationMap.get(`${feed.channelId}:${feed.productVariantId}`);
-          if (reservation) {
-            // Variant floor
+          // 3. CHANNEL ALLOCATION — constrain pool by channel's %/fixed allocation
+          if (status === "success") {
+            const channel = channelMap.get(feed.channelId);
+            if (channel) {
+              if ((channel as any).allocationFixedQty != null) {
+                // Fixed qty allocation: cap this channel's pool at the fixed amount (in base units)
+                const allocBase = (channel as any).allocationFixedQty as number;
+                const allocUnits = Math.floor(allocBase / unitsPerVariant);
+                effectiveAtp = Math.min(effectiveAtp, allocUnits);
+                if (effectiveAtp !== (atp?.atpUnits ?? 0)) status = "channel_alloc_fixed";
+              } else if ((channel as any).allocationPct != null) {
+                // % allocation: channel gets this % of the product's total ATP pool
+                const pct = (channel as any).allocationPct as number;
+                const allocBase = Math.floor(atpBase * pct / 100);
+                const allocUnits = Math.floor(allocBase / unitsPerVariant);
+                effectiveAtp = Math.min(effectiveAtp, allocUnits);
+                if (effectiveAtp !== (atp?.atpUnits ?? 0)) status = "channel_alloc_pct";
+              }
+            }
+          }
+
+          // 4. PRODUCT FLOOR — if total ATP below threshold, push 0
+          if (status === "success" && prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
+            effectiveAtp = 0;
+            status = "product_floor";
+          }
+
+          // 5. PRODUCT CAP
+          if (status === "success" && prodAlloc?.maxAtpBase != null) {
+            const capUnits = Math.floor(prodAlloc.maxAtpBase / unitsPerVariant);
+            effectiveAtp = Math.min(effectiveAtp, capUnits);
+          }
+
+          // 6. VARIANT FLOOR + CAP
+          if (status === "success" && reservation) {
             if (reservation.minStockBase != null && reservation.minStockBase > 0 && effectiveAtp < reservation.minStockBase) {
               effectiveAtp = 0;
               status = "variant_floor";
             }
-            // Max cap
             if (reservation.maxStockBase != null && effectiveAtp > 0) {
               const maxUnits = Math.floor(reservation.maxStockBase / unitsPerVariant);
               effectiveAtp = Math.min(effectiveAtp, maxUnits);
