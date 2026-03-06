@@ -10102,7 +10102,7 @@ export async function registerRoutes(
         : [];
 
       // ATP data
-      const { inventoryAtp } = req.app.locals.services;
+      const { atp: inventoryAtp } = req.app.locals.services;
       const atpBase = await inventoryAtp.getAtpBase(productId);
       const variantAtp = await inventoryAtp.getAtpPerVariant(productId);
 
@@ -10130,7 +10130,7 @@ export async function registerRoutes(
 
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { inventoryAtp } = req.app.locals.services;
+      const { atp: inventoryAtp } = req.app.locals.services;
       const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p } = await import("@shared/schema");
       const { eq, and, inArray, gt, like, or } = await import("drizzle-orm");
 
