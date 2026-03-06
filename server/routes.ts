@@ -10512,6 +10512,20 @@ export async function registerRoutes(
         productAllocMap.set(`${pa.channelId}:${pa.productId}`, pa);
       }
 
+      // Build product line eligibility maps: product -> lines, channel -> lines
+      const plpRows = await db.select({ productId: plp.productId, productLineId: plp.productLineId }).from(plp);
+      const cplRows = await db.select({ channelId: cpl.channelId, productLineId: cpl.productLineId }).from(cpl);
+      const productLineMap = new Map<number, Set<number>>();
+      for (const r of plpRows) {
+        if (!productLineMap.has(r.productId)) productLineMap.set(r.productId, new Set());
+        productLineMap.get(r.productId)!.add(r.productLineId);
+      }
+      const channelLineMap = new Map<number, Set<number>>();
+      for (const r of cplRows) {
+        if (!channelLineMap.has(r.channelId)) channelLineMap.set(r.channelId, new Set());
+        channelLineMap.get(r.channelId)!.add(r.productLineId);
+      }
+
       // Compute global stats (across ALL variants, not filtered)
       const channelStats: Record<number, { fed: number; unfed: number; blocked: number; overrides: number }> = {};
       for (const c of activeChannels) {
@@ -10633,6 +10647,30 @@ export async function registerRoutes(
           let effective = rawAtpUnits;
           let status = "normal";
 
+          // 0. PRODUCT LINE GATE — check if product's lines overlap with channel's lines
+          const prodLines = productLineMap.get(v.productId);
+          const chanLines = channelLineMap.get(c.id);
+          const isEligible = !prodLines || !chanLines || prodLines.size === 0 || chanLines.size === 0
+            || Array.from(prodLines).some(lid => chanLines.has(lid));
+
+          if (!isEligible) {
+            channelData[c.id] = {
+              hasFeed: false,
+              lastSyncedQty: null,
+              lastSyncedAt: null,
+              productFloor: null,
+              productCap: null,
+              isListed: 1,
+              variantFloor: null,
+              variantCap: null,
+              overrideQty: null,
+              effectiveAtp: 0,
+              status: "not_eligible",
+              isEligible: false,
+            };
+            continue;
+          }
+
           // 1. VARIANT HARD OVERRIDE — absolute precedence
           if ((varRes as any)?.overrideQty != null) {
             effective = (varRes as any).overrideQty;
@@ -10693,6 +10731,7 @@ export async function registerRoutes(
             overrideQty: (varRes as any)?.overrideQty ?? null,
             effectiveAtp: Math.max(effective, 0),
             status,
+            isEligible: true,
           };
         }
 
@@ -10709,12 +10748,20 @@ export async function registerRoutes(
         };
       });
 
-      // Include allocation config on channel objects
-      const channelsWithAllocation = activeChannels.map((c: any) => ({
-        ...c,
-        allocationPct: c.allocationPct ?? null,
-        allocationFixedQty: c.allocationFixedQty ?? null,
-      }));
+      // Build product line name lookup
+      const plNameMap = new Map(allProductLines.map((pl: any) => [pl.id, pl.name]));
+
+      // Include allocation config + product line names on channel objects
+      const channelsWithAllocation = activeChannels.map((c: any) => {
+        const lineIds = channelLineMap.get(c.id);
+        const lineNames = lineIds ? Array.from(lineIds).map(id => plNameMap.get(id)).filter(Boolean) : [];
+        return {
+          ...c,
+          allocationPct: c.allocationPct ?? null,
+          allocationFixedQty: c.allocationFixedQty ?? null,
+          productLineNames: lineNames,
+        };
+      });
 
       res.json({
         channels: channelsWithAllocation,

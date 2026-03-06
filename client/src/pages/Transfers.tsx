@@ -253,6 +253,34 @@ export default function Transfers() {
                     data-testid="input-source-location"
                   />
                 </div>
+                {sourceLocationCode && !locations.find(l => l.code.toUpperCase() === sourceLocationCode) && (
+                  <div className="border rounded-md max-h-48 overflow-y-auto">
+                    {locations
+                      .filter(loc => loc.code.toUpperCase().includes(sourceLocationCode))
+                      .slice(0, 10)
+                      .map(loc => (
+                        <button
+                          key={loc.id}
+                          type="button"
+                          className="w-full px-4 py-3 text-left hover:bg-slate-100 border-b last:border-b-0 text-base"
+                          onClick={() => {
+                            setSourceLocationCode(loc.code.toUpperCase());
+                            setFromLocationId(loc.id);
+                            playSoundWithHaptic("scan", "classic", true);
+                            setMobileStep("sku");
+                          }}
+                        >
+                          <span className="font-medium">{loc.code}</span>
+                          <span className="text-sm text-muted-foreground ml-2">
+                            {loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''}{loc.locationType ? ` · ${loc.locationType}` : ''}
+                          </span>
+                        </button>
+                      ))}
+                    {locations.filter(loc => loc.code.toUpperCase().includes(sourceLocationCode)).length === 0 && (
+                      <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
+                    )}
+                  </div>
+                )}
                 <Button
                   className="w-full h-14 text-lg"
                   disabled={!sourceLocationCode || !locations.find(l => l.code.toUpperCase() === sourceLocationCode)}
@@ -417,15 +445,44 @@ export default function Transfers() {
                     data-testid="input-dest-location"
                   />
                 </div>
-                
+
                 {destLocationCode && destLocationCode.toUpperCase() === sourceLocationCode.toUpperCase() && (
                   <p className="text-sm text-red-500">Destination must be different from source</p>
                 )}
-                
+
+                {destLocationCode && !locations.find(l => l.code.toUpperCase() === destLocationCode) && (
+                  <div className="border rounded-md max-h-48 overflow-y-auto">
+                    {locations
+                      .filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase())
+                      .slice(0, 10)
+                      .map(loc => (
+                        <button
+                          key={loc.id}
+                          type="button"
+                          className="w-full px-4 py-3 text-left hover:bg-slate-100 border-b last:border-b-0 text-base"
+                          onClick={() => {
+                            setDestLocationCode(loc.code.toUpperCase());
+                            setToLocationId(loc.id);
+                            playSoundWithHaptic("scan", "classic", true);
+                            setMobileStep("confirm");
+                          }}
+                        >
+                          <span className="font-medium">{loc.code}</span>
+                          <span className="text-sm text-muted-foreground ml-2">
+                            {loc.warehouseId ? warehouseMap.get(loc.warehouseId) || '' : ''}{loc.zone ? ` · ${loc.zone}` : ''}{loc.locationType ? ` · ${loc.locationType}` : ''}
+                          </span>
+                        </button>
+                      ))}
+                    {locations.filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase()).length === 0 && (
+                      <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
+                    )}
+                  </div>
+                )}
+
                 <Button
                   className="w-full h-14 text-lg"
                   disabled={
-                    !destLocationCode || 
+                    !destLocationCode ||
                     !locations.find(l => l.code.toUpperCase() === destLocationCode) ||
                     destLocationCode.toUpperCase() === sourceLocationCode.toUpperCase()
                   }

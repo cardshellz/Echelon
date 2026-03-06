@@ -68,6 +68,7 @@ interface Channel {
   status: string;
   allocationPct: number | null;
   allocationFixedQty: number | null;
+  productLineNames: string[];
 }
 
 interface ChannelStats {
@@ -89,6 +90,7 @@ interface ChannelCellData {
   overrideQty: number | null;
   effectiveAtp: number;
   status: string;
+  isEligible: boolean;
 }
 
 interface AllocationRow {
@@ -415,6 +417,13 @@ function CellEditPopover({ channelId, channelName, row, cellData }: {
 // --- Display logic ---
 
 function getCellDisplay(cellData: ChannelCellData): { content: React.ReactNode; colorClass: string } {
+  if (cellData.isEligible === false) {
+    return {
+      content: <span className="text-[10px] tracking-wide opacity-40">N/A</span>,
+      colorClass: "text-muted-foreground/30 cursor-default",
+    };
+  }
+
   if (cellData.overrideQty != null) {
     return {
       content: (
@@ -718,6 +727,16 @@ export default function ChannelAllocation() {
                   </div>
                 )}
 
+                {ch.productLineNames?.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {ch.productLineNames.map((name) => (
+                      <Badge key={name} variant="outline" className="text-[10px] px-1.5 py-0">
+                        <Tag className="h-2.5 w-2.5 mr-1" />{name}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+
                 {s && (
                   <div className="flex flex-wrap gap-2 text-xs">
                     <span className="text-green-600">{s.fed} synced</span>
@@ -820,6 +839,14 @@ export default function ChannelAllocation() {
                       {channels.map((ch) => {
                         const cellData = row.channels[String(ch.id)];
                         if (!cellData) return <TableCell key={ch.id} className="text-center text-muted-foreground">&mdash;</TableCell>;
+                        if (cellData.isEligible === false) {
+                          const display = getCellDisplay(cellData);
+                          return (
+                            <TableCell key={ch.id} className="text-center p-0">
+                              <div className={cn("px-2 py-1.5 text-sm", display.colorClass)}>{display.content}</div>
+                            </TableCell>
+                          );
+                        }
                         return (
                           <TableCell key={ch.id} className="text-center p-0">
                             <CellEditPopover channelId={ch.id} channelName={ch.name} row={row} cellData={cellData} />
