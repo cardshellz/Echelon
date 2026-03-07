@@ -3,9 +3,11 @@ import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
 import InlineTransferDialog from "@/components/operations/InlineTransferDialog";
+import BinHistorySheet from "@/components/operations/BinHistorySheet";
 import { useAuth } from "@/lib/auth";
 import {
   Package,
+  History,
   Search,
   Plus,
   Download,
@@ -560,6 +562,7 @@ export default function Inventory() {
     variantId?: number;
     sku?: string;
   }>({ open: false });
+  const [historySheet, setHistorySheet] = useState<{ open: boolean; locationId: number | null; locationCode: string }>({ open: false, locationId: null, locationCode: "" });
 
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1577,7 +1580,18 @@ export default function Inventory() {
                           </div>
                           {bin.zone && <div className="text-xs text-muted-foreground mt-0.5">Zone {bin.zone}</div>}
                         </div>
-                        <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
+                            title="View bin history"
+                          >
+                            <History className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </div>
                       <div className="space-y-1.5 mt-2">
                         {bin.items.map((item) => (
@@ -1637,6 +1651,7 @@ export default function Inventory() {
                             {binSortField === "available" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
+                        <TableHead className="w-[50px]"></TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1681,6 +1696,17 @@ export default function Inventory() {
                               <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                               <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
                               <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                              <TableCell className="text-center">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
+                                  title="View bin history"
+                                >
+                                  <History className="h-3.5 w-3.5" />
+                                </Button>
+                              </TableCell>
                             </TableRow>
                           ) : (
                             // Multiple SKUs in bin — expandable row
@@ -1725,6 +1751,20 @@ export default function Inventory() {
                                 <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                 <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
                                 <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                <TableCell className="text-center">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode });
+                                    }}
+                                    title="View bin history"
+                                  >
+                                    <History className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TableCell>
                               </TableRow>
                               {expandedBins.has(bin.locationId) && bin.items.map((item) => (
                                 <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
@@ -1745,6 +1785,7 @@ export default function Inventory() {
                                   <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
                                   <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
                                   <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                  <TableCell></TableCell>
                                 </TableRow>
                               ))}
                             </>
@@ -2247,6 +2288,13 @@ export default function Inventory() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <BinHistorySheet
+        open={historySheet.open}
+        onOpenChange={(open) => setHistorySheet((prev) => ({ ...prev, open }))}
+        locationId={historySheet.locationId}
+        locationCode={historySheet.locationCode}
+      />
     </div>
   );
 }
