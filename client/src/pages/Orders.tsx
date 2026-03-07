@@ -230,9 +230,20 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
 
 // --- Order Detail Panel ---
 
+interface OrderFinancials {
+  subtotalCents: number | null;
+  taxCents: number | null;
+  shippingCents: number | null;
+  discountCents: number | null;
+  totalCents: number | null;
+  discountCodes: string[];
+  shippingMethod: string | null;
+}
+
 interface OrderDetail extends Order {
   items: OrderItem[];
   channel: Channel | null;
+  financials?: OrderFinancials;
 }
 
 const itemStatusColors: Record<string, string> = {
@@ -442,11 +453,11 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
                       <Package className="h-4 w-4 text-muted-foreground" />
                     </div>
                   )}
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 overflow-hidden">
                     <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium truncate">{item.name}</p>
-                        <p className="text-xs font-mono text-muted-foreground">{item.sku}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium break-words line-clamp-2">{item.name}</p>
+                        <p className="text-xs font-mono text-muted-foreground truncate">{item.sku}</p>
                       </div>
                       <Badge variant="outline" className={cn("text-[10px] shrink-0", itemStatusColors[item.status] || "")}>
                         {item.status}
@@ -485,15 +496,68 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
             <div className="mt-3 pt-3 border-t">
               <h5 className="text-xs font-semibold text-muted-foreground mb-2">Digital / Non-shipping ({digitalItems.length})</h5>
               {digitalItems.map((item) => (
-                <div key={item.id} className="flex justify-between text-xs py-1">
-                  <span>{item.name} <span className="font-mono text-muted-foreground">({item.sku})</span></span>
-                  <span>x{item.quantity}</span>
+                <div key={item.id} className="flex justify-between gap-2 text-xs py-1">
+                  <span className="min-w-0 truncate">{item.name} <span className="font-mono text-muted-foreground">({item.sku})</span></span>
+                  <span className="shrink-0">x{item.quantity}</span>
                 </div>
               ))}
             </div>
           )}
         </CardContent>
       </Card>
+
+      {/* Order Financial Summary */}
+      {order.financials && (
+        <Card>
+          <CardContent className="p-4">
+            <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
+              <DollarSign className="h-4 w-4" /> Order Summary
+            </h4>
+            <div className="space-y-1.5 text-sm">
+              {order.financials.subtotalCents != null && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Subtotal</span>
+                  <span>${(order.financials.subtotalCents / 100).toFixed(2)}</span>
+                </div>
+              )}
+              {order.financials.discountCents != null && order.financials.discountCents > 0 && (
+                <div className="flex justify-between text-red-600">
+                  <span>
+                    Discounts
+                    {order.financials.discountCodes.length > 0 && (
+                      <span className="text-xs ml-1">({order.financials.discountCodes.join(", ")})</span>
+                    )}
+                  </span>
+                  <span>-${(order.financials.discountCents / 100).toFixed(2)}</span>
+                </div>
+              )}
+              {order.financials.shippingCents != null && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">
+                    Shipping
+                    {order.financials.shippingMethod && (
+                      <span className="text-xs ml-1">({order.financials.shippingMethod})</span>
+                    )}
+                  </span>
+                  <span>{order.financials.shippingCents === 0 ? "Free" : `$${(order.financials.shippingCents / 100).toFixed(2)}`}</span>
+                </div>
+              )}
+              {order.financials.taxCents != null && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Tax</span>
+                  <span>${(order.financials.taxCents / 100).toFixed(2)}</span>
+                </div>
+              )}
+              {order.financials.totalCents != null && (
+                <div className="flex justify-between font-semibold border-t pt-1.5 mt-1.5">
+                  <span>Total</span>
+                  <span>${(order.financials.totalCents / 100).toFixed(2)}</span>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Notes */}
       {order.notes && (

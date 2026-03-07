@@ -421,12 +421,12 @@ export default function PurchaseOrders() {
 
       {/* Create PO Dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New Purchase Order</DialogTitle>
             <DialogDescription>Create a draft PO. You can add lines after creation.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-4 overflow-y-auto max-h-[calc(100vh-10rem)]">
             {/* Vendor typeahead */}
             <div className="space-y-2">
               <Label>Vendor *</Label>
@@ -435,9 +435,9 @@ export default function PurchaseOrders() {
                   <Button
                     variant="outline"
                     role="combobox"
-                    className="w-full justify-between h-10 font-normal"
+                    className="w-full justify-between h-10 font-normal min-w-0"
                   >
-                    {selectedVendor ? `${selectedVendor.code} — ${selectedVendor.name}` : "Select vendor..."}
+                    <span className="truncate">{selectedVendor ? `${selectedVendor.code} — ${selectedVendor.name}` : "Select vendor..."}</span>
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                   </Button>
                 </PopoverTrigger>
@@ -580,13 +580,13 @@ export default function PurchaseOrders() {
 
       {/* Quick Add Vendor Dialog */}
       <Dialog open={showNewVendorDialog} onOpenChange={setShowNewVendorDialog}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Add New Supplier</DialogTitle>
             <DialogDescription>Create a supplier to use in this purchase order.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label>Code *</Label>
                 <Input
@@ -606,7 +606,7 @@ export default function PurchaseOrders() {
                 />
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-2">
                 <Label>Contact Name</Label>
                 <Input

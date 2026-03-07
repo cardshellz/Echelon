@@ -22,6 +22,7 @@ import {
   ChevronDown,
   Eye,
   ListChecks,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -551,6 +552,32 @@ export default function CycleCounts() {
     },
     onError: (error: Error) => {
       toast({ title: "Resolve failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const syncExpectedMutation = useMutation({
+    mutationFn: async (itemId: number) => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/items/${itemId}/sync-expected`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        throw new Error(err.error || "Failed to sync");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"] });
+      if (data.autoResolved) {
+        toast({ title: "Synced & Resolved", description: "Expected qty now matches counted — variance resolved." });
+      } else {
+        toast({ title: "Expected Qty Synced", description: `New expected: ${data.newExpectedQty}, remaining variance: ${data.newVarianceQty}` });
+      }
+    },
+    onError: (error: Error) => {
+      toast({ title: "Sync failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1712,6 +1739,9 @@ export default function CycleCounts() {
                             }}>
                               <ArrowRight className="h-3 w-3 mr-1" /> Transfer
                             </Button>
+                            <Button size="sm" variant="outline" className="text-orange-600" onClick={() => syncExpectedMutation.mutate(item.id)} disabled={syncExpectedMutation.isPending}>
+                              <RefreshCw className={`h-3 w-3 mr-1 ${syncExpectedMutation.isPending ? "animate-spin" : ""}`} /> Sync
+                            </Button>
                             <Button size="sm" variant="outline" className="text-emerald-700" onClick={() => {
                               setSelectedItem(item);
                               setResolveForm({ reasonCode: "", notes: "" });
@@ -1819,6 +1849,9 @@ export default function CycleCounts() {
                                 window.location.href = `/transfers?${params.toString()}`;
                               }}>
                                 <ArrowRight className="h-3 w-3 mr-1" /> Transfer
+                              </Button>
+                              <Button size="sm" variant="outline" className="text-orange-600" onClick={() => syncExpectedMutation.mutate(item.id)} disabled={syncExpectedMutation.isPending}>
+                                <RefreshCw className={`h-3 w-3 mr-1 ${syncExpectedMutation.isPending ? "animate-spin" : ""}`} /> Sync
                               </Button>
                               <Button size="sm" variant="outline" className="text-emerald-700" onClick={() => {
                                 setSelectedItem(item);
