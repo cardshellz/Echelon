@@ -947,6 +947,59 @@ class CycleCountService {
   }
 
   /**
+   * Sync a cycle count item's expected qty from current inventory levels.
+   * Call after an external transfer has moved stock — updates expectedQty,
+   * recalculates variance, and auto-resolves if variance reaches zero.
+   */
+  async syncExpectedFromInventory(
+    cycleCountId: number,
+    itemId: number,
+    userId?: string,
+  ): Promise<{ success: boolean; newExpectedQty: number; newVarianceQty: number; autoResolved: boolean }> {
+    const item = await this.storage.getCycleCountItemById(itemId);
+    if (!item) throw new CycleCountError("Item not found", 404);
+    if (item.cycleCountId !== cycleCountId) {
+      throw new CycleCountError("Item does not belong to this cycle count");
+    }
+    if (!item.productVariantId) {
+      throw new CycleCountError("Item has no linked product variant");
+    }
+
+    // Read current system inventory at this location
+    const result = await this.db.execute(sql`
+      SELECT COALESCE(variant_qty, 0) as variant_qty
+      FROM inventory_levels
+      WHERE product_variant_id = ${item.productVariantId}
+        AND warehouse_location_id = ${item.warehouseLocationId}
+    `);
+    const currentQty = (result.rows[0] as any)?.variant_qty ?? 0;
+    const newVarianceQty = (item.countedQty ?? 0) - currentQty;
+    const autoResolved = newVarianceQty === 0;
+
+    const updateData: Record<string, any> = {
+      expectedQty: currentQty,
+      varianceQty: newVarianceQty,
+    };
+
+    if (autoResolved) {
+      updateData.varianceType = null;
+      updateData.status = "resolved";
+      updateData.varianceReason = "transfer_resolution";
+      updateData.resolvedBy = userId;
+      updateData.resolvedAt = new Date();
+      const note = "[Auto-resolved] Expected qty synced after transfer";
+      updateData.varianceNotes = item.varianceNotes ? `${item.varianceNotes}\n${note}` : note;
+    } else {
+      updateData.varianceType = newVarianceQty > 0 ? "quantity_over" : "quantity_under";
+    }
+
+    await this.storage.updateCycleCountItem(itemId, updateData);
+    await this.refreshBinStats(cycleCountId);
+
+    return { success: true, newExpectedQty: currentQty, newVarianceQty, autoResolved };
+  }
+
+  /**
    * Resolve a variance item without applying any inventory adjustment.
    * Use when a transfer already fixed the issue, or investigation determined
    * no adjustment is needed.

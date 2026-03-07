@@ -93,16 +93,25 @@ export default function Transfers() {
     queryKey: ["/api/warehouse/locations"]
   });
 
+  // Cycle count context (passed via URL params when coming from cycle count Transfer button)
+  const [cycleCountCtx, setCycleCountCtx] = useState<{ ccId: number; ccItemId: number } | null>(null);
+
   // Pre-fill from URL query params (e.g. from cycle count Transfer button)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const fromCode = params.get("from");
-    const sku = params.get("sku");
     const qty = params.get("qty");
+    const ccId = params.get("ccId");
+    const ccItemId = params.get("ccItemId");
     if (!fromCode || locations.length === 0) return;
 
     const loc = locations.find(l => l.code === fromCode);
     if (!loc) return;
+
+    // Store cycle count context before clearing URL
+    if (ccId && ccItemId) {
+      setCycleCountCtx({ ccId: parseInt(ccId), ccItemId: parseInt(ccItemId) });
+    }
 
     // Only apply once — clear the URL params after applying
     window.history.replaceState({}, "", window.location.pathname);
@@ -159,14 +168,34 @@ export default function Transfers() {
       const res = await apiRequest("POST", "/api/inventory/transfer", data);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       playSoundWithHaptic("success", "classic", true);
-      toast({ title: "Transfer Complete", description: "Inventory moved successfully" });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/transfers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/skus/search"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/sku-locations"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/by-bin"] });
+
+      // If this transfer came from a cycle count, sync the expected qty
+      if (cycleCountCtx) {
+        try {
+          const res = await fetch(`/api/cycle-counts/${cycleCountCtx.ccId}/items/${cycleCountCtx.ccItemId}/sync-expected`, {
+            method: "POST",
+            credentials: "include",
+          });
+          const result = await res.json();
+          if (result.autoResolved) {
+            toast({ title: "Transfer Complete & Cycle Count Resolved", description: "Variance resolved — expected now matches counted." });
+          } else {
+            toast({ title: "Transfer Complete & Cycle Count Updated", description: `Expected qty updated. Remaining variance: ${result.newVarianceQty}` });
+          }
+          setCycleCountCtx(null);
+        } catch {
+          toast({ title: "Transfer Complete", description: "Inventory moved, but failed to update cycle count. Sync manually." });
+        }
+      } else {
+        toast({ title: "Transfer Complete", description: "Inventory moved successfully" });
+      }
       resetForm();
     },
     onError: (error: Error) => {

@@ -6355,8 +6355,87 @@ export async function registerRoutes(
       
       const items = await storage.getOrderItems(id);
       const channel = order.channelId ? await storage.getChannelById(order.channelId) : null;
-      
-      res.json({ ...order, items, channel });
+
+      // Pull financial summary from shopify_orders raw table if available
+      let financials: {
+        subtotalCents: number | null;
+        taxCents: number | null;
+        shippingCents: number | null;
+        discountCents: number | null;
+        totalCents: number | null;
+        discountCodes: string[];
+        shippingMethod: string | null;
+      } = {
+        subtotalCents: null,
+        taxCents: null,
+        shippingCents: null,
+        discountCents: null,
+        totalCents: null,
+        discountCodes: [],
+        shippingMethod: null,
+      };
+
+      if (order.sourceTableId) {
+        try {
+          const rawFinancials = await db.execute<{
+            total_price_cents: number | null;
+            subtotal_price_cents: number | null;
+            total_tax_cents: number | null;
+            total_shipping_price_cents: number | null;
+            total_discounts_cents: number | null;
+            discount_codes: any;
+            shipping_method: string | null;
+          }>(sql`
+            SELECT
+              total_price_cents,
+              subtotal_price_cents,
+              total_tax_cents,
+              total_shipping_price_cents,
+              total_discounts_cents,
+              discount_codes,
+              shipping_method
+            FROM shopify_orders
+            WHERE id = ${order.sourceTableId}
+            LIMIT 1
+          `);
+
+          if (rawFinancials.rows.length > 0) {
+            const raw = rawFinancials.rows[0];
+            financials = {
+              subtotalCents: raw.subtotal_price_cents,
+              taxCents: raw.total_tax_cents,
+              shippingCents: raw.total_shipping_price_cents,
+              discountCents: raw.total_discounts_cents,
+              totalCents: raw.total_price_cents,
+              discountCodes: Array.isArray(raw.discount_codes)
+                ? raw.discount_codes.map((dc: any) => typeof dc === "string" ? dc : dc.code || dc.title || String(dc))
+                : [],
+              shippingMethod: raw.shipping_method,
+            };
+          }
+        } catch {
+          // shopify_orders table may not have these columns — fall back silently
+        }
+      }
+
+      // Compute from items as fallback
+      if (financials.subtotalCents == null) {
+        const itemsSubtotal = items.reduce((s: number, i: any) => {
+          if (i.priceCents != null) return s + (i.priceCents * i.quantity);
+          if (i.totalPriceCents != null) return s + i.totalPriceCents + (i.discountCents || 0) * i.quantity;
+          return s;
+        }, 0);
+        if (itemsSubtotal > 0) financials.subtotalCents = itemsSubtotal;
+      }
+      if (financials.totalCents == null && order.totalAmount) {
+        financials.totalCents = Math.round(parseFloat(order.totalAmount) * 100);
+      }
+      if (financials.discountCents == null) {
+        const itemDiscounts = items.reduce((s: number, i: any) => s + ((i.discountCents || 0) * i.quantity), 0);
+        if (itemDiscounts > 0) financials.discountCents = itemDiscounts;
+      }
+
+      res.json({ ...order, items, channel, financials });
     } catch (error) {
       console.error("Error fetching order:", error);
       res.status(500).json({ error: "Failed to fetch order" });
@@ -8193,6 +8272,22 @@ export async function registerRoutes(
   });
 
   // Resolve variance by recording a transfer (move stock to correct location)
+  // Sync cycle count item expected qty from current inventory (after an external transfer)
+  app.post("/api/cycle-counts/:id/items/:itemId/sync-expected", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      res.json(await ccService.syncExpectedFromInventory(
+        parseInt(req.params.id),
+        parseInt(req.params.itemId),
+        req.session.user?.id,
+      ));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error syncing cycle count expected:", error);
+      res.status(500).json({ error: error.message || "Failed to sync expected qty" });
+    }
+  });
+
   app.post("/api/cycle-counts/:id/items/:itemId/resolve-transfer", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services as any;

@@ -1706,6 +1706,8 @@ export default function CycleCounts() {
                               if (item.locationCode) params.set("from", item.locationCode);
                               if (item.expectedSku) params.set("sku", item.expectedSku);
                               params.set("qty", String(Math.abs(item.varianceQty ?? 0)));
+                              if (selectedCount) params.set("ccId", String(selectedCount));
+                              params.set("ccItemId", String(item.id));
                               window.location.href = `/transfers?${params.toString()}`;
                             }}>
                               <ArrowRight className="h-3 w-3 mr-1" /> Transfer
@@ -1812,6 +1814,8 @@ export default function CycleCounts() {
                                 if (item.locationCode) params.set("from", item.locationCode);
                                 if (item.expectedSku) params.set("sku", item.expectedSku);
                                 params.set("qty", String(Math.abs(item.varianceQty ?? 0)));
+                                if (selectedCount) params.set("ccId", String(selectedCount));
+                                params.set("ccItemId", String(item.id));
                                 window.location.href = `/transfers?${params.toString()}`;
                               }}>
                                 <ArrowRight className="h-3 w-3 mr-1" /> Transfer
