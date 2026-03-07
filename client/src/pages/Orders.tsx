@@ -991,7 +991,7 @@ export default function Orders() {
       </div>
 
       <div className="p-2 md:p-6 grid gap-4 md:gap-6 grid-cols-1 md:grid-cols-3">
-        <div className="md:col-span-2 space-y-4">
+        <div className={cn("md:col-span-2 space-y-4", selectedOrderId && "hidden md:block")}>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mb-4">
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground h-4 w-4" />
@@ -1196,69 +1196,60 @@ export default function Orders() {
           )}
         </div>
 
-        <div className="hidden md:block space-y-6 overflow-y-auto max-h-[calc(100vh-12rem)]">
-          {selectedOrderId ? (
+        {selectedOrderId ? (
+          <div className="space-y-6 overflow-y-auto max-h-[calc(100vh-12rem)]">
             <OrderDetailPanel orderId={selectedOrderId} onClose={() => setSelectedOrderId(null)} />
-          ) : (
-            <>
-              <Card className="bg-primary text-primary-foreground border-none">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-lg">Order Summary</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <span className="text-primary-foreground/80 text-sm">Active Orders</span>
-                      <span className="font-bold">{activeCount}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-primary-foreground/80 text-sm">Completed Today</span>
-                      <span className="font-bold">{completedCount}</span>
-                    </div>
-                    <div className="pt-2 border-t border-primary-foreground/20 mt-2">
-                      <div className="flex justify-between items-center text-amber-200">
-                        <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
-                        <span className="font-bold">{exceptionCount}</span>
-                      </div>
+          </div>
+        ) : (
+          <div className="hidden md:block space-y-6">
+            <Card className="bg-primary text-primary-foreground border-none">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Order Summary</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-primary-foreground/80 text-sm">Active Orders</span>
+                    <span className="font-bold">{activeCount}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-primary-foreground/80 text-sm">Completed Today</span>
+                    <span className="font-bold">{completedCount}</span>
+                  </div>
+                  <div className="pt-2 border-t border-primary-foreground/20 mt-2">
+                    <div className="flex justify-between items-center text-amber-200">
+                      <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
+                      <span className="font-bold">{exceptionCount}</span>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
+                </div>
+              </CardContent>
+            </Card>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">Channels</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-2">
-                  {channels?.slice(0, 5).map((ch) => (
-                    <div key={ch.id} className="flex items-center justify-between text-sm">
-                      <div className="flex items-center gap-2">
-                        {sourceIcons[ch.provider] && (
-                          <img src={sourceIcons[ch.provider]} className="w-4 h-4 object-contain" />
-                        )}
-                        <span>{ch.name}</span>
-                      </div>
-                      <Badge variant={ch.status === "active" ? "default" : "outline"} className="text-xs">
-                        {ch.status}
-                      </Badge>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Channels</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {channels?.slice(0, 5).map((ch) => (
+                  <div key={ch.id} className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      {sourceIcons[ch.provider] && (
+                        <img src={sourceIcons[ch.provider]} className="w-4 h-4 object-contain" />
+                      )}
+                      <span>{ch.name}</span>
                     </div>
-                  ))}
-                  {(!channels || channels.length === 0) && (
-                    <p className="text-sm text-muted-foreground">No channels configured</p>
-                  )}
-                </CardContent>
-              </Card>
-            </>
-          )}
-        </div>
-
-        {/* Mobile: order detail as dialog */}
-        {selectedOrderId && (
-          <Dialog open={!!selectedOrderId} onOpenChange={(open) => { if (!open) setSelectedOrderId(null); }}>
-            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-4 md:hidden">
-              <OrderDetailPanel orderId={selectedOrderId} onClose={() => setSelectedOrderId(null)} />
-            </DialogContent>
-          </Dialog>
+                    <Badge variant={ch.status === "active" ? "default" : "outline"} className="text-xs">
+                      {ch.status}
+                    </Badge>
+                  </div>
+                ))}
+                {(!channels || channels.length === 0) && (
+                  <p className="text-sm text-muted-foreground">No channels configured</p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         )}
       </div>
 
