@@ -190,6 +190,20 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked product_lines tables and seeded defaults");
 
+    // Migration 038: Make location code unique per warehouse instead of globally
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_unique'
+        ) THEN
+          ALTER TABLE warehouse_locations DROP CONSTRAINT warehouse_locations_code_unique;
+          ALTER TABLE warehouse_locations ADD CONSTRAINT warehouse_locations_code_warehouse_unique UNIQUE (code, warehouse_id);
+          RAISE NOTICE 'Migrated location code constraint to per-warehouse unique';
+        END IF;
+      END $$;
+    `);
+
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
       DELETE FROM inventory_levels il

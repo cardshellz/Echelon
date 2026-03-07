@@ -1786,13 +1786,17 @@ export class DatabaseStorage implements IStorage {
   async createWarehouseLocation(location: Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation> {
     // generateLocationCode throws if no hierarchy fields provided
     const code = generateLocationCode(location);
-    
-    // Check for duplicate code
-    const existing = await this.getWarehouseLocationByCode(code);
-    if (existing) {
-      throw new Error(`Location code "${code}" already exists`);
+
+    // Check for duplicate code within the same warehouse
+    const conditions = [eq(warehouseLocations.code, code.toUpperCase())];
+    if (location.warehouseId) {
+      conditions.push(eq(warehouseLocations.warehouseId, location.warehouseId));
     }
-    
+    const [existing] = await db.select().from(warehouseLocations).where(and(...conditions));
+    if (existing) {
+      throw new Error(`Location code "${code}" already exists in this warehouse`);
+    }
+
     const result = await db.insert(warehouseLocations).values({
       ...location,
       code,
@@ -1809,11 +1813,14 @@ export class DatabaseStorage implements IStorage {
     const merged = { ...existing, ...updates };
     const newCode = generateLocationCode(merged);
     
-    // Check if the new code would conflict with another location
+    // Check if the new code would conflict with another location in the same warehouse
     if (newCode !== existing.code) {
-      const conflict = await this.getWarehouseLocationByCode(newCode);
+      const whId = updates.warehouseId ?? existing.warehouseId;
+      const conditions = [eq(warehouseLocations.code, newCode.toUpperCase())];
+      if (whId) conditions.push(eq(warehouseLocations.warehouseId, whId));
+      const [conflict] = await db.select().from(warehouseLocations).where(and(...conditions));
       if (conflict && conflict.id !== id) {
-        throw new Error(`Location code "${newCode}" already exists`);
+        throw new Error(`Location code "${newCode}" already exists in this warehouse`);
       }
     }
     

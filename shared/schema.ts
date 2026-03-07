@@ -433,7 +433,7 @@ export type Warehouse = typeof warehouses.$inferSelect;
 export const warehouseLocations = pgTable("warehouse_locations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "cascade" }), // Which warehouse this location belongs to
-  code: varchar("code", { length: 50 }).notNull().unique(), // Auto-generated from hierarchy: "BULK-A-02-C-1"
+  code: varchar("code", { length: 50 }).notNull(), // Auto-generated from hierarchy: "BULK-A-02-C-1" — unique per warehouse via composite constraint
   name: text("name"), // Friendly name (optional)
   
   // Hierarchical location structure (all optional for flexibility)
