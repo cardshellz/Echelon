@@ -5412,6 +5412,168 @@ export async function registerRoutes(
     }
   });
   
+  // SKU Conversion — move inventory from one variant to another across all locations
+  // Atomic: adjust-out old variant, adjust-in new variant, with sku_correction audit trail
+  app.post("/api/inventory/convert-sku", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { inventoryCore } = req.app.locals.services;
+      const { fromVariantId, toVariantId, locationId, quantity, notes } = req.body;
+
+      if (!fromVariantId || !toVariantId) {
+        return res.status(400).json({ error: "fromVariantId and toVariantId are required" });
+      }
+      const fromVarId = parseInt(String(fromVariantId));
+      const toVarId = parseInt(String(toVariantId));
+      if (isNaN(fromVarId) || isNaN(toVarId)) {
+        return res.status(400).json({ error: "Variant IDs must be valid integers" });
+      }
+      if (fromVarId === toVarId) {
+        return res.status(400).json({ error: "Source and destination variants must be different" });
+      }
+
+      const fromVariant = await storage.getProductVariantById(fromVarId);
+      const toVariant = await storage.getProductVariantById(toVarId);
+      if (!fromVariant) return res.status(404).json({ error: "Source variant not found" });
+      if (!toVariant) return res.status(404).json({ error: "Destination variant not found" });
+
+      const userId = req.session.user?.id || "system";
+      const batchId = `skuconv-${Date.now()}`;
+      const noteText = `SKU conversion: ${fromVariant.sku} → ${toVariant.sku}${notes ? '. ' + notes : ''}`;
+
+      // Find all inventory for the source variant (optionally filtered to one location)
+      let sourceInventory: any[];
+      if (locationId) {
+        const locId = parseInt(String(locationId));
+        const level = await db.execute(sql`
+          SELECT il.*, wl.code as location_code
+          FROM inventory_levels il
+          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+          WHERE il.product_variant_id = ${fromVarId}
+            AND il.warehouse_location_id = ${locId}
+            AND il.variant_qty > 0
+        `);
+        sourceInventory = level.rows as any[];
+      } else {
+        const levels = await db.execute(sql`
+          SELECT il.*, wl.code as location_code
+          FROM inventory_levels il
+          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+          WHERE il.product_variant_id = ${fromVarId}
+            AND il.variant_qty > 0
+        `);
+        sourceInventory = levels.rows as any[];
+      }
+
+      if (sourceInventory.length === 0) {
+        return res.status(400).json({ error: "No inventory found for source variant" });
+      }
+
+      // If a specific quantity is given, validate it doesn't exceed total available
+      const totalAvailable = sourceInventory.reduce((s: number, l: any) => s + l.variant_qty, 0);
+      const convertQty = quantity ? parseInt(String(quantity)) : null;
+      if (convertQty !== null) {
+        if (isNaN(convertQty) || convertQty <= 0) {
+          return res.status(400).json({ error: "Quantity must be a positive integer" });
+        }
+        if (convertQty > totalAvailable) {
+          return res.status(400).json({ error: `Requested ${convertQty} but only ${totalAvailable} available` });
+        }
+      }
+
+      // Execute conversion in a single transaction
+      const conversions: { locationCode: string; qty: number }[] = [];
+      let remaining = convertQty ?? totalAvailable;
+
+      await db.transaction(async (tx: any) => {
+        const svc = (inventoryCore as any).withTx(tx);
+
+        for (const inv of sourceInventory) {
+          if (remaining <= 0) break;
+          const qtyToConvert = Math.min(inv.variant_qty, remaining);
+
+          // Adjust-out from old variant
+          const sourceLevel = await svc.upsertLevel(fromVarId, inv.warehouse_location_id);
+          await svc.adjustLevel(sourceLevel.id, { variantQty: -qtyToConvert });
+          await svc.logTransaction({
+            productVariantId: fromVarId,
+            fromLocationId: inv.warehouse_location_id,
+            toLocationId: null,
+            transactionType: "sku_correction",
+            variantQtyDelta: -qtyToConvert,
+            variantQtyBefore: sourceLevel.variantQty,
+            variantQtyAfter: sourceLevel.variantQty - qtyToConvert,
+            sourceState: "on_hand",
+            targetState: "on_hand",
+            batchId,
+            referenceType: "sku_conversion",
+            referenceId: `${fromVariant.sku}→${toVariant.sku}`,
+            notes: noteText,
+            userId,
+          });
+
+          // Adjust-in to new variant at same location
+          const destLevel = await svc.upsertLevel(toVarId, inv.warehouse_location_id);
+          await svc.adjustLevel(destLevel.id, { variantQty: qtyToConvert });
+          await svc.logTransaction({
+            productVariantId: toVarId,
+            fromLocationId: null,
+            toLocationId: inv.warehouse_location_id,
+            transactionType: "sku_correction",
+            variantQtyDelta: qtyToConvert,
+            variantQtyBefore: destLevel.variantQty,
+            variantQtyAfter: destLevel.variantQty + qtyToConvert,
+            sourceState: "on_hand",
+            targetState: "on_hand",
+            batchId,
+            referenceType: "sku_conversion",
+            referenceId: `${fromVariant.sku}→${toVariant.sku}`,
+            notes: noteText,
+            userId,
+          });
+
+          // Clean up empty source level
+          if (sourceLevel.variantQty - qtyToConvert <= 0) {
+            const hasAssignment = await tx.execute(sql`
+              SELECT 1 FROM product_locations
+              WHERE product_variant_id = ${fromVarId}
+                AND warehouse_location_id = ${inv.warehouse_location_id}
+              LIMIT 1
+            `);
+            if (hasAssignment.rows.length === 0) {
+              await tx.execute(sql`
+                DELETE FROM inventory_levels WHERE id = ${sourceLevel.id}
+              `);
+            }
+          }
+
+          conversions.push({ locationCode: inv.location_code, qty: qtyToConvert });
+          remaining -= qtyToConvert;
+        }
+      });
+
+      const totalConverted = conversions.reduce((s, c) => s + c.qty, 0);
+
+      // Fire channel sync for both variants (fire-and-forget)
+      const { channelSync } = req.app.locals.services as any;
+      if (channelSync) {
+        channelSync.queueSyncAfterInventoryChange(fromVarId).catch(() => {});
+        channelSync.queueSyncAfterInventoryChange(toVarId).catch(() => {});
+      }
+
+      res.json({
+        success: true,
+        fromSku: fromVariant.sku,
+        toSku: toVariant.sku,
+        totalConverted,
+        conversions,
+        batchId,
+      });
+    } catch (error) {
+      console.error("SKU conversion error:", error);
+      res.status(400).json({ error: String(error) });
+    }
+  });
+
   app.get("/api/inventory/transfers", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;

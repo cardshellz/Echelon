@@ -25,7 +25,8 @@ import {
   ArrowLeftRight,
   Building2,
   Trash2,
-  Grid3x3
+  Grid3x3,
+  Repeat2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -682,6 +683,56 @@ export default function Inventory() {
     },
   });
 
+  // SKU Conversion state
+  const [convertDialogOpen, setConvertDialogOpen] = useState(false);
+  const [convertFromSearch, setConvertFromSearch] = useState("");
+  const [convertToSearch, setConvertToSearch] = useState("");
+  const [convertFrom, setConvertFrom] = useState<{ variantId: number; sku: string } | null>(null);
+  const [convertTo, setConvertTo] = useState<{ variantId: number; sku: string } | null>(null);
+  const [convertQty, setConvertQty] = useState("");
+  const [convertNotes, setConvertNotes] = useState("");
+
+  const { data: convertFromResults = [] } = useQuery<{ sku: string; name: string; productVariantId: number }[]>({
+    queryKey: ["/api/inventory/skus/search", convertFromSearch],
+    queryFn: async () => {
+      if (!convertFromSearch || convertFromSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(convertFromSearch)}&limit=10`, { credentials: "include" });
+      return res.ok ? res.json() : [];
+    },
+    enabled: convertDialogOpen && convertFromSearch.length >= 2 && !convertFrom,
+  });
+
+  const { data: convertToResults = [] } = useQuery<{ sku: string; name: string; productVariantId: number }[]>({
+    queryKey: ["/api/inventory/skus/search", convertToSearch],
+    queryFn: async () => {
+      if (!convertToSearch || convertToSearch.length < 2) return [];
+      const res = await fetch(`/api/inventory/skus/search?q=${encodeURIComponent(convertToSearch)}&limit=10`, { credentials: "include" });
+      return res.ok ? res.json() : [];
+    },
+    enabled: convertDialogOpen && convertToSearch.length >= 2 && !convertTo,
+  });
+
+  const convertSkuMutation = useMutation({
+    mutationFn: async (data: { fromVariantId: number; toVariantId: number; quantity?: number; notes?: string }) => {
+      const response = await apiRequest("POST", "/api/inventory/convert-sku", data);
+      return response.json();
+    },
+    onSuccess: (data: { fromSku: string; toSku: string; totalConverted: number }) => {
+      toast({ title: "SKU Conversion Complete", description: `Converted ${data.totalConverted} units: ${data.fromSku} → ${data.toSku}` });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
+      setConvertDialogOpen(false);
+      setConvertFrom(null);
+      setConvertTo(null);
+      setConvertFromSearch("");
+      setConvertToSearch("");
+      setConvertQty("");
+      setConvertNotes("");
+    },
+    onError: (error: Error) => {
+      toast({ title: "Conversion failed", description: error.message, variant: "destructive" });
+    },
+  });
+
   const migrateLocationsMutation = useMutation({
     mutationFn: async () => {
       const response = await apiRequest("POST", "/api/inventory/migrate-locations", {});
@@ -950,6 +1001,10 @@ export default function Inventory() {
             >
               <MapPin size={14} className="mr-1" />
               <span className="hidden lg:inline text-xs">{migrateLocationsMutation.isPending ? "Syncing..." : "Sync"}</span>
+            </Button>
+            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setConvertDialogOpen(true)} data-testid="button-convert-sku">
+              <Repeat2 size={14} />
+              <span className="hidden lg:inline text-xs ml-1">Convert</span>
             </Button>
             <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
               <Upload size={14} />
@@ -1958,6 +2013,163 @@ export default function Inventory() {
         defaultVariantId={transferDialog.variantId}
         defaultSku={transferDialog.sku}
       />
+
+      {/* Convert SKU Dialog */}
+      <Dialog open={convertDialogOpen} onOpenChange={(open) => {
+        setConvertDialogOpen(open);
+        if (!open) {
+          setConvertFrom(null);
+          setConvertTo(null);
+          setConvertFromSearch("");
+          setConvertToSearch("");
+          setConvertQty("");
+          setConvertNotes("");
+        }
+      }}>
+        <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
+          <DialogHeader>
+            <DialogTitle>Convert SKU</DialogTitle>
+            <DialogDescription className="text-sm">
+              Move inventory from one SKU to another. Adjusts out from source, adjusts in to destination at the same location(s).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {/* From SKU */}
+            <div className="space-y-2">
+              <Label className="text-sm">From SKU (source)</Label>
+              {convertFrom ? (
+                <div className="flex items-center gap-2 border rounded-md px-3 py-2 bg-muted/30">
+                  <span className="font-mono text-sm flex-1">{convertFrom.sku}</span>
+                  <Button variant="ghost" size="sm" className="h-6 px-1" onClick={() => { setConvertFrom(null); setConvertFromSearch(""); }}>
+                    <XCircle className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <Input
+                    placeholder="Search source SKU..."
+                    value={convertFromSearch}
+                    onChange={(e) => setConvertFromSearch(e.target.value)}
+                    className="h-10"
+                    autoComplete="off"
+                  />
+                  {convertFromResults.length > 0 && (
+                    <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-background border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {convertFromResults.map((r) => (
+                        <button
+                          key={r.productVariantId}
+                          className="w-full text-left px-3 py-2 hover:bg-muted text-sm flex justify-between"
+                          onClick={() => {
+                            setConvertFrom({ variantId: r.productVariantId, sku: r.sku });
+                            setConvertFromSearch("");
+                          }}
+                        >
+                          <span className="font-mono">{r.sku}</span>
+                          <span className="text-muted-foreground text-xs truncate ml-2">{r.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* To SKU */}
+            <div className="space-y-2">
+              <Label className="text-sm">To SKU (destination)</Label>
+              {convertTo ? (
+                <div className="flex items-center gap-2 border rounded-md px-3 py-2 bg-muted/30">
+                  <span className="font-mono text-sm flex-1">{convertTo.sku}</span>
+                  <Button variant="ghost" size="sm" className="h-6 px-1" onClick={() => { setConvertTo(null); setConvertToSearch(""); }}>
+                    <XCircle className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <Input
+                    placeholder="Search destination SKU..."
+                    value={convertToSearch}
+                    onChange={(e) => setConvertToSearch(e.target.value)}
+                    className="h-10"
+                    autoComplete="off"
+                  />
+                  {convertToResults.length > 0 && (
+                    <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-background border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                      {convertToResults.map((r) => (
+                        <button
+                          key={r.productVariantId}
+                          className="w-full text-left px-3 py-2 hover:bg-muted text-sm flex justify-between"
+                          onClick={() => {
+                            setConvertTo({ variantId: r.productVariantId, sku: r.sku });
+                            setConvertToSearch("");
+                          }}
+                        >
+                          <span className="font-mono">{r.sku}</span>
+                          <span className="text-muted-foreground text-xs truncate ml-2">{r.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Quantity (optional) */}
+            <div className="space-y-2">
+              <Label className="text-sm">Quantity (leave blank for all)</Label>
+              <Input
+                type="number"
+                placeholder="All available"
+                value={convertQty}
+                onChange={(e) => setConvertQty(e.target.value)}
+                className="h-10"
+                min="1"
+              />
+            </div>
+
+            {/* Notes */}
+            <div className="space-y-2">
+              <Label className="text-sm">Notes</Label>
+              <Input
+                placeholder="e.g., SKU migration, rebrand..."
+                value={convertNotes}
+                onChange={(e) => setConvertNotes(e.target.value)}
+                className="h-10"
+              />
+            </div>
+
+            {convertFrom && convertTo && (
+              <div className="rounded-md bg-blue-50 border border-blue-200 p-3 text-sm">
+                <p className="font-medium text-blue-800">Conversion Preview</p>
+                <p className="text-blue-700 mt-1">
+                  <span className="font-mono">{convertFrom.sku}</span> → <span className="font-mono">{convertTo.sku}</span>
+                </p>
+                <p className="text-blue-600 text-xs mt-0.5">
+                  {convertQty ? `${convertQty} units` : "All available inventory"} across all locations
+                </p>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setConvertDialogOpen(false)} className="w-full sm:w-auto min-h-[44px]">Cancel</Button>
+            <Button
+              onClick={() => {
+                if (!convertFrom || !convertTo) return;
+                convertSkuMutation.mutate({
+                  fromVariantId: convertFrom.variantId,
+                  toVariantId: convertTo.variantId,
+                  quantity: convertQty ? parseInt(convertQty) : undefined,
+                  notes: convertNotes || undefined,
+                });
+              }}
+              disabled={!convertFrom || !convertTo || convertSkuMutation.isPending || (convertFrom?.variantId === convertTo?.variantId)}
+              className="w-full sm:w-auto min-h-[44px]"
+            >
+              {convertSkuMutation.isPending ? "Converting..." : "Convert"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
         <DialogContent className="w-[95vw] max-w-md mx-auto max-h-[90vh] overflow-y-auto p-4">
