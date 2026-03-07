@@ -19,7 +19,15 @@ import {
   User2,
   Check,
   Building2,
-  ChevronRight
+  ChevronRight,
+  X,
+  Truck,
+  MapPin as MapPinIcon,
+  Mail,
+  FileText,
+  ArrowLeft,
+  Box,
+  DollarSign,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,6 +84,16 @@ interface OrderItem {
   quantity: number;
   pickedQuantity: number;
   status: string;
+  imageUrl: string | null;
+  location: string;
+  zone: string;
+  priceCents: number | null;
+  discountCents: number | null;
+  totalPriceCents: number | null;
+  requiresShipping: number;
+  barcode: string | null;
+  shortReason: string | null;
+  pickedAt: string | null;
 }
 
 interface Order {
@@ -90,16 +108,32 @@ interface Order {
   warehouseStatus: string;
   priority: string;
   itemCount: number;
+  unitCount: number;
   pickedCount: number;
   totalAmount: string | null;
+  currency: string | null;
   onHold: number;
   createdAt: string;
   orderPlacedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
   items: OrderItem[];
   combinedGroupId: number | null;
   combinedRole: string | null;
   slaDueAt: string | null;
   slaStatus: string | null;
+  shippingName: string | null;
+  shippingAddress: string | null;
+  shippingCity: string | null;
+  shippingState: string | null;
+  shippingPostalCode: string | null;
+  shippingCountry: string | null;
+  financialStatus: string | null;
+  shopifyFulfillmentStatus: string | null;
+  notes: string | null;
+  batchId: string | null;
+  assignedPickerId: string | null;
+  externalOrderId: string | null;
 }
 
 interface OrdersResponse {
@@ -194,6 +228,330 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
   );
 }
 
+// --- Order Detail Panel ---
+
+interface OrderDetail extends Order {
+  items: OrderItem[];
+  channel: Channel | null;
+}
+
+const itemStatusColors: Record<string, string> = {
+  pending: "bg-slate-100 text-slate-600",
+  picked: "bg-green-100 text-green-700",
+  shorted: "bg-red-100 text-red-700",
+  cancelled: "bg-gray-100 text-gray-500",
+};
+
+const financialStatusColors: Record<string, string> = {
+  paid: "bg-green-100 text-green-700 border-green-200",
+  authorized: "bg-blue-100 text-blue-700 border-blue-200",
+  pending: "bg-amber-100 text-amber-700 border-amber-200",
+  partially_refunded: "bg-orange-100 text-orange-700 border-orange-200",
+  refunded: "bg-red-100 text-red-700 border-red-200",
+  voided: "bg-gray-100 text-gray-500 border-gray-200",
+};
+
+function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () => void }) {
+  const { data: order, isLoading } = useQuery<OrderDetail>({
+    queryKey: ["/api/oms/orders", orderId, "detail"],
+    queryFn: async () => {
+      const res = await fetch(`/api/oms/orders/${orderId}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch order");
+      return res.json();
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <Card className="sticky top-6">
+        <CardContent className="py-12 text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto" />
+          <p className="text-sm text-muted-foreground mt-3">Loading order...</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!order) {
+    return (
+      <Card className="sticky top-6">
+        <CardContent className="py-12 text-center text-muted-foreground">
+          <p>Order not found</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const shippableItems = order.items?.filter(i => i.requiresShipping === 1) ?? [];
+  const digitalItems = order.items?.filter(i => i.requiresShipping === 0) ?? [];
+  const totalPicked = shippableItems.reduce((s, i) => s + i.pickedQuantity, 0);
+  const totalQty = shippableItems.reduce((s, i) => s + i.quantity, 0);
+
+  const hasAddress = order.shippingAddress || order.shippingCity;
+  const addressLines = [
+    order.shippingName,
+    order.shippingAddress,
+    [order.shippingCity, order.shippingState, order.shippingPostalCode].filter(Boolean).join(", "),
+    order.shippingCountry && order.shippingCountry !== "US" ? order.shippingCountry : null,
+  ].filter(Boolean);
+
+  // Calculate order total from items if totalAmount not available
+  const itemsTotal = order.items?.reduce((s, i) => s + (i.totalPriceCents || 0), 0) ?? 0;
+  const displayTotal = order.totalAmount
+    ? `$${parseFloat(order.totalAmount).toFixed(2)}`
+    : itemsTotal > 0 ? `$${(itemsTotal / 100).toFixed(2)}` : null;
+
+  return (
+    <div className="space-y-4 sticky top-6">
+      {/* Header */}
+      <Card>
+        <CardContent className="p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+              <div>
+                <h3 className="font-bold text-lg">#{order.orderNumber}</h3>
+                <p className="text-xs text-muted-foreground">
+                  {order.source !== "manual" && order.externalOrderId && (
+                    <span className="mr-2">Ext: {order.externalOrderId}</span>
+                  )}
+                  ID: {order.id}
+                </p>
+              </div>
+            </div>
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+
+          {/* Status badges */}
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
+              {order.warehouseStatus.replace("_", " ")}
+            </Badge>
+            {order.financialStatus && (
+              <Badge variant="outline" className={cn("text-xs", financialStatusColors[order.financialStatus] || "")}>
+                {order.financialStatus.replace("_", " ")}
+              </Badge>
+            )}
+            {order.priority !== "normal" && (
+              <Badge className={cn("text-xs", priorityColors[order.priority])}>
+                {order.priority.toUpperCase()}
+              </Badge>
+            )}
+            {order.onHold === 1 && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
+            {order.batchId && (
+              <Badge variant="outline" className="text-xs bg-violet-50 text-violet-700 border-violet-200">
+                Batch: {order.batchId}
+              </Badge>
+            )}
+          </div>
+
+          {/* Key info grid */}
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            {order.channel && (
+              <div className="flex items-center gap-2">
+                <Store className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>{order.channel.name}</span>
+              </div>
+            )}
+            {displayTotal && (
+              <div className="flex items-center gap-2">
+                <DollarSign className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="font-medium">{displayTotal}</span>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>{order.orderPlacedAt ? format(new Date(order.orderPlacedAt), "MMM d, h:mm a") : format(new Date(order.createdAt), "MMM d, h:mm a")}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Box className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>{order.itemCount} items, {order.unitCount || order.itemCount} units</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Customer & Shipping */}
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <h4 className="text-sm font-semibold flex items-center gap-2">
+            <User2 className="h-4 w-4" /> Customer
+          </h4>
+          <div className="text-sm space-y-1">
+            <p className="font-medium">{order.customerName}</p>
+            {order.customerEmail && (
+              <p className="text-muted-foreground flex items-center gap-1.5">
+                <Mail className="h-3 w-3" /> {order.customerEmail}
+              </p>
+            )}
+          </div>
+
+          {hasAddress && (
+            <>
+              <div className="border-t pt-3">
+                <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                  <Truck className="h-4 w-4" /> Shipping Address
+                </h4>
+                <div className="text-sm text-muted-foreground space-y-0.5">
+                  {addressLines.map((line, i) => (
+                    <p key={i}>{line}</p>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Pick Progress */}
+      {totalQty > 0 && order.warehouseStatus !== "shipped" && (
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between text-sm mb-2">
+              <h4 className="font-semibold">Pick Progress</h4>
+              <span className={cn("font-medium", totalPicked === totalQty ? "text-green-600" : "")}>
+                {totalPicked}/{totalQty}
+              </span>
+            </div>
+            <Progress value={(totalPicked / totalQty) * 100} className="h-2" />
+            {order.assignedPickerId && (
+              <p className="text-xs text-muted-foreground mt-2">Picker: {order.assignedPickerId}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Line Items */}
+      <Card>
+        <CardContent className="p-4">
+          <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+            <Package className="h-4 w-4" /> Line Items ({shippableItems.length})
+          </h4>
+          <div className="space-y-2">
+            {shippableItems.map((item) => (
+              <div key={item.id} className="border rounded-md p-3">
+                <div className="flex items-start gap-3">
+                  {item.imageUrl ? (
+                    <img src={item.imageUrl} className="w-10 h-10 rounded object-cover border" />
+                  ) : (
+                    <div className="w-10 h-10 rounded bg-muted flex items-center justify-center">
+                      <Package className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-medium truncate">{item.name}</p>
+                        <p className="text-xs font-mono text-muted-foreground">{item.sku}</p>
+                      </div>
+                      <Badge variant="outline" className={cn("text-[10px] shrink-0", itemStatusColors[item.status] || "")}>
+                        {item.status}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground">
+                      <span>Qty: <strong className="text-foreground">{item.quantity}</strong></span>
+                      <span>Picked: <strong className={item.pickedQuantity === item.quantity ? "text-green-600" : "text-foreground"}>{item.pickedQuantity}</strong></span>
+                      {item.location && item.location !== "UNASSIGNED" && (
+                        <span className="flex items-center gap-0.5">
+                          <MapPinIcon className="h-3 w-3" /> {item.location}
+                        </span>
+                      )}
+                    </div>
+                    {item.priceCents != null && (
+                      <div className="text-xs text-muted-foreground mt-1">
+                        ${(item.priceCents / 100).toFixed(2)} ea
+                        {item.discountCents && item.discountCents > 0 && (
+                          <span className="text-red-500 ml-1">(-${(item.discountCents / 100).toFixed(2)})</span>
+                        )}
+                        {item.totalPriceCents != null && (
+                          <span className="ml-2 font-medium text-foreground">= ${(item.totalPriceCents / 100).toFixed(2)}</span>
+                        )}
+                      </div>
+                    )}
+                    {item.shortReason && (
+                      <p className="text-xs text-red-500 mt-1">Short: {item.shortReason}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {digitalItems.length > 0 && (
+            <div className="mt-3 pt-3 border-t">
+              <h5 className="text-xs font-semibold text-muted-foreground mb-2">Digital / Non-shipping ({digitalItems.length})</h5>
+              {digitalItems.map((item) => (
+                <div key={item.id} className="flex justify-between text-xs py-1">
+                  <span>{item.name} <span className="font-mono text-muted-foreground">({item.sku})</span></span>
+                  <span>x{item.quantity}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Notes */}
+      {order.notes && (
+        <Card>
+          <CardContent className="p-4">
+            <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+              <FileText className="h-4 w-4" /> Notes
+            </h4>
+            <p className="text-sm text-muted-foreground whitespace-pre-wrap">{order.notes}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Timestamps */}
+      <Card>
+        <CardContent className="p-4">
+          <h4 className="text-sm font-semibold mb-2">Timeline</h4>
+          <div className="space-y-1.5 text-xs text-muted-foreground">
+            {order.orderPlacedAt && (
+              <div className="flex justify-between">
+                <span>Placed</span>
+                <span>{format(new Date(order.orderPlacedAt), "MMM d, yyyy h:mm a")}</span>
+              </div>
+            )}
+            <div className="flex justify-between">
+              <span>Imported</span>
+              <span>{format(new Date(order.createdAt), "MMM d, yyyy h:mm a")}</span>
+            </div>
+            {order.startedAt && (
+              <div className="flex justify-between">
+                <span>Picking started</span>
+                <span>{format(new Date(order.startedAt), "MMM d, yyyy h:mm a")}</span>
+              </div>
+            )}
+            {order.completedAt && (
+              <div className="flex justify-between">
+                <span>Completed</span>
+                <span>{format(new Date(order.completedAt), "MMM d, yyyy h:mm a")}</span>
+              </div>
+            )}
+            {order.slaDueAt && (
+              <div className="flex justify-between">
+                <span>SLA Due</span>
+                <span className={cn(
+                  order.slaStatus === "overdue" && "text-red-500 font-medium",
+                  order.slaStatus === "at_risk" && "text-amber-500 font-medium",
+                )}>
+                  {format(new Date(order.slaDueAt), "MMM d, yyyy h:mm a")}
+                </span>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function Orders() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -212,6 +570,7 @@ export default function Orders() {
   const [statusFilter, setStatusFilter] = useState<string>("active");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isCombineOpen, setIsCombineOpen] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [selectedCombineGroup, setSelectedCombineGroup] = useState<CombinableGroup | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<number[]>([]);
   const [expandedOrderIds, setExpandedOrderIds] = useState<Set<number>>(new Set());
@@ -696,12 +1055,14 @@ export default function Orders() {
           ) : (
             <div className="space-y-3">
               {displayOrders.map((order) => (
-                <Card 
-                  key={order.isCombinedGroup ? `combined-${order.combinedGroupId}` : order.id} 
+                <Card
+                  key={order.isCombinedGroup ? `combined-${order.combinedGroupId}` : order.id}
                   className={cn(
                     "hover:border-primary/50 transition-colors cursor-pointer group",
-                    order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20"
+                    order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
+                    selectedOrderId === order.id && "border-primary ring-1 ring-primary/30"
                   )}
+                  onClick={() => setSelectedOrderId(order.id)}
                   data-testid={`card-order-${order.id}`}
                 >
                   <CardContent className="p-4">
@@ -835,55 +1196,70 @@ export default function Orders() {
           )}
         </div>
 
-        <div className="hidden md:block space-y-6">
-          <Card className="bg-primary text-primary-foreground border-none">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-lg">Order Summary</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <span className="text-primary-foreground/80 text-sm">Active Orders</span>
-                  <span className="font-bold">{activeCount}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-primary-foreground/80 text-sm">Completed Today</span>
-                  <span className="font-bold">{completedCount}</span>
-                </div>
-                <div className="pt-2 border-t border-primary-foreground/20 mt-2">
-                  <div className="flex justify-between items-center text-amber-200">
-                    <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
-                    <span className="font-bold">{exceptionCount}</span>
+        <div className="hidden md:block space-y-6 overflow-y-auto max-h-[calc(100vh-12rem)]">
+          {selectedOrderId ? (
+            <OrderDetailPanel orderId={selectedOrderId} onClose={() => setSelectedOrderId(null)} />
+          ) : (
+            <>
+              <Card className="bg-primary text-primary-foreground border-none">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg">Order Summary</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <span className="text-primary-foreground/80 text-sm">Active Orders</span>
+                      <span className="font-bold">{activeCount}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-primary-foreground/80 text-sm">Completed Today</span>
+                      <span className="font-bold">{completedCount}</span>
+                    </div>
+                    <div className="pt-2 border-t border-primary-foreground/20 mt-2">
+                      <div className="flex justify-between items-center text-amber-200">
+                        <span className="text-sm flex items-center gap-1"><AlertCircle className="h-3 w-3" /> Exceptions</span>
+                        <span className="font-bold">{exceptionCount}</span>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+                </CardContent>
+              </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Channels</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {channels?.slice(0, 5).map((ch) => (
-                <div key={ch.id} className="flex items-center justify-between text-sm">
-                  <div className="flex items-center gap-2">
-                    {sourceIcons[ch.provider] && (
-                      <img src={sourceIcons[ch.provider]} className="w-4 h-4 object-contain" />
-                    )}
-                    <span>{ch.name}</span>
-                  </div>
-                  <Badge variant={ch.status === "active" ? "default" : "outline"} className="text-xs">
-                    {ch.status}
-                  </Badge>
-                </div>
-              ))}
-              {(!channels || channels.length === 0) && (
-                <p className="text-sm text-muted-foreground">No channels configured</p>
-              )}
-            </CardContent>
-          </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Channels</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {channels?.slice(0, 5).map((ch) => (
+                    <div key={ch.id} className="flex items-center justify-between text-sm">
+                      <div className="flex items-center gap-2">
+                        {sourceIcons[ch.provider] && (
+                          <img src={sourceIcons[ch.provider]} className="w-4 h-4 object-contain" />
+                        )}
+                        <span>{ch.name}</span>
+                      </div>
+                      <Badge variant={ch.status === "active" ? "default" : "outline"} className="text-xs">
+                        {ch.status}
+                      </Badge>
+                    </div>
+                  ))}
+                  {(!channels || channels.length === 0) && (
+                    <p className="text-sm text-muted-foreground">No channels configured</p>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          )}
         </div>
+
+        {/* Mobile: order detail as dialog */}
+        {selectedOrderId && (
+          <Dialog open={!!selectedOrderId} onOpenChange={(open) => { if (!open) setSelectedOrderId(null); }}>
+            <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-4 md:hidden">
+              <OrderDetailPanel orderId={selectedOrderId} onClose={() => setSelectedOrderId(null)} />
+            </DialogContent>
+          </Dialog>
+        )}
       </div>
 
       <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
