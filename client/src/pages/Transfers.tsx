@@ -83,15 +83,40 @@ export default function Transfers() {
     window.addEventListener("resize", checkMobile);
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
-  
+
   const { data: transfers = [], isLoading: transfersLoading } = useQuery<Transfer[]>({
     queryKey: ["/api/inventory/transfers"],
     refetchInterval: 10000
   });
-  
+
   const { data: locations = [] } = useQuery<WarehouseLocation[]>({
     queryKey: ["/api/warehouse/locations"]
   });
+
+  // Pre-fill from URL query params (e.g. from cycle count Transfer button)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const fromCode = params.get("from");
+    const sku = params.get("sku");
+    const qty = params.get("qty");
+    if (!fromCode || locations.length === 0) return;
+
+    const loc = locations.find(l => l.code === fromCode);
+    if (!loc) return;
+
+    // Only apply once — clear the URL params after applying
+    window.history.replaceState({}, "", window.location.pathname);
+
+    if (isMobile) {
+      setSourceLocationCode(fromCode);
+      if (qty) setMobileQuantity(qty);
+      setMobileStep("sku");
+    } else {
+      setFromLocationId(loc.id);
+      setLocationSearch(fromCode);
+      if (qty) setQuantity(qty);
+    }
+  }, [locations, isMobile]);
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
     queryKey: ["/api/warehouses"]

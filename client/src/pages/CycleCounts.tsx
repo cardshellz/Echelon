@@ -1702,10 +1702,11 @@ export default function CycleCounts() {
                               <Pencil className="h-3 w-3 mr-1" /> Recount
                             </Button>
                             <Button size="sm" variant="outline" className="text-blue-700" onClick={() => {
-                              setSelectedItem(item);
-                              setTransferForm({ destinationLocationId: "", qty: String(Math.abs(item.varianceQty ?? 0)), notes: "" });
-                              setLocationSearch("");
-                              setTransferDialogOpen(true);
+                              const params = new URLSearchParams();
+                              if (item.locationCode) params.set("from", item.locationCode);
+                              if (item.expectedSku) params.set("sku", item.expectedSku);
+                              params.set("qty", String(Math.abs(item.varianceQty ?? 0)));
+                              window.location.href = `/transfers?${params.toString()}`;
                             }}>
                               <ArrowRight className="h-3 w-3 mr-1" /> Transfer
                             </Button>
@@ -1807,10 +1808,11 @@ export default function CycleCounts() {
                                 <Pencil className="h-3 w-3 mr-1" /> Recount
                               </Button>
                               <Button size="sm" variant="outline" className="text-blue-700" onClick={() => {
-                                setSelectedItem(item);
-                                setTransferForm({ destinationLocationId: "", qty: String(Math.abs(item.varianceQty ?? 0)), notes: "" });
-                                setLocationSearch("");
-                                setTransferDialogOpen(true);
+                                const params = new URLSearchParams();
+                                if (item.locationCode) params.set("from", item.locationCode);
+                                if (item.expectedSku) params.set("sku", item.expectedSku);
+                                params.set("qty", String(Math.abs(item.varianceQty ?? 0)));
+                                window.location.href = `/transfers?${params.toString()}`;
                               }}>
                                 <ArrowRight className="h-3 w-3 mr-1" /> Transfer
                               </Button>
