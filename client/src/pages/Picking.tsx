@@ -169,7 +169,10 @@ async function updateOrderItem(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status, pickedQuantity, shortReason, pickMethod }),
   });
-  if (!res.ok) throw new Error("Failed to update item");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Unknown error" }));
+    throw new Error(err.message || err.error || `Failed to update item (${res.status})`);
+  }
   return res.json();
 }
 
