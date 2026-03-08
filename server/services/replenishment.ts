@@ -829,7 +829,7 @@ class ReplenishmentService {
    * After a task completes, check for blocked tasks that depend on it.
    * Unblock them and auto-execute if configured.
    */
-  private async unblockDependentTasks(completedTaskId: number, userId?: string): Promise<void> {
+  async unblockDependentTasks(completedTaskId: number, userId?: string): Promise<void> {
     const dependents = await this.db
       .select()
       .from(replenTasks)
@@ -1315,7 +1315,7 @@ class ReplenishmentService {
       throw new Error(`Replen task ${taskId} not found`);
     }
 
-    if (task.status !== "pending") {
+    if (!["pending", "assigned", "in_progress"].includes(task.status)) {
       throw new Error(`Task ${taskId} is ${task.status}, cannot confirm`);
     }
 
@@ -1358,7 +1358,110 @@ class ReplenishmentService {
   }
 
   // ---------------------------------------------------------------------------
-  // 5b. REPLEN GUIDANCE — check if pickable replen source exists for a location
+  // 5b. COMPLETE MATCHING REPLEN TASKS AFTER MANUAL TRANSFER
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After a manual inventory transfer, find and complete any matching pending
+   * replen tasks WITHOUT re-moving inventory (it's already been moved).
+   *
+   * Matches on: fromLocationId + toLocationId + variant (pickProductVariantId).
+   * Partial matches (same variant+dest but different source) are also handled
+   * since the destination is fulfilled regardless of which source was used.
+   */
+  async completeMatchingTransferTask(
+    fromLocationId: number,
+    toLocationId: number,
+    variantId: number,
+    userId?: string,
+  ): Promise<{ completedTaskIds: number[] }> {
+    // Find pending/assigned/in_progress replen tasks that match this transfer
+    const matchingTasks = await this.db
+      .select()
+      .from(replenTasks)
+      .where(
+        and(
+          eq(replenTasks.toLocationId, toLocationId),
+          eq(replenTasks.pickProductVariantId, variantId),
+          inArray(replenTasks.status, ["pending", "assigned", "in_progress"]),
+        ),
+      );
+
+    const completedIds: number[] = [];
+
+    for (const task of matchingTasks) {
+      // Mark completed without moving inventory
+      await this.db
+        .update(replenTasks)
+        .set({
+          status: "completed",
+          qtyCompleted: task.qtyTargetUnits,
+          completedAt: new Date(),
+          assignedTo: userId ?? task.assignedTo,
+          notes: `${task.notes || ""}\nAuto-completed: manual transfer from loc ${fromLocationId} to loc ${toLocationId} fulfilled this task`.trim(),
+        })
+        .where(eq(replenTasks.id, task.id));
+
+      // Unblock any dependent cascade tasks
+      await this.unblockDependentTasks(task.id, userId);
+      completedIds.push(task.id);
+
+      console.log(`[Replen] Auto-completed task #${task.id} — manual transfer matched (variant ${variantId}, to loc ${toLocationId})`);
+    }
+
+    return { completedTaskIds: completedIds };
+  }
+
+  /**
+   * Mark a replen task as done WITHOUT moving inventory.
+   * For manual reconciliation when the physical work was already done
+   * but the system didn't capture it (e.g. transfer done outside replen flow).
+   */
+  async markTaskDone(
+    taskId: number,
+    userId?: string,
+    notes?: string,
+  ): Promise<ReplenTask> {
+    const [task] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    if (!task) {
+      throw new Error(`Replen task ${taskId} not found`);
+    }
+
+    if (!["pending", "assigned", "in_progress", "blocked"].includes(task.status)) {
+      throw new Error(`Task ${taskId} is ${task.status}, cannot mark done`);
+    }
+
+    await this.db
+      .update(replenTasks)
+      .set({
+        status: "completed",
+        qtyCompleted: task.qtyTargetUnits,
+        completedAt: new Date(),
+        assignedTo: userId ?? task.assignedTo,
+        notes: `${task.notes || ""}\nManually marked done${notes ? `: ${notes}` : ""} — inventory not re-moved`.trim(),
+      })
+      .where(eq(replenTasks.id, taskId));
+
+    // Unblock dependent tasks
+    await this.unblockDependentTasks(taskId, userId);
+
+    const [updated] = await this.db
+      .select()
+      .from(replenTasks)
+      .where(eq(replenTasks.id, taskId))
+      .limit(1);
+
+    console.log(`[Replen] Task #${taskId} manually marked done by ${userId || "unknown"}`);
+    return updated as ReplenTask;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5c. REPLEN GUIDANCE — check if pickable replen source exists for a location
   // ---------------------------------------------------------------------------
 
   /**

@@ -796,6 +796,31 @@ export default function Replenishment() {
     },
   });
 
+  const markDoneMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await fetch(`/api/replen/tasks/${id}/mark-done`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: "Manually marked done — inventory already moved" }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to mark done" }));
+        throw new Error(err.error || "Failed to mark done");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/action-queue"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });
+      toast({ title: "Task marked done", description: "Inventory was already moved — task closed" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Mark done failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const uploadCsvMutation = useMutation({
     mutationFn: async (file: File) => {
       const formData = new FormData();
@@ -1493,18 +1518,35 @@ export default function Replenishment() {
                               </>
                             )}
                             {["pending", "assigned", "in_progress", "blocked"].includes(task.status) && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="min-h-[36px] text-xs text-muted-foreground hover:text-destructive"
-                                onClick={() => updateTaskMutation.mutate({
-                                  id: task.id,
-                                  data: { status: "cancelled" }
-                                })}
-                              >
-                                <XCircle className="w-3 h-3 sm:mr-1" />
-                                <span className="hidden sm:inline">Cancel</span>
-                              </Button>
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="min-h-[36px] text-xs text-amber-700 border-amber-300 hover:bg-amber-50 dark:text-amber-400 dark:border-amber-700 dark:hover:bg-amber-950/30"
+                                  disabled={markDoneMutation.isPending}
+                                  onClick={() => markDoneMutation.mutate(task.id)}
+                                  title="Mark as done without moving inventory (already moved manually)"
+                                >
+                                  {markDoneMutation.isPending ? (
+                                    <Loader2 className="w-3 h-3 animate-spin sm:mr-1" />
+                                  ) : (
+                                    <CheckCircle className="w-3 h-3 sm:mr-1" />
+                                  )}
+                                  <span className="hidden sm:inline">Done</span>
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="min-h-[36px] text-xs text-muted-foreground hover:text-destructive"
+                                  onClick={() => updateTaskMutation.mutate({
+                                    id: task.id,
+                                    data: { status: "cancelled" }
+                                  })}
+                                >
+                                  <XCircle className="w-3 h-3 sm:mr-1" />
+                                  <span className="hidden sm:inline">Cancel</span>
+                                </Button>
+                              </>
                             )}
                           </div>
                         </TableCell>

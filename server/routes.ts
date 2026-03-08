@@ -5394,8 +5394,12 @@ export async function registerRoutes(
           console.warn(`[ChannelSync] Post-transfer sync failed for variant ${varId}:`, err)
         );
       }
-      // Auto-trigger replenishment check on source location (fire-and-forget)
+      // Auto-complete matching replen tasks fulfilled by this transfer (fire-and-forget)
       if (xfrReplen) {
+        xfrReplen.completeMatchingTransferTask(fromLocId, toLocId, varId, userId).catch((err: any) =>
+          console.warn(`[Replen] Auto-complete matching task failed for variant ${varId}:`, err)
+        );
+        // Also trigger replenishment check on source location
         xfrReplen.checkAndTriggerAfterPick(varId, fromLocId).catch((err: any) =>
           console.warn(`[Replen] Post-transfer check failed for variant ${varId}:`, err)
         );
@@ -9867,6 +9871,20 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Error reporting replen exception:", error);
       res.status(500).json({ error: error.message || "Failed to report exception" });
+    }
+  });
+
+  // Mark a replen task as done WITHOUT re-moving inventory (manual reconciliation)
+  app.post("/api/replen/tasks/:id/mark-done", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { replenishment } = req.app.locals.services;
+      const { notes } = req.body || {};
+      const result = await replenishment.markTaskDone(id, req.session.user?.id, notes);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error marking replen task done:", error);
+      res.status(400).json({ error: error.message || "Failed to mark task done" });
     }
   });
 
