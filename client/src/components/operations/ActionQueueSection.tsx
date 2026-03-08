@@ -35,7 +35,7 @@ interface ActionQueueSectionProps {
   searchQuery?: string;
   canEdit: boolean;
   onTransferFrom: (fromLocationId: number, fromLocationCode: string, variantId?: number, sku?: string) => void;
-  onTransferTo: (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string) => void;
+  onTransferTo: (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string, fromLocationId?: number, fromLocationCode?: string, qty?: number) => void;
   onAdjust: (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) => void;
   onCountsLoaded: (counts: ActionQueueCounts) => void;
 }
@@ -65,7 +65,7 @@ const ACTION_LABELS: Record<string, { label: string; icon: typeof Edit }> = {
 const FILTER_LABELS: Record<string, string> = {
   negative_inventory: "Negative Inventory",
   aging_receiving: "Aging Receiving",
-  pallet_drop: "Pallet Drop Needed",
+  pallet_drop: "Pending Pallet Drops",
   stuck_replen: "Stuck Replen Tasks",
   stale_bin: "Stale Bins",
 };
@@ -121,13 +121,15 @@ export default function ActionQueueSection({
         onTransferFrom(item.locationId, item.locationCode, item.variantId!, item.sku!);
         break;
       case "pallet_drop":
-        // Transfer from reserve (air pallet) to floor pallet location
-        onTransferTo(item.locationId, item.locationCode, item.variantId!, item.sku!);
+        // Execute pallet drop — pre-fill source (reserve) → destination (pick) with qty
+        onTransferTo(item.locationId, item.locationCode, item.variantId!, item.sku!,
+          item.fromLocationId ?? undefined, item.fromLocationCode ?? undefined, item.qty ?? undefined);
         break;
       case "stuck_replen":
-        // View the stuck task — open transfer dialog with pre-filled source/dest
+        // View stuck task — pre-fill source/dest if available
         if (item.variantId && item.sku) {
-          onTransferTo(item.locationId, item.locationCode, item.variantId, item.sku);
+          onTransferTo(item.locationId, item.locationCode, item.variantId, item.sku,
+            item.fromLocationId ?? undefined, item.fromLocationCode ?? undefined, item.qty ?? undefined);
         }
         break;
       case "stale_bin":

@@ -608,7 +608,13 @@ export class OperationsDashboardService {
         (SELECT COUNT(*) FROM replen_tasks rt
          LEFT JOIN warehouse_locations wl ON rt.to_location_id = wl.id
          WHERE rt.status IN ('pending', 'assigned')
+           AND rt.replen_method = 'pallet_drop'
+           ${whFilter}) as pallet_drop_task_count,
+        (SELECT COUNT(*) FROM replen_tasks rt
+         LEFT JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+         WHERE rt.status IN ('pending', 'assigned')
            AND rt.created_at < NOW() - INTERVAL '4 hours'
+           AND COALESCE(rt.replen_method, '') != 'pallet_drop'
            ${whFilter}) as stuck_replen_count,
         (SELECT COUNT(DISTINCT wl.id) FROM warehouse_locations wl
          JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
@@ -629,7 +635,8 @@ export class OperationsDashboardService {
           il.variant_qty as qty, NULL::text as detail, 'adjust'::text as action,
           NULL::int as bulk_available, NULL::text as pending_replen_status,
           NULL::int as days_since_movement, NULL::int as sku_count,
-          NULL::int as hours_aging, NULL::int as task_id
+          NULL::int as hours_aging, NULL::int as task_id,
+          NULL::int as from_location_id, NULL::text as from_location_code
         FROM inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
@@ -642,10 +649,11 @@ export class OperationsDashboardService {
           il.id, wl.id, wl.code, wl.location_type,
           pv.id, pv.sku, pv.name,
           il.variant_qty,
-          EXTRACT(HOUR FROM NOW() - il.updated_at)::text || 'h in ' || wl.location_type,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - il.updated_at) / 3600)::text || 'h in ' || wl.location_type,
           'move'::text,
           NULL::int, NULL::text, NULL::int, NULL::int,
-          EXTRACT(HOUR FROM NOW() - il.updated_at)::int, NULL::int
+          FLOOR(EXTRACT(EPOCH FROM NOW() - il.updated_at) / 3600)::int, NULL::int,
+          NULL::int, NULL::text
         FROM inventory_levels il
         JOIN product_variants pv ON il.product_variant_id = pv.id
         JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
@@ -656,73 +664,43 @@ export class OperationsDashboardService {
 
         UNION ALL
 
-        -- 3. Pallet Drop Needed (priority 2)
+        -- 3. Pallet Drop Tasks (priority 2) — pending replen tasks with method pallet_drop
         SELECT 'pallet_drop'::text, 2,
-          il.id, wl.id, wl.code, wl.location_type,
+          rt.id, wl_to.id, wl_to.code, wl_to.location_type,
           pv.id, pv.sku, pv.name,
-          il.variant_qty,
-          ROUND(vel.daily_velocity::numeric, 1) || ' units/day · ~' || ROUND((il.variant_qty / vel.daily_velocity)::numeric, 1) || ' days left',
+          rt.qty_target_units,
+          COALESCE(wl_from.code, '?') || ' → ' || wl_to.code || ' · ' || rt.status || ' ' || FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::text || 'h',
           'replenish'::text,
-          COALESCE(air.air_qty, 0)::int, NULL::text, NULL::int, NULL::int,
-          NULL::int, NULL::int
-        FROM warehouse_locations wl
-        JOIN inventory_levels il ON il.warehouse_location_id = wl.id
-        JOIN product_variants pv ON il.product_variant_id = pv.id
-        CROSS JOIN LATERAL (
-          SELECT COALESCE(SUM(ABS(it.variant_qty_delta)), 0) / GREATEST(${lookbackDays}, 1) AS daily_velocity
-          FROM inventory_transactions it
-          WHERE it.product_variant_id = il.product_variant_id
-            AND it.transaction_type = 'pick'
-            AND it.created_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-        ) vel
-        LEFT JOIN LATERAL (
-          SELECT SUM(il2.variant_qty) as air_qty
-          FROM inventory_levels il2
-          JOIN warehouse_locations wl2 ON il2.warehouse_location_id = wl2.id
-          WHERE wl2.location_type = 'reserve' AND wl2.is_pickable = 0
-            AND il2.variant_qty > 0
-            AND il2.product_variant_id = pv.id
-        ) air ON true
-        CROSS JOIN LATERAL (
-          SELECT COALESCE(
-            (SELECT lrc.trigger_value::numeric FROM location_replen_config lrc
-             WHERE lrc.warehouse_location_id = wl.id
-               AND (lrc.product_variant_id = il.product_variant_id OR lrc.product_variant_id IS NULL)
-               AND lrc.is_active = 1
-             ORDER BY lrc.product_variant_id NULLS LAST LIMIT 1),
-            (SELECT rr.trigger_value::numeric FROM replen_rules rr
-             WHERE rr.pick_product_variant_id = il.product_variant_id
-               AND rr.replen_method = 'pallet_drop' AND rr.is_active = 1 LIMIT 1),
-            (SELECT rtd.trigger_value::numeric FROM replen_tier_defaults rtd
-             WHERE rtd.replen_method = 'pallet_drop' AND rtd.is_active = 1
-             ORDER BY rtd.hierarchy_level LIMIT 1),
-            2
-          ) AS effective_trigger
-        ) trig
-        WHERE wl.location_type = 'pick' AND wl.is_pickable = 1
-          AND wl.bin_type IN ('pallet', 'floor')
-          AND il.variant_qty > 0
-          AND vel.daily_velocity > 0
-          AND (il.variant_qty / vel.daily_velocity) < trig.effective_trigger
-          AND COALESCE(air.air_qty, 0) > 0
+          NULL::int, rt.status, NULL::int, NULL::int,
+          FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
+          wl_from.id, wl_from.code
+        FROM replen_tasks rt
+        JOIN warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN warehouse_locations wl_from ON rt.from_location_id = wl_from.id
+        LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
+        WHERE rt.status IN ('pending', 'assigned')
+          AND rt.replen_method = 'pallet_drop'
           ${whFilter}
 
         UNION ALL
 
-        -- 4. Stuck Replen (priority 3)
+        -- 4. Stuck Replen (priority 3) — non-pallet-drop tasks pending > 4 hours
         SELECT 'stuck_replen'::text, 3,
-          rt.id, wl.id, wl.code, wl.location_type,
+          rt.id, wl_to.id, wl_to.code, wl_to.location_type,
           pv.id, pv.sku, pv.name,
           rt.qty_target_units,
-          rt.status || ' for ' || EXTRACT(HOUR FROM NOW() - rt.created_at)::text || 'h',
+          rt.status || ' for ' || FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::text || 'h',
           'investigate'::text,
           NULL::int, rt.status, NULL::int, NULL::int,
-          EXTRACT(HOUR FROM NOW() - rt.created_at)::int, rt.id
+          FLOOR(EXTRACT(EPOCH FROM NOW() - rt.created_at) / 3600)::int, rt.id,
+          wl_from.id, wl_from.code
         FROM replen_tasks rt
-        JOIN warehouse_locations wl ON rt.to_location_id = wl.id
+        JOIN warehouse_locations wl_to ON rt.to_location_id = wl_to.id
+        LEFT JOIN warehouse_locations wl_from ON rt.from_location_id = wl_from.id
         LEFT JOIN product_variants pv ON rt.pick_product_variant_id = pv.id
         WHERE rt.status IN ('pending', 'assigned')
           AND rt.created_at < NOW() - INTERVAL '4 hours'
+          AND COALESCE(rt.replen_method, '') != 'pallet_drop'
           ${whFilter}
 
         UNION ALL
@@ -737,7 +715,8 @@ export class OperationsDashboardService {
           NULL::int, NULL::text,
           EXTRACT(DAY FROM NOW() - MAX(last_move.last_at))::int,
           COUNT(DISTINCT il.product_variant_id)::int,
-          NULL::int, NULL::int
+          NULL::int, NULL::int,
+          NULL::int, NULL::text
         FROM warehouse_locations wl
         JOIN inventory_levels il ON il.warehouse_location_id = wl.id AND il.variant_qty > 0
         LEFT JOIN LATERAL (
@@ -763,7 +742,7 @@ export class OperationsDashboardService {
     const counts = {
       negative_inventory: parseInt(c.negative_count) || 0,
       aging_receiving: parseInt(c.aging_receiving_count) || 0,
-      pallet_drop: parseInt(c.pallet_drop_count) || 0,
+      pallet_drop: parseInt(c.pallet_drop_task_count) || 0,
       stuck_replen: parseInt(c.stuck_replen_count) || 0,
       stale_bin: parseInt(c.stale_count) || 0,
     };
@@ -792,6 +771,8 @@ export class OperationsDashboardService {
       skuCount: r.sku_count != null ? parseInt(r.sku_count) : null,
       hoursAging: r.hours_aging != null ? parseInt(r.hours_aging) : null,
       taskId: r.task_id != null ? parseInt(r.task_id) : null,
+      fromLocationId: r.from_location_id != null ? parseInt(r.from_location_id) : null,
+      fromLocationCode: r.from_location_code || null,
     }));
 
     return { items, total, page, pageSize, counts };

@@ -33,6 +33,8 @@ export interface ActionQueueItem {
   skuCount: number | null;
   hoursAging: number | null;
   taskId: number | null;
+  fromLocationId: number | null;
+  fromLocationCode: string | null;
 }
 
 export interface ActionQueueResponse {

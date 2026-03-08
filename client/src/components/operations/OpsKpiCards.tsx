@@ -41,8 +41,8 @@ const ACTIONABLE_CARDS: {
 }[] = [
   { key: "negative_inventory", label: "Negative Inv", sub: "need adjustment", icon: AlertTriangle, alertColor: "text-red-600", normalColor: "text-green-600" },
   { key: "aging_receiving", label: "Aging Receiving", sub: "in receiving > 24h", icon: PackageCheck, alertColor: "text-red-600", normalColor: "text-green-600" },
-  { key: "pallet_drop", label: "Pallet Drop", sub: "reserve → floor needed", icon: ArrowDown, alertColor: "text-amber-600", normalColor: "text-green-600" },
-  { key: "stuck_replen", label: "Stuck Replen", sub: "pending > 4 hours", icon: Timer, alertColor: "text-amber-600", normalColor: "text-green-600" },
+  { key: "pallet_drop", label: "Pallet Drop", sub: "pending pallet drops", icon: ArrowDown, alertColor: "text-amber-600", normalColor: "text-green-600" },
+  { key: "stuck_replen", label: "Stuck Replen", sub: "non-drop tasks > 4h", icon: Timer, alertColor: "text-amber-600", normalColor: "text-green-600" },
   { key: "stale_bin", label: "Stale Bins", sub: "90+ days no movement", icon: Clock, alertColor: "text-amber-600", normalColor: "text-muted-foreground" },
 ];
 

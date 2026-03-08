@@ -32,6 +32,7 @@ interface InlineTransferDialogProps {
   defaultToLocationCode?: string;
   defaultVariantId?: number;
   defaultSku?: string;
+  defaultQty?: number;
 }
 
 interface Location {
@@ -58,6 +59,7 @@ export default function InlineTransferDialog({
   defaultToLocationCode,
   defaultVariantId,
   defaultSku,
+  defaultQty,
 }: InlineTransferDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -75,7 +77,7 @@ export default function InlineTransferDialog({
       setFromLocationId(defaultFromLocationId ?? null);
       setToLocationId(defaultToLocationId ?? null);
       setVariantId(defaultVariantId ?? null);
-      setQuantity("");
+      setQuantity(defaultQty ? defaultQty.toString() : "");
       setNotes("");
       setLocationSearch("");
     }

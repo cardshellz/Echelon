@@ -22,6 +22,7 @@ export interface TransferDialogState {
   toLocationCode?: string;
   variantId?: number;
   sku?: string;
+  qty?: number;
 }
 
 export interface AdjustDialogState {
@@ -68,8 +69,8 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
     setTransferDialog({ open: true, fromLocationId, fromLocationCode, variantId, sku });
 
   // Helper: open transfer dialog with destination pre-filled (replen flow)
-  const openTransferTo = (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string) =>
-    setTransferDialog({ open: true, toLocationId, toLocationCode, variantId, sku });
+  const openTransferTo = (toLocationId: number, toLocationCode: string, variantId?: number, sku?: string, fromLocationId?: number, fromLocationCode?: string, qty?: number) =>
+    setTransferDialog({ open: true, toLocationId, toLocationCode, variantId, sku, fromLocationId, fromLocationCode, qty });
 
   const openAdjust = (locationId: number, locationCode: string, variantId: number, sku: string, currentQty: number) =>
     setAdjustDialog({ open: true, locationId, locationCode, variantId, sku, currentQty });
@@ -123,6 +124,7 @@ export default function OperationsView({ warehouseId, searchQuery }: OperationsV
         defaultToLocationCode={transferDialog.toLocationCode}
         defaultVariantId={transferDialog.variantId}
         defaultSku={transferDialog.sku}
+        defaultQty={transferDialog.qty}
       />
 
       <InlineAdjustDialog
