@@ -321,6 +321,179 @@ function VariantChannelCell({
   );
 }
 
+interface InventoryRow {
+  variant_id: number;
+  sku: string;
+  variant_name: string;
+  hierarchy_level: number;
+  units_per_variant: number;
+  is_base_unit: boolean;
+  level_id: number | null;
+  location_id: number | null;
+  variant_qty: number | null;
+  reserved_qty: number | null;
+  picked_qty: number | null;
+  packed_qty: number;
+  backorder_qty: number;
+  level_updated_at: string | null;
+  location_code: string | null;
+  location_type: string | null;
+  zone: string | null;
+  is_pickable: number | null;
+  warehouse_name: string | null;
+}
+
+function ProductInventoryTab({ productId }: { productId: number }) {
+  const { data: rows = [], isLoading } = useQuery<InventoryRow[]>({
+    queryKey: [`/api/products/${productId}/inventory`],
+    enabled: !!productId,
+  });
+
+  // Group by variant
+  const variantGroups = rows.reduce<Record<number, { variant: InventoryRow; levels: InventoryRow[] }>>((acc, row) => {
+    if (!acc[row.variant_id]) {
+      acc[row.variant_id] = { variant: row, levels: [] };
+    }
+    if (row.level_id && row.variant_qty !== null) {
+      acc[row.variant_id].levels.push(row);
+    }
+    return acc;
+  }, {});
+
+  const variantList = Object.values(variantGroups);
+
+  const locationTypeBadge = (type: string | null) => {
+    const colors: Record<string, string> = {
+      pick: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
+      reserve: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+      receiving: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+      floor: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
+      pallet: "bg-slate-100 text-slate-800 dark:bg-slate-900/30 dark:text-slate-400",
+    };
+    return (
+      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${colors[type || ""] || "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"}`}>
+        {type || "—"}
+      </span>
+    );
+  };
+
+  return (
+    <Card>
+      <CardHeader className="p-3 md:p-6">
+        <CardTitle className="text-base md:text-lg">Inventory Levels</CardTitle>
+        <CardDescription className="text-xs md:text-sm">
+          Stock levels across warehouse locations for all variants
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+        {isLoading ? (
+          <div className="text-center py-8 text-muted-foreground">
+            <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-50" />
+            <p className="text-sm">Loading inventory...</p>
+          </div>
+        ) : variantList.length === 0 ? (
+          <div className="text-center py-8 text-muted-foreground">
+            <Package className="h-10 w-10 mx-auto mb-2 opacity-50" />
+            <p className="text-sm">No variants found for this product.</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {variantList.map(({ variant, levels }) => {
+              const totalQty = levels.reduce((sum, l) => sum + (l.variant_qty || 0), 0);
+              const totalReserved = levels.reduce((sum, l) => sum + (l.reserved_qty || 0), 0);
+              const available = totalQty - totalReserved;
+              const hierLabel = getHierarchyLabel(variant.hierarchy_level);
+
+              return (
+                <div key={variant.variant_id} className="border rounded-lg">
+                  {/* Variant header */}
+                  <div className="flex items-center justify-between p-3 bg-muted/50 rounded-t-lg">
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="text-xs">{hierLabel}</Badge>
+                      <span className="font-mono text-sm font-medium">{variant.sku}</span>
+                      {variant.variant_name && variant.variant_name !== variant.sku && (
+                        <span className="text-xs text-muted-foreground hidden sm:inline">{variant.variant_name}</span>
+                      )}
+                      {variant.units_per_variant > 1 && (
+                        <span className="text-[10px] text-muted-foreground">({variant.units_per_variant} units)</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-sm">
+                      <div className="text-right">
+                        <div className="font-semibold">{totalQty.toLocaleString()}</div>
+                        <div className="text-[10px] text-muted-foreground">on hand</div>
+                      </div>
+                      {totalReserved > 0 && (
+                        <div className="text-right">
+                          <div className="text-amber-600 font-medium">{totalReserved.toLocaleString()}</div>
+                          <div className="text-[10px] text-muted-foreground">reserved</div>
+                        </div>
+                      )}
+                      <div className="text-right">
+                        <div className={`font-semibold ${available < 0 ? "text-red-600" : available === 0 ? "text-muted-foreground" : "text-green-600"}`}>
+                          {available.toLocaleString()}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground">available</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Location breakdown */}
+                  {levels.length === 0 ? (
+                    <div className="p-3 text-xs text-muted-foreground italic">No inventory at any location</div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs py-1.5 px-3">Location</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3">Type</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3 hidden sm:table-cell">Warehouse</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3 text-right">On Hand</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3 text-right hidden sm:table-cell">Reserved</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3 text-right hidden sm:table-cell">Picked</TableHead>
+                          <TableHead className="text-xs py-1.5 px-3 text-right">Available</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {levels.map((l) => {
+                          const avail = (l.variant_qty || 0) - (l.reserved_qty || 0);
+                          return (
+                            <TableRow key={l.level_id} className="text-xs">
+                              <TableCell className="py-1.5 px-3 font-mono font-medium">
+                                <div className="flex items-center gap-1.5">
+                                  <MapPin className="h-3 w-3 text-muted-foreground" />
+                                  {l.location_code}
+                                  {l.zone && <span className="text-muted-foreground">({l.zone})</span>}
+                                </div>
+                              </TableCell>
+                              <TableCell className="py-1.5 px-3">{locationTypeBadge(l.location_type)}</TableCell>
+                              <TableCell className="py-1.5 px-3 hidden sm:table-cell text-muted-foreground">{l.warehouse_name || "—"}</TableCell>
+                              <TableCell className="py-1.5 px-3 text-right font-medium">{(l.variant_qty || 0).toLocaleString()}</TableCell>
+                              <TableCell className="py-1.5 px-3 text-right hidden sm:table-cell text-amber-600">
+                                {(l.reserved_qty || 0) > 0 ? (l.reserved_qty || 0).toLocaleString() : "—"}
+                              </TableCell>
+                              <TableCell className="py-1.5 px-3 text-right hidden sm:table-cell text-muted-foreground">
+                                {(l.picked_qty || 0) > 0 ? (l.picked_qty || 0).toLocaleString() : "—"}
+                              </TableCell>
+                              <TableCell className={`py-1.5 px-3 text-right font-medium ${avail < 0 ? "text-red-600" : avail === 0 ? "text-muted-foreground" : ""}`}>
+                                {avail.toLocaleString()}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function ProductDetail() {
   const [, params] = useRoute("/products/:id");
   const [, setLocation] = useLocation();
@@ -2185,21 +2358,7 @@ export default function ProductDetail() {
 
             {/* ===== INVENTORY TAB ===== */}
             <TabsContent value="inventory" className="mt-4">
-              <Card>
-                <CardHeader className="p-3 md:p-6">
-                  <CardTitle className="text-base md:text-lg">Inventory Levels</CardTitle>
-                  <CardDescription className="text-xs md:text-sm">
-                    Stock levels across warehouse locations
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
-                  <div className="text-center py-8 text-muted-foreground">
-                    <BarChart3 className="h-10 w-10 md:h-12 md:w-12 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">Inventory tracking coming soon.</p>
-                    <p className="text-xs">Connect inventory levels to see stock by location.</p>
-                  </div>
-                </CardContent>
-              </Card>
+              <ProductInventoryTab productId={product.productId} />
             </TabsContent>
           </Tabs>
         </div>

@@ -1090,6 +1090,29 @@ export async function registerRoutes(
     }
   });
 
+  // Consolidated bin count + replen confirmation (replaces separate endpoints below)
+  app.post("/api/picking/bin-count", requireAuth, async (req, res) => {
+    try {
+      const { picking } = req.app.locals.services as any;
+      const { sku, locationId, binCount, didReplen } = req.body;
+      if (!sku || !locationId || binCount == null || didReplen == null) {
+        return res.status(400).json({ error: "sku, locationId, binCount, and didReplen are required" });
+      }
+      const result = await picking.handleBinCount({
+        sku,
+        locationId,
+        binCount: Number(binCount),
+        didReplen: Boolean(didReplen),
+        userId: req.session.user?.id,
+      });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error in consolidated bin count:", error);
+      res.status(500).json({ error: error.message || "Failed to process bin count" });
+    }
+  });
+
+  // @deprecated — use POST /api/picking/bin-count instead
   app.post("/api/picking/case-break/confirm", requireAuth, async (req, res) => {
     try {
       const { picking } = req.app.locals.services as any;
@@ -3788,6 +3811,47 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error deleting product:", error);
       res.status(500).json({ error: "Failed to delete product" });
+    }
+  });
+
+  // ============================================================================
+  // Product Inventory — all variants' inventory levels with location context
+  // ============================================================================
+  app.get("/api/products/:id/inventory", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.id);
+      const rows = await db.execute(sql`
+        SELECT
+          pv.id AS variant_id,
+          pv.sku,
+          pv.name AS variant_name,
+          pv.hierarchy_level,
+          pv.units_per_variant,
+          pv.is_base_unit,
+          il.id AS level_id,
+          il.warehouse_location_id AS location_id,
+          il.variant_qty,
+          il.reserved_qty,
+          il.picked_qty,
+          COALESCE(il.packed_qty, 0) AS packed_qty,
+          COALESCE(il.backorder_qty, 0) AS backorder_qty,
+          il.updated_at AS level_updated_at,
+          wl.code AS location_code,
+          wl.location_type,
+          wl.zone,
+          wl.is_pickable,
+          w.name AS warehouse_name
+        FROM product_variants pv
+        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+        LEFT JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+        LEFT JOIN warehouses w ON w.id = wl.warehouse_id
+        WHERE pv.product_id = ${productId}
+        ORDER BY pv.hierarchy_level ASC, pv.sku ASC, wl.code ASC
+      `);
+      res.json(rows.rows);
+    } catch (error) {
+      console.error("Error fetching product inventory:", error);
+      res.status(500).json({ error: "Failed to fetch product inventory" });
     }
   });
 
