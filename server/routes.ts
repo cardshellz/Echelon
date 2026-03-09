@@ -12141,7 +12141,7 @@ export async function registerRoutes(
   app.get("/api/products/:id/vendors", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const vendorProducts = await purchasing.getVendorProducts({ productId: Number(req.params.id) });
-      res.json({ vendorProducts });
+      res.json(vendorProducts);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
