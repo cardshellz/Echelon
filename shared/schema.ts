@@ -1445,6 +1445,7 @@ export const cycleCounts = pgTable("cycle_counts", {
   aisleFilter: varchar("aisle_filter", { length: 20 }), // Optional: limit to specific aisle (e.g., "A", "01")
   locationTypeFilter: text("location_type_filter"), // Optional: comma-separated list of location types to include
   binTypeFilter: text("bin_type_filter"), // Optional: comma-separated list of bin types to include (bin, pallet, carton_flow, etc.)
+  locationCodes: text("location_codes"), // Optional: comma-separated specific bin codes for quick counts
   assignedTo: varchar("assigned_to", { length: 100 }), // User assigned to count
   totalBins: integer("total_bins").notNull().default(0),
   countedBins: integer("counted_bins").notNull().default(0),

@@ -190,14 +190,22 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked product_lines tables and seeded defaults");
 
+    // Add location_codes column to cycle_counts for quick single-bin counts
+    await client.query(`ALTER TABLE cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
+
     // Migration 038: Make location code unique per warehouse instead of globally
     await client.query(`
       DO $$
       BEGIN
-        IF EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_unique'
-        ) THEN
+        -- Drop global unique constraint (may exist under either name)
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_unique') THEN
           ALTER TABLE warehouse_locations DROP CONSTRAINT warehouse_locations_code_unique;
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_key') THEN
+          ALTER TABLE warehouse_locations DROP CONSTRAINT warehouse_locations_code_key;
+        END IF;
+        -- Add composite unique (code + warehouse_id) if not already present
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_warehouse_unique') THEN
           ALTER TABLE warehouse_locations ADD CONSTRAINT warehouse_locations_code_warehouse_unique UNIQUE (code, warehouse_id);
           RAISE NOTICE 'Migrated location code constraint to per-warehouse unique';
         END IF;

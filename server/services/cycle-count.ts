@@ -451,7 +451,7 @@ class CycleCountService {
     return { skuSummaries };
   }
 
-  async create(data: { name: string; description?: string; warehouseId?: number; zoneFilter?: string; aisleFilter?: string; locationTypeFilter?: string; binTypeFilter?: string }, createdBy?: string) {
+  async create(data: { name: string; description?: string; warehouseId?: number; zoneFilter?: string; aisleFilter?: string; locationTypeFilter?: string; binTypeFilter?: string; locationCodes?: string }, createdBy?: string) {
     if (!data.name) throw new CycleCountError("Name is required");
 
     return this.storage.createCycleCount({
@@ -462,6 +462,7 @@ class CycleCountService {
       aisleFilter: data.aisleFilter || null,
       locationTypeFilter: data.locationTypeFilter || null,
       binTypeFilter: data.binTypeFilter || null,
+      locationCodes: data.locationCodes || null,
       status: "draft",
       createdBy,
     } as any);
@@ -490,6 +491,10 @@ class CycleCountService {
     if (cycleCount.binTypeFilter) {
       const allowedBinTypes = cycleCount.binTypeFilter.split(",").map((t: string) => t.trim());
       locations = locations.filter((l: any) => allowedBinTypes.includes(l.binType));
+    }
+    if ((cycleCount as any).locationCodes) {
+      const codes = (cycleCount as any).locationCodes.split(",").map((c: string) => c.trim().toUpperCase());
+      locations = locations.filter((l: any) => codes.includes(l.code.toUpperCase()));
     }
 
     // Snapshot current inventory for each location

@@ -8448,6 +8448,30 @@ export async function registerRoutes(
     }
   });
 
+  // Quick Count — create + initialize + return in one step for single-bin counts
+  app.post("/api/cycle-counts/quick", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { locationCode, warehouseId } = req.body;
+      if (!locationCode) return res.status(400).json({ error: "locationCode is required" });
+
+      const code = locationCode.trim().toUpperCase();
+      const cc = await ccService.create({
+        name: `Quick Count — ${code}`,
+        description: `Single-bin quick count for ${code}`,
+        locationCodes: code,
+        warehouseId: warehouseId || undefined,
+      }, req.session.user?.id);
+
+      const initialized = await ccService.initialize(cc.id);
+      res.status(201).json({ ...initialized, cycleCountId: cc.id });
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error creating quick count:", error);
+      res.status(500).json({ error: error.message || "Failed to create quick count" });
+    }
+  });
+
   app.post("/api/cycle-counts/:id/initialize", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services as any;

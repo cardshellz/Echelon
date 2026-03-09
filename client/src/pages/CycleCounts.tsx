@@ -122,6 +122,8 @@ interface AdjustmentReason {
 export default function CycleCounts() {
   const [selectedCount, setSelectedCount] = useState<number | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [quickCountOpen, setQuickCountOpen] = useState(false);
+  const [quickCountBin, setQuickCountBin] = useState("");
   const [countDialogOpen, setCountDialogOpen] = useState(false);
   const [approveDialogOpen, setApproveDialogOpen] = useState(false);
   const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
@@ -240,6 +242,33 @@ export default function CycleCounts() {
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const quickCountMutation = useMutation({
+    mutationFn: async (locationCode: string) => {
+      const res = await fetch("/api/cycle-counts/quick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ locationCode }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed to create quick count" }));
+        throw new Error(err.error || "Failed to create quick count");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Quick count created", description: `${data.binsCreated} item(s) ready for counting` });
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
+      setQuickCountOpen(false);
+      setQuickCountBin("");
+      // Auto-select the newly created count
+      setSelectedCount(data.cycleCountId);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Quick count failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -2585,9 +2614,14 @@ export default function CycleCounts() {
           <h1 className="text-xl md:text-2xl font-bold">Cycle Counts</h1>
           <p className="text-sm text-muted-foreground">Monthly inventory reconciliation</p>
         </div>
-        <Button onClick={() => setCreateDialogOpen(true)} data-testid="button-new-count" className="w-full sm:w-auto">
-          <Plus className="h-4 w-4 mr-2" /> New Cycle Count
-        </Button>
+        <div className="flex gap-2 w-full sm:w-auto">
+          <Button variant="outline" onClick={() => setQuickCountOpen(true)} className="flex-1 sm:flex-initial">
+            <MapPin className="h-4 w-4 mr-2" /> Quick Count
+          </Button>
+          <Button onClick={() => setCreateDialogOpen(true)} data-testid="button-new-count" className="flex-1 sm:flex-initial">
+            <Plus className="h-4 w-4 mr-2" /> New Cycle Count
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -2900,6 +2934,46 @@ export default function CycleCounts() {
               disabled={createMutation.isPending || !newCountForm.name}
             >
               Create
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Quick Count Dialog */}
+      <Dialog open={quickCountOpen} onOpenChange={setQuickCountOpen}>
+        <DialogContent className="max-w-sm p-4">
+          <DialogHeader className="pb-2">
+            <DialogTitle className="text-lg">Quick Count — Single Bin</DialogTitle>
+            <DialogDescription className="text-xs">
+              Count a single bin for QA or minor adjustments
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-sm">Bin Code *</Label>
+              <Input
+                value={quickCountBin}
+                onChange={(e) => setQuickCountBin(e.target.value.toUpperCase())}
+                placeholder="e.g., H-05-A"
+                className="h-10 font-mono"
+                autoComplete="off"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && quickCountBin.trim()) {
+                    quickCountMutation.mutate(quickCountBin.trim());
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex gap-2 pt-3 border-t mt-3">
+            <Button variant="outline" className="flex-1 h-11" onClick={() => { setQuickCountOpen(false); setQuickCountBin(""); }}>Cancel</Button>
+            <Button
+              className="flex-1 h-11"
+              onClick={() => quickCountMutation.mutate(quickCountBin.trim())}
+              disabled={quickCountMutation.isPending || !quickCountBin.trim()}
+            >
+              {quickCountMutation.isPending ? "Creating..." : "Count Bin"}
             </Button>
           </div>
         </DialogContent>
