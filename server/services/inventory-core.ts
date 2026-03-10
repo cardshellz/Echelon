@@ -993,7 +993,7 @@ export class InventoryCoreService {
   // INTERNAL: transaction-scoped clone
   // ---------------------------------------------------------------------------
 
-  private withTx(tx: any): InventoryCoreService {
+  withTx(tx: any): InventoryCoreService {
     return new InventoryCoreService(tx, this.lotService);
   }
 }
