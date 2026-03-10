@@ -6612,19 +6612,17 @@ export async function registerRoutes(
             total_price_cents: number | null;
             subtotal_price_cents: number | null;
             total_tax_cents: number | null;
-            total_shipping_price_cents: number | null;
+            total_shipping_cents: number | null;
             total_discounts_cents: number | null;
             discount_codes: any;
-            shipping_method: string | null;
           }>(sql`
             SELECT
               total_price_cents,
               subtotal_price_cents,
               total_tax_cents,
-              total_shipping_price_cents,
+              total_shipping_cents,
               total_discounts_cents,
-              discount_codes,
-              shipping_method
+              discount_codes
             FROM shopify_orders
             WHERE id = ${order.sourceTableId}
             LIMIT 1
@@ -6635,13 +6633,13 @@ export async function registerRoutes(
             financials = {
               subtotalCents: raw.subtotal_price_cents,
               taxCents: raw.total_tax_cents,
-              shippingCents: raw.total_shipping_price_cents,
+              shippingCents: raw.total_shipping_cents,
               discountCents: raw.total_discounts_cents,
               totalCents: raw.total_price_cents,
               discountCodes: Array.isArray(raw.discount_codes)
                 ? raw.discount_codes.map((dc: any) => typeof dc === "string" ? dc : dc.code || dc.title || String(dc))
                 : [],
-              shippingMethod: raw.shipping_method,
+              shippingMethod: null,
             };
           }
         } catch {
@@ -6666,7 +6664,26 @@ export async function registerRoutes(
         if (itemDiscounts > 0) financials.discountCents = itemDiscounts;
       }
 
-      res.json({ ...order, items, channel, financials });
+      // Look up member plan from members/plans tables (shared DB with shellz-club-app)
+      let memberPlan: string | null = null;
+      if (order.customerEmail) {
+        try {
+          const memberResult = await db.execute<{ plan_name: string }>(sql`
+            SELECT p.name as plan_name
+            FROM members m
+            JOIN plans p ON m.plan_id = p.id
+            WHERE LOWER(m.email) = LOWER(${order.customerEmail})
+            LIMIT 1
+          `);
+          if (memberResult.rows.length > 0) {
+            memberPlan = memberResult.rows[0].plan_name;
+          }
+        } catch {
+          // members/plans tables may not exist — ignore
+        }
+      }
+
+      res.json({ ...order, items, channel, financials, memberPlan });
     } catch (error) {
       console.error("Error fetching order:", error);
       res.status(500).json({ error: "Failed to fetch order" });

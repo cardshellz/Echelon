@@ -439,17 +439,24 @@ export class ReceivingService {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // Pre-fetch warehouse locations for efficient lookup
+    // Get the receipt's warehouseId to filter locations
+    const receipt = await this.storage.getReceivingOrderById(orderId);
+    const receiptWarehouseId = receipt?.warehouseId ?? null;
+
+    // Pre-fetch warehouse locations — filter by receipt's warehouse when set
     const allWarehouseLocations = await this.storage.getAllWarehouseLocations();
-    const locationByCode = new Map(allWarehouseLocations.map((l: any) => [l.code.toUpperCase().trim(), l]));
+    const filteredLocations = receiptWarehouseId
+      ? allWarehouseLocations.filter((l: any) => l.warehouseId === receiptWarehouseId)
+      : allWarehouseLocations;
+    const locationByCode = new Map(filteredLocations.map((l: any) => [l.code.toUpperCase().trim(), l]));
     const locationByName = new Map(
-      allWarehouseLocations
+      filteredLocations
         .filter((l: any) => l.name)
         .map((l: any) => [l.name!.toUpperCase().trim(), l]),
     );
     // Normalized index: stripped hyphens → location (for fuzzy matching)
     const locationByNormalized = new Map<string, any>();
-    for (const loc of allWarehouseLocations) {
+    for (const loc of filteredLocations) {
       const stripped = (loc as any).code.toUpperCase().replace(/-/g, "");
       if (!locationByNormalized.has(stripped)) {
         locationByNormalized.set(stripped, loc);

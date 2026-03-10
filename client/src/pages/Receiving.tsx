@@ -115,6 +115,7 @@ interface WarehouseLocation {
   code: string;
   zone: string | null;
   name: string | null;
+  warehouseId: number | null;
 }
 
 function LocationTypeahead({ 
@@ -1201,6 +1202,20 @@ DEF-456,25,,,5.00,,Location TBD`;
               </Select>
             </div>
             
+            <div>
+              <Label className="text-sm">Warehouse <span className="text-red-500">*</span></Label>
+              <Select value={newReceipt.warehouseId} onValueChange={(v) => setNewReceipt({ ...newReceipt, warehouseId: v })}>
+                <SelectTrigger className="h-11" data-testid="select-warehouse">
+                  <SelectValue placeholder="Select warehouse..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {warehouses.map((w) => (
+                    <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             <details className="group">
               <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
                 <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
@@ -1217,20 +1232,6 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <SelectItem value="none">No Vendor</SelectItem>
                       {vendors.map((v) => (
                         <SelectItem key={v.id} value={v.id.toString()}>{v.name} ({v.code})</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label className="text-sm">Warehouse</Label>
-                  <Select value={newReceipt.warehouseId} onValueChange={(v) => setNewReceipt({ ...newReceipt, warehouseId: v })}>
-                    <SelectTrigger className="h-11" data-testid="select-warehouse">
-                      <SelectValue placeholder="Select warehouse..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">No Warehouse</SelectItem>
-                      {warehouses.map((w) => (
-                        <SelectItem key={w.id} value={w.id.toString()}>{w.name} ({w.code})</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
@@ -1332,7 +1333,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Button 
                 className="min-h-[44px]"
                 onClick={() => createReceiptMutation.mutate(newReceipt)}
-                disabled={createReceiptMutation.isPending}
+                disabled={createReceiptMutation.isPending || !newReceipt.warehouseId}
                 data-testid="btn-create-receipt"
               >
                 Create Receipt
@@ -1655,7 +1656,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       </span>
                                     ) : (
                                       <LocationTypeahead
-                                        locations={locations}
+                                        locations={selectedReceipt?.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                                         value={line.putawayLocationId}
                                         onChange={(locationId) => updateLineMutation.mutate({
                                           lineId: line.id,

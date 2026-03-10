@@ -244,6 +244,7 @@ interface OrderDetail extends Order {
   items: OrderItem[];
   channel: Channel | null;
   financials?: OrderFinancials;
+  memberPlan?: string | null;
 }
 
 const itemStatusColors: Record<string, string> = {
@@ -393,7 +394,14 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
             <User2 className="h-4 w-4" /> Customer
           </h4>
           <div className="text-sm space-y-1">
-            <p className="font-medium">{order.customerName}</p>
+            <div className="flex items-center gap-2">
+              <p className="font-medium">{order.customerName}</p>
+              {order.memberPlan && (
+                <Badge variant="outline" className="text-[10px] bg-purple-100 text-purple-800">
+                  {order.memberPlan}
+                </Badge>
+              )}
+            </div>
             {order.customerEmail && (
               <p className="text-muted-foreground flex items-center gap-1.5">
                 <Mail className="h-3 w-3" /> {order.customerEmail}
