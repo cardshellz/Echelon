@@ -60,6 +60,7 @@ export default function Transfers() {
   const [toLocationId, setToLocationId] = useState<number | null>(null);
   const [variantId, setVariantId] = useState<number | null>(null);
   const [selectedSkuLabel, setSelectedSkuLabel] = useState("");
+  const [selectedSkuAvailable, setSelectedSkuAvailable] = useState<number | null>(null);
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
   const [skuFilter, setSkuFilter] = useState("");
@@ -228,6 +229,7 @@ export default function Transfers() {
     setToLocationId(null);
     setVariantId(null);
     setSelectedSkuLabel("");
+    setSelectedSkuAvailable(null);
     setQuantity("");
     setNotes("");
     setSkuFilter("");
@@ -408,6 +410,7 @@ export default function Transfers() {
                   disabled={!selectedSku}
                   onClick={() => {
                     playSoundWithHaptic("success", "classic", true);
+                    if (selectedSku) setMobileQuantity(String(selectedSku.available));
                     setMobileStep("quantity");
                   }}
                   data-testid="button-next-sku"
@@ -670,6 +673,8 @@ export default function Transfers() {
                       setLocationSearch("");
                       setVariantId(null);
                       setSelectedSkuLabel("");
+                      setSelectedSkuAvailable(null);
+                      setQuantity("");
                     }}
                     className="p-1 hover:bg-slate-200 rounded"
                     data-testid="button-clear-source"
@@ -730,11 +735,16 @@ export default function Transfers() {
                 <div className="flex items-center gap-2 p-2 border rounded-md bg-slate-50">
                   <Package className="h-4 w-4 text-muted-foreground" />
                   <span className="font-medium flex-1">{selectedSkuLabel}</span>
+                  {selectedSkuAvailable != null && (
+                    <span className="text-xs text-green-600">{selectedSkuAvailable.toLocaleString()} avail</span>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
                       setVariantId(null);
                       setSelectedSkuLabel("");
+                      setSelectedSkuAvailable(null);
+                      setQuantity("");
                     }}
                     className="p-1 hover:bg-slate-200 rounded"
                     data-testid="button-clear-sku"
@@ -756,12 +766,14 @@ export default function Transfers() {
                       onClick={() => {
                         setSelectedSkuLabel(result.sku);
                         setVariantId(result.variantId);
+                        setSelectedSkuAvailable(result.available);
+                        setQuantity(String(result.available));
                       }}
                       data-testid={`sku-at-location-${result.variantId}`}
                     >
                       <div className="font-medium">{result.sku}</div>
                       <div className="text-xs text-muted-foreground truncate">{result.name}</div>
-                      <div className="text-xs text-green-600">Available: {result.available}</div>
+                      <div className="text-xs text-green-600">Available: {result.available.toLocaleString()}</div>
                     </button>
                   ))}
                 </div>
