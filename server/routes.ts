@@ -1111,7 +1111,9 @@ export async function registerRoutes(
   });
 
   // @deprecated — use POST /api/picking/bin-count instead
+  // Kept alive with logging to detect any external callers before removal
   app.post("/api/picking/case-break/confirm", requireAuth, async (req, res) => {
+    console.warn("[DEPRECATED] POST /api/picking/case-break/confirm was called — migrate to /api/picking/bin-count");
     try {
       const { picking } = req.app.locals.services as any;
       const { sku, warehouseLocationId, actualBinQty } = req.body;
@@ -1127,6 +1129,7 @@ export async function registerRoutes(
   });
 
   app.post("/api/picking/case-break/skip", requireAuth, async (req, res) => {
+    console.warn("[DEPRECATED] POST /api/picking/case-break/skip was called — migrate to /api/picking/bin-count");
     try {
       const { picking } = req.app.locals.services as any;
       const { sku, warehouseLocationId, actualBinQty } = req.body;

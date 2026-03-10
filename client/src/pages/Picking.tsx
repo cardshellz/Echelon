@@ -179,25 +179,6 @@ async function updateOrderItem(
   return res.json();
 }
 
-async function confirmBinCount(sku: string, locationId: number, actualQty: number): Promise<BinCountResponse> {
-  const res = await fetch("/api/picking/case-break/confirm", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sku, warehouseLocationId: locationId, actualBinQty: actualQty }),
-  });
-  if (!res.ok) throw new Error("Failed to confirm bin count");
-  return res.json();
-}
-
-async function skipBinCount(sku: string, locationId: number, actualQty: number): Promise<BinCountResponse> {
-  const res = await fetch("/api/picking/case-break/skip", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sku, warehouseLocationId: locationId, actualBinQty: actualQty }),
-  });
-  if (!res.ok) throw new Error("Failed to skip bin count");
-  return res.json();
-}
 
 async function markOrderReadyToShip(orderId: number): Promise<Order> {
   const res = await fetch(`/api/picking/orders/${orderId}/ready-to-ship`, {
@@ -1037,12 +1018,6 @@ export default function Picking() {
     },
   });
 
-  // @deprecated — kept for backward compatibility, no longer called
-  const skipBinCountMutation = useMutation({
-    mutationFn: ({ sku, locationId, actualQty }: { sku: string; locationId: number; actualQty: number }) =>
-      skipBinCount(sku, locationId, actualQty),
-    onSuccess: () => { setBinCountOpen(false); },
-  });
 
   // Mutation for confirming replen (picker says YES, they did replen)
   const confirmReplenMutation = useMutation({
