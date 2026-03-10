@@ -83,29 +83,35 @@ The `inventory_transactions` table is an append-only ledger for a complete inven
 The receiving system handles inventory intake from vendors. It includes `vendors`, `receiving_orders` (with workflow), `receiving_lines` (with expected/received quantities and put-away location), and CSV bulk import functionality. Closing a receiving order generates `inventory_transactions` and updates `inventory_levels`.
 
 ### Replenishment Subsystem
-Automates inventory flow from bulk to forward pick locations using a two-tier architecture:
+Fully event-driven — replenishment triggers automatically on any inventory change, not via scheduled batch scans. Automates inventory flow from bulk to forward pick locations.
 
-**Tier Defaults (`replen_tier_defaults`)**: Define replenishment rules by UOM hierarchy level. Each default specifies:
-- `hierarchyLevel`: Target UOM tier (1=each, 2=pack, 3=case, 4=pallet)
-- `sourceHierarchyLevel`: Source UOM tier to replenish from
-- `pickLocationType` / `sourceLocationType`: Location types for source and destination
-- `minQty` / `maxQty`: Trigger thresholds
-- `replenMethod`: case_break, full_case, or pallet_drop
-- `priority`: Lower = higher priority when multiple defaults match
+**Architecture** (Fix #6 — event-driven refactor):
+- `checkReplenForLocation(locationId)` — lightweight wrapper that checks all variants assigned to a pickable bin
+- `checkReplenNeeded(variantId, locationId)` — single source of truth for threshold evaluation
+- `checkAndTriggerAfterPick(variantId, locationId)` — inline trigger during picking (creates + optionally auto-executes tasks)
+- `createAndExecuteReplen(variantId, locationId)` — creates a task and optionally auto-executes it
+- Shared resolution helpers: `resolveReplenParams()`, `calculateQtyNeeded()`, `checkThreshold()`, `loadLocationConfig()`
+- No scheduler, no batch scanners — all replen is reactive
 
-**SKU Overrides (`replen_rules`)**: Product-specific exceptions that override tier defaults. Null fields inherit from the matching tier default.
+**Config Resolution** (most-specific wins):
+1. `location_replen_config` — per-location, optionally per-variant overrides
+2. `replen_rules` — SKU-specific overrides
+3. `replen_tier_defaults` — hierarchy-level defaults (warehouse-specific > global)
 
-**Generate Logic**: When generating tasks, the system:
-1. Scans all products with inventory in forward pick locations below minQty
-2. For each product, finds the highest-priority tier default where BOTH hierarchyLevel and sourceHierarchyLevel exist in the product's UOM variants
-3. Applies any SKU-specific overrides (null fields fall back to tier default)
-4. Creates replenishment tasks with source/destination locations
+**Event Triggers** — `checkReplenForLocation` fires after:
+- Manual adjustments, stock adds, stock adjustments (inventory.routes.ts)
+- Bin-to-bin transfers (source location checked)
+- CSV inventory uploads (all affected locations)
+- Receiving put-away (all putaway locations)
+- Cycle count resolution (adjusted locations)
+- Returns processing (restock location)
+- Break/assembly conversions (target location)
+- Picking already calls `checkAndTriggerAfterPick` directly
 
 **Warehouse Settings (`warehouse_settings`)**: Configure warehouse-level replenishment behavior:
 - `replenMode`: inline (pickers replen), queue (dedicated workers), hybrid (threshold-based)
 - `shortPickAction`: What happens when picker finds empty bin
 - `inlineReplenMaxUnits`: Threshold for hybrid mode
-- Additional wave planning and pick path settings
 
 ### Order Combining
 Allows grouping multiple orders to the same customer/address for efficient picking and shipping. The system:

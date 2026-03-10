@@ -734,29 +734,6 @@ export default function Replenishment() {
     },
   });
 
-  const replenEmptyBinsMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/replen/scan-empty-bins", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!res.ok) throw new Error("Failed to scan empty bins");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
-      if (data.tasksCreated > 0) {
-        toast({ title: `Found ${data.tasksCreated} bins needing replen` });
-      } else {
-        toast({ title: "All bins OK", description: "No empty or low bins found" });
-      }
-    },
-    onError: () => {
-      toast({ title: "Scan failed", variant: "destructive" });
-    },
-  });
 
   const updateTaskMutation = useMutation({
     mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenTask> }) => {
@@ -1353,21 +1330,6 @@ export default function Replenishment() {
               </Button>
             </div>
             <div className="flex flex-wrap gap-2 w-full sm:w-auto">
-              <Button
-                variant="outline"
-                className="flex-1 sm:flex-none min-h-[44px]"
-                onClick={() => replenEmptyBinsMutation.mutate()}
-                disabled={replenEmptyBinsMutation.isPending}
-                data-testid="button-scan-empty-bins"
-              >
-                {replenEmptyBinsMutation.isPending ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                )}
-                <span className="hidden sm:inline">Replen Empty Bins</span>
-                <span className="sm:hidden">Empty Bins</span>
-              </Button>
               <Button className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setShowTaskDialog(true)} data-testid="button-create-task">
                 <Plus className="w-4 h-4 mr-2" />
                 <span className="hidden sm:inline">Create Task</span>

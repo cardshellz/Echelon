@@ -111,56 +111,6 @@ app.use((req, res, next) => {
 });
 
 /**
- * Scheduled replenishment sync — periodically runs checkThresholds to generate
- * replen tasks for bins that are below min levels. This catches bins at zero
- * stock that can't trigger via the after-pick auto-trigger.
- */
-function startReplenScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
-  let intervalHandle: ReturnType<typeof setInterval> | null = null;
-
-  async function runReplenCheck() {
-    try {
-      const tasks = await services.replenishment.checkThresholds();
-      if (tasks.length > 0) {
-        log(`[Replen Scheduler] Generated ${tasks.length} replen task(s)`, "replen");
-      }
-    } catch (err: any) {
-      console.warn("[Replen Scheduler] Error:", err?.message);
-    }
-  }
-
-  async function setupInterval() {
-    try {
-      // Load warehouse settings to check if scheduled replen is enabled
-      const settings = await dbInstance
-        .select()
-        .from(warehouseSettings)
-        .where(eq(warehouseSettings.isActive, 1));
-
-      const defaultSettings = settings.find((s: any) => s.warehouseCode === "DEFAULT") || settings[0];
-
-      if (!defaultSettings || !defaultSettings.scheduledReplenEnabled) {
-        log("[Replen Scheduler] Scheduled replen disabled — using manual/after-pick only", "replen");
-        return;
-      }
-
-      const intervalMinutes = defaultSettings.scheduledReplenIntervalMinutes || 30;
-      log(`[Replen Scheduler] Starting with ${intervalMinutes}-minute interval`, "replen");
-
-      // Run once on startup (after a short delay to let DB settle)
-      setTimeout(() => runReplenCheck(), 10_000);
-
-      // Then run on the configured interval
-      intervalHandle = setInterval(() => runReplenCheck(), intervalMinutes * 60 * 1000);
-    } catch (err: any) {
-      console.warn("[Replen Scheduler] Failed to start:", err?.message);
-    }
-  }
-
-  setupInterval();
-}
-
-/**
  * Scheduled channel sync — periodically pushes ATP to all active channel feeds
  * as a safety net for missed reactive syncs (e.g. transient API failures).
  */
@@ -228,9 +178,6 @@ function startChannelSyncScheduler(services: ReturnType<typeof createServices>, 
   const services = createServices(db);
   app.locals.services = services;
   initOrderSyncServices(services);
-
-  // Start scheduled replenishment sync (checks warehouse settings for interval)
-  startReplenScheduler(services, db);
 
   // Start scheduled channel sync (safety net for missed reactive syncs)
   startChannelSyncScheduler(services, db);

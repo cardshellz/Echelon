@@ -41,10 +41,9 @@ export function registerInventoryRoutes(app: Express) {
           console.warn(`[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, err)
         );
       }
-      // Auto-trigger replenishment check (fire-and-forget)
       if (adjReplen) {
-        adjReplen.checkAndTriggerAfterPick(adjustVariantId, warehouseLocationId).catch((err: any) =>
-          console.warn(`[Replen] Post-adjust check failed for variant ${adjustVariantId}:`, err)
+        adjReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-adjust check failed for loc ${warehouseLocationId}:`, err)
         );
       }
 
@@ -224,9 +223,8 @@ export function registerInventoryRoutes(app: Express) {
         xfrReplen.completeMatchingTransferTask(fromLocId, toLocId, varId, userId).catch((err: any) =>
           console.warn(`[Replen] Auto-complete matching task failed for variant ${varId}:`, err)
         );
-        // Also trigger replenishment check on source location
-        xfrReplen.checkAndTriggerAfterPick(varId, fromLocId).catch((err: any) =>
-          console.warn(`[Replen] Post-transfer check failed for variant ${varId}:`, err)
+        xfrReplen.checkReplenForLocation(fromLocId).catch((err: any) =>
+          console.warn(`[Replen] Post-transfer replen check failed for loc ${fromLocId}:`, err)
         );
       }
       // Auto-sync pick queue locations for this SKU (fire-and-forget)
@@ -524,6 +522,7 @@ export function registerInventoryRoutes(app: Express) {
         console.log("Note: adjustment_reasons table not available, continuing without reason codes");
       }
 
+      const csvAffectedLocations = new Set<number>();
       for (let i = 0; i < parsed.data.length; i++) {
         const row = parsed.data[i];
         const rowNum = i + 2; // Account for header row
@@ -630,9 +629,19 @@ export function registerInventoryRoutes(app: Express) {
 
           results.push({ row: rowNum, sku, location: locationCode, status: "success", message: `Updated to ${targetQty} units` });
           successCount++;
+          csvAffectedLocations.add(warehouseLocation.id);
         } catch (err: any) {
           results.push({ row: rowNum, sku, location: locationCode, status: "error", message: err.message || "Database error" });
           errorCount++;
+        }
+      }
+
+      const { replenishment: csvReplen } = req.app.locals.services as any;
+      if (csvReplen && csvAffectedLocations.size > 0) {
+        for (const locId of csvAffectedLocations) {
+          csvReplen.checkReplenForLocation(locId).catch((err: any) =>
+            console.warn(`[Replen] Post-CSV-upload check failed for loc ${locId}:`, err)
+          );
         }
       }
 
@@ -1002,6 +1011,14 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
+      const { replenishment: breakReplen } = req.app.locals.services as any;
+      if (breakReplen) {
+        const targetLocId = result.targetLocationId || targetLocationId || warehouseLocationId;
+        breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
+          console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
+        );
+      }
+
       res.json(result);
     } catch (error: any) {
       console.error("Error breaking variant:", error);
@@ -1026,6 +1043,13 @@ export function registerInventoryRoutes(app: Express) {
         warehouseLocationId,
         userId,
       });
+
+      const { replenishment: asmReplen } = req.app.locals.services as any;
+      if (asmReplen) {
+        asmReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-assemble check failed for loc ${warehouseLocationId}:`, err)
+        );
+      }
 
       res.json(result);
     } catch (error: any) {
@@ -1081,6 +1105,13 @@ export function registerInventoryRoutes(app: Express) {
         userId,
         notes,
       });
+
+      const { replenishment: retReplen } = req.app.locals.services as any;
+      if (retReplen) {
+        retReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-return check failed for loc ${warehouseLocationId}:`, err)
+        );
+      }
 
       res.json(result);
     } catch (error: any) {
@@ -2712,10 +2743,15 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { channelSync: addSync } = req.app.locals.services as any;
+      const { channelSync: addSync, replenishment: addReplen } = req.app.locals.services as any;
       if (addSync) {
         addSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, err)
+        );
+      }
+      if (addReplen) {
+        addReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-add-stock check failed for loc ${warehouseLocationId}:`, err)
         );
       }
 
@@ -2749,10 +2785,15 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { channelSync: adjStockSync } = req.app.locals.services as any;
+      const { channelSync: adjStockSync, replenishment: adjStockReplen } = req.app.locals.services as any;
       if (adjStockSync) {
         adjStockSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, err)
+        );
+      }
+      if (adjStockReplen) {
+        adjStockReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
+          console.warn(`[Replen] Post-adjust-stock check failed for loc ${warehouseLocationId}:`, err)
         );
       }
 

@@ -195,6 +195,7 @@ export class ReceivingService {
     let totalReceived = 0;
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
+    const putawayLocationIds = new Set<number>();
 
     for (const line of lines) {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
@@ -247,6 +248,7 @@ export class ReceivingService {
         totalReceived += qtyToAdd;
         linesReceived++;
         receivedVariantIds.add(line.productVariantId);
+        putawayLocationIds.add(line.putawayLocationId);
       }
     }
 
@@ -286,6 +288,7 @@ export class ReceivingService {
       order: updated,
       linesProcessed: linesReceived,
       unitsReceived: totalReceived,
+      putawayLocationIds: Array.from(putawayLocationIds),
     };
   }
 

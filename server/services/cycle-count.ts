@@ -56,6 +56,7 @@ type ChannelSync = {
 
 type Replenishment = {
   checkAndTriggerAfterPick(variantId: number, locationId: number): Promise<any>;
+  checkReplenForLocation(warehouseLocationId: number): Promise<void>;
 };
 
 type Reservation = {
@@ -344,15 +345,14 @@ class CycleCountService {
       }
     }
 
-    // Replen checks for negative adjustments only
+    const replenLocations = new Set<number>();
     for (const adj of adjustments) {
-      if (adj.qtyChange >= 0 || !adj.sku) continue;
-      const variant = await this.storage.getProductVariantBySku(adj.sku);
-      if (variant) {
-        this.replenishment.checkAndTriggerAfterPick(variant.id, adj.locationId).catch((err: any) =>
-          console.warn(`[Replen] Post-cycle-count threshold check failed for ${adj.sku}:`, err)
-        );
-      }
+      if (adj.qtyChange < 0) replenLocations.add(adj.locationId);
+    }
+    for (const locId of replenLocations) {
+      this.replenishment.checkReplenForLocation(locId).catch((err: any) =>
+        console.warn(`[Replen] Post-cycle-count check failed for loc ${locId}:`, err)
+      );
     }
   }
 

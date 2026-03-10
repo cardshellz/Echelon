@@ -230,6 +230,14 @@ export function registerPurchasingRoutes(app: Express) {
         message: result.totalUnitsReceived ? `${result.totalUnitsReceived} units received` : undefined,
         data: { receivingOrderId: parseInt(req.params.id) },
       }).catch(() => {});
+      const { replenishment: rcvReplen } = req.app.locals.services as any;
+      if (rcvReplen && result.putawayLocationIds?.length) {
+        for (const locId of result.putawayLocationIds) {
+          rcvReplen.checkReplenForLocation(locId).catch((err: any) =>
+            console.warn(`[Replen] Post-receiving check failed for loc ${locId}:`, err)
+          );
+        }
+      }
       res.json(result);
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
@@ -1244,64 +1252,6 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
   
-  app.post("/api/replen/generate", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { replenishment } = req.app.locals.services as any;
-      if (!replenishment) {
-        return res.status(500).json({ error: "Replenishment service not available" });
-      }
-      const warehouseId = req.body.warehouseId ? parseInt(req.body.warehouseId) : undefined;
-      const result = await replenishment.generateTasks(warehouseId);
-      res.json(result);
-    } catch (error) {
-      console.error("Error generating replen tasks:", error);
-      res.status(500).json({ error: "Failed to generate replen tasks" });
-    }
-  });
-
-  // Scan empty bins — uses ReplenishmentService.checkThresholds which also scans
-  // product_locations for bins assigned to products with zero stock
-  app.post("/api/replen/scan-empty-bins", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { replenishment } = req.app.locals.services as any;
-      if (!replenishment) {
-        return res.status(500).json({ error: "Replenishment service not available" });
-      }
-
-      const warehouseId = req.body.warehouseId ? parseInt(req.body.warehouseId) : undefined;
-      const tasks = await replenishment.checkThresholds(warehouseId);
-
-      res.json({
-        success: true,
-        tasksCreated: tasks.length,
-        tasks: tasks.map((t: any) => ({
-          id: t.id,
-          fromLocationId: t.fromLocationId,
-          toLocationId: t.toLocationId,
-          pickProductVariantId: t.pickProductVariantId,
-          qtyTargetUnits: t.qtyTargetUnits,
-          status: t.status,
-        })),
-      });
-    } catch (error) {
-      console.error("Error running replen sync:", error);
-      res.status(500).json({ error: "Failed to run replen sync" });
-    }
-  });
-
-  // --- Replenishment Check Route ---
-
-  app.post("/api/replen/check", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { replenishment } = req.app.locals.services;
-      const tasks = await replenishment.checkThresholds();
-      res.json({ created: tasks.length, tasks });
-    } catch (error: any) {
-      console.error("Error checking replenishment thresholds:", error);
-      res.status(500).json({ error: error.message || "Failed to check thresholds" });
-    }
-  });
-
   // --- SLA Monitoring ---
 
   // Get SLA alerts (at_risk + overdue orders)
