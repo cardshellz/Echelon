@@ -96,6 +96,8 @@ const actionTypeConfig: Record<string, { label: string; icon: React.ElementType;
   order_unhold: { label: "Order Unhold", icon: Play, color: "bg-purple-400" },
   order_exception: { label: "Exception", icon: AlertTriangle, color: "bg-red-600" },
   exception_resolved: { label: "Exception Resolved", icon: CheckCircle2, color: "bg-emerald-500" },
+  replen_skip: { label: "Replen Skipped", icon: AlertTriangle, color: "bg-amber-500" },
+  inventory_discrepancy: { label: "Inventory Discrepancy", icon: AlertTriangle, color: "bg-red-400" },
 };
 
 function formatDuration(ms: number | null): string {
@@ -443,12 +445,17 @@ export default function PickingLogs() {
                             ) : "—"}
                           </td>
                           <td className="py-2 px-3">
-                            {log.reason && (
+                            {log.notes && (
+                              <span className="text-muted-foreground text-xs truncate max-w-[200px] block">
+                                {log.notes}
+                              </span>
+                            )}
+                            {log.reason && !log.notes && (
                               <span className="text-muted-foreground text-xs truncate max-w-[200px] block">
                                 {log.reason}
                               </span>
                             )}
-                            {log.locationCode && !log.reason && (
+                            {log.locationCode && !log.reason && !log.notes && (
                               <span className="text-muted-foreground text-xs">
                                 @ {log.locationCode}
                               </span>

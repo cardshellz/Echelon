@@ -52,6 +52,7 @@ export type ReplenGuidance = {
   replenMethod: string;
   executionMode: string;
   taskNotes: string;
+  skipReason?: string | null;
 };
 
 type GenerateTasksResult = {
@@ -1327,7 +1328,7 @@ class ReplenishmentService {
     const _tag = `[Replen checkReplenNeeded] variant=${productVariantId} loc=${warehouseLocationId}`;
     const skip = (reason: string): ReplenGuidance => {
       console.log(`${_tag} EXIT: ${reason}`);
-      return { needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod: "full_case", executionMode: "queue", taskNotes: "" };
+      return { needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod: "full_case", executionMode: "queue", taskNotes: "", skipReason: reason };
     };
 
     // Get current level at the pick location
