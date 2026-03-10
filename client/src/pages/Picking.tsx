@@ -4502,8 +4502,8 @@ export default function Picking() {
       </Dialog>
       
       {/* Combined Bin Count + Replen Dialog — single dialog, single API call */}
-      <Dialog open={binCountOpen} onOpenChange={(open) => { if (!open) { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); setDidReplen(false); } }}>
-        <DialogContent className="w-[95vw] max-w-sm p-4">
+      <Dialog open={binCountOpen} onOpenChange={() => { /* non-dismissable — must confirm count */ }}>
+        <DialogContent className="w-[95vw] max-w-sm p-4 [&>button]:hidden" onPointerDownOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle className="flex items-center justify-center gap-2">
               {binCountContext && !binCountContext.deducted ? (
@@ -4627,13 +4627,7 @@ export default function Picking() {
             >
               {binCountMutation.isPending ? "Saving..." : "Confirm"}
             </Button>
-            <Button
-              variant="ghost"
-              className="w-full h-10 min-h-[44px] text-xs text-muted-foreground"
-              onClick={() => { binCountPendingRef.current = false; setBinCountOpen(false); setBinCountContext(null); setDidReplen(false); }}
-            >
-              Dismiss
-            </Button>
+            {/* No dismiss — picker must confirm the count */}
           </DialogFooter>
         </DialogContent>
       </Dialog>
