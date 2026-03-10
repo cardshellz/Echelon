@@ -24,6 +24,19 @@ Testing: ALWAYS test on PRODUCTION (Heroku). Development database is empty/unuse
 - **Database ORM**: Drizzle ORM with PostgreSQL
 - **API Design**: RESTful API
 - **Session Storage**: PostgreSQL-backed sessions
+- **Route Organization**: Domain-specific route files under `server/routes/`:
+  - `middleware.ts` — shared middleware (requireAuth, requirePermission, requireInternalApiKey, upload, syncPickQueueForSku)
+  - `auth.routes.ts` — auth, users, roles, permissions
+  - `locations.routes.ts` — product locations CRUD, CSV import/export
+  - `picking.routes.ts` — picking queue, picking ops, picking logs, order management, combining, exceptions
+  - `shopify.routes.ts` — Shopify sync, backfill, webhooks
+  - `warehouse.routes.ts` — warehouses, zones, routing rules, warehouse locations, warehouse settings
+  - `products.routes.ts` — products CRUD, variants, assets, bin assignments
+  - `inventory.routes.ts` — inventory ops, adjustments, bootstrap, catalog products, break/assembly, returns, reservations, channel sync, alerts, lots
+  - `channels.routes.ts` — channel management, OMS, allocation, product lines
+  - `settings.routes.ts` — app settings, adjustment reasons, cycle counts
+  - `purchasing.routes.ts` — vendors, receiving, replenishment, POs, invoices, AP, payments, operations dashboard, SLA, notifications
+  - `routes.ts` — thin dispatcher that imports and calls all domain registrars
 
 ### Shared Layer
 - **Schema & Validation**: Drizzle schema definitions and Zod validation schemas.
