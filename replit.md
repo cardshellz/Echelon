@@ -154,7 +154,7 @@ The system monitors order sync health and alerts when issues are detected via an
 
 ### Third-Party Libraries
 - **@tanstack/react-query**: Server state management.
-- **drizzle-orm / drizzle-zod**: Database ORM and schema generation.
+- **drizzle-orm 0.39.x / drizzle-zod 0.5.x**: Database ORM and schema generation. drizzle-zod pinned to 0.5.x for type compatibility with drizzle-orm 0.39.x (0.7.x breaks createInsertSchema type inference).
 - **date-fns**: Date formatting.
 - **recharts**: Chart components.
 - **Radix UI**: Accessible UI component primitives.

@@ -11,6 +11,7 @@ import {
   warehouses,
   productLineProducts,
   channelProductLines,
+  warehouseSettings,
 } from "@shared/schema";
 import type {
   ChannelFeed,

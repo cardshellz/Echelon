@@ -232,12 +232,11 @@ export default function PurchaseOrderDetail() {
 
   // Mutations
   function createTransitionMutation(endpoint: string, method = "POST") {
-    return useMutation({
-      mutationFn: async (body?: any) => {
+    return useMutation<any, Error, void>({
+      mutationFn: async () => {
         const res = await fetch(`/api/purchase-orders/${poId}/${endpoint}`, {
           method,
           headers: { "Content-Type": "application/json" },
-          body: body ? JSON.stringify(body) : undefined,
         });
         if (!res.ok) {
           const err = await res.json();

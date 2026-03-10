@@ -654,8 +654,8 @@ export function registerProductRoutes(app: Express) {
       await db.insert(inventoryTransactions).values({
         productVariantId: targetId,
         transactionType: "adjustment",
-        quantityChange: 0,
-        reason: `Merged from variant ${source.sku || source.id} (id=${sourceId}): ${movedInventory.length} inventory records, ${movedLocations.length} location assignments`,
+        variantQtyDelta: 0,
+        notes: `Merged from variant ${source.sku || source.id} (id=${sourceId}): ${movedInventory.length} inventory records, ${movedLocations.length} location assignments`,
       });
 
       // Deactivate source variant

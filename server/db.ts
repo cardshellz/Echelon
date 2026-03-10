@@ -241,7 +241,7 @@ export async function runStartupMigrations(): Promise<void> {
             AND pl.warehouse_location_id = il.warehouse_location_id
         )
     `);
-    if (zombieResult.rowCount > 0) {
+    if ((zombieResult.rowCount ?? 0) > 0) {
       console.log(`Cleaned up ${zombieResult.rowCount} zombie inventory_levels records`);
     }
 

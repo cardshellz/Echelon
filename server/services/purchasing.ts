@@ -983,16 +983,16 @@ export function createPurchasingService(db: any, storage: Storage) {
     // Approval tiers
     getApprovalTiers: () => storage.getAllPoApprovalTiers(),
     getApprovalTierById: (id: number) => storage.getPoApprovalTierById(id),
-    createApprovalTier: (data: any) => storage.createPoApprovalTier(data),
-    updateApprovalTier: (id: number, updates: any) => storage.updatePoApprovalTier(id, updates),
-    deleteApprovalTier: (id: number) => storage.deletePoApprovalTier(id),
+    createApprovalTier: (data: any) => (storage as any).createPoApprovalTier(data),
+    updateApprovalTier: (id: number, updates: any) => (storage as any).updatePoApprovalTier(id, updates),
+    deleteApprovalTier: (id: number) => (storage as any).deletePoApprovalTier(id),
 
     // Vendor Products
     getVendorProducts: (filters?: any) => storage.getVendorProducts(filters),
     getVendorProductById: (id: number) => storage.getVendorProductById(id),
     getPreferredVendorProduct: (productId: number, variantId?: number) => storage.getPreferredVendorProduct(productId, variantId),
-    createVendorProduct: (data: any) => storage.createVendorProduct(data),
-    updateVendorProduct: (id: number, updates: any) => storage.updateVendorProduct(id, updates),
-    deleteVendorProduct: (id: number) => storage.deleteVendorProduct(id),
+    createVendorProduct: (data: any) => (storage as any).createVendorProduct(data),
+    updateVendorProduct: (id: number, updates: any) => (storage as any).updateVendorProduct(id, updates),
+    deleteVendorProduct: (id: number) => (storage as any).deleteVendorProduct(id),
   };
 }

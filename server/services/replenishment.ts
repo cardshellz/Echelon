@@ -280,8 +280,8 @@ class ReplenishmentService {
       const siblings = await this.db.select().from(productVariants)
         .where(and(eq(productVariants.productId, variant.productId), eq(productVariants.isActive, true)));
       const higherSiblings = siblings
-        .filter(v => v.id !== productVariantId && v.hierarchyLevel > variant.hierarchyLevel)
-        .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel);
+        .filter((v: any) => v.id !== productVariantId && v.hierarchyLevel > variant.hierarchyLevel)
+        .sort((a: any, b: any) => a.hierarchyLevel - b.hierarchyLevel);
 
       for (const sib of higherSiblings) {
         sourceLocation = await this.findSourceLocation(
@@ -1388,7 +1388,7 @@ class ReplenishmentService {
       taskId,
       cycleCountId: cycleCount.id,
       status: "blocked",
-      reason,
+      exceptionReason: reason,
     };
   }
 

@@ -76,6 +76,7 @@ interface ProductVariantRow {
   hierarchyLevel: number;
   parentVariantId: number | null;
   isBaseUnit: boolean;
+  isActive: boolean;
 }
 
 interface ProductDetailData {

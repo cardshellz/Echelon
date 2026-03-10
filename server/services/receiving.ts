@@ -23,6 +23,8 @@ interface InventoryCore {
     unitCostCents?: number;
     receivingOrderId?: number;
     purchaseOrderId?: number;
+    inboundShipmentId?: number;
+    costProvisional?: number;
   }): Promise<void>;
 }
 

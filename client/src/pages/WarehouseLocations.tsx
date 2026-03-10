@@ -433,6 +433,7 @@ export default function WarehouseLocations() {
       bin: "",
       name: "",
       locationType: "bin",
+      binType: "",
       isPickable: 1,
       warehouseId: "",
     });

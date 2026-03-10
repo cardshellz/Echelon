@@ -238,7 +238,7 @@ export interface IStorage {
   getAllWarehouseLocations(): Promise<WarehouseLocation[]>;
   getWarehouseLocationById(id: number): Promise<WarehouseLocation | undefined>;
   getWarehouseLocationByCode(code: string): Promise<WarehouseLocation | undefined>;
-  createWarehouseLocation(location: Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation>;
+  createWarehouseLocation(location: InsertWarehouseLocation | Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation>;
   updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null>;
   deleteWarehouseLocation(id: number): Promise<boolean>;
   
@@ -1034,7 +1034,7 @@ export class DatabaseStorage implements IStorage {
 
   async getAllSkus(): Promise<string[]> {
     const result = await db.select({ sku: productLocations.sku }).from(productLocations);
-    return result.map(r => r.sku);
+    return result.map(r => r.sku).filter((s): s is string => s !== null);
   }
 
   // Order methods
@@ -1107,7 +1107,7 @@ export class DatabaseStorage implements IStorage {
     `);
     
     // Map snake_case columns to camelCase for Order type
-    const orderRows: Order[] = (orderList.rows as any[]).map(row => ({
+    const orderRows = (orderList.rows as any[]).map((row: any) => ({
       id: row.id,
       channelId: row.channel_id,
       source: row.source,
@@ -1266,10 +1266,10 @@ export class DatabaseStorage implements IStorage {
     }
 
     // Combine orders with their items
-    return orderRows.map(order => ({
+    return orderRows.map((order: any) => ({
       ...order,
       items: itemsByOrderId.get(order.id) || [],
-    }));
+    })) as any;
   }
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
@@ -1796,9 +1796,9 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async createWarehouseLocation(location: Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation> {
-    // generateLocationCode throws if no hierarchy fields provided
-    const code = generateLocationCode(location);
+  async createWarehouseLocation(location: InsertWarehouseLocation | Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation> {
+    const rawCode = ('code' in location && location.code) ? location.code : generateLocationCode(location);
+    const code = rawCode.toUpperCase().trim();
 
     // Check for duplicate code within the same warehouse
     const conditions = [eq(warehouseLocations.code, code.toUpperCase())];

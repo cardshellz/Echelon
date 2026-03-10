@@ -210,9 +210,9 @@ class CycleCountService {
     let countedBins = 0;
     let varianceBins = 0;
     for (const binItems of bins.values()) {
-      const allPending = binItems.every(i => i.status === "pending");
+      const allPending = binItems.every((i: any) => i.status === "pending");
       if (!allPending) countedBins++;
-      if (!allPending && binItems.some(i => i.varianceType)) varianceBins++;
+      if (!allPending && binItems.some((i: any) => i.varianceType)) varianceBins++;
     }
     return { countedBins, varianceCount: varianceBins };
   }
@@ -221,12 +221,12 @@ class CycleCountService {
    * Lookup product_variants and products by SKU (case-insensitive).
    */
   private async lookupVariantAndProductBySku(sku: string): Promise<{ productVariantId: number | null; productId: number | null }> {
-    const variantResult = await this.db.execute<{ id: number }>(sql`
+    const variantResult = await this.db.execute(sql`
       SELECT id FROM product_variants WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productVariantId = variantResult.rows[0]?.id || null;
 
-    const productResult = await this.db.execute<{ id: number }>(sql`
+    const productResult = await this.db.execute(sql`
       SELECT id FROM products WHERE UPPER(sku) = ${sku.toUpperCase()} LIMIT 1
     `);
     const productId = productResult.rows[0]?.id || null;
@@ -247,7 +247,7 @@ class CycleCountService {
       }
     }
     // Delete reverse-linked items
-    const reverseResult = await this.db.execute<{ id: number; status: string }>(sql`
+    const reverseResult = await this.db.execute(sql`
       SELECT id, status FROM cycle_count_items
       WHERE related_item_id = ${itemId} AND status != 'approved'
     `);
@@ -500,13 +500,7 @@ class CycleCountService {
     // Snapshot current inventory for each location
     const items: any[] = [];
     for (const location of locations) {
-      const result = await this.db.execute<{
-        product_variant_id: number;
-        variant_qty: number;
-        product_id: number | null;
-        sku: string | null;
-        is_assigned: number;
-      }>(sql`
+      const result = await this.db.execute(sql`
         -- Assigned bins: always include even if qty=0 (verify the assignment)
         SELECT
           pv.id as product_variant_id,
@@ -694,7 +688,7 @@ class CycleCountService {
         await this.lookupVariantAndProductBySku(countedSku!);
 
       // Create new item for the FOUND product
-      const foundItemResult = await this.db.execute<{ id: number }>(sql`
+      const foundItemResult = await this.db.execute(sql`
         INSERT INTO cycle_count_items (
           cycle_count_id, warehouse_location_id, product_variant_id, product_id,
           expected_sku, expected_qty, counted_sku, counted_qty,
@@ -1080,7 +1074,7 @@ class CycleCountService {
 
     const { productVariantId, productId } = await this.lookupVariantAndProductBySku(sku);
 
-    const result = await this.db.execute<{ id: number }>(sql`
+    const result = await this.db.execute(sql`
       INSERT INTO cycle_count_items (
         cycle_count_id, warehouse_location_id, product_variant_id, product_id,
         expected_sku, expected_qty, counted_sku, counted_qty,
@@ -1134,7 +1128,7 @@ class CycleCountService {
     }
 
     // Reverse link: approve any item pointing TO this one
-    const reverseResult = await this.db.execute<{ id: number }>(sql`
+    const reverseResult = await this.db.execute(sql`
       SELECT id FROM cycle_count_items
       WHERE related_item_id = ${itemId}
       AND status != 'approved'
@@ -1201,7 +1195,7 @@ class CycleCountService {
         // Handle linked items (mismatch pairs)
         const linkedIds: number[] = [];
         if (item.relatedItemId) linkedIds.push(item.relatedItemId);
-        const reverseResult = await this.db.execute<{ id: number }>(sql`
+        const reverseResult = await this.db.execute(sql`
           SELECT id FROM cycle_count_items
           WHERE related_item_id = ${itemId} AND status != 'approved'
         `);

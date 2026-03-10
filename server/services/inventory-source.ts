@@ -82,11 +82,11 @@ class ShopifyChannelAdapter implements InventorySourceAdapter {
     let hasMore = true;
 
     while (hasMore) {
-      const url = pageInfo
+      const url: string = pageInfo
         ? `https://${conn.shopDomain}/admin/api/${apiVersion}/inventory_levels.json?page_info=${pageInfo}&limit=250`
         : `https://${conn.shopDomain}/admin/api/${apiVersion}/inventory_levels.json?location_ids=${shopifyLocationId}&limit=250`;
 
-      const response = await fetch(url, {
+      const response: Response = await fetch(url, {
         headers: {
           "X-Shopify-Access-Token": conn.accessToken,
           "Content-Type": "application/json",
@@ -105,9 +105,9 @@ class ShopifyChannelAdapter implements InventorySourceAdapter {
       }
 
       // Handle pagination via Link header
-      const linkHeader = response.headers.get("Link");
+      const linkHeader: string | null = response.headers.get("Link");
       if (linkHeader?.includes('rel="next"')) {
-        const match = linkHeader.match(/<[^>]*page_info=([^>&]*).*?>;\s*rel="next"/);
+        const match: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]*).*?>;\s*rel="next"/);
         pageInfo = match?.[1] || null;
         hasMore = !!pageInfo;
       } else {

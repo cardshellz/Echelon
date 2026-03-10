@@ -905,9 +905,9 @@ export function registerInventoryRoutes(app: Express) {
           if (!product) continue;
 
           const upv = variant.unitsPerVariant || 1;
-          const variantQty = levels.reduce((sum, l) => sum + (l.variantQty || 0), 0);
-          const reservedQty = levels.reduce((sum, l) => sum + (l.reservedQty || 0), 0);
-          const pickedQty = levels.reduce((sum, l) => sum + (l.pickedQty || 0), 0);
+          const variantQty = levels.reduce((sum: number, l: any) => sum + (l.variantQty || 0), 0);
+          const reservedQty = levels.reduce((sum: number, l: any) => sum + (l.reservedQty || 0), 0);
+          const pickedQty = levels.reduce((sum: number, l: any) => sum + (l.pickedQty || 0), 0);
           const onHandPieces = variantQty * upv;
           const reservedPieces = reservedQty * upv;
           const pickedPieces = pickedQty * upv;
@@ -1375,8 +1375,8 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { inventoryAlerts } = req.app.locals.services;
       const alerts = await inventoryAlerts.checkAll();
-      const critical = alerts.filter(a => a.severity === "critical").length;
-      const warning = alerts.filter(a => a.severity === "warning").length;
+      const critical = alerts.filter((a: any) => a.severity === "critical").length;
+      const warning = alerts.filter((a: any) => a.severity === "warning").length;
       res.json({ alerts, summary: { total: alerts.length, critical, warning } });
     } catch (error: any) {
       console.error("Error checking inventory alerts:", error);
@@ -1474,6 +1474,7 @@ export function registerInventoryRoutes(app: Express) {
       const skusWithoutVariant: Array<{ sku: string; name: string; location: string }> = [];
 
       for (const pl of productLocationsData) {
+        if (!pl.sku) continue;
         const match = pl.sku.match(variantPattern);
         
         if (match) {
@@ -1482,7 +1483,7 @@ export function registerInventoryRoutes(app: Express) {
           const pieces = parseInt(match[3], 10);
           
           if (!baseSkuMap[baseSku]) {
-            let baseName = pl.name;
+            let baseName = pl.name || "";
             const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case)\s+of\s+\d+.*/i);
             if (packMatch) {
               baseName = baseName.substring(0, packMatch.index).trim();
@@ -1499,14 +1500,14 @@ export function registerInventoryRoutes(app: Express) {
             sku: pl.sku,
             type: variantType === 'P' ? 'Pack' : variantType === 'B' ? 'Box' : 'Case',
             pieces,
-            name: pl.name,
-            location: pl.location
+            name: pl.name || "",
+            location: pl.location || ""
           });
         } else {
           skusWithoutVariant.push({
             sku: pl.sku,
-            name: pl.name,
-            location: pl.location
+            name: pl.name || "",
+            location: pl.location || ""
           });
         }
       }
@@ -1608,6 +1609,7 @@ export function registerInventoryRoutes(app: Express) {
       const skusWithoutVariant: Array<{ sku: string; name: string; location: string; barcode: string | null }> = [];
 
       for (const pl of productLocationsData) {
+        if (!pl.sku) continue;
         const match = pl.sku.match(variantPattern);
         
         if (match) {
@@ -1616,7 +1618,7 @@ export function registerInventoryRoutes(app: Express) {
           const pieces = parseInt(match[3], 10);
           
           if (!baseSkuMap[baseSku]) {
-            let baseName = pl.name;
+            let baseName = pl.name || "";
             const packMatch = baseName.match(/\s*[-–]\s*(Pack|Box|Case|1 Holder|1 Pack)\s+(of\s+)?\d*.*/i);
             if (packMatch) {
               baseName = baseName.substring(0, packMatch.index).trim();
@@ -1629,15 +1631,15 @@ export function registerInventoryRoutes(app: Express) {
             sku: pl.sku,
             type: variantType === 'P' ? 'pack' : variantType === 'B' ? 'box' : 'case',
             pieces,
-            name: pl.name,
-            location: pl.location,
+            name: pl.name || "",
+            location: pl.location || "",
             barcode: pl.barcode
           });
         } else {
           skusWithoutVariant.push({
             sku: pl.sku,
-            name: pl.name,
-            location: pl.location,
+            name: pl.name || "",
+            location: pl.location || "",
             barcode: pl.barcode
           });
         }

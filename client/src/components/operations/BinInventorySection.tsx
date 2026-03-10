@@ -149,7 +149,7 @@ export default function BinInventorySection({
 
   const flatRows = useMemo<FlatRow[]>(() => {
     if (!data?.bins) return [];
-    return data.bins.flatMap((bin, groupIndex) => {
+    return data.bins.flatMap((bin, groupIndex): FlatRow[] => {
       if (bin.items.length === 0) {
         return [{ bin, item: null, isFirst: true, rowCount: 1, groupIndex }];
       }

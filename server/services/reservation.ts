@@ -449,9 +449,9 @@ class ReservationService {
         ),
       );
 
-    const affectedOrderIds = [...new Set(
-      reserveTxns.map((t: any) => t.orderId).filter(Boolean),
-    )];
+    const affectedOrderIds: number[] = Array.from(new Set(
+      reserveTxns.map((t: any) => t.orderId as number).filter(Boolean),
+    ));
 
     if (affectedOrderIds.length === 0) {
       console.log(`[RESERVATION] No affected orders found for re-allocation`);

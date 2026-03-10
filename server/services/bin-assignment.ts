@@ -81,21 +81,7 @@ export class BinAssignmentService {
    * `product_locations.location_type` column.
    */
   async getAssignmentsView(filters?: AssignmentFilters): Promise<BinAssignmentRow[]> {
-    const rows = await this.db.execute<{
-      product_variant_id: number;
-      product_id: number;
-      sku: string | null;
-      product_name: string;
-      variant_name: string;
-      units_per_variant: number;
-      product_location_id: number | null;
-      assigned_location_code: string | null;
-      assigned_location_id: number | null;
-      location_type: string | null;
-      zone: string | null;
-      is_primary: number | null;
-      current_qty: number | null;
-    }>(sql`
+    const rows = await this.db.execute(sql`
       SELECT
         pv.id AS product_variant_id,
         p.id AS product_id,

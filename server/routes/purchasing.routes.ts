@@ -928,7 +928,7 @@ export function registerPurchasingRoutes(app: Express) {
         const allLocations = await storage.getAllWarehouseLocations();
         const allVariants = await storage.getAllProductVariants();
         const locByCode = new Map(allLocations.map(l => [l.code.toLowerCase(), l]));
-        const varBySku = new Map(allVariants.map(v => [v.sku.toLowerCase(), v]));
+        const varBySku = new Map(allVariants.filter(v => v.sku).map(v => [v.sku!.toLowerCase(), v]));
 
         const results = { created: 0, updated: 0, skipped: 0, errors: [] as string[] };
 
@@ -1992,12 +1992,12 @@ export function registerPurchasingRoutes(app: Express) {
         po,
         lines,
         vendor,
-        companyName: settings.company_name,
-        companyAddress: settings.company_address,
-        companyCity: settings.company_city,
-        companyState: settings.company_state,
-        companyPostalCode: settings.company_postal_code,
-        companyCountry: settings.company_country,
+        companyName: settings.company_name ?? undefined,
+        companyAddress: settings.company_address ?? undefined,
+        companyCity: settings.company_city ?? undefined,
+        companyState: settings.company_state ?? undefined,
+        companyPostalCode: settings.company_postal_code ?? undefined,
+        companyCountry: settings.company_country ?? undefined,
       });
 
       res.json({ html });

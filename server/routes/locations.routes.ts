@@ -91,9 +91,8 @@ export function registerLocationRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
       }
       
-      const data = parsed.data as InsertProductLocation;
+      const data = parsed.data as any;
       
-      // Validate that warehouse location exists
       const warehouseLoc = await storage.getWarehouseLocationByCode(data.location);
       if (!warehouseLoc) {
         return res.status(400).json({ 
@@ -145,9 +144,8 @@ export function registerLocationRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid request data", details: parsed.error });
       }
       
-      const data = parsed.data as UpdateProductLocation;
+      const data = parsed.data as any;
       
-      // If location is being updated, validate it exists in warehouse locations
       let dataWithRef: any = { ...data };
       if (data.location) {
         const warehouseLoc = await storage.getWarehouseLocationByCode(data.location);

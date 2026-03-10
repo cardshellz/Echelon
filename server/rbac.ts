@@ -113,7 +113,7 @@ export const SYSTEM_ROLES = {
   admin: {
     name: "Administrator",
     description: "Full system access",
-    permissions: DEFAULT_PERMISSIONS.map(p => `${p.resource}:${p.action}`), // All permissions
+    permissions: DEFAULT_PERMISSIONS.map((p: any) => `${p.resource}:${p.action}`),
   },
   lead: {
     name: "Team Lead",
@@ -158,7 +158,7 @@ export async function seedRBAC() {
   // Insert all permissions (ignore duplicates)
   for (const perm of DEFAULT_PERMISSIONS) {
     try {
-      await db.insert(authPermissions).values(perm).onConflictDoNothing();
+      await db.insert(authPermissions).values(perm as any).onConflictDoNothing();
     } catch (e) {
       // Already exists
     }
@@ -429,7 +429,7 @@ export async function seedAdjustmentReasons() {
   // Insert all adjustment reasons (ignore duplicates)
   for (const reason of DEFAULT_ADJUSTMENT_REASONS) {
     try {
-      await db.insert(adjustmentReasons).values(reason).onConflictDoNothing();
+      await db.insert(adjustmentReasons).values(reason as any).onConflictDoNothing();
     } catch (e) {
       // Already exists
     }

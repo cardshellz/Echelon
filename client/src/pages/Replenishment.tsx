@@ -548,7 +548,7 @@ export default function Replenishment() {
   });
 
   const updateTierDefaultMutation = useMutation({
-    mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenTierDefault> }) => {
+    mutationFn: async ({ id, data }: { id: number; data: Record<string, any> }) => {
       const res = await fetch(`/api/replen/tier-defaults/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -617,7 +617,7 @@ export default function Replenishment() {
   });
 
   const updateOverrideMutation = useMutation({
-    mutationFn: async ({ id, data }: { id: number; data: Partial<ReplenRule> }) => {
+    mutationFn: async ({ id, data }: { id: number; data: Record<string, any> }) => {
       const res = await fetch(`/api/replen/rules/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
