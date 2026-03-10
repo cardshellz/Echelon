@@ -290,24 +290,8 @@ class PickingService {
           inventoryCtx.replen.sourceVariantSku = replenGuidance.sourceVariantSku;
           inventoryCtx.replen.sourceVariantName = replenGuidance.sourceVariantName;
           inventoryCtx.replen.qtyToMove = replenGuidance.qtyTargetUnits || null;
-        } else if (replenGuidance && !replenGuidance.needed && replenGuidance.skipReason) {
-          // Log why replen was skipped — queryable from Picking Logs
-          this.storage.createPickingLog({
-            actionType: "replen_skip",
-            pickerId: pickerId || undefined,
-            pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-            orderId: item.orderId,
-            orderNumber: order?.orderNumber,
-            orderItemId: item.id,
-            sku: item.sku,
-            itemName: item.name,
-            locationCode: deductResult.locationCode,
-            notes: `Replen not triggered: ${replenGuidance.skipReason}`,
-            metadata: { replenSkipReason: replenGuidance.skipReason, onHand: deductResult.systemQtyAfter, locationId: deductResult.locationId },
-            deviceType: deviceType || "desktop",
-            sessionId,
-          }).catch((err: any) => console.warn("[PickingLog] Failed to log replen skip:", err.message));
         }
+        // No log when replen isn't needed — that's the normal case, not an event
 
         // Only prompt bin count when there's a reason to verify:
         // 1. Replen was triggered — picker needs to confirm before/after
