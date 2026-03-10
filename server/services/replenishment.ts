@@ -1325,24 +1325,27 @@ class ReplenishmentService {
     warehouseLocationId: number,
   ): Promise<ReplenGuidance> {
     const _tag = `[Replen checkReplenNeeded] variant=${productVariantId} loc=${warehouseLocationId}`;
-    const none: ReplenGuidance = { needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod: "full_case", executionMode: "queue", taskNotes: "" };
+    const skip = (reason: string): ReplenGuidance => {
+      console.log(`${_tag} EXIT: ${reason}`);
+      return { needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod: "full_case", executionMode: "queue", taskNotes: "" };
+    };
 
     // Get current level at the pick location
     const level = await this.inventoryCore.getLevel(productVariantId, warehouseLocationId);
-    if (!level) { console.log(`${_tag} EXIT: no inventory level record`); return none; }
+    if (!level) return skip("no_inventory_level");
 
     // Get the location metadata
     const [location] = await this.db.select().from(warehouseLocations).where(eq(warehouseLocations.id, warehouseLocationId)).limit(1);
-    if (!location || location.isPickable !== 1) { console.log(`${_tag} EXIT: location not found or not pickable`); return none; }
+    if (!location || location.isPickable !== 1) return skip("location_not_pickable");
 
     // Only replenish variants assigned to this pick location
     const [assignment] = await this.db.select({ id: productLocations.id }).from(productLocations)
       .where(and(eq(productLocations.productVariantId, productVariantId), eq(productLocations.warehouseLocationId, warehouseLocationId))).limit(1);
-    if (!assignment) { console.log(`${_tag} EXIT: no product_locations assignment`); return none; }
+    if (!assignment) return skip("no_bin_assignment");
 
     // Get variant
     const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
-    if (!variant) { console.log(`${_tag} EXIT: variant not found`); return none; }
+    if (!variant) return skip("variant_not_found");
 
     console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${level.variantQty} hierarchyLevel=${variant.hierarchyLevel}`);
 
@@ -1360,7 +1363,7 @@ class ReplenishmentService {
 
     const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
       ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
-    if (triggerValue == null || triggerValue < 0) { console.log(`${_tag} EXIT: no triggerValue configured`); return none; }
+    if (triggerValue == null || triggerValue < 0) return skip("no_trigger_value");
 
     // Replen parameters
     const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
@@ -1372,12 +1375,12 @@ class ReplenishmentService {
     let taskNotes: string;
     if (replenMethod === "pallet_drop") {
       const velocity = await this.computeVariantVelocity(productVariantId);
-      if (velocity === 0) { console.log(`${_tag} EXIT: pallet_drop velocity=0`); return none; }
+      if (velocity === 0) return skip("pallet_drop_zero_velocity");
       const coverageDays = level.variantQty / velocity;
-      if (coverageDays >= triggerValue) { console.log(`${_tag} EXIT: pallet_drop coverage ${coverageDays.toFixed(1)}d >= trigger ${triggerValue}d`); return none; }
+      if (coverageDays >= triggerValue) return skip(`above_threshold (coverage=${coverageDays.toFixed(1)}d >= trigger=${triggerValue}d)`);
       taskNotes = `Auto-triggered after pick (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
     } else {
-      if (level.variantQty > triggerValue) { console.log(`${_tag} EXIT: onHand ${level.variantQty} > triggerValue ${triggerValue}`); return none; }
+      if (level.variantQty > triggerValue) return skip(`above_threshold (onHand=${level.variantQty} > trigger=${triggerValue})`);
       console.log(`${_tag} THRESHOLD MET: onHand=${level.variantQty} <= trigger=${triggerValue}, method=${replenMethod}`);
       taskNotes = `Auto-triggered after pick: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
     }
@@ -1386,7 +1389,7 @@ class ReplenishmentService {
     const [existingTask] = await this.db.select().from(replenTasks)
       .where(and(eq(replenTasks.pickProductVariantId, productVariantId), eq(replenTasks.toLocationId, warehouseLocationId), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])))
       .limit(1);
-    if (existingTask) { console.log(`${_tag} EXIT: dedup — existing task #${existingTask.id}`); return none; }
+    if (existingTask) return skip(`dedup_existing_task (#${existingTask.id})`);
 
     // Find source location
     const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
@@ -1396,7 +1399,7 @@ class ReplenishmentService {
 
     if (!sourceLocation) {
       console.log(`${_tag} no source location found — stockout`);
-      return { ...none, needed: true, stockout: true, pickVariantId: productVariantId, replenMethod, taskNotes };
+      return { needed: true, stockout: true, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod, executionMode: "queue", taskNotes };
     }
 
     // Calculate quantities
