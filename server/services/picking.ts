@@ -311,9 +311,30 @@ class PickingService {
         inventoryCtx.locationCode = deductResult.locationCode;
         inventoryCtx.binCountNeeded = true;
 
-        // Check if reserve has stock (for stockout indicator)
-        const hasReserve = await this._hasReserveStock(deductResult.productVariantId);
-        inventoryCtx.replen.stockout = !hasReserve;
+        // Run the SAME replen check as the success path — picker needs full
+        // guidance (source location, qty, method), not just a "no stock" boolean.
+        if (deductResult.locationId) {
+          const replenGuidance = await this.replenishment
+            .checkReplenNeeded(deductResult.productVariantId, deductResult.locationId)
+            .catch((err: any) => { console.warn("[Replen] guidance check failed (deduct fail path):", err.message); return null; });
+
+          if (replenGuidance?.needed) {
+            inventoryCtx.replen.triggered = true;
+            inventoryCtx.replen.stockout = replenGuidance.stockout;
+            inventoryCtx.replen.sourceLocationCode = replenGuidance.sourceLocationCode;
+            inventoryCtx.replen.sourceVariantSku = replenGuidance.sourceVariantSku;
+            inventoryCtx.replen.sourceVariantName = replenGuidance.sourceVariantName;
+            inventoryCtx.replen.qtyToMove = replenGuidance.qtyTargetUnits || null;
+          } else {
+            // Replen not needed or can't be determined — fall back to reserve check
+            const hasReserve = await this._hasReserveStock(deductResult.productVariantId);
+            inventoryCtx.replen.stockout = !hasReserve;
+          }
+        } else {
+          // No location context — can't check replen, just check reserve
+          const hasReserve = await this._hasReserveStock(deductResult.productVariantId);
+          inventoryCtx.replen.stockout = !hasReserve;
+        }
 
         // Log discrepancy to picking_logs (fire-and-forget)
         this.storage.createPickingLog({
