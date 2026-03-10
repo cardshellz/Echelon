@@ -58,6 +58,7 @@ type Storage = {
   updateOrderItemStatus: (id: number, status: ItemStatus, pickedQty?: number, shortReason?: string, expectedCurrentStatus?: ItemStatus) => Promise<OrderItem | null>;
   getProductVariantBySku: (sku: string) => Promise<any | undefined>;
   getProductVariantById: (id: number) => Promise<any | undefined>;
+  getProductVariantsByProductId: (productId: number) => Promise<any[]>;
   getBinLocationFromInventoryBySku: (sku: string) => Promise<{ location: string; zone: string; barcode: string | null; imageUrl: string | null } | undefined>;
   createPickingLog: (log: any) => Promise<any>;
   updateOrderProgress: (orderId: number, postPickStatus?: string) => Promise<Order | null>;
@@ -459,14 +460,30 @@ class PickingService {
     };
   }
 
-  /** Check if any non-pick location has stock for this variant */
+  /** Check if any non-pick location has stock for this variant OR its fungible source (e.g. case variant) */
   private async _hasReserveStock(productVariantId: number): Promise<boolean> {
-    const levels = await this.inventoryCore.getLevelsByVariant(productVariantId);
     const locations = await this.storage.getAllWarehouseLocations();
-    return levels.some(l => {
-      const loc = locations.find(wl => wl.id === l.warehouseLocationId);
-      return loc && loc.locationType !== "pick" && l.variantQty > 0;
-    });
+    const hasNonPick = (varId: number) =>
+      this.inventoryCore.getLevelsByVariant(varId).then(levels =>
+        levels.some(l => {
+          const loc = locations.find(wl => wl.id === l.warehouseLocationId);
+          return loc && loc.locationType !== "pick" && l.variantQty > 0;
+        }),
+      );
+
+    // Check exact variant first
+    if (await hasNonPick(productVariantId)) return true;
+
+    // Check fungible source variants (e.g. C800 case for P25 pack)
+    const variant = await this.storage.getProductVariantById(productVariantId);
+    if (!variant?.productId) return false;
+
+    const siblings = await this.storage.getProductVariantsByProductId(variant.productId);
+    const sources = siblings.filter(v => v.id !== productVariantId && v.hierarchyLevel > variant.hierarchyLevel && v.isActive);
+    for (const src of sources) {
+      if (await hasNonPick(src.id)) return true;
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------

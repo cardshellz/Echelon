@@ -1394,9 +1394,34 @@ class ReplenishmentService {
 
     // Find source location
     const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
-    const sourceLocation = await this.findSourceLocation(
-      sourceVariantId ?? productVariantId, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
+    let resolvedSourceVariantId = sourceVariantId;
+    let sourceLocation = await this.findSourceLocation(
+      resolvedSourceVariantId ?? productVariantId, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
     );
+
+    // Fallback: if no explicit source variant was configured and nothing found,
+    // try higher-hierarchy siblings (e.g. case variants for a pack variant).
+    // This handles the common case where there's no rule/tier-default but reserve has cases.
+    if (!sourceLocation && resolvedSourceVariantId == null && variant.productId) {
+      const siblings = await this.db.select().from(productVariants)
+        .where(and(eq(productVariants.productId, variant.productId), eq(productVariants.isActive, true)));
+      const higherSiblings = siblings
+        .filter(v => v.id !== productVariantId && v.hierarchyLevel > variant.hierarchyLevel)
+        .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel); // try smallest case first
+
+      for (const sib of higherSiblings) {
+        sourceLocation = await this.findSourceLocation(
+          sib.id, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
+        );
+        if (sourceLocation) {
+          resolvedSourceVariantId = sib.id;
+          // If we found a case variant, use case_break method
+          if (replenMethod === "full_case") replenMethod = "case_break";
+          console.log(`${_tag} FALLBACK: found case variant ${sib.sku} (id=${sib.id}) at ${sourceLocation.code}`);
+          break;
+        }
+      }
+    }
 
     if (!sourceLocation) {
       console.log(`${_tag} no source location found — stockout`);
@@ -1404,8 +1429,8 @@ class ReplenishmentService {
     }
 
     // Calculate quantities
-    const sourceVariant = sourceVariantId != null
-      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, sourceVariantId)).limit(1))[0] ?? variant
+    const sourceVariant = resolvedSourceVariantId != null
+      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, resolvedSourceVariantId)).limit(1))[0] ?? variant
       : variant;
     const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
     const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
@@ -1421,7 +1446,7 @@ class ReplenishmentService {
       stockout: false,
       sourceLocationId: sourceLocation.id,
       sourceLocationCode: sourceLocation.code,
-      sourceVariantId: sourceVariantId ?? null,
+      sourceVariantId: resolvedSourceVariantId ?? null,
       sourceVariantSku: sourceVariant.sku,
       sourceVariantName: sourceVariant.name || sourceVariant.sku || null,
       pickVariantId: productVariantId,
