@@ -478,7 +478,9 @@ export class OperationsDashboardService {
     let locationFilter = sql``;
     let variantFilter = sql``;
     if (locationId) {
-      locationFilter = sql`AND (it.from_location_id = ${locationId} OR it.to_location_id = ${locationId})`;
+      // Filter to transactions involving this location, but exclude 'ship' events
+      // because the pick transaction already shows the deduction from the bin
+      locationFilter = sql`AND (it.from_location_id = ${locationId} OR it.to_location_id = ${locationId}) AND it.transaction_type != 'ship'`;
     }
     if (variantId) {
       variantFilter = sql`AND it.product_variant_id = ${variantId}`;

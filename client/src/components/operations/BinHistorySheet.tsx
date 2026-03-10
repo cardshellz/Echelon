@@ -48,7 +48,7 @@ const TYPE_COLORS: Record<string, string> = {
   pick: "bg-blue-100 text-blue-800",
   adjustment: "bg-yellow-100 text-yellow-800",
   transfer: "bg-purple-100 text-purple-800",
-  ship: "bg-indigo-100 text-indigo-800",
+  cycle_count: "bg-amber-100 text-amber-800",
   return: "bg-orange-100 text-orange-800",
   replenish: "bg-teal-100 text-teal-800",
   reserve: "bg-cyan-100 text-cyan-800",
@@ -113,7 +113,7 @@ export default function BinHistorySheet({ open, onOpenChange, locationId, locati
               <SelectItem value="receipt">Receipts</SelectItem>
               <SelectItem value="pick">Picks</SelectItem>
               <SelectItem value="replenish">Replenishments</SelectItem>
-              <SelectItem value="ship">Shipments</SelectItem>
+              <SelectItem value="cycle_count">Cycle Counts</SelectItem>
             </SelectContent>
           </Select>
 

@@ -17,6 +17,7 @@ import {
   XCircle,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -84,11 +85,26 @@ const CHANNEL_OPTIONS = [
   { label: "Manual", value: "manual" },
 ];
 
+interface ShipmentDetail {
+  id: number;
+  status: string;
+  carrier: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  shippedAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  source: string;
+  externalFulfillmentId: string | null;
+  items: Array<{ sku: string | null; name: string | null; qty: number }>;
+}
+
 interface OrderDetail {
   order: Order;
   items: OrderItem[];
   pickingLogs: PickingLog[];
   picker?: { id: string; displayName: string | null };
+  shipmentHistory: ShipmentDetail[];
 }
 
 const DATE_PRESETS = [
@@ -233,8 +249,8 @@ export default function OrderHistory() {
   const buildQueryParams = () => {
     const params = new URLSearchParams();
     const { startDate, endDate } = getDateRange();
-    
-    if (search) params.set("orderNumber", search);
+
+    if (search) params.set("search", search);
     if (status && status !== "all") params.set("status", status);
     if (priority && priority !== "all") params.set("priority", priority);
     if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
@@ -281,7 +297,7 @@ export default function OrderHistory() {
     const params = new URLSearchParams();
     const { startDate, endDate } = getDateRange();
     
-    if (search) params.set("orderNumber", search);
+    if (search) params.set("search", search);
     if (status && status !== "all") params.set("status", status);
     if (priority && priority !== "all") params.set("priority", priority);
     if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
@@ -289,7 +305,7 @@ export default function OrderHistory() {
     if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
-    
+
     window.location.href = `/api/orders/history/export?${params.toString()}`;
   };
 
@@ -803,10 +819,76 @@ function OrderDetailPanel({
 
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Shipment</CardTitle>
+            <CardTitle className="text-sm font-medium text-muted-foreground">
+              Shipments {detail.shipmentHistory.length > 0 && `(${detail.shipmentHistory.length})`}
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground italic">Shipment tracking coming soon</p>
+            {detail.shipmentHistory.length === 0 ? (
+              <p className="text-sm text-muted-foreground italic">No shipments recorded</p>
+            ) : (
+              <div className="space-y-3">
+                {detail.shipmentHistory.map((s) => (
+                  <div key={s.id} className="border rounded-lg p-3 text-sm space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Badge variant="outline" className={cn("text-xs",
+                        s.status === "delivered" ? "bg-green-100 text-green-800 border-green-200" :
+                        s.status === "shipped" ? "bg-blue-100 text-blue-800 border-blue-200" :
+                        s.status === "packed" ? "bg-purple-100 text-purple-800 border-purple-200" :
+                        "bg-gray-100 text-gray-800"
+                      )}>
+                        {s.status}
+                      </Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {s.source === "shopify_webhook" ? "Shopify" : s.source}
+                      </span>
+                    </div>
+                    {s.carrier && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Carrier</span>
+                        <span>{s.carrier}</span>
+                      </div>
+                    )}
+                    {s.trackingNumber && (
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted-foreground">Tracking</span>
+                        {s.trackingUrl ? (
+                          <a href={s.trackingUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-blue-600 hover:underline flex items-center gap-1">
+                            {s.trackingNumber}
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        ) : (
+                          <span className="font-mono text-xs">{s.trackingNumber}</span>
+                        )}
+                      </div>
+                    )}
+                    {s.shippedAt && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Shipped</span>
+                        <span>{format(new Date(s.shippedAt), "MMM d, h:mm a")}</span>
+                      </div>
+                    )}
+                    {s.deliveredAt && (
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Delivered</span>
+                        <span>{format(new Date(s.deliveredAt), "MMM d, h:mm a")}</span>
+                      </div>
+                    )}
+                    {s.items.length > 0 && (
+                      <div className="border-t pt-2 mt-2">
+                        <div className="text-xs text-muted-foreground mb-1">Items</div>
+                        {s.items.map((si, idx) => (
+                          <div key={idx} className="flex justify-between text-xs">
+                            <span className="font-mono">{si.sku || "—"}</span>
+                            <span>x{si.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 

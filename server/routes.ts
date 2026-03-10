@@ -6315,7 +6315,8 @@ export async function registerRoutes(
       }
       
       const filters: any = {};
-      
+
+      if (req.query.search) filters.search = req.query.search as string;
       if (req.query.orderNumber) filters.orderNumber = req.query.orderNumber as string;
       if (req.query.customerName) filters.customerName = req.query.customerName as string;
       if (req.query.sku) filters.sku = req.query.sku as string;
@@ -6330,7 +6331,7 @@ export async function registerRoutes(
       if (req.query.endDate) filters.endDate = new Date(req.query.endDate as string);
       if (req.query.limit) filters.limit = parseInt(req.query.limit as string, 10);
       if (req.query.offset) filters.offset = parseInt(req.query.offset as string, 10);
-      
+
       const [orders, total] = await Promise.all([
         storage.getOrderHistory(filters),
         storage.getOrderHistoryCount(filters)

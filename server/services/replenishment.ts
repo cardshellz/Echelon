@@ -38,6 +38,22 @@ type DrizzleDb = {
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
+export type ReplenGuidance = {
+  needed: boolean;
+  stockout: boolean;
+  sourceLocationId: number | null;
+  sourceLocationCode: string | null;
+  sourceVariantId: number | null;
+  sourceVariantSku: string | null;
+  sourceVariantName: string | null;
+  pickVariantId: number;
+  qtySourceUnits: number;
+  qtyTargetUnits: number;
+  replenMethod: string;
+  executionMode: string;
+  taskNotes: string;
+};
+
 type GenerateTasksResult = {
   success: boolean;
   tierDefaultsEvaluated: number;
@@ -1295,10 +1311,335 @@ class ReplenishmentService {
     return task as ReplenTask;
   }
 
+  // ---------------------------------------------------------------------------
+  // 5a-NEW. GUIDANCE-ONLY REPLEN CHECK (no task creation)
+  // ---------------------------------------------------------------------------
+
   /**
-   * Confirm and execute replen task after picker verification
-   * Called when picker confirms they actually performed the replenishment
-   * This ensures inventory accuracy by only executing when replen actually happened
+   * Check if replenishment is needed after a pick — returns guidance data only.
+   * Does NOT create any DB records. The caller uses the guidance to display
+   * info to the picker, then calls createAndExecuteReplen() if picker confirms.
+   */
+  async checkReplenNeeded(
+    productVariantId: number,
+    warehouseLocationId: number,
+  ): Promise<ReplenGuidance> {
+    const _tag = `[Replen checkReplenNeeded] variant=${productVariantId} loc=${warehouseLocationId}`;
+    const none: ReplenGuidance = { needed: false, stockout: false, sourceLocationId: null, sourceLocationCode: null, sourceVariantId: null, sourceVariantSku: null, sourceVariantName: null, pickVariantId: productVariantId, qtySourceUnits: 0, qtyTargetUnits: 0, replenMethod: "full_case", executionMode: "queue", taskNotes: "" };
+
+    // Get current level at the pick location
+    const level = await this.inventoryCore.getLevel(productVariantId, warehouseLocationId);
+    if (!level) { console.log(`${_tag} EXIT: no inventory level record`); return none; }
+
+    // Get the location metadata
+    const [location] = await this.db.select().from(warehouseLocations).where(eq(warehouseLocations.id, warehouseLocationId)).limit(1);
+    if (!location || location.isPickable !== 1) { console.log(`${_tag} EXIT: location not found or not pickable`); return none; }
+
+    // Only replenish variants assigned to this pick location
+    const [assignment] = await this.db.select({ id: productLocations.id }).from(productLocations)
+      .where(and(eq(productLocations.productVariantId, productVariantId), eq(productLocations.warehouseLocationId, warehouseLocationId))).limit(1);
+    if (!assignment) { console.log(`${_tag} EXIT: no product_locations assignment`); return none; }
+
+    // Get variant
+    const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
+    if (!variant) { console.log(`${_tag} EXIT: variant not found`); return none; }
+
+    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${level.variantQty} hierarchyLevel=${variant.hierarchyLevel}`);
+
+    // Load settings, rules, tier defaults
+    const whSettings = await this.getSettingsForWarehouse(location.warehouseId ?? undefined);
+
+    const locConfigVariant = await this.db.select().from(locationReplenConfig)
+      .where(and(eq(locationReplenConfig.warehouseLocationId, warehouseLocationId), eq(locationReplenConfig.productVariantId, productVariantId), eq(locationReplenConfig.isActive, 1))).limit(1);
+    const locConfigWide = locConfigVariant.length > 0 ? null : (await this.db.select().from(locationReplenConfig)
+      .where(and(eq(locationReplenConfig.warehouseLocationId, warehouseLocationId), isNull(locationReplenConfig.productVariantId), eq(locationReplenConfig.isActive, 1))).limit(1))[0] || null;
+    const locConfig = locConfigVariant[0] || locConfigWide;
+
+    const rule = await this.findRuleForVariant(productVariantId);
+    const tierDefault = await this.findTierDefaultForVariant(variant.hierarchyLevel, location.warehouseId ?? undefined);
+
+    const triggerValue = (locConfig?.triggerValue != null ? parseFloat(locConfig.triggerValue) : null)
+      ?? rule?.triggerValue ?? tierDefault?.triggerValue ?? null;
+    if (triggerValue == null || triggerValue < 0) { console.log(`${_tag} EXIT: no triggerValue configured`); return none; }
+
+    // Replen parameters
+    const maxQty = locConfig?.maxQty ?? rule?.maxQty ?? tierDefault?.maxQty ?? null;
+    const replenMethod = locConfig?.replenMethod ?? rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
+    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+    const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
+
+    // Threshold check
+    let taskNotes: string;
+    if (replenMethod === "pallet_drop") {
+      const velocity = await this.computeVariantVelocity(productVariantId);
+      if (velocity === 0) { console.log(`${_tag} EXIT: pallet_drop velocity=0`); return none; }
+      const coverageDays = level.variantQty / velocity;
+      if (coverageDays >= triggerValue) { console.log(`${_tag} EXIT: pallet_drop coverage ${coverageDays.toFixed(1)}d >= trigger ${triggerValue}d`); return none; }
+      taskNotes = `Auto-triggered after pick (pallet_drop): velocity=${velocity.toFixed(1)}/day, coverage=${coverageDays.toFixed(1)}d, trigger=${triggerValue}d`;
+    } else {
+      if (level.variantQty > triggerValue) { console.log(`${_tag} EXIT: onHand ${level.variantQty} > triggerValue ${triggerValue}`); return none; }
+      console.log(`${_tag} THRESHOLD MET: onHand=${level.variantQty} <= trigger=${triggerValue}, method=${replenMethod}`);
+      taskNotes = `Auto-triggered after pick: onHand=${level.variantQty}, triggerValue=${triggerValue}`;
+    }
+
+    // Dedup: if there's already an active task for this variant+location, don't prompt again
+    const [existingTask] = await this.db.select().from(replenTasks)
+      .where(and(eq(replenTasks.pickProductVariantId, productVariantId), eq(replenTasks.toLocationId, warehouseLocationId), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])))
+      .limit(1);
+    if (existingTask) { console.log(`${_tag} EXIT: dedup — existing task #${existingTask.id}`); return none; }
+
+    // Find source location
+    const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+    const sourceLocation = await this.findSourceLocation(
+      sourceVariantId ?? productVariantId, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
+    );
+
+    if (!sourceLocation) {
+      console.log(`${_tag} no source location found — stockout`);
+      return { ...none, needed: true, stockout: true, pickVariantId: productVariantId, replenMethod, taskNotes };
+    }
+
+    // Calculate quantities
+    const sourceVariant = sourceVariantId != null
+      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, sourceVariantId)).limit(1))[0] ?? variant
+      : variant;
+    const qtyNeeded = (maxQty ?? triggerValue * 2) - level.variantQty;
+    const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
+    const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
+
+    // Execution decision (for display — "Auto-Complete" vs "Manual" badge)
+    const execDecision = this.resolveAutoExecute(rule?.autoReplen ?? null, tierDefault?.autoReplen ?? null, whSettings, qtyTargetUnits);
+
+    console.log(`${_tag} GUIDANCE: from=${sourceLocation.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${replenMethod}`);
+
+    return {
+      needed: true,
+      stockout: false,
+      sourceLocationId: sourceLocation.id,
+      sourceLocationCode: sourceLocation.code,
+      sourceVariantId: sourceVariantId ?? null,
+      sourceVariantSku: sourceVariant.sku,
+      sourceVariantName: sourceVariant.name || sourceVariant.sku || null,
+      pickVariantId: productVariantId,
+      qtySourceUnits,
+      qtyTargetUnits,
+      replenMethod,
+      executionMode: execDecision.executionMode,
+      taskNotes,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5a-NEW2. ATOMIC CREATE + EXECUTE REPLEN (called after picker confirms)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Re-derive replen guidance from current state, create task as completed,
+   * and execute inventory movement — all in one shot.
+   * Returns null if replen is no longer needed or source stock is gone.
+   */
+  async createAndExecuteReplen(
+    pickVariantId: number,
+    toLocationId: number,
+    userId?: string,
+  ): Promise<{ task: ReplenTask; moved: number } | null> {
+    const _tag = `[Replen createAndExecute] variant=${pickVariantId} loc=${toLocationId}`;
+
+    // Re-derive guidance from current DB state (fresh, not stale)
+    const guidance = await this.checkReplenNeeded(pickVariantId, toLocationId);
+    if (!guidance.needed || guidance.stockout || !guidance.sourceLocationId) {
+      console.log(`${_tag} guidance says no replen needed or stockout — skipping`);
+      return null;
+    }
+
+    // Load required data for movement
+    const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1);
+    if (!variant) return null;
+
+    const sourceVariant = guidance.sourceVariantId
+      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, guidance.sourceVariantId)).limit(1))[0] ?? variant
+      : variant;
+
+    const [location] = await this.db.select().from(warehouseLocations).where(eq(warehouseLocations.id, toLocationId)).limit(1);
+    if (!location) return null;
+
+    const rule = await this.findRuleForVariant(pickVariantId);
+    const priority = rule?.priority ?? 5;
+    const autoReplen = rule?.autoReplen ?? 0;
+
+    // Create task as completed (the picker already physically did the replen)
+    const [task] = await this.db.insert(replenTasks).values({
+      replenRuleId: rule?.id ?? null,
+      fromLocationId: guidance.sourceLocationId,
+      toLocationId,
+      productId: rule?.productId ?? null,
+      sourceProductVariantId: guidance.sourceVariantId ?? pickVariantId,
+      pickProductVariantId: pickVariantId,
+      qtySourceUnits: guidance.qtySourceUnits,
+      qtyTargetUnits: guidance.qtyTargetUnits,
+      qtyCompleted: 0, // will be updated by executeTask
+      status: "pending", // executeTask transitions to completed
+      priority,
+      triggeredBy: "inline_pick",
+      executionMode: guidance.executionMode,
+      replenMethod: guidance.replenMethod,
+      autoReplen,
+      warehouseId: location.warehouseId ?? undefined,
+      notes: `${guidance.taskNotes}\nConfirmed by picker, executing atomically`,
+    } satisfies InsertReplenTask).returning();
+
+    console.log(`${_tag} created task ${task.id}, executing immediately...`);
+
+    // Execute the inventory movement
+    try {
+      const result = await this.executeTask(task.id, userId ?? "picker:confirmed");
+      console.log(`${_tag} task ${task.id} executed, moved ${result.moved} units`);
+      // Re-read task to get final state
+      const [completed] = await this.db.select().from(replenTasks).where(eq(replenTasks.id, task.id)).limit(1);
+      return { task: completed as ReplenTask, moved: result.moved };
+    } catch (err: any) {
+      console.error(`${_tag} executeTask failed for task ${task.id}:`, err?.message);
+      // Mark as blocked so it's visible in the queue for manual resolution
+      await this.db.update(replenTasks).set({
+        status: "blocked",
+        notes: `${task.notes}\nExecution failed: ${err?.message || "unknown error"}`,
+      }).where(eq(replenTasks.id, task.id));
+      // Re-throw so caller gets the real reason (not confused with "no source stock")
+      throw new Error(`execute_failed: ${err?.message || "unknown error"}`);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5a-NEW3. INFER UNRECORDED REPLEN FROM BIN COUNT SURPLUS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When a bin count reveals more inventory than the system expects and the
+   * picker did NOT confirm a replen, we infer that an unrecorded case break
+   * (or full-case move) happened at some prior point. This method:
+   *
+   * 1. Resolves the replen source for the variant+location (rule/tier config)
+   * 2. Calculates how many whole source units (cases) explain the surplus
+   * 3. Creates a completed replen task and executes the source deduction
+   * 4. Returns the number of pick-variant units attributed to the inferred replen
+   *
+   * The caller uses the return value to split the bin count adjustment into
+   * "explained by replen" and "unexplained cycle count variance".
+   *
+   * Returns null if no source is configured or stock is insufficient.
+   */
+  async inferUnrecordedReplen(
+    pickVariantId: number,
+    toLocationId: number,
+    surplusQty: number,
+    userId?: string,
+  ): Promise<{ task: ReplenTask; moved: number } | null> {
+    const _tag = `[Replen inferUnrecorded] variant=${pickVariantId} loc=${toLocationId} surplus=${surplusQty}`;
+
+    if (surplusQty <= 0) return null;
+
+    // --- Resolve source configuration (same as checkReplenNeeded but NO threshold check) ---
+
+    const [variant] = await this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1);
+    if (!variant) { console.log(`${_tag} EXIT: variant not found`); return null; }
+
+    const [location] = await this.db.select().from(warehouseLocations).where(eq(warehouseLocations.id, toLocationId)).limit(1);
+    if (!location) { console.log(`${_tag} EXIT: location not found`); return null; }
+
+    // Only infer for assigned pick locations
+    const [assignment] = await this.db.select({ id: productLocations.id }).from(productLocations)
+      .where(and(eq(productLocations.productVariantId, pickVariantId), eq(productLocations.warehouseLocationId, toLocationId))).limit(1);
+    if (!assignment) { console.log(`${_tag} EXIT: no product_locations assignment`); return null; }
+
+    const rule = await this.findRuleForVariant(pickVariantId);
+    const tierDefault = await this.findTierDefaultForVariant(variant.hierarchyLevel, location.warehouseId ?? undefined);
+
+    const replenMethod = rule?.replenMethod ?? tierDefault?.replenMethod ?? "full_case";
+    const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
+    const sourceVariantId = rule?.sourceProductVariantId ?? await this.resolveSourceVariant(variant, tierDefault);
+
+    // Find source location
+    const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
+    const sourceLocation = await this.findSourceLocation(
+      sourceVariantId ?? pickVariantId, location.warehouseId ?? undefined, sourceLocationType, location.parentLocationId, sourcePriority,
+    );
+
+    if (!sourceLocation) {
+      console.log(`${_tag} no source location found — cannot infer replen`);
+      return null;
+    }
+
+    // Resolve source variant
+    const sourceVariant = sourceVariantId != null
+      ? (await this.db.select().from(productVariants).where(eq(productVariants.id, sourceVariantId)).limit(1))[0] ?? variant
+      : variant;
+
+    // Calculate how many whole source units explain the surplus
+    // e.g., surplus=50 pick units, source case has 100 base units, pick variant has 1 base unit per variant
+    //   → 50 pick units = 50 base units → need ceil(50/100) = 1 case, which produces 100 pick units
+    // But we should only infer cases that fit within the surplus:
+    //   → floor(surplus / unitsPerCase) whole cases
+    const pickUnitsPerSourceUnit = replenMethod === "case_break" && sourceVariant.id !== variant.id
+      ? Math.floor(sourceVariant.unitsPerVariant / variant.unitsPerVariant)
+      : 1;
+
+    if (pickUnitsPerSourceUnit <= 0) {
+      console.log(`${_tag} EXIT: cannot compute pick units per source unit`);
+      return null;
+    }
+
+    // Always break whole cases — ceil because any surplus implies at least one
+    // case was broken. The remainder (case units minus what picker counted)
+    // gets reconciled as cycle count variance by the caller.
+    const wholeCases = Math.ceil(surplusQty / pickUnitsPerSourceUnit);
+
+    const qtySourceUnits = wholeCases;
+    const qtyTargetUnits = wholeCases * pickUnitsPerSourceUnit;
+
+    console.log(`${_tag} INFERRED: ${qtySourceUnits} source units from ${sourceLocation.code} → ${qtyTargetUnits} pick units, method=${replenMethod}`);
+
+    // Create task as pending (executeTask will transition to completed)
+    const [task] = await this.db.insert(replenTasks).values({
+      replenRuleId: rule?.id ?? null,
+      fromLocationId: sourceLocation.id,
+      toLocationId,
+      productId: rule?.productId ?? null,
+      sourceProductVariantId: sourceVariant.id,
+      pickProductVariantId: pickVariantId,
+      qtySourceUnits,
+      qtyTargetUnits,
+      qtyCompleted: 0,
+      status: "pending",
+      priority: rule?.priority ?? 5,
+      triggeredBy: "inferred_bin_count",
+      executionMode: "auto",
+      replenMethod,
+      autoReplen: rule?.autoReplen ?? 0,
+      warehouseId: location.warehouseId ?? undefined,
+      notes: `Inferred from bin count: surplus=${surplusQty}, attributed=${qtyTargetUnits} (${qtySourceUnits} source units from ${sourceLocation.code})`,
+    } satisfies InsertReplenTask).returning();
+
+    console.log(`${_tag} created inferred task ${task.id}, executing...`);
+
+    try {
+      const result = await this.executeTask(task.id, userId ?? "system:inferred_replen");
+      console.log(`${_tag} task ${task.id} executed, moved ${result.moved} units`);
+      const [completed] = await this.db.select().from(replenTasks).where(eq(replenTasks.id, task.id)).limit(1);
+      return { task: completed as ReplenTask, moved: result.moved };
+    } catch (err: any) {
+      console.error(`${_tag} executeTask failed for task ${task.id}:`, err?.message);
+      await this.db.update(replenTasks).set({
+        status: "blocked",
+        notes: `${task.notes}\nExecution failed: ${err?.message || "unknown error"}`,
+      }).where(eq(replenTasks.id, task.id));
+      // Don't throw — the caller will still do the cycle count for the full surplus
+      return null;
+    }
+  }
+
+  /**
+   * @deprecated Use checkReplenNeeded() + createAndExecuteReplen() instead.
+   * Kept for backward compatibility — scheduled replen uses checkThresholds() which is separate.
    */
   async confirmPickerReplen(
     taskId: number,

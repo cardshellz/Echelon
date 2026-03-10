@@ -46,6 +46,9 @@ type InventoryCore = {
 
 type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
+  checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
+  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
+  inferUnrecordedReplen: (pickVariantId: number, toLocationId: number, surplusQty: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
 };
 
@@ -114,6 +117,9 @@ export type BinCountResult = {
   adjustment: number;
   replenTriggered: boolean;
   replenTaskStatus: string | null;
+  replenFailReason: string | null;
+  inferredReplen: boolean; // true if system inferred an unrecorded case break from surplus
+  inferredReplenMoved: number | null; // units attributed to inferred replen
 };
 
 export type PickQueueOrder = any; // Pass-through type from storage
@@ -269,40 +275,27 @@ class PickingService {
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
 
-        // Await replen check (need result for picker UI — no longer fire-and-forget)
-        const replenTask = await this.replenishment
-          .checkAndTriggerAfterPick(deductResult.productVariantId, deductResult.locationId)
-          .catch((err: any) => { console.warn("[Replen] trigger failed:", err.message); return null; });
+        // Guidance-only replen check — NO task created, just display info for picker
+        const replenGuidance = await this.replenishment
+          .checkReplenNeeded(deductResult.productVariantId, deductResult.locationId)
+          .catch((err: any) => { console.warn("[Replen] guidance check failed:", err.message); return null; });
 
-        if (replenTask) {
+        if (replenGuidance?.needed) {
           inventoryCtx.replen.triggered = true;
-          inventoryCtx.replen.taskId = replenTask.id;
-          inventoryCtx.replen.taskStatus = replenTask.status;
-          inventoryCtx.replen.autoExecuted = replenTask.status === "completed";
-          inventoryCtx.replen.stockout = replenTask.status === "blocked";
-          inventoryCtx.binCountNeeded = true;
-
-          // Populate replen guidance info for picker
-          if (replenTask.fromLocationId) {
-            const allLocs = await this.storage.getAllWarehouseLocations();
-            const sourceLoc = allLocs.find(l => l.id === replenTask.fromLocationId);
-            inventoryCtx.replen.sourceLocationCode = sourceLoc?.code || null;
-          }
-          if (replenTask.sourceProductVariantId) {
-            const sourceVariant = await this.storage.getProductVariantById(replenTask.sourceProductVariantId);
-            if (sourceVariant) {
-              inventoryCtx.replen.sourceVariantSku = sourceVariant.sku;
-              inventoryCtx.replen.sourceVariantName = sourceVariant.name || sourceVariant.sku;
-            }
-          }
-          inventoryCtx.replen.qtyToMove = replenTask.qtyTargetUnits || replenTask.qtySourceUnits || null;
-
-          // If replen auto-executed, re-read inventory to show actual post-replen quantity
-          if (replenTask.status === "completed") {
-            const updatedLevel = await this.inventoryCore.getLevel(deductResult.productVariantId, deductResult.locationId);
-            inventoryCtx.systemQtyAfter = updatedLevel?.variantQty ?? 0;
-          }
+          inventoryCtx.replen.taskId = null; // no task created yet
+          inventoryCtx.replen.taskStatus = null;
+          inventoryCtx.replen.autoExecuted = false;
+          inventoryCtx.replen.stockout = replenGuidance.stockout;
+          inventoryCtx.replen.sourceLocationCode = replenGuidance.sourceLocationCode;
+          inventoryCtx.replen.sourceVariantSku = replenGuidance.sourceVariantSku;
+          inventoryCtx.replen.sourceVariantName = replenGuidance.sourceVariantName;
+          inventoryCtx.replen.qtyToMove = replenGuidance.qtyTargetUnits || null;
         }
+
+        // Always prompt bin count after a successful pick — even if replen
+        // threshold wasn't met, the picker may have already physically
+        // replenished (e.g., broke a case before picking the remaining qty)
+        inventoryCtx.binCountNeeded = true;
 
       } else if (!deductResult.success) {
         // Deduction FAILED — system inventory is wrong.
@@ -680,6 +673,9 @@ class PickingService {
       adjustment,
       replenTriggered: !!replenTask,
       replenTaskStatus: replenTask?.status || null,
+      replenFailReason: null,
+      inferredReplen: false,
+      inferredReplenMoved: null,
     };
   }
 
@@ -727,7 +723,147 @@ class PickingService {
       }
     }
 
-    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null };
+    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null, replenFailReason: null, inferredReplen: false, inferredReplenMoved: null };
+  }
+
+  // -------------------------------------------------------------------------
+  // 7b. CONSOLIDATED BIN COUNT (replaces separate replen confirm + bin count)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Handles both replen confirmation and bin count in a single atomic call.
+   * If didReplen=true: creates + executes replen task, then reconciles bin count.
+   * If didReplen=false: just reconciles bin count, no replen task created.
+   */
+  async handleBinCount(params: {
+    sku: string;
+    locationId: number;
+    binCount: number;
+    didReplen: boolean;
+    userId?: string;
+  }): Promise<BinCountResult> {
+    const { sku, locationId, binCount, didReplen, userId } = params;
+
+    const variant = await this.storage.getProductVariantBySku(sku);
+    if (!variant) {
+      throw new Error(`No variant found for SKU ${sku}`);
+    }
+
+    let replenResult: { moved: number } | null = null;
+    let replenFailReason: string | null = null;
+
+    // Step 1: If picker confirmed replen, create+execute the task atomically
+    if (didReplen) {
+      try {
+        replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
+        if (replenResult) {
+          console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
+        } else {
+          replenFailReason = "no_source_stock";
+          console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
+        }
+      } catch (err: any) {
+        const msg = err?.message || "unknown_error";
+        replenFailReason = msg.startsWith("execute_failed:") ? "execute_failed" : msg;
+        console.warn(`[BinCount] replen failed (will still do bin count): ${msg}`);
+      }
+    }
+
+    // Step 2: Re-read current system qty (after pick deduction + replen if it happened)
+    const level = await this.inventoryCore.getLevel(variant.id, locationId);
+    const systemQty = level?.variantQty ?? 0;
+
+    // Step 3: If there's a surplus and picker didn't explicitly confirm replen,
+    // infer that an unrecorded case break / replen occurred. This keeps the
+    // source bin accurate instead of dumping everything into a blind cycle count.
+    let inferredReplen: { moved: number } | null = null;
+    const surplus = binCount - systemQty;
+
+    if (!didReplen && surplus > 0) {
+      try {
+        inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
+        if (inferredReplen) {
+          console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
+          // Re-read system qty after the inferred replen credited the destination
+          // (executeTask already adjusted the level)
+        } else {
+          console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
+        }
+      } catch (err: any) {
+        console.warn(`[BinCount] inferred replen failed:`, err?.message);
+      }
+    }
+
+    // Step 4: Re-read system qty again (reflects: pick deduction + explicit replen + inferred replen)
+    const postLevel = await this.inventoryCore.getLevel(variant.id, locationId);
+    const postSystemQty = postLevel?.variantQty ?? systemQty;
+    const adjustment = binCount - postSystemQty;
+
+    if (adjustment !== 0 && postLevel) {
+      // Remaining gap = unexplained variance (cycle count)
+      await this.inventoryCore.adjustLevel(postLevel.id, { variantQty: adjustment });
+      await this.inventoryCore.logTransaction({
+        productVariantId: variant.id,
+        toLocationId: locationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: adjustment,
+        variantQtyBefore: postSystemQty,
+        variantQtyAfter: binCount,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
+        referenceId: `${sku}:${locationId}`,
+        notes: didReplen
+          ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
+          : inferredReplen
+            ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
+            : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`,
+        userId: userId || null,
+      });
+    } else {
+      // No remaining adjustment — log for audit trail
+      await this.inventoryCore.logTransaction({
+        productVariantId: variant.id,
+        toLocationId: locationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: 0,
+        variantQtyBefore: postSystemQty,
+        variantQtyAfter: binCount,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
+        referenceId: `${sku}:${locationId}`,
+        notes: inferredReplen
+          ? `Bin count verified after inferred replen: system=${postSystemQty}, actual=${binCount} (match). Inferred replen moved ${inferredReplen.moved} units from source.`
+          : `Bin count verified: system=${postSystemQty}, actual=${binCount} (match)${didReplen ? `, replen moved=${replenResult?.moved ?? 'failed'}` : ''}`,
+        userId: userId || null,
+      });
+    }
+
+    // Step 5: If picker said NO replen (and no inferred replen), cancel orphaned pending tasks
+    if (!didReplen && !inferredReplen) {
+      const existingTasks = await this.storage.getPendingReplenTasksForLocation(locationId);
+      for (const task of existingTasks) {
+        if (task.pickProductVariantId === variant.id && (task.status === "pending" || task.status === "blocked")) {
+          await this.storage.updateReplenTask(task.id, {
+            status: "cancelled",
+            notes: `${task.notes || ""}\nCancelled: picker confirmed no replen needed (actual qty=${binCount})`,
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      systemQtyBefore: systemQty,
+      actualBinQty: binCount,
+      adjustment,
+      replenTriggered: !!replenResult || !!inferredReplen,
+      replenTaskStatus: replenResult ? "completed" : inferredReplen ? "completed" : null,
+      replenFailReason: didReplen && !replenResult ? replenFailReason : null,
+      inferredReplen: !!inferredReplen,
+      inferredReplenMoved: inferredReplen?.moved ?? null,
+    };
   }
 
   // -------------------------------------------------------------------------
