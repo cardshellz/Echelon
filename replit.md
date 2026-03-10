@@ -113,6 +113,13 @@ Fully event-driven — replenishment triggers automatically on any inventory cha
 - `shortPickAction`: What happens when picker finds empty bin
 - `inlineReplenMaxUnits`: Threshold for hybrid mode
 
+### Mock Data Removal (Fix #8)
+All mock/demo data has been removed from the frontend:
+- **Picking.tsx**: Deleted `createSingleOrderQueue`, `createInitialQueue` mock data blocks (~110 lines), `handleResetDemo` function, and all `isRealItem`/`isRealOrder` branching (22+ occurrences). All picking flows now use API paths exclusively. Queue initializes empty.
+- **Dashboard.tsx**: Replaced mock chart data and mock inventory table with empty state components.
+- **Dropship.tsx**: Replaced mock vendors and syncCatalog arrays with empty states.
+- **Note**: Batch picking mode queue has no API hydration (pre-existing limitation — was always mock-driven). Single mode is fully API-driven.
+
 ### Order Combining
 Allows grouping multiple orders to the same customer/address for efficient picking and shipping. The system:
 - Automatically detects orders with matching addresses using normalized address hashing (email + normalized street/city/state/zip)

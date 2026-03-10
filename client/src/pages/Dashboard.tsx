@@ -33,45 +33,7 @@ interface SyncHealth {
   needsAlert: boolean;
   alertMessage: string | null;
 }
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import {
-  Area,
-  AreaChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  BarChart,
-  Bar
-} from "recharts";
 
-// Mock Data
-const data = [
-  { name: "Mon", orders: 400, shipped: 240 },
-  { name: "Tue", orders: 300, shipped: 139 },
-  { name: "Wed", orders: 200, shipped: 980 },
-  { name: "Thu", orders: 278, shipped: 390 },
-  { name: "Fri", orders: 189, shipped: 480 },
-  { name: "Sat", orders: 239, shipped: 380 },
-  { name: "Sun", orders: 349, shipped: 430 },
-];
-
-const inventoryData = [
-  { sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02", qty: 45, status: "In Stock" },
-  { sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "B-12-04", qty: 12, status: "Low Stock" },
-  { sku: "PM-102-GRY", name: "Puma RS-X", location: "A-04-01", qty: 0, status: "Out of Stock" },
-  { sku: "NB-990-NVY", name: "New Balance 990", location: "C-09-02", qty: 89, status: "In Stock" },
-  { sku: "AS-200-BLU", name: "Asics Gel-Lyte", location: "B-03-05", qty: 3, status: "Low Stock" },
-];
 
 export default function Dashboard() {
   const { toast } = useToast();
@@ -236,55 +198,9 @@ export default function Dashboard() {
             <CardDescription className="text-xs md:text-sm">Daily order processing vs shipping volume</CardDescription>
           </CardHeader>
           <CardContent className="p-2 md:p-6 pt-0">
-            <div className="h-[200px] md:h-[300px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data}>
-                  <defs>
-                    <linearGradient id="colorOrders" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0}/>
-                    </linearGradient>
-                    <linearGradient id="colorShipped" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="hsl(var(--chart-2))" stopOpacity={0.3}/>
-                      <stop offset="95%" stopColor="hsl(var(--chart-2))" stopOpacity={0}/>
-                    </linearGradient>
-                  </defs>
-                  <XAxis 
-                    dataKey="name" 
-                    stroke="#888888" 
-                    fontSize={12} 
-                    tickLine={false} 
-                    axisLine={false} 
-                  />
-                  <YAxis 
-                    stroke="#888888" 
-                    fontSize={12} 
-                    tickLine={false} 
-                    axisLine={false} 
-                    tickFormatter={(value) => `${value}`} 
-                  />
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '6px', borderColor: 'hsl(var(--border))' }}
-                  />
-                  <Area 
-                    type="monotone" 
-                    dataKey="orders" 
-                    stroke="hsl(var(--primary))" 
-                    strokeWidth={2}
-                    fillOpacity={1} 
-                    fill="url(#colorOrders)" 
-                  />
-                  <Area 
-                    type="monotone" 
-                    dataKey="shipped" 
-                    stroke="hsl(var(--chart-2))" 
-                    strokeWidth={2}
-                    fillOpacity={1} 
-                    fill="url(#colorShipped)" 
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
+            <div className="h-[200px] md:h-[300px] w-full flex flex-col items-center justify-center text-muted-foreground">
+              <Truck className="h-8 w-8 mb-2 opacity-20" />
+              <p className="text-xs md:text-sm" data-testid="text-chart-empty">No fulfillment data available yet</p>
             </div>
           </CardContent>
         </Card>
@@ -302,36 +218,9 @@ export default function Dashboard() {
                 <TabsTrigger value="moving_fast" className="text-xs md:text-sm min-h-[36px]">Fast Moving</TabsTrigger>
               </TabsList>
               <TabsContent value="low_stock" className="mt-0">
-                <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="text-xs md:text-sm py-2">SKU</TableHead>
-                      <TableHead className="text-xs md:text-sm py-2">Qty</TableHead>
-                      <TableHead className="text-xs md:text-sm py-2 text-right">Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {inventoryData.map((item) => (
-                      <TableRow key={item.sku}>
-                        <TableCell className="font-mono-sku text-[10px] md:text-xs font-medium py-2">{item.sku}</TableCell>
-                        <TableCell className="text-xs md:text-sm py-2">{item.qty}</TableCell>
-                        <TableCell className="text-right py-2">
-                          <Badge 
-                            variant="secondary" 
-                            className={`text-[10px] md:text-xs ${
-                              item.status === "Out of Stock" ? "bg-rose-100 text-rose-700 hover:bg-rose-100 dark:bg-rose-900/30 dark:text-rose-400" :
-                              item.status === "Low Stock" ? "bg-amber-100 text-amber-700 hover:bg-amber-100 dark:bg-amber-900/30 dark:text-amber-400" :
-                              "bg-emerald-100 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/30 dark:text-emerald-400"
-                            }`}
-                          >
-                            {item.status}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                <div className="flex flex-col items-center justify-center h-36 md:h-48 text-muted-foreground text-xs md:text-sm">
+                  <Package className="h-6 w-6 md:h-8 md:w-8 mb-2 opacity-20" />
+                  <span data-testid="text-low-stock-empty">No low stock alerts</span>
                 </div>
               </TabsContent>
               <TabsContent value="moving_fast" className="mt-0">

@@ -339,116 +339,6 @@ interface SingleOrder {
   isCombinedGroup?: boolean; // True if this entry represents a combined group
 }
 
-const createSingleOrderQueue = (): SingleOrder[] => [
-  {
-    id: "ORD-1024",
-    orderNumber: "#1024",
-    customer: "Alice Freeman",
-    priority: "high",
-    age: "15m",
-    status: "ready",
-    assignee: null,
-    items: [
-      { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
-      { id: 4, sku: "PM-102-GRY", name: "Puma RS-X", location: "B-12-04-D", qty: 1, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  {
-    id: "ORD-1025",
-    orderNumber: "#1025",
-    customer: "Bob Smith",
-    priority: "rush",
-    age: "8m",
-    status: "ready",
-    assignee: null,
-    items: [
-      { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 0, status: "pending", orderId: "#1025", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  {
-    id: "ORD-1026",
-    orderNumber: "#1026",
-    customer: "Charlie Davis",
-    priority: "normal",
-    age: "1h 5m",
-    status: "ready",
-    assignee: null,
-    items: [
-      { id: 3, sku: "NB-990-NVY", name: "New Balance 990v5", location: "B-12-01-C", qty: 3, picked: 0, status: "pending", orderId: "#1026", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  {
-    id: "ORD-1030",
-    orderNumber: "#1030",
-    customer: "Diana Prince",
-    priority: "normal",
-    age: "45m",
-    status: "ready",
-    assignee: null,
-    items: [
-      { id: 5, sku: "NK-AIR-RED", name: "Nike Air Force 1 Red", location: "A-02-01-A", qty: 1, picked: 0, status: "pending", orderId: "#1030", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
-      { id: 6, sku: "AD-STN-BLK", name: "Adidas Stan Smith", location: "A-02-03-B", qty: 2, picked: 0, status: "pending", orderId: "#1030", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-];
-
-// Initial mock data for batch picking mode
-const createInitialQueue = (): PickBatch[] => [
-  { 
-    id: "BATCH-4921", 
-    orders: 3, 
-    priority: "high", 
-    age: "15m", 
-    zones: ["A", "B"], 
-    status: "ready", 
-    assignee: null,
-    items: [
-      { id: 1, sku: "NK-292-BLK", name: "Nike Air Max 90", location: "A-01-02-B", qty: 2, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
-      { id: 2, sku: "AD-550-WHT", name: "Adidas Ultraboost", location: "A-01-04-A", qty: 1, picked: 0, status: "pending", orderId: "#1025", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
-      { id: 3, sku: "NB-990-NVY", name: "New Balance 990v5", location: "B-12-01-C", qty: 3, picked: 0, status: "pending", orderId: "#1026", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
-      { id: 4, sku: "PM-102-GRY", name: "Puma RS-X", location: "B-12-04-D", qty: 1, picked: 0, status: "pending", orderId: "#1024", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  { 
-    id: "BATCH-4918", 
-    orders: 2, 
-    priority: "rush", 
-    age: "8m", 
-    zones: ["A"], 
-    status: "ready", 
-    assignee: null,
-    items: [
-      { id: 5, sku: "NK-AIR-RED", name: "Nike Air Force 1 Red", location: "A-02-01-A", qty: 1, picked: 0, status: "pending", orderId: "#1030", image: "https://images.unsplash.com/photo-1542291026-7eec264c27ff?auto=format&fit=crop&w=100&q=80" },
-      { id: 6, sku: "AD-STN-BLK", name: "Adidas Stan Smith", location: "A-02-03-B", qty: 2, picked: 0, status: "pending", orderId: "#1031", image: "https://images.unsplash.com/photo-1551107696-a4b0c5a0d9a2?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  { 
-    id: "BATCH-4919", 
-    orders: 4, 
-    priority: "normal", 
-    age: "1h 5m", 
-    zones: ["B", "C"], 
-    status: "ready", 
-    assignee: null,
-    items: [
-      { id: 7, sku: "VN-OLD-BLK", name: "Vans Old Skool", location: "B-05-02-A", qty: 1, picked: 0, status: "pending", orderId: "#1032", image: "https://images.unsplash.com/photo-1525966222134-fcfa99b8ae77?auto=format&fit=crop&w=100&q=80" },
-      { id: 8, sku: "CV-CHK-WHT", name: "Converse Chuck Taylor", location: "B-05-04-C", qty: 2, picked: 0, status: "pending", orderId: "#1033", image: "https://images.unsplash.com/photo-1607522370275-f14206abe5d3?auto=format&fit=crop&w=100&q=80" },
-      { id: 9, sku: "RB-CL-TAN", name: "Reebok Classic", location: "C-01-01-A", qty: 1, picked: 0, status: "pending", orderId: "#1034", image: "https://images.unsplash.com/photo-1539185441755-769473a23570?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-  { 
-    id: "ORD-1035", 
-    orders: 1, 
-    priority: "normal", 
-    age: "45m", 
-    zones: ["C"], 
-    status: "ready", 
-    assignee: null,
-    items: [
-      { id: 10, sku: "SK-BLZ-BLU", name: "Skechers Blazer Blue", location: "C-03-02-B", qty: 1, picked: 0, status: "pending", orderId: "#1035", image: "https://images.unsplash.com/photo-1608231387042-66d1773070a5?auto=format&fit=crop&w=100&q=80" },
-    ]
-  },
-];
 
 // Sound and haptic imports from shared library
 import { 
@@ -691,11 +581,8 @@ export default function Picking() {
     return result;
   })();
   
-  // Use API data if available, otherwise fall back to mock data
-  const hasApiData = ordersFromApi.length > 0 || apiOrders.length === 0;
-  
-  // Core state - Batch mode (mock data for batch mode still)
-  const [queue, setQueue] = useState<PickBatch[]>(createInitialQueue);
+  // Core state - Batch mode
+  const [queue, setQueue] = useState<PickBatch[]>([]);
   // Core state - Single mode (local copy for active picking session)
   const [localSingleQueue, setLocalSingleQueue] = useState<SingleOrder[]>([]);
   
@@ -718,7 +605,7 @@ export default function Picking() {
         );
         return [...merged, ...completedLocalOrders];
       })()
-    : localSingleQueue.length > 0 ? localSingleQueue : createSingleOrderQueue();
+    : localSingleQueue;
 
   // Sync completed orders from API into local state to persist across refetches
   useEffect(() => {
@@ -1357,47 +1244,31 @@ export default function Picking() {
         return;
       }
       
-      // For single mode, claim the order via API if it's a real order (numeric id)
       const numericId = parseInt(id);
-      const isRealOrder = !isNaN(numericId) && ordersFromApi.some(o => o.id === id);
       
-      if (isRealOrder) {
-        try {
-          await claimMutation.mutateAsync({ orderId: numericId });
-          // Success - copy the order to local state for picking session
-          const orderToPick = ordersFromApi.find(o => o.id === id);
-          if (orderToPick) {
-            setLocalSingleQueue(prev => {
-              // Add or update this order in local state
-              const existing = prev.find(o => o.id === id);
-              if (existing) {
-                return prev.map(o => o.id === id ? { ...orderToPick, status: "in_progress" as const, assignee: "You" } : o);
-              } else {
-                return [...prev, { ...orderToPick, status: "in_progress" as const, assignee: "You" }];
-              }
-            });
-          }
-          setActiveOrderId(id);
-          setCurrentItemIndex(0);
-          setView("picking");
-          triggerHaptic("medium");
-        } catch (error: any) {
-          console.error("Failed to claim order:", error);
-          // Order was claimed by someone else - refresh the queue
-          setClaimError("This order was just claimed by another picker. The queue has been refreshed.");
-          refetch();
-          triggerHaptic("heavy");
-          playSound("error");
+      try {
+        await claimMutation.mutateAsync({ orderId: numericId });
+        const orderToPick = ordersFromApi.find(o => o.id === id);
+        if (orderToPick) {
+          setLocalSingleQueue(prev => {
+            const existing = prev.find(o => o.id === id);
+            if (existing) {
+              return prev.map(o => o.id === id ? { ...orderToPick, status: "in_progress" as const, assignee: "You" } : o);
+            } else {
+              return [...prev, { ...orderToPick, status: "in_progress" as const, assignee: "You" }];
+            }
+          });
         }
-      } else {
-        // Mock order - proceed without API call
-        setSingleQueue(prev => prev.map(o => 
-          o.id === id ? { ...o, status: "in_progress" as const, assignee: "You" } : o
-        ));
         setActiveOrderId(id);
         setCurrentItemIndex(0);
         setView("picking");
         triggerHaptic("medium");
+      } catch (error: any) {
+        console.error("Failed to claim order:", error);
+        setClaimError("This order was just claimed by another picker. The queue has been refreshed.");
+        refetch();
+        triggerHaptic("heavy");
+        playSound("error");
       }
     }
   };
@@ -1513,16 +1384,12 @@ export default function Picking() {
     const newPicked = currentItem.picked + qty;
     const newStatus: ItemStatus = newPicked >= currentItem.qty ? "completed" : "in_progress";
     
-    // Sync with API if this is a real order item (all modes)
-    const isRealItem = !isNaN(currentItem.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({
-        itemId: currentItem.id,
-        status: newStatus, 
-        pickedQuantity: newPicked,
-        pickMethod: "scan"
-      });
-    }
+    updateItemMutation.mutate({
+      itemId: currentItem.id,
+      status: newStatus, 
+      pickedQuantity: newPicked,
+      pickMethod: "scan"
+    });
     
     let orderCompleted = false;
     
@@ -1570,23 +1437,7 @@ export default function Picking() {
     setPickQty(1);
 
     if (orderCompleted) {
-      if (isRealItem) {
-        // Defer completion until onSuccess — we don't yet know if binCountNeeded will block it
-        orderCompletedPendingRef.current = true;
-      } else {
-        // Demo/mock mode — no API call in flight, complete immediately
-        setTimeout(() => {
-          if (pickingMode === "batch") {
-            setActiveBatchId(null);
-          } else {
-            setActiveOrderId(null);
-          }
-          playSound("complete");
-          triggerHaptic("heavy");
-          setCurrentItemIndex(0);
-          setView("queue");
-        }, 500);
-      }
+      orderCompletedPendingRef.current = true;
     } else {
       setTimeout(() => {
         advanceToNext();
@@ -1652,17 +1503,13 @@ export default function Picking() {
     
     const shortQty = parseInt(shortPickQty) || 0;
     
-    // Sync with API if this is a real order item (all modes)
-    const isRealItem = !isNaN(targetItem.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({
-        itemId: targetItem.id,
-        status: "short" as ItemStatus, 
-        pickedQuantity: shortQty,
-        shortReason: shortPickReason || undefined,
-        pickMethod: "short"
-      });
-    }
+    updateItemMutation.mutate({
+      itemId: targetItem.id,
+      status: "short" as ItemStatus, 
+      pickedQuantity: shortQty,
+      shortReason: shortPickReason || undefined,
+      pickMethod: "short"
+    });
     
     let orderCompleted = false;
     
@@ -1713,16 +1560,7 @@ export default function Picking() {
     setShortPickListIndex(null);
     
     if (orderCompleted) {
-      if (isRealItem) {
-        // Defer navigation — let updateItemMutation.onSuccess handle it
-        // after checking binCountPendingRef (avoids race with bin count dialog)
-        orderCompletedPendingRef.current = true;
-      } else {
-        setTimeout(() => {
-          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
-          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
-        }, 500);
-      }
+      orderCompletedPendingRef.current = true;
     } else if (!isListView) {
       setTimeout(() => {
         advanceToNext();
@@ -1862,29 +1700,17 @@ export default function Picking() {
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 2000);
     
-    // Sync with API (all modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({
-        itemId: item.id,
-        status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
-        pickedQuantity: newPicked,
-        pickMethod: "scan"
-      });
-    }
+    updateItemMutation.mutate({
+      itemId: item.id,
+      status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
+      pickedQuantity: newPicked,
+      pickMethod: "scan"
+    });
     
-    // Helper to check completion — defers navigation to updateItemMutation.onSuccess for real items
     const checkAndHandleCompletion = (items: typeof activeWork.items) => {
       const allDone = items.every(it => it.status === "completed" || it.status === "short");
       if (allDone) {
-        if (isRealItem) {
-          orderCompletedPendingRef.current = true;
-        } else {
-          setTimeout(() => {
-            if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
-            playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
-          }, 500);
-        }
+        orderCompletedPendingRef.current = true;
       }
       return allDone;
     };
@@ -1944,17 +1770,12 @@ export default function Picking() {
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 2000);
     
-    // Sync with API (all modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      console.log("[PICK] Sending API update for item:", item.id);
-      updateItemMutation.mutate({
-        itemId: item.id,
-        status: "completed" as ItemStatus,
-        pickedQuantity: qty,
-        pickMethod: "pick_all"
-      });
-    }
+    updateItemMutation.mutate({
+      itemId: item.id,
+      status: "completed" as ItemStatus,
+      pickedQuantity: qty,
+      pickMethod: "pick_all"
+    });
     
     let orderCompleted = false;
     
@@ -1992,16 +1813,7 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      if (isRealItem) {
-        // Defer navigation — let updateItemMutation.onSuccess handle it
-        // after checking binCountPendingRef (avoids race with bin count dialog)
-        orderCompletedPendingRef.current = true;
-      } else {
-        setTimeout(() => {
-          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
-          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
-        }, 500);
-      }
+      orderCompletedPendingRef.current = true;
     }
   };
 
@@ -2074,16 +1886,12 @@ export default function Picking() {
     playSound("error");
     triggerHaptic("medium");
     
-    // Sync with API (all modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({
-        itemId: item.id,
-        status: "short" as ItemStatus,
-        pickedQuantity: 0,
-        pickMethod: "short"
-      });
-    }
+    updateItemMutation.mutate({
+      itemId: item.id,
+      status: "short" as ItemStatus,
+      pickedQuantity: 0,
+      pickMethod: "short"
+    });
     
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
@@ -2141,16 +1949,12 @@ export default function Picking() {
     setLastScannedItemId(item.id);
     setTimeout(() => setLastScannedItemId(null), 1000);
     
-    // Sync with API for real items (both single and batch modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
-        status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
-        pickedQuantity: newPicked,
-        pickMethod: "manual"
-      });
-    }
+    updateItemMutation.mutate({ 
+      itemId: item.id, 
+      status: isItemComplete ? "completed" as ItemStatus : "in_progress" as ItemStatus, 
+      pickedQuantity: newPicked,
+      pickMethod: "manual"
+    });
     
     let orderCompleted = false;
     
@@ -2183,16 +1987,7 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      if (isRealItem) {
-        // Defer navigation — let updateItemMutation.onSuccess handle it
-        // after checking binCountPendingRef (avoids race with bin count dialog)
-        orderCompletedPendingRef.current = true;
-      } else {
-        setTimeout(() => {
-          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
-          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
-        }, 500);
-      }
+      orderCompletedPendingRef.current = true;
     }
   };
 
@@ -2208,16 +2003,12 @@ export default function Picking() {
     
     triggerHaptic("light");
     
-    // Sync with API for real items (both single and batch modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
-        status: newStatus, 
-        pickedQuantity: newPicked,
-        pickMethod: "manual"
-      });
-    }
+    updateItemMutation.mutate({ 
+      itemId: item.id, 
+      status: newStatus, 
+      pickedQuantity: newPicked,
+      pickMethod: "manual"
+    });
     
     if (pickingMode === "batch") {
       setQueue(prev => prev.map(batch => {
@@ -2268,16 +2059,12 @@ export default function Picking() {
     const isItemComplete = newPicked >= item.qty;
     const newStatus: ItemStatus = newPicked === 0 ? "pending" : isItemComplete ? "completed" : "in_progress";
     
-    // Sync with API for real items (both single and batch modes)
-    const isRealItem = !isNaN(item.id) && ordersFromApi.length > 0;
-    if (isRealItem) {
-      updateItemMutation.mutate({ 
-        itemId: item.id, 
-        status: newStatus, 
-        pickedQuantity: newPicked,
-        pickMethod: "manual"
-      });
-    }
+    updateItemMutation.mutate({ 
+      itemId: item.id, 
+      status: newStatus, 
+      pickedQuantity: newPicked,
+      pickMethod: "manual"
+    });
     
     let orderCompleted = false;
     
@@ -2310,16 +2097,7 @@ export default function Picking() {
     }
     
     if (orderCompleted) {
-      if (isRealItem) {
-        // Defer navigation — let updateItemMutation.onSuccess handle it
-        // after checking binCountPendingRef (avoids race with bin count dialog)
-        orderCompletedPendingRef.current = true;
-      } else {
-        setTimeout(() => {
-          if (pickingMode === "batch") { setActiveBatchId(null); } else { setActiveOrderId(null); }
-          playSound("complete"); triggerHaptic("heavy"); setCurrentItemIndex(0); setView("queue");
-        }, 500);
-      }
+      orderCompletedPendingRef.current = true;
     }
 
     setEditQtyOpen(false);
@@ -2384,24 +2162,17 @@ export default function Picking() {
     // BUT only if the picker hasn't started picking anything yet
     if (activeOrderId && pickingMode === "single") {
       const subOrderIds = getSubOrderIds(activeOrderId);
-      const isRealOrder = subOrderIds.length > 0 && ordersFromApi.some(o => o.id === activeOrderId);
+      const activeOrder = singleQueue.find(o => o.id === activeOrderId);
+      const hasPickedItems = activeOrder?.items.some(item => item.picked > 0 || item.status === "completed" || item.status === "short");
 
-      if (isRealOrder) {
-        // Check if any items have been picked
-        const activeOrder = singleQueue.find(o => o.id === activeOrderId);
-        const hasPickedItems = activeOrder?.items.some(item => item.picked > 0 || item.status === "completed" || item.status === "short");
-
-        if (!hasPickedItems) {
-          // No items picked yet - release the order(s) so another picker can grab them
-          try {
-            for (const subId of subOrderIds) {
-              await releaseMutation.mutateAsync({ orderId: subId });
-            }
-          } catch (error) {
-            console.error("Failed to release order:", error);
+      if (!hasPickedItems && subOrderIds.length > 0) {
+        try {
+          for (const subId of subOrderIds) {
+            await releaseMutation.mutateAsync({ orderId: subId });
           }
+        } catch (error) {
+          console.error("Failed to release order:", error);
         }
-        // If items have been picked, keep the order claimed (in progress)
       }
     }
     
@@ -2443,16 +2214,6 @@ export default function Picking() {
     }
   };
   
-  // Reset demo (only for mock data mode)
-  const handleResetDemo = () => {
-    setQueue(createInitialQueue());
-    setLocalSingleQueue([]);
-    setView("queue");
-    setActiveBatchId(null);
-    setActiveOrderId(null);
-    setCurrentItemIndex(0);
-    setScanInput("");
-  };
   
   // Toggle fullscreen
   const toggleFullscreen = () => {
