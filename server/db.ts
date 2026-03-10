@@ -212,6 +212,21 @@ export async function runStartupMigrations(): Promise<void> {
       END $$;
     `);
 
+    // Performance indexes on high-traffic query columns
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items(sku)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_product_variant_id ON inventory_levels(product_variant_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_warehouse_location_id ON inventory_levels(warehouse_location_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_pv_wl ON inventory_levels(product_variant_id, warehouse_location_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_order_id ON picking_logs(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_sku ON picking_logs(sku)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_timestamp ON picking_logs(timestamp)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_transactions_product_variant_id ON inventory_transactions(product_variant_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_transactions_order_id ON inventory_transactions(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_orders_warehouse_status ON orders(warehouse_status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_orders_source_table_id ON orders(source_table_id)`);
+    console.log("Checked performance indexes");
+
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
       DELETE FROM inventory_levels il
