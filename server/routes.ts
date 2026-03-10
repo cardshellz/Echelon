@@ -5,13 +5,9 @@ import { eq, inArray, sql, isNull, and, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import { insertProductLocationSchema, updateProductLocationSchema, insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertProductSchema, insertProductVariantSchema, insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, productLocations, productVariants, products, productAssets, channels, channelListings, inventoryLevels, inventoryTransactions, orders, orderItems, itemStatusEnum, shipments, fulfillmentRoutingRules, warehouses, warehouseLocations, warehouseTypeEnum, inventorySourceTypeEnum, routingMatchTypeEnum, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes } from "@shared/schema";
-import { createOrderCombiningService } from "./services/order-combining";
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "./shopify";
-import { createProductImportService } from "./services/product-import";
-import { createChannelProductPushService } from "./services/channel-product-push";
-import { createBinAssignmentService } from "./services/bin-assignment";
-import { createPurchasingService, PurchasingError } from "./services/purchasing";
-import { createShipmentTrackingService, ShipmentTrackingError } from "./services/shipment-tracking";
+import { PurchasingError } from "./services/purchasing";
+import { ShipmentTrackingError } from "./services/shipment-tracking";
 import * as apLedger from "./services/ap-ledger";
 import { renderPoHtml } from "./services/po-document";
 import * as emailService from "./services/email";
@@ -24,12 +20,6 @@ import multer from "multer";
 import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons, getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles, hasPermission } from "./rbac";
 
 const upload = multer({ storage: multer.memoryStorage() });
-const orderCombining = createOrderCombiningService(db);
-const productImport = createProductImportService();
-const channelProductPush = createChannelProductPushService(db);
-const binAssignment = createBinAssignmentService(db, storage);
-const purchasing = createPurchasingService(db, storage);
-const shipmentTracking = createShipmentTrackingService(db, storage);
 
 // Permission checking middleware
 function requirePermission(resource: string, action: string) {
@@ -111,7 +101,15 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
+  const {
+    orderCombining,
+    productImport,
+    channelProductPush,
+    binAssignment,
+    purchasing,
+    shipmentTracking,
+  } = app.locals.services as any;
+
   // Seed RBAC permissions and roles on startup
   await seedRBAC();
   

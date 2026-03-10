@@ -6,7 +6,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
-import { setupOrderSyncListener } from "./orderSyncListener";
+import { setupOrderSyncListener, initOrderSyncServices } from "./orderSyncListener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { warehouseSettings } from "@shared/schema";
@@ -227,6 +227,7 @@ function startChannelSyncScheduler(services: ReturnType<typeof createServices>, 
   // Create WMS service container and attach to app for route handlers
   const services = createServices(db);
   app.locals.services = services;
+  initOrderSyncServices(services);
 
   // Start scheduled replenishment sync (checks warehouse settings for interval)
   startReplenScheduler(services, db);
