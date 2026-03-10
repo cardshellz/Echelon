@@ -680,6 +680,10 @@ DEF-456,25,,,5.00,,Location TBD`;
   });
 
   // Location search for add line dialog (local filter, no API call needed)
+  const warehouseFilteredLocations = selectedReceipt?.warehouseId
+    ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId)
+    : locations;
+
   const handleLocationSearch = (query: string) => {
     setLocationSearch(query);
     if (query.length < 1) {
@@ -687,7 +691,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       setShowLocationDropdown(false);
       return;
     }
-    const filtered = locations.filter(loc => 
+    const filtered = warehouseFilteredLocations.filter(loc =>
       loc.code.toLowerCase().includes(query.toLowerCase()) ||
       (loc.name && loc.name.toLowerCase().includes(query.toLowerCase()))
     ).slice(0, 20);
@@ -1990,12 +1994,9 @@ DEF-456,25,,,5.00,,Location TBD`;
               )}
             </div>
 
-            <details className="group">
-              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
-                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
-                Put-away Location (optional)
-              </summary>
-              <div className="space-y-2 mt-3">
+            <div>
+              <Label className="text-sm">Put-away Location <span className="text-red-500">*</span></Label>
+              <div className="space-y-2 mt-1">
                 <div className="relative">
                   <Input
                     className="h-11"
@@ -2005,7 +2006,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       if (locationSearch.length > 0 && locationResults.length > 0) {
                         setShowLocationDropdown(true);
                       } else if (locationSearch.length === 0) {
-                        const initial = locations.slice(0, 20);
+                        const initial = warehouseFilteredLocations.slice(0, 20);
                         setLocationResults(initial);
                         setShowLocationDropdown(initial.length > 0);
                       }
@@ -2041,11 +2042,11 @@ DEF-456,25,,,5.00,,Location TBD`;
                 </div>
                 {newLine.putawayLocationId && !locationSearch && (
                   <div className="text-xs text-muted-foreground">
-                    Selected: {locations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
+                    Selected: {warehouseFilteredLocations.find(l => l.id.toString() === newLine.putawayLocationId)?.code}
                   </div>
                 )}
               </div>
-            </details>
+            </div>
 
             <div className="flex justify-end gap-2 pt-4">
               <Button variant="outline" className="min-h-[44px]" onClick={() => {
@@ -2085,7 +2086,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                     },
                   });
                 }}
-                disabled={!newLine.sku || addLineMutation.isPending}
+                disabled={!newLine.sku || !newLine.putawayLocationId || addLineMutation.isPending}
                 data-testid="btn-confirm-add-line"
               >
                 <Plus className="h-4 w-4 mr-2" />
