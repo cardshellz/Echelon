@@ -4593,20 +4593,30 @@ export default function Picking() {
                 type="number"
                 inputMode="numeric"
                 value={binCountQty}
-                onChange={(e) => setBinCountQty(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  // Block barcode-length inputs (scanners type fast, producing 6+ digits at once)
+                  if (val.length > 5) return;
+                  setBinCountQty(val);
+                }}
+                max={10000}
                 min={0}
                 className="w-full h-14 text-xl text-center font-bold"
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && binCountQty !== "" && binCountContext?.locationId) {
+                  const qty = parseInt(binCountQty);
+                  if (e.key === "Enter" && !isNaN(qty) && qty >= 0 && qty <= 10000 && binCountContext?.locationId) {
                     binCountMutation.mutate({
                       sku: binCountContext.sku,
                       locationId: binCountContext.locationId,
-                      binCount: parseInt(binCountQty),
+                      binCount: qty,
                       didReplen,
                     });
                   }
                 }}
               />
+              {binCountQty !== "" && parseInt(binCountQty) > 10000 && (
+                <p className="text-xs text-destructive font-medium">Count cannot exceed 10,000</p>
+              )}
             </div>
           </div>
 
@@ -4614,16 +4624,17 @@ export default function Picking() {
             <Button
               className="w-full h-14 min-h-[44px] text-lg"
               onClick={() => {
-                if (binCountContext?.locationId && binCountQty !== "") {
+                const qty = parseInt(binCountQty);
+                if (binCountContext?.locationId && !isNaN(qty) && qty >= 0 && qty <= 10000) {
                   binCountMutation.mutate({
                     sku: binCountContext.sku,
                     locationId: binCountContext.locationId,
-                    binCount: parseInt(binCountQty),
+                    binCount: qty,
                     didReplen,
                   });
                 }
               }}
-              disabled={binCountQty === "" || !binCountContext?.locationId || binCountMutation.isPending}
+              disabled={binCountQty === "" || parseInt(binCountQty) > 10000 || !binCountContext?.locationId || binCountMutation.isPending}
             >
               {binCountMutation.isPending ? "Saving..." : "Confirm"}
             </Button>

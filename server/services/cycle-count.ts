@@ -635,6 +635,16 @@ class CycleCountService {
     const countedSku = params.countedSku?.trim() || null;
     const { countedQty, notes } = params;
 
+    // Guard: reject obviously wrong counts (e.g. barcode scanned into count field)
+    const MAX_COUNT = 10_000;
+    if (countedQty < 0 || countedQty > MAX_COUNT) {
+      throw new CycleCountError(
+        `Count ${countedQty} is outside the valid range (0–${MAX_COUNT}). ` +
+        `If a barcode was scanned, clear it and type the actual quantity.`,
+        400,
+      );
+    }
+
     const item = await this.storage.getCycleCountItemById(itemId);
     if (!item) throw new CycleCountError("Item not found", 404);
 

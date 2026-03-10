@@ -748,6 +748,15 @@ class PickingService {
   }): Promise<BinCountResult> {
     const { sku, locationId, binCount, didReplen, userId } = params;
 
+    // Guard: reject obviously wrong counts (e.g. barcode scanned into number field)
+    const MAX_BIN_COUNT = 10_000;
+    if (binCount < 0 || binCount > MAX_BIN_COUNT) {
+      throw new Error(
+        `Bin count ${binCount} is outside the valid range (0–${MAX_BIN_COUNT}). ` +
+        `If a barcode was scanned into the count field, please clear it and type the actual quantity.`,
+      );
+    }
+
     const variant = await this.storage.getProductVariantBySku(sku);
     if (!variant) {
       throw new Error(`No variant found for SKU ${sku}`);
