@@ -309,10 +309,13 @@ class PickingService {
           }).catch((err: any) => console.warn("[PickingLog] Failed to log replen skip:", err.message));
         }
 
-        // Always prompt bin count after a successful pick — even if replen
-        // threshold wasn't met, the picker may have already physically
-        // replenished (e.g., broke a case before picking the remaining qty)
-        inventoryCtx.binCountNeeded = true;
+        // Only prompt bin count when there's a reason to verify:
+        // 1. Replen was triggered — picker needs to confirm before/after
+        // 2. Bin hit zero — verify it's actually empty
+        // 3. Inventory discrepancy detected (handled in the else branch below)
+        if (inventoryCtx.replen.triggered || deductResult.systemQtyAfter <= 0) {
+          inventoryCtx.binCountNeeded = true;
+        }
 
       } else if (!deductResult.success) {
         // Deduction FAILED — system inventory is wrong.
