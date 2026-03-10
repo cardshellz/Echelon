@@ -210,18 +210,22 @@ interface BinInventory {
   hasUnassigned: boolean;
 }
 
-function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }: {
+function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, warehouseId }: {
   variantId: number;
   sku: string;
   warehouses: Warehouse[];
   canEdit: boolean;
   onTransfer: (fromLocationId: number, fromLocationCode: string, variantId: number, sku: string) => void;
+  warehouseId?: number | null;
 }) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const { toast } = useToast();
+  const locationUrl = warehouseId
+    ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
+    : `/api/inventory/variants/${variantId}/locations`;
   const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
-    queryKey: [`/api/inventory/variants/${variantId}/locations`],
+    queryKey: [locationUrl],
   });
 
   const deleteOrphanMutation = useMutation({
@@ -230,7 +234,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
       if (!res.ok) throw new Error((await res.json()).error);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inventory/variants/${variantId}/locations`] });
+      queryClient.invalidateQueries({ queryKey: [locationUrl] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
     },
   });
@@ -246,7 +250,7 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
       return res.json();
     },
     onSuccess: (_data, _vars) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inventory/variants/${variantId}/locations`] });
+      queryClient.invalidateQueries({ queryKey: [locationUrl] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
       toast({ title: `${sku} assigned to bin` });
     },
@@ -398,16 +402,20 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer }
 }
 
 // Per-bin breakdown for a single descendant variant in the fungible pool
-function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses }: {
+function FungibleLocationRows({ variantId, sku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses, warehouseId }: {
   variantId: number;
   sku: string;
   parentUnitsPerVariant: number;
   childUnitsPerVariant: number;
   canEdit: boolean;
   warehouses: Warehouse[];
+  warehouseId?: number | null;
 }) {
+  const locationUrl = warehouseId
+    ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
+    : `/api/inventory/variants/${variantId}/locations`;
   const { data: locationLevels = [], isLoading } = useQuery<VariantLocationLevel[]>({
-    queryKey: [`/api/inventory/variants/${variantId}/locations`],
+    queryKey: [locationUrl],
   });
 
   if (isLoading) {
@@ -1528,6 +1536,7 @@ export default function Inventory() {
                                 sku={level.sku}
                                 warehouses={warehouses}
                                 canEdit={canEdit}
+                                warehouseId={selectedWarehouseId}
                                 onTransfer={(fromLocationId, fromLocationCode, variantId, sku) => {
                                   setTransferDialog({
                                     open: true,
@@ -1575,6 +1584,7 @@ export default function Inventory() {
                                           childUnitsPerVariant={desc.unitsPerVariant}
                                           canEdit={canEdit}
                                           warehouses={warehouses}
+                                          warehouseId={selectedWarehouseId}
                                         />
                                       </React.Fragment>
                                     ))}

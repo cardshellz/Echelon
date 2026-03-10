@@ -7855,14 +7855,14 @@ export async function registerRoutes(
                     ELSE 0 END) as has_replen_rule
         FROM product_variants pv
         LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+        INNER JOIN inventory_levels il ON il.product_variant_id = pv.id
+        INNER JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
+        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
         LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
         LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
         WHERE pv.is_active = true
-          AND (wl.warehouse_id = ${warehouseId} OR il.id IS NULL)
         GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
+        HAVING COALESCE(SUM(il.variant_qty), 0) != 0 OR COALESCE(SUM(il.reserved_qty), 0) != 0
         ORDER BY pv.sku
       ` : sql`
         SELECT
@@ -8100,7 +8100,8 @@ export async function registerRoutes(
   app.get("/api/inventory/levels/:variantId/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const variantId = parseInt(req.params.variantId);
-      
+      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+
       const result = await db.execute<{
         id: number;
         warehouse_location_id: number;
@@ -8121,6 +8122,7 @@ export async function registerRoutes(
         FROM inventory_levels il
         LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.product_variant_id = ${variantId}
+          ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
         ORDER BY wl.code
       `);
 
