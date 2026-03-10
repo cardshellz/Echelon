@@ -120,6 +120,14 @@ All mock/demo data has been removed from the frontend:
 - **Dropship.tsx**: Replaced mock vendors and syncCatalog arrays with empty states.
 - **Note**: Batch picking mode queue has no API hydration (pre-existing limitation — was always mock-driven). Single mode is fully API-driven.
 
+### Audit Log Error Handling (Fix #9)
+Audit log writes are now resilient — a failed log entry won't crash the main operation:
+- **Picking logs** (service + routes): Already used fire-and-forget `.catch()` pattern (no change needed)
+- **Picking log backfill route**: Now wraps each order in per-order try/catch; reports `ordersFailed` count in response
+- **Reservation orphaned-release**: Transaction log write wrapped in try/catch; release operation continues if log fails
+- **3PL inventory sync**: Transaction log write wrapped in try/catch; sync continues if log fails
+- **Inventory-core `logTransaction`**: Intentionally left inside DB transactions — these are atomic with the operation (if log fails, operation rolls back, which is correct for inventory integrity)
+
 ### Order Combining
 Allows grouping multiple orders to the same customer/address for efficient picking and shipping. The system:
 - Automatically detects orders with matching addresses using normalized address hashing (email + normalized street/city/state/zip)

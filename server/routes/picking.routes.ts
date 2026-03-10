@@ -837,100 +837,108 @@ export function registerPickingRoutes(app: Express) {
 
       let logsCreated = 0;
 
+      let ordersFailed = 0;
+
       for (const order of completedOrders) {
-        const items = order.items;
-        
-        const existingLogs = await storage.getPickingLogsByOrderId(order.id);
-        if (existingLogs.length > 0) {
-          continue;
-        }
-
-        let pickerName = "Unknown Picker";
-        if (order.assignedPickerId) {
-          const picker = await storage.getUser(order.assignedPickerId);
-          if (picker) {
-            pickerName = picker.displayName || picker.username;
+        try {
+          const items = order.items;
+          
+          const existingLogs = await storage.getPickingLogsByOrderId(order.id);
+          if (existingLogs.length > 0) {
+            continue;
           }
-        }
 
-        if (order.startedAt) {
-          await storage.createPickingLog({
-            actionType: "order_claimed",
-            pickerId: order.assignedPickerId || undefined,
-            pickerName,
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            orderStatusBefore: "ready",
-            orderStatusAfter: "in_progress",
-          });
-          logsCreated++;
-        }
+          let pickerName = "Unknown Picker";
+          if (order.assignedPickerId) {
+            const picker = await storage.getUser(order.assignedPickerId);
+            if (picker) {
+              pickerName = picker.displayName || picker.username;
+            }
+          }
 
-        for (const item of items) {
-          if (item.status === "completed" && item.pickedQuantity > 0) {
-            const pickMethod = Math.random() > 0.3 ? "scan" : "manual";
-            
+          if (order.startedAt) {
             await storage.createPickingLog({
-              actionType: "item_picked",
+              actionType: "order_claimed",
               pickerId: order.assignedPickerId || undefined,
               pickerName,
               orderId: order.id,
               orderNumber: order.orderNumber,
-              orderItemId: item.id,
-              sku: item.sku,
-              itemName: item.name,
-              locationCode: item.location,
-              qtyRequested: item.quantity,
-              qtyBefore: 0,
-              qtyAfter: item.pickedQuantity,
-              qtyDelta: item.pickedQuantity,
-              pickMethod,
-              itemStatusBefore: "pending",
-              itemStatusAfter: "completed",
+              orderStatusBefore: "ready",
+              orderStatusAfter: "in_progress",
             });
             logsCreated++;
-          } else if (item.status === "short") {
+          }
+
+          for (const item of items) {
+            if (item.status === "completed" && item.pickedQuantity > 0) {
+              const pickMethod = Math.random() > 0.3 ? "scan" : "manual";
+              
+              await storage.createPickingLog({
+                actionType: "item_picked",
+                pickerId: order.assignedPickerId || undefined,
+                pickerName,
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                orderItemId: item.id,
+                sku: item.sku,
+                itemName: item.name,
+                locationCode: item.location,
+                qtyRequested: item.quantity,
+                qtyBefore: 0,
+                qtyAfter: item.pickedQuantity,
+                qtyDelta: item.pickedQuantity,
+                pickMethod,
+                itemStatusBefore: "pending",
+                itemStatusAfter: "completed",
+              });
+              logsCreated++;
+            } else if (item.status === "short") {
+              await storage.createPickingLog({
+                actionType: "item_shorted",
+                pickerId: order.assignedPickerId || undefined,
+                pickerName,
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                orderItemId: item.id,
+                sku: item.sku,
+                itemName: item.name,
+                locationCode: item.location,
+                qtyRequested: item.quantity,
+                qtyBefore: 0,
+                qtyAfter: item.pickedQuantity || 0,
+                qtyDelta: item.pickedQuantity || 0,
+                reason: item.shortReason || "not_found",
+                pickMethod: "short",
+                itemStatusBefore: "pending",
+                itemStatusAfter: "short",
+              });
+              logsCreated++;
+            }
+          }
+
+          if (order.completedAt) {
             await storage.createPickingLog({
-              actionType: "item_shorted",
+              actionType: "order_completed",
               pickerId: order.assignedPickerId || undefined,
               pickerName,
               orderId: order.id,
               orderNumber: order.orderNumber,
-              orderItemId: item.id,
-              sku: item.sku,
-              itemName: item.name,
-              locationCode: item.location,
-              qtyRequested: item.quantity,
-              qtyBefore: 0,
-              qtyAfter: item.pickedQuantity || 0,
-              qtyDelta: item.pickedQuantity || 0,
-              reason: item.shortReason || "not_found",
-              pickMethod: "short",
-              itemStatusBefore: "pending",
-              itemStatusAfter: "short",
+              orderStatusBefore: "in_progress",
+              orderStatusAfter: "completed",
             });
             logsCreated++;
           }
-        }
-
-        if (order.completedAt) {
-          await storage.createPickingLog({
-            actionType: "order_completed",
-            pickerId: order.assignedPickerId || undefined,
-            pickerName,
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            orderStatusBefore: "in_progress",
-            orderStatusAfter: "completed",
-          });
-          logsCreated++;
+        } catch (orderErr: any) {
+          console.warn(`[PickingLog Backfill] Failed to backfill order ${order.id}:`, orderErr.message);
+          ordersFailed++;
         }
       }
 
       res.json({ 
         success: true, 
         ordersProcessed: completedOrders.length,
-        logsCreated 
+        logsCreated,
+        ordersFailed,
       });
     } catch (error) {
       console.error("Error backfilling picking logs:", error);

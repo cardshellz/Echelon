@@ -355,15 +355,18 @@ class InventorySourceService {
         });
     }
 
-    // Log the sync transaction
-    await this.db.insert(inventoryTransactions).values({
-      productVariantId: variantId,
-      warehouseLocationId: locationId,
-      transactionType: "3pl_sync",
-      qty: delta,
-      referenceId: `warehouse-${warehouseId}`,
-      notes: `Synced from external source (set to ${newQty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-    });
+    try {
+      await this.db.insert(inventoryTransactions).values({
+        productVariantId: variantId,
+        warehouseLocationId: locationId,
+        transactionType: "3pl_sync",
+        qty: delta,
+        referenceId: `warehouse-${warehouseId}`,
+        notes: `Synced from external source (set to ${newQty}, delta ${delta > 0 ? "+" : ""}${delta})`,
+      });
+    } catch (err: any) {
+      console.warn(`[InventorySource] Failed to log 3PL sync transaction for variant=${variantId}:`, err.message);
+    }
   }
 }
 

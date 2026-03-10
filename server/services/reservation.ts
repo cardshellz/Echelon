@@ -3,6 +3,7 @@ import {
   orders,
   orderItems,
   inventoryLevels,
+  inventoryTransactions,
   productVariants,
   warehouseLocations,
   warehouses,
@@ -419,17 +420,20 @@ class ReservationService {
     // 2. Force-release the excess reserved qty
     await this.inventoryCore.adjustLevel(level.id, { reservedQty: -excess });
 
-    // Log unreserve transaction
-    const { inventoryTransactions } = await import("@shared/schema");
-    await this.db.insert(inventoryTransactions).values({
-      productVariantId,
-      fromLocationId: warehouseLocationId,
-      transactionType: "unreserve",
-      variantQtyDelta: -excess,
-      notes: `Orphaned reservation released: cycle count zeroed inventory at this location`,
-      userId: userId || null,
-    });
     result.released = excess;
+
+    try {
+      await this.db.insert(inventoryTransactions).values({
+        productVariantId,
+        fromLocationId: warehouseLocationId,
+        transactionType: "unreserve",
+        variantQtyDelta: -excess,
+        notes: `Orphaned reservation released: cycle count zeroed inventory at this location`,
+        userId: userId || null,
+      });
+    } catch (err: any) {
+      console.warn(`[RESERVATION] Failed to log orphaned-release transaction for variant=${productVariantId}:`, err.message);
+    }
 
     // 3. Find affected orders: distinct orders that had reserves at this location
     const reserveTxns = await this.db
