@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
@@ -29,6 +29,7 @@ import {
   Trash2,
   Grid3x3,
   Repeat2,
+  Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -555,6 +556,8 @@ export default function Inventory() {
   const [binSortField, setBinSortField] = useState<string>("code");
   const [binSortDirection, setBinSortDirection] = useState<"asc" | "desc">("asc");
   const [expandedBins, setExpandedBins] = useState<Set<number>>(new Set());
+  const [expandedZones, setExpandedZones] = useState<Set<string>>(new Set());
+  const [zonesInitForWarehouse, setZonesInitForWarehouse] = useState<number | null>(null);
   const [transferDialog, setTransferDialog] = useState<{
     open: boolean;
     fromLocationId?: number;
@@ -905,6 +908,43 @@ export default function Inventory() {
       }
       return binSortDirection === "asc" ? aVal - bVal : bVal - aVal;
     });
+
+  // Group bins by zone when a warehouse is selected
+  const zoneGroups = useMemo(() => {
+    if (!selectedWarehouseId) return null;
+    const groups = new Map<string, { bins: BinInventory[], totalQty: number, totalReserved: number, totalAvailable: number }>();
+    for (const bin of sortedBinInventory) {
+      const zone = bin.zone || "__none__";
+      if (!groups.has(zone)) {
+        groups.set(zone, { bins: [], totalQty: 0, totalReserved: 0, totalAvailable: 0 });
+      }
+      const g = groups.get(zone)!;
+      g.bins.push(bin);
+      g.totalQty += bin.totalQty;
+      g.totalReserved += bin.totalReserved;
+      g.totalAvailable += bin.totalAvailable;
+    }
+    return Array.from(groups.entries()).sort((a, b) => {
+      if (a[0] === "__none__") return 1;
+      if (b[0] === "__none__") return -1;
+      return a[0].localeCompare(b[0]);
+    });
+  }, [sortedBinInventory, selectedWarehouseId]);
+
+  // Auto-expand all zones when data first loads for a warehouse
+  useEffect(() => {
+    if (zoneGroups && zonesInitForWarehouse !== selectedWarehouseId) {
+      setExpandedZones(new Set(zoneGroups.map(([zone]) => zone)));
+      setZonesInitForWarehouse(selectedWarehouseId);
+    }
+  }, [zoneGroups, selectedWarehouseId, zonesInitForWarehouse]);
+
+  const toggleZone = (zone: string) => {
+    const next = new Set(expandedZones);
+    if (next.has(zone)) next.delete(zone);
+    else next.add(zone);
+    setExpandedZones(next);
+  };
 
   const handleAdjustSubmit = () => {
     if (!selectedItem || !adjustmentQty || !adjustmentReason) return;
@@ -1559,61 +1599,151 @@ export default function Inventory() {
               <>
                 {/* Mobile card layout */}
                 <div className="md:hidden space-y-3 flex-1 overflow-auto">
-                  {sortedBinInventory.map((bin) => (
-                    <div key={bin.locationId} className="rounded-md border bg-card p-4">
-                      <div className="flex items-start justify-between mb-2">
-                        <div>
-                          <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
-                            {bin.locationCode}
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
-                              bin.isPickable
-                                ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                                : "bg-muted text-muted-foreground"
-                            }`}>
-                              {bin.locationType.replace("_", " ")}
+                  {zoneGroups ? (
+                    zoneGroups.map(([zone, group]) => (
+                      <div key={zone}>
+                        {/* Zone header card */}
+                        <div
+                          className="rounded-md border bg-muted/60 p-3 mb-2 cursor-pointer flex items-center justify-between"
+                          onClick={() => toggleZone(zone)}
+                        >
+                          <div className="flex items-center gap-2">
+                            {expandedZones.has(zone) ?
+                              <ChevronDown className="h-4 w-4 text-muted-foreground" /> :
+                              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                            }
+                            <Layers className="h-4 w-4 text-muted-foreground" />
+                            <span className="font-semibold text-sm">
+                              {zone === "__none__" ? "No Zone" : `Zone: ${zone}`}
                             </span>
-                            {bin.hasUnassigned && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
-                                UNASSIGNED STOCK
-                              </span>
-                            )}
+                            <span className="text-xs text-muted-foreground">
+                              {group.bins.length} bin{group.bins.length !== 1 ? "s" : ""}
+                            </span>
                           </div>
-                          {bin.zone && <div className="text-xs text-muted-foreground mt-0.5">Zone {bin.zone}</div>}
+                          <div className="flex items-center gap-3 text-xs font-mono">
+                            <span className="font-bold">{group.totalQty.toLocaleString()}</span>
+                            <span className="text-muted-foreground">{group.totalReserved.toLocaleString()}</span>
+                            <span className="text-green-600">{group.totalAvailable.toLocaleString()}</span>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
-                            title="View bin history"
-                          >
-                            <History className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
+                        {/* Bin cards within zone */}
+                        {expandedZones.has(zone) && (
+                          <div className="space-y-2 ml-2 mb-4">
+                            {group.bins.map((bin) => (
+                              <div key={bin.locationId} className="rounded-md border bg-card p-4">
+                                <div className="flex items-start justify-between mb-2">
+                                  <div>
+                                    <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
+                                      {bin.locationCode}
+                                      <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                        bin.isPickable
+                                          ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                          : "bg-muted text-muted-foreground"
+                                      }`}>
+                                        {bin.locationType.replace("_", " ")}
+                                      </span>
+                                      {bin.hasUnassigned && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                          UNASSIGNED STOCK
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-7 w-7"
+                                      onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
+                                      title="View bin history"
+                                    >
+                                      <History className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </div>
+                                <div className="space-y-1.5 mt-2">
+                                  {bin.items.map((item) => (
+                                    <div key={item.inventoryLevelId} className={`flex items-center justify-between text-xs py-1 px-2 rounded ${item.isAssigned ? "bg-muted/30" : "bg-amber-50 dark:bg-amber-900/10"}`}>
+                                      <div className="flex items-center gap-1.5 min-w-0">
+                                        <span className="font-mono font-medium truncate">{item.sku}</span>
+                                        {!item.isAssigned && (
+                                          <span className="text-[9px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 shrink-0">
+                                            NOT ASSIGNED
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-3 shrink-0 font-mono">
+                                        <span>{item.variantQty}</span>
+                                        <span className="text-muted-foreground">{item.reservedQty}</span>
+                                        <span className="text-green-600">{item.available}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <div className="space-y-1.5 mt-2">
-                        {bin.items.map((item) => (
-                          <div key={item.inventoryLevelId} className={`flex items-center justify-between text-xs py-1 px-2 rounded ${item.isAssigned ? "bg-muted/30" : "bg-amber-50 dark:bg-amber-900/10"}`}>
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-mono font-medium truncate">{item.sku}</span>
-                              {!item.isAssigned && (
-                                <span className="text-[9px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 shrink-0">
-                                  NOT ASSIGNED
+                    ))
+                  ) : (
+                    sortedBinInventory.map((bin) => (
+                      <div key={bin.locationId} className="rounded-md border bg-card p-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <div>
+                            <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
+                              {bin.locationCode}
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                bin.isPickable
+                                  ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                  : "bg-muted text-muted-foreground"
+                              }`}>
+                                {bin.locationType.replace("_", " ")}
+                              </span>
+                              {bin.hasUnassigned && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+                                  UNASSIGNED STOCK
                                 </span>
                               )}
                             </div>
-                            <div className="flex items-center gap-3 shrink-0 font-mono">
-                              <span>{item.variantQty}</span>
-                              <span className="text-muted-foreground">{item.reservedQty}</span>
-                              <span className="text-green-600">{item.available}</span>
-                            </div>
+                            {bin.zone && <div className="text-xs text-muted-foreground mt-0.5">Zone {bin.zone}</div>}
                           </div>
-                        ))}
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs text-muted-foreground">{bin.skuCount} SKU{bin.skuCount !== 1 ? "s" : ""}</span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
+                              title="View bin history"
+                            >
+                              <History className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="space-y-1.5 mt-2">
+                          {bin.items.map((item) => (
+                            <div key={item.inventoryLevelId} className={`flex items-center justify-between text-xs py-1 px-2 rounded ${item.isAssigned ? "bg-muted/30" : "bg-amber-50 dark:bg-amber-900/10"}`}>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="font-mono font-medium truncate">{item.sku}</span>
+                                {!item.isAssigned && (
+                                  <span className="text-[9px] px-1 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 shrink-0">
+                                    NOT ASSIGNED
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0 font-mono">
+                                <span>{item.variantQty}</span>
+                                <span className="text-muted-foreground">{item.reservedQty}</span>
+                                <span className="text-green-600">{item.available}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
 
                 {/* Desktop table */}
@@ -1654,78 +1784,170 @@ export default function Inventory() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {sortedBinInventory.map((bin) => (
-                        <React.Fragment key={bin.locationId}>
-                          {bin.skuCount === 1 ? (
-                            // Single SKU in bin — flat row
-                            <TableRow className={bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}>
-                              <TableCell>
-                                <div className="flex items-center gap-1.5">
-                                  <MapPin className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                                  <span className="font-mono font-medium">{bin.locationCode}</span>
-                                  <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
-                                    bin.isPickable
-                                      ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                                      : "bg-muted text-muted-foreground"
-                                  }`}>
-                                    {bin.locationType.replace("_", " ")}
-                                  </span>
-                                  {bin.zone && <span className="text-[10px] text-muted-foreground">[{bin.zone}]</span>}
-                                  {bin.warehouseCode && <span className="text-[10px] text-muted-foreground">{bin.warehouseCode}</span>}
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                                    onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
-                                    title="View bin history"
-                                  >
-                                    <History className="h-3 w-3" />
-                                  </Button>
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex items-center gap-1.5">
-                                  <span className="font-mono text-sm">{bin.items[0].sku}</span>
-                                  {bin.items[0].variantName && (
-                                    <span className="text-xs text-muted-foreground truncate max-w-[200px]">{bin.items[0].variantName}</span>
-                                  )}
-                                  {!bin.items[0].isAssigned && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
-                                      NOT ASSIGNED
-                                    </span>
-                                  )}
-                                  {bin.assignedSku && bin.items[0].sku !== bin.assignedSku && (
-                                    <span className="text-[10px] text-muted-foreground" title={`Assigned: ${bin.assignedSku}`}>
-                                      (assigned: {bin.assignedSku})
-                                    </span>
-                                  )}
-                                </div>
-                              </TableCell>
-                              <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
-                              <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
-                              <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
-                            </TableRow>
-                          ) : (
-                            // Multiple SKUs in bin — expandable row
-                            <>
-                              <TableRow
-                                className={`cursor-pointer hover:bg-muted/50 ${bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}`}
-                                onClick={() => {
-                                  const newExpanded = new Set(expandedBins);
-                                  if (newExpanded.has(bin.locationId)) {
-                                    newExpanded.delete(bin.locationId);
-                                  } else {
-                                    newExpanded.add(bin.locationId);
+                      {zoneGroups ? (
+                        // Grouped mode — warehouse selected, group by zone
+                        zoneGroups.map(([zone, group]) => (
+                          <React.Fragment key={zone}>
+                            {/* Zone header row */}
+                            <TableRow
+                              className="bg-muted/60 hover:bg-muted/80 cursor-pointer border-t-2 border-border"
+                              onClick={() => toggleZone(zone)}
+                            >
+                              <TableCell colSpan={2}>
+                                <div className="flex items-center gap-2">
+                                  {expandedZones.has(zone) ?
+                                    <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
+                                    <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
                                   }
-                                  setExpandedBins(newExpanded);
-                                }}
-                              >
+                                  <Layers className="h-4 w-4 text-muted-foreground" />
+                                  <span className="font-semibold text-sm">
+                                    {zone === "__none__" ? "No Zone" : `Zone: ${zone}`}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground">
+                                    {group.bins.length} bin{group.bins.length !== 1 ? "s" : ""}
+                                  </span>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-right font-mono font-bold">{group.totalQty.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono text-muted-foreground">{group.totalReserved.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono font-medium text-green-600">{group.totalAvailable.toLocaleString()}</TableCell>
+                            </TableRow>
+                            {/* Bin rows within zone */}
+                            {expandedZones.has(zone) && group.bins.map((bin) => (
+                              <React.Fragment key={bin.locationId}>
+                                {bin.skuCount === 1 ? (
+                                  <TableRow className={bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}>
+                                    <TableCell className="pl-10">
+                                      <div className="flex items-center gap-1.5">
+                                        <MapPin className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                        <span className="font-mono font-medium">{bin.locationCode}</span>
+                                        <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                          bin.isPickable
+                                            ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                            : "bg-muted text-muted-foreground"
+                                        }`}>
+                                          {bin.locationType.replace("_", " ")}
+                                        </span>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                                          onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
+                                          title="View bin history"
+                                        >
+                                          <History className="h-3 w-3" />
+                                        </Button>
+                                      </div>
+                                    </TableCell>
+                                    <TableCell>
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono text-sm">{bin.items[0].sku}</span>
+                                        {bin.items[0].variantName && (
+                                          <span className="text-xs text-muted-foreground truncate max-w-[200px]">{bin.items[0].variantName}</span>
+                                        )}
+                                        {!bin.items[0].isAssigned && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                            NOT ASSIGNED
+                                          </span>
+                                        )}
+                                        {bin.assignedSku && bin.items[0].sku !== bin.assignedSku && (
+                                          <span className="text-[10px] text-muted-foreground" title={`Assigned: ${bin.assignedSku}`}>
+                                            (assigned: {bin.assignedSku})
+                                          </span>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                  </TableRow>
+                                ) : (
+                                  <>
+                                    <TableRow
+                                      className={`cursor-pointer hover:bg-muted/50 ${bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}`}
+                                      onClick={() => {
+                                        const newExpanded = new Set(expandedBins);
+                                        if (newExpanded.has(bin.locationId)) newExpanded.delete(bin.locationId);
+                                        else newExpanded.add(bin.locationId);
+                                        setExpandedBins(newExpanded);
+                                      }}
+                                    >
+                                      <TableCell className="pl-10">
+                                        <div className="flex items-center gap-1.5">
+                                          {expandedBins.has(bin.locationId) ?
+                                            <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
+                                            <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                                          }
+                                          <span className="font-mono font-medium">{bin.locationCode}</span>
+                                          <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                            bin.isPickable
+                                              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                              : "bg-muted text-muted-foreground"
+                                          }`}>
+                                            {bin.locationType.replace("_", " ")}
+                                          </span>
+                                          {bin.hasUnassigned && (
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                              UNASSIGNED
+                                            </span>
+                                          )}
+                                          <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode });
+                                            }}
+                                            title="View bin history"
+                                          >
+                                            <History className="h-3 w-3" />
+                                          </Button>
+                                        </div>
+                                      </TableCell>
+                                      <TableCell>
+                                        <span className="text-sm text-muted-foreground">{bin.skuCount} SKUs</span>
+                                      </TableCell>
+                                      <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
+                                      <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
+                                      <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                    </TableRow>
+                                    {expandedBins.has(bin.locationId) && bin.items.map((item) => (
+                                      <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
+                                        <TableCell></TableCell>
+                                        <TableCell className="pl-8">
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="font-mono text-xs font-medium">{item.sku}</span>
+                                            {item.variantName && (
+                                              <span className="text-xs text-muted-foreground truncate max-w-[200px]">{item.variantName}</span>
+                                            )}
+                                            {!item.isAssigned && (
+                                              <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                                NOT ASSIGNED
+                                              </span>
+                                            )}
+                                          </div>
+                                        </TableCell>
+                                        <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </>
+                                )}
+                              </React.Fragment>
+                            ))}
+                          </React.Fragment>
+                        ))
+                      ) : (
+                        // Flat mode — no warehouse selected
+                        sortedBinInventory.map((bin) => (
+                          <React.Fragment key={bin.locationId}>
+                            {bin.skuCount === 1 ? (
+                              <TableRow className={bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}>
                                 <TableCell>
                                   <div className="flex items-center gap-1.5">
-                                    {expandedBins.has(bin.locationId) ?
-                                      <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
-                                      <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-                                    }
+                                    <MapPin className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                                     <span className="font-mono font-medium">{bin.locationCode}</span>
                                     <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
                                       bin.isPickable
@@ -1735,19 +1957,12 @@ export default function Inventory() {
                                       {bin.locationType.replace("_", " ")}
                                     </span>
                                     {bin.zone && <span className="text-[10px] text-muted-foreground">[{bin.zone}]</span>}
-                                    {bin.hasUnassigned && (
-                                      <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
-                                        UNASSIGNED
-                                      </span>
-                                    )}
+                                    {bin.warehouseCode && <span className="text-[10px] text-muted-foreground">{bin.warehouseCode}</span>}
                                     <Button
                                       variant="ghost"
                                       size="icon"
                                       className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode });
-                                      }}
+                                      onClick={() => setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode })}
                                       title="View bin history"
                                     >
                                       <History className="h-3 w-3" />
@@ -1755,44 +1970,115 @@ export default function Inventory() {
                                   </div>
                                 </TableCell>
                                 <TableCell>
-                                  <span className="text-sm text-muted-foreground">{bin.skuCount} SKUs</span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-mono text-sm">{bin.items[0].sku}</span>
+                                    {bin.items[0].variantName && (
+                                      <span className="text-xs text-muted-foreground truncate max-w-[200px]">{bin.items[0].variantName}</span>
+                                    )}
+                                    {!bin.items[0].isAssigned && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                        NOT ASSIGNED
+                                      </span>
+                                    )}
+                                    {bin.assignedSku && bin.items[0].sku !== bin.assignedSku && (
+                                      <span className="text-[10px] text-muted-foreground" title={`Assigned: ${bin.assignedSku}`}>
+                                        (assigned: {bin.assignedSku})
+                                      </span>
+                                    )}
+                                  </div>
                                 </TableCell>
                                 <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                 <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
                                 <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
                               </TableRow>
-                              {expandedBins.has(bin.locationId) && bin.items.map((item) => (
-                                <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
-                                  <TableCell></TableCell>
-                                  <TableCell className="pl-8">
+                            ) : (
+                              <>
+                                <TableRow
+                                  className={`cursor-pointer hover:bg-muted/50 ${bin.hasUnassigned ? "bg-amber-50/30 dark:bg-amber-900/5" : ""}`}
+                                  onClick={() => {
+                                    const newExpanded = new Set(expandedBins);
+                                    if (newExpanded.has(bin.locationId)) newExpanded.delete(bin.locationId);
+                                    else newExpanded.add(bin.locationId);
+                                    setExpandedBins(newExpanded);
+                                  }}
+                                >
+                                  <TableCell>
                                     <div className="flex items-center gap-1.5">
-                                      <span className="font-mono text-xs font-medium">{item.sku}</span>
-                                      {item.variantName && (
-                                        <span className="text-xs text-muted-foreground truncate max-w-[200px]">{item.variantName}</span>
-                                      )}
-                                      {!item.isAssigned && (
+                                      {expandedBins.has(bin.locationId) ?
+                                        <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" /> :
+                                        <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                                      }
+                                      <span className="font-mono font-medium">{bin.locationCode}</span>
+                                      <span className={`text-[10px] px-1.5 py-0.5 rounded-sm ${
+                                        bin.isPickable
+                                          ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                                          : "bg-muted text-muted-foreground"
+                                      }`}>
+                                        {bin.locationType.replace("_", " ")}
+                                      </span>
+                                      {bin.zone && <span className="text-[10px] text-muted-foreground">[{bin.zone}]</span>}
+                                      {bin.hasUnassigned && (
                                         <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
-                                          NOT ASSIGNED
+                                          UNASSIGNED
                                         </span>
                                       )}
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setHistorySheet({ open: true, locationId: bin.locationId, locationCode: bin.locationCode });
+                                        }}
+                                        title="View bin history"
+                                      >
+                                        <History className="h-3 w-3" />
+                                      </Button>
                                     </div>
                                   </TableCell>
-                                  <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
-                                  <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
-                                  <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                  <TableCell>
+                                    <span className="text-sm text-muted-foreground">{bin.skuCount} SKUs</span>
+                                  </TableCell>
+                                  <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
+                                  <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
+                                  <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
                                 </TableRow>
-                              ))}
-                            </>
-                          )}
-                        </React.Fragment>
-                      ))}
+                                {expandedBins.has(bin.locationId) && bin.items.map((item) => (
+                                  <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
+                                    <TableCell></TableCell>
+                                    <TableCell className="pl-8">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono text-xs font-medium">{item.sku}</span>
+                                        {item.variantName && (
+                                          <span className="text-xs text-muted-foreground truncate max-w-[200px]">{item.variantName}</span>
+                                        )}
+                                        {!item.isAssigned && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded-sm bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 whitespace-nowrap">
+                                            NOT ASSIGNED
+                                          </span>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </>
+                            )}
+                          </React.Fragment>
+                        ))
+                      )}
                     </TableBody>
                   </Table>
                 </div>
 
                 {sortedBinInventory.length > 0 && (
                   <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
-                    <div>Showing {sortedBinInventory.length} of {binInventory.length} bins</div>
+                    <div>
+                      Showing {sortedBinInventory.length} of {binInventory.length} bins
+                      {zoneGroups && ` across ${zoneGroups.length} zone${zoneGroups.length !== 1 ? "s" : ""}`}
+                    </div>
                   </div>
                 )}
               </>
