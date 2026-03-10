@@ -909,32 +909,43 @@ export default function Inventory() {
       return binSortDirection === "asc" ? aVal - bVal : bVal - aVal;
     });
 
-  // Group bins by zone when a warehouse is selected
+  // Group bins by warehouse (when "All") then zone
   const zoneGroups = useMemo(() => {
-    if (!selectedWarehouseId) return null;
-    const groups = new Map<string, { bins: BinInventory[], totalQty: number, totalReserved: number, totalAvailable: number }>();
+    if (sortedBinInventory.length === 0) return null;
+
+    // When a specific warehouse is selected, group by zone only
+    // When "All Warehouses", group by warehouse+zone
+    const groups = new Map<string, { label: string, bins: BinInventory[], totalQty: number, totalReserved: number, totalAvailable: number }>();
     for (const bin of sortedBinInventory) {
       const zone = bin.zone || "__none__";
-      if (!groups.has(zone)) {
-        groups.set(zone, { bins: [], totalQty: 0, totalReserved: 0, totalAvailable: 0 });
+      const groupKey = selectedWarehouseId
+        ? zone
+        : `${bin.warehouseCode || "__nowh__"}::${zone}`;
+      if (!groups.has(groupKey)) {
+        const label = selectedWarehouseId
+          ? (zone === "__none__" ? "No Zone" : zone)
+          : (zone === "__none__"
+              ? (bin.warehouseCode ? `${bin.warehouseCode} — No Zone` : "No Zone")
+              : (bin.warehouseCode ? `${bin.warehouseCode} — ${zone}` : zone));
+        groups.set(groupKey, { label, bins: [], totalQty: 0, totalReserved: 0, totalAvailable: 0 });
       }
-      const g = groups.get(zone)!;
+      const g = groups.get(groupKey)!;
       g.bins.push(bin);
       g.totalQty += bin.totalQty;
       g.totalReserved += bin.totalReserved;
       g.totalAvailable += bin.totalAvailable;
     }
     return Array.from(groups.entries()).sort((a, b) => {
-      if (a[0] === "__none__") return 1;
-      if (b[0] === "__none__") return -1;
+      if (a[0] === "__none__" || a[0].endsWith("::__none__")) return 1;
+      if (b[0] === "__none__" || b[0].endsWith("::__none__")) return -1;
       return a[0].localeCompare(b[0]);
     });
   }, [sortedBinInventory, selectedWarehouseId]);
 
-  // Auto-expand all zones when data first loads for a warehouse
+  // Auto-expand all zones when data loads or warehouse changes
   useEffect(() => {
     if (zoneGroups && zonesInitForWarehouse !== selectedWarehouseId) {
-      setExpandedZones(new Set(zoneGroups.map(([zone]) => zone)));
+      setExpandedZones(new Set(zoneGroups.map(([key]) => key)));
       setZonesInitForWarehouse(selectedWarehouseId);
     }
   }, [zoneGroups, selectedWarehouseId, zonesInitForWarehouse]);
@@ -1010,23 +1021,6 @@ export default function Inventory() {
             Inventory
           </h1>
           <div className="flex flex-wrap items-center gap-1.5">
-            <Select
-              value={selectedWarehouseId?.toString() || "all"}
-              onValueChange={(v) => setSelectedWarehouseId(v === "all" ? null : parseInt(v))}
-            >
-              <SelectTrigger className="w-[160px] h-8 text-xs" data-testid="select-warehouse-filter">
-                <Building2 className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
-                <SelectValue placeholder="All Warehouses" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Warehouses</SelectItem>
-                {warehouses.map((wh) => (
-                  <SelectItem key={wh.id} value={wh.id.toString()}>
-                    {wh.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
             <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => {
               queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
               queryClient.invalidateQueries({ queryKey: ["/api/operations"] });
@@ -1106,8 +1100,26 @@ export default function Inventory() {
             </TabsTrigger>
           </TabsList>
 
-          {/* Compact summary bar — context changes per active tab */}
+          {/* Warehouse filter + compact summary bar */}
           <div className="flex items-center gap-3 text-xs text-muted-foreground py-2 px-1">
+            <Select
+              value={selectedWarehouseId?.toString() || "all"}
+              onValueChange={(v) => setSelectedWarehouseId(v === "all" ? null : parseInt(v))}
+            >
+              <SelectTrigger className="w-[160px] h-7 text-xs shrink-0" data-testid="select-warehouse-filter">
+                <Building2 className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+                <SelectValue placeholder="All Warehouses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Warehouses</SelectItem>
+                {warehouses.map((wh) => (
+                  <SelectItem key={wh.id} value={wh.id.toString()}>
+                    {wh.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-muted-foreground/30">|</span>
             {activeTab === "physical" && (
               <>
                 {/* Totals */}
@@ -1614,7 +1626,7 @@ export default function Inventory() {
                             }
                             <Layers className="h-4 w-4 text-muted-foreground" />
                             <span className="font-semibold text-sm">
-                              {zone === "__none__" ? "No Zone" : `Zone: ${zone}`}
+                              {group.label}
                             </span>
                             <span className="text-xs text-muted-foreground">
                               {group.bins.length} bin{group.bins.length !== 1 ? "s" : ""}
@@ -1801,7 +1813,7 @@ export default function Inventory() {
                                   }
                                   <Layers className="h-4 w-4 text-muted-foreground" />
                                   <span className="font-semibold text-sm">
-                                    {zone === "__none__" ? "No Zone" : `Zone: ${zone}`}
+                                    {group.label}
                                   </span>
                                   <span className="text-xs text-muted-foreground">
                                     {group.bins.length} bin{group.bins.length !== 1 ? "s" : ""}
