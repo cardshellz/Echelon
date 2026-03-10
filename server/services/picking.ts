@@ -400,42 +400,60 @@ class PickingService {
 
     // Resolve pick location: explicit ID > assigned bin > auto-select
     let pickLocationId: number | null = opts.warehouseLocationId ? Number(opts.warehouseLocationId) : null;
+    let actualPickQty = pickedQty;
 
-    // Try the location already assigned to this order item
+    const pickablePriority: Record<string, number> = { pick: 0, pallet: 1 };
+    const pickableLevels = levels
+      .map((l: any) => {
+        const loc = allLocations.find(loc => loc.id === l.warehouseLocationId);
+        return { level: l, loc };
+      })
+      .filter(({ loc }) => loc?.isPickable === 1 && !loc.cycleCountFreezeId)
+      .sort((a, b) => (pickablePriority[a.loc?.locationType as string] ?? 99) - (pickablePriority[b.loc?.locationType as string] ?? 99));
+
+    // Try the location already assigned to this order item (full qty)
     if (!pickLocationId && assignedLocationId) {
-      const hasStock = levels.some((l: any) =>
-        l.warehouseLocationId === assignedLocationId && l.variantQty >= pickedQty
-      );
-      if (hasStock) {
+      const assignedLevel = levels.find((l: any) => l.warehouseLocationId === assignedLocationId);
+      if (assignedLevel && assignedLevel.variantQty >= pickedQty) {
         pickLocationId = assignedLocationId;
       }
     }
 
-    // Fallback: auto-select from PICKABLE locations only (never reserve/receiving)
+    // Fallback: any pickable location with full qty
     if (!pickLocationId) {
-      const pickablePriority: Record<string, number> = { pick: 0, pallet: 1 };
-      const sortedLevels = levels
-        .filter((l: any) => {
-          const loc = allLocations.find(loc => loc.id === l.warehouseLocationId);
-          return loc?.isPickable === 1 && !loc.cycleCountFreezeId && l.variantQty >= pickedQty;
-        })
-        .sort((a: any, b: any) => {
-          const locA = allLocations.find(loc => loc.id === a.warehouseLocationId);
-          const locB = allLocations.find(loc => loc.id === b.warehouseLocationId);
-          return (pickablePriority[locA?.locationType as string] ?? 99) - (pickablePriority[locB?.locationType as string] ?? 99);
-        });
-      pickLocationId = sortedLevels[0]?.warehouseLocationId || null;
+      const fullMatch = pickableLevels.find(({ level: l }) => l.variantQty >= pickedQty);
+      if (fullMatch) pickLocationId = fullMatch.level.warehouseLocationId;
+    }
+
+    // Partial pick: no location has full qty — take what's available
+    if (!pickLocationId) {
+      // Prefer assigned bin if it has anything
+      if (assignedLocationId) {
+        const assignedLevel = levels.find((l: any) => l.warehouseLocationId === assignedLocationId);
+        if (assignedLevel && assignedLevel.variantQty > 0) {
+          pickLocationId = assignedLocationId;
+          actualPickQty = assignedLevel.variantQty;
+        }
+      }
+      // Otherwise take the best pickable bin with any stock
+      if (!pickLocationId) {
+        const partial = pickableLevels.find(({ level: l }) => l.variantQty > 0);
+        if (partial) {
+          pickLocationId = partial.level.warehouseLocationId;
+          actualPickQty = partial.level.variantQty;
+        }
+      }
     }
 
     if (!pickLocationId) {
-      // Resolve system qty at assigned bin for context
+      // Truly zero stock anywhere — nothing to deduct
       const assignedLevel = assignedLocationId
         ? levels.find((l: any) => l.warehouseLocationId === assignedLocationId)
         : null;
       return {
         success: false,
         error: "no_inventory",
-        message: `No location has sufficient stock for ${pickedQty} of ${item.sku}`,
+        message: `No pickable location has any stock for ${item.sku}`,
         productVariantId: productVariant.id,
         locationId: assignedLocationId,
         locationCode: assignedLocationCode,
@@ -443,10 +461,14 @@ class PickingService {
       };
     }
 
+    if (actualPickQty < pickedQty) {
+      console.log(`[Inventory] Partial pick: ${actualPickQty} of ${pickedQty} requested for ${productVariant.sku} at location ${pickLocationId}`);
+    }
+
     const picked = await this.inventoryCore.pickItem({
       productVariantId: productVariant.id,
       warehouseLocationId: pickLocationId,
-      qty: pickedQty,
+      qty: actualPickQty,
       orderId: item.orderId,
       orderItemId: item.id,
       userId: opts.userId,
@@ -458,7 +480,7 @@ class PickingService {
       return {
         success: false,
         error: "insufficient_inventory",
-        message: `Not enough stock to pick ${pickedQty} of ${item.sku}`,
+        message: `Concurrent pick claimed stock for ${item.sku}`,
         productVariantId: productVariant.id,
         locationId: pickLocationId,
         locationCode: loc?.code || assignedLocationCode,
