@@ -38,6 +38,25 @@ Testing: ALWAYS test on PRODUCTION (Heroku). Development database is empty/unuse
   - `purchasing.routes.ts` — vendors, receiving, replenishment, POs, invoices, AP, payments, operations dashboard, SLA, notifications
   - `routes.ts` — thin dispatcher that imports and calls all domain registrars
 
+- **Storage Layer**: Domain-split modules under `server/storage/`:
+  - `base.ts` — shared `db` re-export and schema imports
+  - `users.ts` — user CRUD
+  - `product-locations.ts` — product location assignments, bin lookups
+  - `orders.ts` — orders, order items, fulfillment, exceptions
+  - `warehouse.ts` — warehouses, zones, warehouse locations
+  - `products.ts` — products, variants, assets, archive helpers
+  - `channel-catalog.ts` — channel product/variant/pricing/listing overrides
+  - `inventory.ts` — inventory levels, transactions, transfers, adjustment reasons, channel feeds
+  - `picking-logs.ts` — picking audit trail, metrics
+  - `order-history.ts` — order history queries, order detail
+  - `channels.ts` — channels, connections, partner profiles, reservations
+  - `settings.ts` — echelon app settings
+  - `cycle-counts.ts` — cycle counts and items
+  - `replenishment.ts` — tier defaults, rules, location configs, tasks, warehouse settings
+  - `procurement.ts` — vendors, receiving, POs, lots, costs, inbound shipments
+  - `index.ts` — composes all domains into `IStorage` interface and `storage` singleton
+  - `server/storage.ts` — thin re-export for backward compatibility
+
 ### Shared Layer
 - **Schema & Validation**: Drizzle schema definitions and Zod validation schemas.
 
