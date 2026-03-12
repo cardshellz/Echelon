@@ -106,6 +106,7 @@ export interface IOrderStorage {
   completeNonShippableItems(orderId: number): Promise<void>;
   getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]>;
   getShipmentsByOrderIds(orderIds: number[]): Promise<any[]>;
+  getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]>;
 }
 
 export const orderMethods: IOrderStorage = {
@@ -1028,5 +1029,17 @@ export const orderMethods: IOrderStorage = {
       .select()
       .from(shipments)
       .where(inArray(shipments.orderId, orderIds));
+  },
+
+  async getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]> {
+    const result = await db.execute(sql`
+      SELECT oi.id, oi.location, oi.zone
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      WHERE UPPER(oi.sku) = ${sku.toUpperCase()}
+        AND oi.status = 'pending'
+        AND o.warehouse_status IN ('ready', 'in_progress')
+    `);
+    return result.rows as any[];
   },
 };

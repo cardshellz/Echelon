@@ -7,7 +7,7 @@ import { warehouseStorage } from "../warehouse";
 import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission } from "../../routes/middleware";
-import { syncPickQueueForSku } from "../../routes/middleware";
+import { syncPickQueueForSku } from "../orders";
 
 export function registerProductRoutes(app: Express) {
   // ============================================================================

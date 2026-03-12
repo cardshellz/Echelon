@@ -16,7 +16,7 @@ import {
   cycleCounts,
   cycleCountItems,
 } from "@shared/schema";
-import { calculateRemainingCapacity, findOverflowBin } from "../../inventory-utils";
+import { calculateRemainingCapacity, findOverflowBin } from "./inventory-utils";
 import { notify } from "../notifications/notifications.service";
 import type {
   ReplenTask,

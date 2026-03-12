@@ -37,6 +37,9 @@ export { createOperationsDashboardService } from "./operations-dashboard.service
 // Order sync
 export { setupOrderSyncListener, initOrderSyncServices, syncNewOrders, getSyncHealth } from "./order-sync-listener";
 
+// Pick queue sync
+export { syncPickQueueForSku } from "./pick-queue-sync";
+
 // Service types
 export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "./picking.service";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./returns.service";

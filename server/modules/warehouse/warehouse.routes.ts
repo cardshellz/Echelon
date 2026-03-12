@@ -4,7 +4,8 @@ import { warehouseStorage } from "../warehouse";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
-import { requirePermission, syncPickQueueForSku } from "../../routes/middleware";
+import { requirePermission } from "../../routes/middleware";
+import { syncPickQueueForSku } from "../orders";
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
 export function registerWarehouseRoutes(app: Express) {

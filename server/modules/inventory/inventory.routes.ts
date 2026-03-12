@@ -7,7 +7,8 @@ import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
-import { requirePermission, requireAuth, syncPickQueueForSku, upload } from "../../routes/middleware";
+import { requirePermission, requireAuth, upload } from "../../routes/middleware";
+import { syncPickQueueForSku } from "../orders";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 

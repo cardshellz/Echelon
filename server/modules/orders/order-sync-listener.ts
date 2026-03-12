@@ -8,17 +8,33 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import type { InsertOrderItem } from "@shared/schema";
+import type { ServiceRegistry } from "../../services";
 
-let inventoryCore: any;
-let reservation: any;
-let fulfillmentRouter: any;
-let slaMonitor: any;
+interface SyncServices {
+  inventoryCore: ServiceRegistry["inventoryCore"];
+  reservation: ServiceRegistry["reservation"];
+  fulfillmentRouter: ServiceRegistry["fulfillmentRouter"];
+  slaMonitor: ServiceRegistry["slaMonitor"];
+}
 
-export function initOrderSyncServices(services: any) {
-  inventoryCore = services.inventoryCore;
-  reservation = services.reservation;
-  fulfillmentRouter = services.fulfillmentRouter;
-  slaMonitor = services.slaMonitor;
+let services: SyncServices | null = null;
+const svc = () => {
+  if (!services) throw new Error("Order sync services not initialized — call initOrderSyncServices first");
+  return services;
+};
+
+// Back-compat aliases used throughout this file
+let inventoryCore: SyncServices["inventoryCore"];
+let reservation: SyncServices["reservation"];
+let fulfillmentRouter: SyncServices["fulfillmentRouter"];
+let slaMonitor: SyncServices["slaMonitor"];
+
+export function initOrderSyncServices(reg: Pick<ServiceRegistry, "inventoryCore" | "reservation" | "fulfillmentRouter" | "slaMonitor">) {
+  services = reg;
+  inventoryCore = reg.inventoryCore;
+  reservation = reg.reservation;
+  fulfillmentRouter = reg.fulfillmentRouter;
+  slaMonitor = reg.slaMonitor;
 }
 
 /**
