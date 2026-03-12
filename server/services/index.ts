@@ -49,7 +49,13 @@ import { createChannelProductPushService } from "../modules/channels/product-pus
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
-import { storage } from "../storage";
+import { catalogStorage } from "../modules/catalog";
+import { warehouseStorage } from "../modules/warehouse";
+import { inventoryStorage } from "../modules/inventory";
+import { ordersStorage } from "../modules/orders";
+import { channelsStorage } from "../modules/channels";
+import { procurementStorage } from "../modules/procurement";
+import { identityStorage } from "../modules/identity";
 
 export function createServices(db: any) {
   // Foundation
@@ -67,8 +73,15 @@ export function createServices(db: any) {
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore);
 
-  // Depends on inventoryCore + replenishment + storage
-  const picking = createPickingService(db, inventoryCore, replenishment, storage);
+  // Depends on inventoryCore + replenishment + multi-module storage
+  const picking = createPickingService(db, inventoryCore, replenishment, {
+    ...ordersStorage,
+    ...catalogStorage,
+    ...warehouseStorage,
+    ...inventoryStorage,
+    ...channelsStorage,
+    ...identityStorage,
+  });
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
@@ -77,20 +90,35 @@ export function createServices(db: any) {
   const slaMonitor = createSLAMonitorService(db);
   const orderCombining = createOrderCombiningService(db);
 
-  // Depends on inventoryCore + channelSync + replenishment + storage + reservation
-  const cycleCount = createCycleCountService(db, inventoryCore, channelSync, replenishment, storage, reservation);
+  // Depends on inventoryCore + channelSync + replenishment + multi-module storage + reservation
+  const cycleCount = createCycleCountService(db, inventoryCore, channelSync, replenishment, {
+    ...inventoryStorage,
+    ...warehouseStorage,
+    ...catalogStorage,
+  }, reservation);
 
   // Standalone (read-only analytics)
   const operationsDashboard = createOperationsDashboardService(db);
 
-  // Purchasing (depends on storage) — must precede receiving
-  const purchasing = createPurchasingService(db, storage);
+  // Purchasing (depends on procurement + catalog + warehouse storage) — must precede receiving
+  const purchasing = createPurchasingService(db, {
+    ...procurementStorage,
+    ...catalogStorage,
+    ...warehouseStorage,
+  });
 
-  // Shipment tracking (depends on storage)
-  const shipmentTracking = createShipmentTrackingService(db, storage);
+  // Shipment tracking (depends on procurement + catalog storage)
+  const shipmentTracking = createShipmentTrackingService(db, {
+    ...procurementStorage,
+    ...catalogStorage,
+  });
 
-  // Depends on inventoryCore + channelSync + storage + purchasing + shipmentTracking
-  const receiving = createReceivingService(db, inventoryCore, channelSync, storage, purchasing, shipmentTracking);
+  // Depends on inventoryCore + channelSync + multi-module storage + purchasing + shipmentTracking
+  const receiving = createReceivingService(db, inventoryCore, channelSync, {
+    ...procurementStorage,
+    ...catalogStorage,
+    ...warehouseStorage,
+  }, purchasing, shipmentTracking);
 
   // Standalone (imports from Shopify)
   const productImport = createProductImportService();
@@ -98,8 +126,11 @@ export function createServices(db: any) {
   // Channel product push (depends on storage only)
   const channelProductPush = createChannelProductPushService(db);
 
-  // Bin assignment (depends on storage)
-  const binAssignment = createBinAssignmentService(db, storage);
+  // Bin assignment (depends on catalog + warehouse storage)
+  const binAssignment = createBinAssignmentService(db, {
+    ...catalogStorage,
+    ...warehouseStorage,
+  });
 
   return {
     inventoryCore,

@@ -7,6 +7,8 @@
 
 // Storage
 export { type IUserStorage, userMethods } from "./identity.storage";
+import { type IUserStorage, userMethods } from "./identity.storage";
+export const identityStorage: IUserStorage = userMethods;
 
 // Routes
 export { registerAuthRoutes } from "./identity.routes";

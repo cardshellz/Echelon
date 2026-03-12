@@ -11,6 +11,17 @@ export { type IOrderStorage, orderMethods } from "./orders.storage";
 export { type IPickingLogStorage, pickingLogMethods } from "./picking-logs.storage";
 export { type IOrderHistoryStorage, orderHistoryMethods } from "./order-history.storage";
 
+import { type IOrderStorage, orderMethods } from "./orders.storage";
+import { type IPickingLogStorage, pickingLogMethods } from "./picking-logs.storage";
+import { type IOrderHistoryStorage, orderHistoryMethods } from "./order-history.storage";
+
+export type OrdersModuleStorage = IOrderStorage & IPickingLogStorage & IOrderHistoryStorage;
+export const ordersStorage: OrdersModuleStorage = {
+  ...orderMethods,
+  ...pickingLogMethods,
+  ...orderHistoryMethods,
+};
+
 // Routes
 export { registerPickingRoutes } from "./picking.routes";
 

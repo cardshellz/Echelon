@@ -12,6 +12,15 @@
 export { type IChannelStorage, channelMethods } from "./channels.storage";
 export { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
 
+import { type IChannelStorage, channelMethods } from "./channels.storage";
+import { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
+
+export type ChannelsModuleStorage = IChannelStorage & IChannelCatalogStorage;
+export const channelsStorage: ChannelsModuleStorage = {
+  ...channelMethods,
+  ...channelCatalogMethods,
+};
+
 // Routes
 export { registerChannelRoutes } from "./channels.routes";
 

@@ -12,6 +12,17 @@ export { type IInventoryStorage, inventoryMethods } from "./inventory.storage";
 export { type IReplenishmentStorage, replenishmentMethods } from "./replenishment.storage";
 export { type ICycleCountStorage, cycleCountMethods } from "./cycle-counts.storage";
 
+import { type IInventoryStorage, inventoryMethods } from "./inventory.storage";
+import { type IReplenishmentStorage, replenishmentMethods } from "./replenishment.storage";
+import { type ICycleCountStorage, cycleCountMethods } from "./cycle-counts.storage";
+
+export type InventoryModuleStorage = IInventoryStorage & IReplenishmentStorage & ICycleCountStorage;
+export const inventoryStorage: InventoryModuleStorage = {
+  ...inventoryMethods,
+  ...replenishmentMethods,
+  ...cycleCountMethods,
+};
+
 // Routes
 export { registerInventoryRoutes } from "./inventory.routes";
 
