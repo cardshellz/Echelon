@@ -15,9 +15,6 @@ export { type IProcurementStorage, procurementMethods } from "./procurement.stor
 import { type IProcurementStorage, procurementMethods } from "./procurement.storage";
 export const procurementStorage: IProcurementStorage = procurementMethods;
 
-// Routes
-export { registerPurchasingRoutes } from "./procurement.routes";
-
 // Services
 export { createPurchasingService } from "./purchasing.service";
 export { createReceivingService } from "./receiving.service";

@@ -21,14 +21,6 @@ export const channelsStorage: ChannelsModuleStorage = {
   ...channelCatalogMethods,
 };
 
-// Routes
-export { registerChannelRoutes } from "./channels.routes";
-
-// Services
-export { createChannelSyncService } from "./sync.service";
-export { createChannelProductPushService } from "./product-push.service";
-export { createReservationService } from "./reservation.service";
-
 // Service types
 export type { SyncResult } from "./sync.service";
 export type { ReservationResult } from "./reservation.service";

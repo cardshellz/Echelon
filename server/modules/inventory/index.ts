@@ -23,9 +23,6 @@ export const inventoryStorage: InventoryModuleStorage = {
   ...cycleCountMethods,
 };
 
-// Routes
-export { registerInventoryRoutes } from "./inventory.routes";
-
 // Services
 export { createInventoryCoreService } from "./core.service";
 export { createInventoryAtpService } from "./atp.service";

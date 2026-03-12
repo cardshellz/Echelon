@@ -1,4 +1,4 @@
-import { ordersStorage } from "../orders";
+import { orderMethods as ordersStorage } from "./orders.storage";
 import { warehouseStorage } from "../warehouse";
 import { broadcastOrdersUpdated } from "../../websocket";
 

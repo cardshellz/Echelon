@@ -22,11 +22,6 @@ export const warehouseStorage: WarehouseModuleStorage = {
   ...settingsMethods,
 };
 
-// Routes
-export { registerWarehouseRoutes } from "./warehouse.routes";
-export { registerLocationRoutes } from "./locations.routes";
-export { registerSettingsRoutes } from "./settings.routes";
-
 // Services
 export { createBinAssignmentService } from "./bin-assignment.service";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment.service";

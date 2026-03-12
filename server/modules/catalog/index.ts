@@ -10,9 +10,5 @@ export { type IProductStorage, productMethods } from "./catalog.storage";
 import { type IProductStorage, productMethods } from "./catalog.storage";
 export const catalogStorage: IProductStorage = productMethods;
 
-// Routes
-export { registerProductRoutes } from "./catalog.routes";
-
-// Services
-export { createProductImportService } from "./product-import.service";
+// Service types
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";

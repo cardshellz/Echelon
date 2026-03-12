@@ -22,21 +22,6 @@ export const ordersStorage: OrdersModuleStorage = {
   ...orderHistoryMethods,
 };
 
-// Routes
-export { registerPickingRoutes } from "./picking.routes";
-
-// Services
-export { createPickingService } from "./picking.service";
-export { createFulfillmentService } from "./fulfillment.service";
-export { createFulfillmentRouterService } from "./fulfillment-router.service";
-export { createReturnsService } from "./returns.service";
-export { createOrderCombiningService } from "./combining.service";
-export { createSLAMonitorService } from "./sla-monitor.service";
-export { createOperationsDashboardService } from "./operations-dashboard.service";
-
-// Order sync
-export { setupOrderSyncListener, initOrderSyncServices, syncNewOrders, getSyncHealth } from "./order-sync-listener";
-
 // Pick queue sync
 export { syncPickQueueForSku } from "./pick-queue-sync";
 
