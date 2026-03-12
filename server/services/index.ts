@@ -159,6 +159,9 @@ export function createServices(db: any) {
   };
 }
 
+/** Typed service container — use instead of `as any` on `req.app.locals.services` */
+export type ServiceRegistry = ReturnType<typeof createServices>;
+
 // Re-export factory functions for individual service creation
 export { createInventoryCoreService } from "../modules/inventory/core.service";
 export { createInventoryAtpService } from "../modules/inventory/atp.service";

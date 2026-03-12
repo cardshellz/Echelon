@@ -819,7 +819,7 @@ export function registerChannelRoutes(app: Express) {
   // Preview resolved product for a channel (master + overrides merged)
   app.get("/api/channel-push/preview/:productId/:channelId", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services as any;
+      const { channelProductPush } = req.app.locals.services;
       const productId = parseInt(req.params.productId);
       const channelId = parseInt(req.params.channelId);
       const resolved = await channelProductPush.getResolvedProductForChannel(productId, channelId);
@@ -836,7 +836,7 @@ export function registerChannelRoutes(app: Express) {
   // Push product to all active channels
   app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services as any;
+      const { channelProductPush } = req.app.locals.services;
       const productId = parseInt(req.params.productId);
       const results = await channelProductPush.pushProductToAllChannels(productId);
       res.json({ success: true, results });
@@ -849,7 +849,7 @@ export function registerChannelRoutes(app: Express) {
   // Push product to specific channel
   app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services as any;
+      const { channelProductPush } = req.app.locals.services;
       const productId = parseInt(req.params.productId);
       const channelId = parseInt(req.params.channelId);
       const result = await channelProductPush.pushProduct(productId, channelId);
@@ -863,7 +863,7 @@ export function registerChannelRoutes(app: Express) {
   // Push all products to a channel (bulk)
   app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services as any;
+      const { channelProductPush } = req.app.locals.services;
       const channelId = parseInt(req.params.channelId);
       const result = await channelProductPush.pushAllProducts(channelId);
       res.json(result);

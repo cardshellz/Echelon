@@ -39,7 +39,7 @@ export function registerInventoryRoutes(app: Express) {
       });
 
       // Sync to sales channels after adjustment (fire-and-forget)
-      const { channelSync: adjSync, replenishment: adjReplen } = req.app.locals.services as any;
+      const { channelSync: adjSync, replenishment: adjReplen } = req.app.locals.services;
       if (adjSync) {
         adjSync.queueSyncAfterInventoryChange(adjustVariantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-adjust sync failed for variant ${adjustVariantId}:`, err)
@@ -216,7 +216,7 @@ export function registerInventoryRoutes(app: Express) {
       });
 
       // Sync to sales channels after transfer (fire-and-forget)
-      const { channelSync: xfrSync, replenishment: xfrReplen } = req.app.locals.services as any;
+      const { channelSync: xfrSync, replenishment: xfrReplen } = req.app.locals.services;
       if (xfrSync) {
         xfrSync.queueSyncAfterInventoryChange(varId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-transfer sync failed for variant ${varId}:`, err)
@@ -385,7 +385,7 @@ export function registerInventoryRoutes(app: Express) {
       const totalConverted = conversions.reduce((s, c) => s + c.qty, 0);
 
       // Fire channel sync for both variants (fire-and-forget)
-      const { channelSync } = req.app.locals.services as any;
+      const { channelSync } = req.app.locals.services;
       if (channelSync) {
         channelSync.queueSyncAfterInventoryChange(fromVarId).catch(() => {});
         channelSync.queueSyncAfterInventoryChange(toVarId).catch(() => {});
@@ -612,7 +612,7 @@ export function registerInventoryRoutes(app: Express) {
           const variantQtyDelta = targetQty - variantQtyBefore;
 
           // Log with Full WMS fields
-          const { inventoryCore: csvCore } = req.app.locals.services as any;
+          const { inventoryCore: csvCore } = req.app.locals.services;
           await csvCore.logTransaction({
             productVariantId: variant?.id,
             toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
@@ -640,7 +640,7 @@ export function registerInventoryRoutes(app: Express) {
         }
       }
 
-      const { replenishment: csvReplen } = req.app.locals.services as any;
+      const { replenishment: csvReplen } = req.app.locals.services;
       if (csvReplen && csvAffectedLocations.size > 0) {
         for (const locId of csvAffectedLocations) {
           csvReplen.checkReplenForLocation(locId).catch((err: any) =>
@@ -719,7 +719,7 @@ export function registerInventoryRoutes(app: Express) {
       });
 
       // Sync to sales channels after receive (fire-and-forget)
-      const { channelSync: rcvSync } = req.app.locals.services as any;
+      const { channelSync: rcvSync } = req.app.locals.services;
       if (rcvSync) {
         rcvSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-receive sync failed for variant ${variantId}:`, err)
@@ -814,7 +814,7 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/inventory/backorder-status/:itemId", async (req, res) => {
     try {
       const itemId = parseInt(req.params.itemId);
-      const { atp: atpSvc } = req.app.locals.services as any;
+      const { atp: atpSvc } = req.app.locals.services;
       const variant = await storage.getProductVariantById(itemId);
       let status;
       if (!variant) {
@@ -952,7 +952,7 @@ export function registerInventoryRoutes(app: Express) {
         // Original behavior: full summary across all warehouses
         const products = await storage.getAllProducts();
         const summaries = await Promise.all(
-          products.map(product => (req.app.locals.services as any).atp.getInventoryItemSummary(product.id))
+          products.map(product => (req.app.locals.services).atp.getInventoryItemSummary(product.id))
         );
         res.json(summaries.filter(Boolean));
       }
@@ -966,7 +966,7 @@ export function registerInventoryRoutes(app: Express) {
   // Supports single-product sync (productId in body) or full sync.
   app.post("/api/inventory/sync-shopify", async (req, res) => {
     try {
-      const { channelSync } = req.app.locals.services as any;
+      const { channelSync } = req.app.locals.services;
       const { productId } = req.body;
 
       if (productId) {
@@ -1015,7 +1015,7 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { replenishment: breakReplen } = req.app.locals.services as any;
+      const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
         const targetLocId = result.targetLocationId || targetLocationId || warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
@@ -1048,7 +1048,7 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { replenishment: asmReplen } = req.app.locals.services as any;
+      const { replenishment: asmReplen } = req.app.locals.services;
       if (asmReplen) {
         asmReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
           console.warn(`[Replen] Post-assemble check failed for loc ${warehouseLocationId}:`, err)
@@ -1110,7 +1110,7 @@ export function registerInventoryRoutes(app: Express) {
         notes,
       });
 
-      const { replenishment: retReplen } = req.app.locals.services as any;
+      const { replenishment: retReplen } = req.app.locals.services;
       if (retReplen) {
         retReplen.checkReplenForLocation(warehouseLocationId).catch((err: any) =>
           console.warn(`[Replen] Post-return check failed for loc ${warehouseLocationId}:`, err)
@@ -1978,7 +1978,7 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/inventory/items/:id", async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const { atp } = req.app.locals.services as any;
+      const { atp } = req.app.locals.services;
       const summary = await atp.getInventoryItemSummary(id);
       if (!summary) {
         return res.status(404).json({ error: "Item not found" });
@@ -2749,7 +2749,7 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { channelSync: addSync, replenishment: addReplen } = req.app.locals.services as any;
+      const { channelSync: addSync, replenishment: addReplen } = req.app.locals.services;
       if (addSync) {
         addSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-add-stock sync failed for variant ${variantId}:`, err)
@@ -2791,7 +2791,7 @@ export function registerInventoryRoutes(app: Express) {
         userId,
       });
 
-      const { channelSync: adjStockSync, replenishment: adjStockReplen } = req.app.locals.services as any;
+      const { channelSync: adjStockSync, replenishment: adjStockReplen } = req.app.locals.services;
       if (adjStockSync) {
         adjStockSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
           console.warn(`[ChannelSync] Post-adjust-stock sync failed for variant ${variantId}:`, err)
@@ -2864,7 +2864,7 @@ export function registerInventoryRoutes(app: Express) {
             const currentQty = existingLevel.variantQty || 0;
             const delta = variantQty - currentQty;
             if (delta !== 0) {
-              const { inventoryCore: csvAdjCore } = req.app.locals.services as any;
+              const { inventoryCore: csvAdjCore } = req.app.locals.services;
               await csvAdjCore.adjustInventory({
                 productVariantId: variant.id,
                 warehouseLocationId: location.id,

@@ -16,7 +16,7 @@ import type { InsertOrderItem } from "@shared/schema";
 export function registerShopifyRoutes(app: Express) {
   const {
     productImport,
-  } = app.locals.services as any;
+  } = app.locals.services;
 
   app.post("/api/shopify/sync", async (req, res) => {
     try {

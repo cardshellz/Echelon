@@ -18,7 +18,7 @@ import { broadcastOrdersUpdated } from "../../websocket";
 import { purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes, orders, orderItems, shipments, inventoryLevels, inventoryTransactions, productVariants, warehouseLocations } from "@shared/schema";
 
 export function registerPurchasingRoutes(app: Express) {
-  const { purchasing, shipmentTracking } = app.locals.services as any;
+  const { purchasing, shipmentTracking } = app.locals.services;
 
   // ===== VENDORS API =====
   
@@ -214,7 +214,7 @@ export function registerPurchasingRoutes(app: Express) {
   
   app.post("/api/receiving/:id/open", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { receiving: rcvService } = req.app.locals.services as any;
+      const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.open(parseInt(req.params.id), req.session.user?.id || null);
       res.json(result);
     } catch (error: any) {
@@ -227,14 +227,14 @@ export function registerPurchasingRoutes(app: Express) {
   // Close/complete a receiving order - updates inventory
   app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { receiving: rcvService } = req.app.locals.services as any;
+      const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.close(parseInt(req.params.id), req.session.user?.id || null);
       notificationService.notify("po_received", {
-        title: `Receiving Complete: ${result.orderNumber || `#${req.params.id}`}`,
-        message: result.totalUnitsReceived ? `${result.totalUnitsReceived} units received` : undefined,
+        title: `Receiving Complete: ${(result.order as any)?.orderNumber || `#${req.params.id}`}`,
+        message: result.unitsReceived ? `${result.unitsReceived} units received` : undefined,
         data: { receivingOrderId: parseInt(req.params.id) },
       }).catch(() => {});
-      const { replenishment: rcvReplen } = req.app.locals.services as any;
+      const { replenishment: rcvReplen } = req.app.locals.services;
       if (rcvReplen && result.putawayLocationIds?.length) {
         for (const locId of result.putawayLocationIds) {
           rcvReplen.checkReplenForLocation(locId).catch((err: any) =>
@@ -339,7 +339,7 @@ export function registerPurchasingRoutes(app: Express) {
   // Uses the same SKU pattern as Shopify sync: BASE-SKU-[P|B|C]###
   app.post("/api/receiving/lines/:lineId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const { receiving: rcvService } = req.app.locals.services as any;
+      const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.createVariantFromLine(parseInt(req.params.lineId));
       res.json(result);
     } catch (error: any) {
@@ -374,7 +374,7 @@ export function registerPurchasingRoutes(app: Express) {
   // Bulk complete all lines in a receiving order
   app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { receiving: rcvService } = req.app.locals.services as any;
+      const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.completeAllLines(parseInt(req.params.orderId));
       res.json(result);
     } catch (error: any) {
@@ -411,7 +411,7 @@ export function registerPurchasingRoutes(app: Express) {
   // Bulk add lines from CSV for initial inventory load
   app.post("/api/receiving/:orderId/lines/bulk", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { receiving: rcvService } = req.app.locals.services as any;
+      const { receiving: rcvService } = req.app.locals.services;
       const result = await rcvService.bulkImportLines(
         parseInt(req.params.orderId),
         req.body.lines,
@@ -1100,7 +1100,7 @@ export function registerPurchasingRoutes(app: Express) {
       }
 
       // Resolve execution mode via unified decision when not explicitly set
-      const { replenishment } = req.app.locals.services as any;
+      const { replenishment } = req.app.locals.services;
       let shouldAutoExecute = !!autoExecute;
       let executionMode = autoExecute ? "inline" : "queue";
 
@@ -1207,7 +1207,7 @@ export function registerPurchasingRoutes(app: Express) {
   // Report an exception during replen task execution → blocks task + auto-creates cycle count
   app.post("/api/replen/tasks/:id/exception", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { replenishment } = req.app.locals.services as any;
+      const { replenishment } = req.app.locals.services;
       if (!replenishment) {
         return res.status(500).json({ error: "Replenishment service not available" });
       }
@@ -1298,7 +1298,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/bin-inventory", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getBinInventory({
         warehouseId: req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null,
         zone: (req.query.zone as string) || null,
@@ -1320,7 +1320,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/unassigned-inventory", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getUnassignedInventory({
         page: parseInt(req.query.page as string) || 1,
         pageSize: parseInt(req.query.pageSize as string) || 50,
@@ -1334,7 +1334,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/location-health", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getLocationHealth({
         warehouseId: req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null,
         staleDays: parseInt(req.query.staleDays as string) || 30,
@@ -1348,7 +1348,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/exceptions", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getExceptions({
         warehouseId: req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null,
         staleDays: parseInt(req.query.staleDays as string) || 30,
@@ -1362,7 +1362,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/pick-readiness", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getPickReadiness({
         warehouseId: req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null,
         threshold: parseInt(req.query.threshold as string) || 5,
@@ -1376,7 +1376,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/activity", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getActivity({
         locationId: req.query.locationId ? parseInt(req.query.locationId as string) : null,
         variantId: req.query.variantId ? parseInt(req.query.variantId as string) : null,
@@ -1391,7 +1391,7 @@ export function registerPurchasingRoutes(app: Express) {
 
   app.get("/api/operations/action-queue", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { operationsDashboard: ops } = req.app.locals.services as any;
+      const { operationsDashboard: ops } = req.app.locals.services;
       const result = await ops.getActionQueue({
         warehouseId: req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null,
         filter: (req.query.filter as string) || "all",
@@ -2569,11 +2569,13 @@ export function registerPurchasingRoutes(app: Express) {
   app.post("/api/inbound-shipments/:id/delivered", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const shipment = await shipmentTracking.markDelivered(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.deliveredDate ? new Date(req.body.deliveredDate) : undefined);
-      notificationService.notify("shipment_arrived", {
-        title: `Shipment Delivered: ${shipment.referenceNumber || `#${shipment.id}`}`,
-        message: shipment.shipperName ? `From ${shipment.shipperName}` : undefined,
-        data: { shipmentId: shipment.id },
-      }).catch(() => {});
+      if (shipment) {
+        notificationService.notify("shipment_arrived", {
+          title: `Shipment Delivered: ${shipment.shipmentNumber || `#${shipment.id}`}`,
+          message: shipment.shipperName ? `From ${shipment.shipperName}` : undefined,
+          data: { shipmentId: shipment.id },
+        }).catch(() => {});
+      }
       res.json(shipment);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });

@@ -280,7 +280,7 @@ export function registerProductRoutes(app: Express) {
           return res.status(400).json({ error: "Target variant not found or inactive" });
         }
 
-        const { inventoryCore } = req.app.locals.services as any;
+        const { inventoryCore } = req.app.locals.services;
         const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         for (const v of variants) {
@@ -308,7 +308,7 @@ export function registerProductRoutes(app: Express) {
         }
 
         // Sync target variant inventory to channels
-        const { channelSync } = req.app.locals.services as any;
+        const { channelSync } = req.app.locals.services;
         if (channelSync) {
           channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
             console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
@@ -752,7 +752,7 @@ export function registerProductRoutes(app: Express) {
           return res.status(400).json({ error: "Target variant not found or inactive" });
         }
 
-        const { inventoryCore } = req.app.locals.services as any;
+        const { inventoryCore } = req.app.locals.services;
         const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         for (const level of levels) {
@@ -775,7 +775,7 @@ export function registerProductRoutes(app: Express) {
           }
         }
 
-        const { channelSync } = req.app.locals.services as any;
+        const { channelSync } = req.app.locals.services;
         if (channelSync) {
           channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
             console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
@@ -936,7 +936,7 @@ export function registerProductRoutes(app: Express) {
   // ============================================================================
   // Bin Assignments (variant-centric pick location management)
   // ============================================================================
-  const { binAssignment } = app.locals.services as any;
+  const { binAssignment } = app.locals.services;
 
   app.get("/api/bin-assignments", requirePermission("inventory", "view"), async (req, res) => {
     try {

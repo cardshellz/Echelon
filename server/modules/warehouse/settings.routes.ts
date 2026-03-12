@@ -140,7 +140,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.get("/api/cycle-counts", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.getAll());
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -151,7 +151,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.get("/api/cycle-counts/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.getById(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -162,7 +162,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.get("/api/cycle-counts/:id/variance-summary", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.getVarianceSummary(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -173,7 +173,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       const result = await ccService.create(req.body, req.session.user?.id);
       res.status(201).json(result);
     } catch (error: any) {
@@ -186,7 +186,7 @@ export function registerSettingsRoutes(app: Express) {
   // Quick Count — create + initialize + return in one step for single-bin counts
   app.post("/api/cycle-counts/quick", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       const { locationCode, warehouseId } = req.body;
       if (!locationCode) return res.status(400).json({ error: "locationCode is required" });
 
@@ -209,7 +209,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/initialize", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.initialize(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -220,7 +220,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/count", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.recordCount(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -236,7 +236,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/reset", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.resetItem(parseInt(req.params.id), parseInt(req.params.itemId)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -247,7 +247,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/investigate", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.investigateItem(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -264,7 +264,7 @@ export function registerSettingsRoutes(app: Express) {
   // Sync cycle count item expected qty from current inventory (after an external transfer)
   app.post("/api/cycle-counts/:id/items/:itemId/sync-expected", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.syncExpectedFromInventory(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -279,7 +279,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/resolve-transfer", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.resolveWithTransfer(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -300,7 +300,7 @@ export function registerSettingsRoutes(app: Express) {
   // Resolve variance without inventory adjustment
   app.post("/api/cycle-counts/:id/items/:itemId/resolve", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.resolveItem(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -319,7 +319,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/add-found-item", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.addFoundItem(parseInt(req.params.id), req.body, req.session.user?.id));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -330,7 +330,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/approve", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.approveVariance(
         parseInt(req.params.id),
         parseInt(req.params.itemId),
@@ -345,7 +345,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/bulk-approve", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.bulkApprove(
         parseInt(req.params.id),
         { itemIds: req.body.itemIds, reasonCode: req.body.reasonCode, notes: req.body.notes, approvedBy: req.session.user?.id },
@@ -359,7 +359,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/items/:itemId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.createVariant(parseInt(req.params.id), parseInt(req.params.itemId)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -373,7 +373,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.post("/api/cycle-counts/:id/complete", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.complete(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
@@ -384,7 +384,7 @@ export function registerSettingsRoutes(app: Express) {
 
   app.delete("/api/cycle-counts/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { cycleCount: ccService } = req.app.locals.services as any;
+      const { cycleCount: ccService } = req.app.locals.services;
       res.json(await ccService.delete(parseInt(req.params.id)));
     } catch (error: any) {
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });

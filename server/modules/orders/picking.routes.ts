@@ -11,7 +11,7 @@ import { broadcastOrdersUpdated } from "../../websocket";
 import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {
-  const { orderCombining } = app.locals.services as any;
+  const { orderCombining } = app.locals.services;
 
   // ===== PICKING QUEUE API =====
   
@@ -157,7 +157,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.get("/api/picking/queue", async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const orders = await picking.getPickQueue();
       res.json(orders);
     } catch (error) {
@@ -182,7 +182,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/orders/:id/claim", async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
       const { pickerId } = req.body;
       if (!pickerId) return res.status(400).json({ error: "pickerId is required" });
@@ -197,7 +197,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/orders/:id/release", async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
       const { resetProgress = true, reason } = req.body || {};
       const order = await picking.releaseOrder(id, {
@@ -216,7 +216,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const result = await picking.pickItem(parseInt(req.params.id), {
         status: req.body.status,
         pickedQuantity: req.body.pickedQuantity,
@@ -241,7 +241,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/case-break", requireAuth, async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const { sku, warehouseLocationId } = req.body;
       if (!sku || !warehouseLocationId) {
         return res.status(400).json({ error: "sku and warehouseLocationId are required" });
@@ -261,7 +261,7 @@ export function registerPickingRoutes(app: Express) {
   // Consolidated bin count + replen confirmation (replaces separate endpoints below)
   app.post("/api/picking/bin-count", requireAuth, async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const { sku, locationId, binCount, didReplen } = req.body;
       if (!sku || !locationId || binCount == null || didReplen == null) {
         return res.status(400).json({ error: "sku, locationId, binCount, and didReplen are required" });
@@ -285,7 +285,7 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/case-break/confirm", requireAuth, async (req, res) => {
     console.warn("[DEPRECATED] POST /api/picking/case-break/confirm was called — migrate to /api/picking/bin-count");
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const { sku, warehouseLocationId, actualBinQty } = req.body;
       if (!sku || !warehouseLocationId || actualBinQty == null) {
         return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
@@ -301,7 +301,7 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/case-break/skip", requireAuth, async (req, res) => {
     console.warn("[DEPRECATED] POST /api/picking/case-break/skip was called — migrate to /api/picking/bin-count");
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const { sku, warehouseLocationId, actualBinQty } = req.body;
       if (!sku || !warehouseLocationId || actualBinQty == null) {
         return res.status(400).json({ error: "sku, warehouseLocationId, and actualBinQty are required" });
@@ -316,7 +316,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/replen/confirm", requireAuth, async (req, res) => {
     try {
-      const { replenishment } = req.app.locals.services as any;
+      const { replenishment } = req.app.locals.services;
       const { taskId } = req.body;
       if (!taskId) {
         return res.status(400).json({ error: "taskId is required" });
@@ -331,7 +331,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/replen/cancel", requireAuth, async (req, res) => {
     try {
-      const { replenishment } = req.app.locals.services as any;
+      const { replenishment } = req.app.locals.services;
       const { taskId } = req.body;
       if (!taskId) {
         return res.status(400).json({ error: "taskId is required" });
@@ -346,7 +346,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
     try {
-      const { replenishment } = req.app.locals.services as any;
+      const { replenishment } = req.app.locals.services;
       const { sku, locationCode } = req.body;
       if (!sku || !locationCode) {
         return res.status(400).json({ error: "sku and locationCode are required" });
@@ -361,7 +361,7 @@ export function registerPickingRoutes(app: Express) {
 
   app.post("/api/picking/orders/:id/ready-to-ship", async (req, res) => {
     try {
-      const { picking } = req.app.locals.services as any;
+      const { picking } = req.app.locals.services;
       const order = await picking.markReadyToShip(
         parseInt(req.params.id),
         req.session?.user?.id,
