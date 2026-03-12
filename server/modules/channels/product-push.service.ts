@@ -31,7 +31,9 @@ import {
   type ChannelAssetOverride,
   type ChannelListing,
 } from "@shared/schema";
-import { storage } from "../../storage";
+import { catalogStorage } from "../catalog";
+import { channelsStorage } from "../channels";
+const storage = { ...catalogStorage, ...channelsStorage };
 
 // ---------------------------------------------------------------------------
 // Types

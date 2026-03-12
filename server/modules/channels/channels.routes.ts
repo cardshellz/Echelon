@@ -2,7 +2,12 @@ import type { Express } from "express";
 import { z } from "zod";
 import { eq, sql, and } from "drizzle-orm";
 import { db } from "../../db";
-import { storage } from "../../storage";
+import { channelsStorage } from "../channels";
+import { ordersStorage } from "../orders";
+import { catalogStorage } from "../catalog";
+import { warehouseStorage } from "../warehouse";
+import { inventoryStorage } from "../inventory";
+const storage = { ...channelsStorage, ...ordersStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
 import { insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, channels, channelListings, productVariants, products, orders, orderItems, inventoryLevels } from "@shared/schema";
 

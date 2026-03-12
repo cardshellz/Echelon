@@ -1,7 +1,10 @@
 import type { Express } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
-import { storage } from "../../storage";
+import { ordersStorage } from "../orders";
+import { channelsStorage } from "../channels";
+import { identityStorage } from "../identity";
+const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, shipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";

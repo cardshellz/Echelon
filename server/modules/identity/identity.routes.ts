@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { storage } from "../../storage";
+import { identityStorage as storage } from "../identity";
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import bcrypt from "bcrypt";
 import { getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles } from "./rbac";

@@ -1,7 +1,12 @@
 import { Pool, Client } from "pg";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
-import { storage } from "../../storage";
+import { ordersStorage } from "../orders";
+import { channelsStorage } from "../channels";
+import { catalogStorage } from "../catalog";
+import { warehouseStorage } from "../warehouse";
+import { inventoryStorage } from "../inventory";
+const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import type { InsertOrderItem } from "@shared/schema";
 
 let inventoryCore: any;

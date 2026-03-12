@@ -2,7 +2,9 @@ import type { Express } from "express";
 import { z } from "zod";
 import { eq, sql, and, gte } from "drizzle-orm";
 import { db } from "../../db";
-import { storage } from "../../storage";
+import { warehouseStorage } from "../warehouse";
+import { inventoryStorage } from "../inventory";
+const storage = { ...warehouseStorage, ...inventoryStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
 export function registerSettingsRoutes(app: Express) {

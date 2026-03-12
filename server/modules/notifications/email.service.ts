@@ -13,7 +13,10 @@
 import nodemailer from "nodemailer";
 import { renderPoHtml } from "../procurement/po-document";
 import { createPurchasingService } from "../procurement/purchasing.service";
-import { storage } from "../../storage";
+import { procurementStorage } from "../procurement";
+import { warehouseStorage } from "../warehouse";
+import { catalogStorage } from "../catalog";
+const storage = { ...procurementStorage, ...warehouseStorage, ...catalogStorage };
 import { db } from "../../db";
 
 export function isSmtpConfigured(): boolean {

@@ -9,7 +9,9 @@
  *   2. syncProductsWithMultiUOM() — Full SKU-based product/variant creation with hierarchy parsing
  */
 
-import { storage } from "../../storage";
+import { catalogStorage } from "../catalog";
+import { warehouseStorage } from "../warehouse";
+const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 
 // ---------------------------------------------------------------------------

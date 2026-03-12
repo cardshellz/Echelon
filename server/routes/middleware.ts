@@ -1,7 +1,10 @@
 import type { Request, Response, NextFunction } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
-import { storage } from "../storage";
+import { ordersStorage } from "../modules/orders";
+import { inventoryStorage } from "../modules/inventory";
+import { warehouseStorage } from "../modules/warehouse";
+const storage = { ...ordersStorage, ...inventoryStorage, ...warehouseStorage };
 import { hasPermission } from "../modules/identity/rbac";
 import { broadcastOrdersUpdated } from "../websocket";
 import multer from "multer";
