@@ -1,4 +1,4 @@
-import { db } from "../db";
+import { db } from "../../db";
 import { eq, and, desc, isNull, sql } from "drizzle-orm";
 import {
   notifications,
@@ -10,7 +10,7 @@ import {
   type NotificationType,
   type NotificationPreference,
 } from "@shared/schema";
-import { broadcastToUser } from "../websocket";
+import { broadcastToUser } from "../../websocket";
 
 /**
  * Send a notification to all users whose preferences (role default or user override) enable it.

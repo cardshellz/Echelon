@@ -31,7 +31,7 @@ import {
   type ChannelAssetOverride,
   type ChannelListing,
 } from "@shared/schema";
-import { storage } from "../storage";
+import { storage } from "../../storage";
 
 // ---------------------------------------------------------------------------
 // Types

@@ -8,8 +8,8 @@ import { PurchasingError } from "../services/purchasing";
 import { ShipmentTrackingError } from "../services/shipment-tracking";
 import * as apLedger from "../services/ap-ledger";
 import { renderPoHtml } from "../services/po-document";
-import * as emailService from "../services/email";
-import * as notificationService from "../services/notifications";
+import * as emailService from "../modules/notifications/email.service";
+import * as notificationService from "../modules/notifications/notifications.service";
 import { broadcastOrdersUpdated } from "../websocket";
 import { purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes, orders, orderItems, shipments, inventoryLevels, inventoryTransactions, productVariants, warehouseLocations } from "@shared/schema";
 

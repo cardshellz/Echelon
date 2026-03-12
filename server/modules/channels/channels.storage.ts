@@ -15,7 +15,7 @@ import {
   channelReservations,
   productVariants,
   eq, and, asc,
-} from "./base";
+} from "../../storage/base";
 
 export interface IChannelStorage {
   getAllChannels(): Promise<Channel[]>;

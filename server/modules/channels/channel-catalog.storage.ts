@@ -8,7 +8,7 @@ import {
   eq,
   and,
   sql,
-} from "./base";
+} from "../../storage/base";
 import type {
   ChannelProductOverride,
   InsertChannelProductOverride,
@@ -20,7 +20,7 @@ import type {
   InsertChannelListing,
   ChannelAssetOverride,
   InsertChannelAssetOverride,
-} from "./base";
+} from "../../storage/base";
 
 export interface IChannelCatalogStorage {
   getChannelProductOverride(channelId: number, productId: number): Promise<ChannelProductOverride | undefined>;

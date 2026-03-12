@@ -11,10 +11,10 @@
  */
 
 import nodemailer from "nodemailer";
-import { renderPoHtml } from "./po-document";
-import { createPurchasingService } from "./purchasing";
-import { storage } from "../storage";
-import { db } from "../db";
+import { renderPoHtml } from "../../services/po-document";
+import { createPurchasingService } from "../../services/purchasing";
+import { storage } from "../../storage";
+import { db } from "../../db";
 
 export function isSmtpConfigured(): boolean {
   return !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
