@@ -1,13 +1,11 @@
 import type { Express } from "express";
-import { eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "../../db";
 import { warehouseStorage } from "../warehouse";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission, syncPickQueueForSku } from "../../routes/middleware";
-import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, warehouses, warehouseLocations, fulfillmentRoutingRules, routingMatchTypeEnum, productLocations, inventoryLevels } from "@shared/schema";
+import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
 export function registerWarehouseRoutes(app: Express) {
 
@@ -99,7 +97,7 @@ export function registerWarehouseRoutes(app: Express) {
 
   app.get("/api/fulfillment-routing-rules", requirePermission("inventory", "view"), async (req, res) => {
     try {
-      const rules = await db.select().from(fulfillmentRoutingRules).orderBy(sql`priority DESC, id`);
+      const rules = await storage.getAllFulfillmentRoutingRules();
       res.json(rules);
     } catch (error) {
       console.error("Error fetching routing rules:", error);
@@ -120,7 +118,7 @@ export function registerWarehouseRoutes(app: Express) {
       if (data.matchType !== "default" && !data.matchValue) {
         return res.status(400).json({ error: "matchValue is required for non-default rules" });
       }
-      const [rule] = await db.insert(fulfillmentRoutingRules).values(data as any).returning();
+      const rule = await storage.createFulfillmentRoutingRule(data as any);
       res.status(201).json(rule);
     } catch (error) {
       console.error("Error creating routing rule:", error);
@@ -135,10 +133,7 @@ export function registerWarehouseRoutes(app: Express) {
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid rule data", details: parsed.error });
       }
-      const [rule] = await db.update(fulfillmentRoutingRules)
-        .set({ ...parsed.data as any, updatedAt: new Date() })
-        .where(eq(fulfillmentRoutingRules.id, id))
-        .returning();
+      const rule = await storage.updateFulfillmentRoutingRule(id, parsed.data as any);
       if (!rule) {
         return res.status(404).json({ error: "Routing rule not found" });
       }
@@ -152,9 +147,7 @@ export function registerWarehouseRoutes(app: Express) {
   app.delete("/api/fulfillment-routing-rules/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const [deleted] = await db.delete(fulfillmentRoutingRules)
-        .where(eq(fulfillmentRoutingRules.id, id))
-        .returning();
+      const deleted = await storage.deleteFulfillmentRoutingRule(id);
       if (!deleted) {
         return res.status(404).json({ error: "Routing rule not found" });
       }
@@ -331,19 +324,7 @@ export function registerWarehouseRoutes(app: Express) {
   app.get("/api/warehouse/locations", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const locations = await storage.getAllWarehouseLocations();
-
-      const assignedSkusResult = await db.execute(sql`
-        SELECT warehouse_location_id, STRING_AGG(sku, ', ' ORDER BY is_primary DESC, sku) as skus
-        FROM product_locations
-        WHERE sku IS NOT NULL
-        GROUP BY warehouse_location_id
-      `);
-      const primarySkuMap = new Map<number, string>();
-      for (const row of assignedSkusResult.rows as any[]) {
-        if (row.warehouse_location_id && row.skus) {
-          primarySkuMap.set(row.warehouse_location_id, row.skus);
-        }
-      }
+      const primarySkuMap = await storage.getSkusByWarehouseLocation();
 
       const enriched = locations.map(loc => ({
         ...loc,
@@ -458,22 +439,16 @@ export function registerWarehouseRoutes(app: Express) {
       
       for (const id of ids) {
         try {
-          const invLevels = await db.select({ id: inventoryLevels.id })
-            .from(inventoryLevels)
-            .where(eq(inventoryLevels.warehouseLocationId, id))
-            .limit(1);
-          
-          if (invLevels.length > 0) {
+          const hasInventory = await storage.hasInventoryAtLocation(id);
+
+          if (hasInventory) {
             blocked.push(`Location ${id} has inventory - move or adjust stock first`);
             continue;
           }
-          
-          const productLocs = await db.select({ id: productLocations.id })
-            .from(productLocations)
-            .where(eq(productLocations.warehouseLocationId, id))
-            .limit(1);
-          
-          if (productLocs.length > 0) {
+
+          const hasProducts = await storage.hasProductsAssignedToLocation(id);
+
+          if (hasProducts) {
             blocked.push(`Location ${id} has products assigned - reassign them first`);
             continue;
           }
@@ -515,15 +490,12 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(404).json({ error: "Target location not found" });
       }
       
-      const result = await db.update(productLocations)
-        .set({ 
-          warehouseLocationId: targetLocationId,
-          location: targetLocation.code,
-          zone: targetLocation.zone || 'STAGING'
-        })
-        .where(inArray(productLocations.warehouseLocationId, sourceLocationIds));
-      
-      const reassigned = result.rowCount || 0;
+      const reassigned = await storage.bulkReassignProducts(
+        sourceLocationIds,
+        targetLocationId,
+        targetLocation.code,
+        targetLocation.zone || 'STAGING'
+      );
       res.json({ success: true, reassigned });
     } catch (error: any) {
       console.error("Error bulk reassigning products:", error);
@@ -622,55 +594,7 @@ export function registerWarehouseRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid location ID" });
       }
       
-      const result = await db.execute<{
-        id: number;
-        product_variant_id: number;
-        variant_qty: number;
-        reserved_qty: number;
-        picked_qty: number;
-        sku: string | null;
-        variant_name: string | null;
-        units_per_variant: number;
-        product_title: string | null;
-        product_id: number | null;
-        image_url: string | null;
-        barcode: string | null;
-      }>(sql`
-        SELECT
-          il.id,
-          il.product_variant_id,
-          il.variant_qty,
-          il.reserved_qty,
-          il.picked_qty,
-          pv.sku,
-          pv.name as variant_name,
-          pv.units_per_variant,
-          COALESCE(p.title, p.name) as product_title,
-          p.id as product_id,
-          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url,
-          pv.barcode
-        FROM inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
-        LEFT JOIN products p ON pv.product_id = p.id
-        WHERE il.warehouse_location_id = ${warehouseLocationId}
-          AND il.variant_qty > 0
-        ORDER BY pv.sku
-      `);
-
-      const inventory = result.rows.map(row => ({
-        id: row.id,
-        variantId: row.product_variant_id,
-        qty: row.variant_qty,
-        reservedQty: row.reserved_qty,
-        pickedQty: row.picked_qty,
-        sku: row.sku,
-        variantName: row.variant_name,
-        unitsPerVariant: row.units_per_variant,
-        productTitle: row.product_title,
-        productId: row.product_id,
-        imageUrl: row.image_url,
-        barcode: row.barcode,
-      }));
+      const inventory = await storage.getLocationInventoryDetail(warehouseLocationId);
       
       res.json(inventory);
     } catch (error: any) {

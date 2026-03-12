@@ -281,3 +281,10 @@ export async function resetUserPreferences(userId: string) {
     .delete(notificationPreferences)
     .where(eq(notificationPreferences.userId, userId));
 }
+
+/**
+ * List all notification types (for admin settings).
+ */
+export async function getAllNotificationTypes(): Promise<NotificationType[]> {
+  return await db.select().from(notificationTypes).orderBy(notificationTypes.category, notificationTypes.label);
+}

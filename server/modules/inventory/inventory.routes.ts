@@ -1,15 +1,14 @@
 import type { Express } from "express";
-import { z } from "zod";
-import { eq, sql, and } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import { inventoryStorage } from "../inventory";
 import { warehouseStorage } from "../warehouse";
 import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
-const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage };
+import { channelsStorage } from "../channels";
+const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
 import { requirePermission, requireAuth, syncPickQueueForSku, upload } from "../../routes/middleware";
-import { inventoryLevels, inventoryTransactions, productVariants, warehouseLocations, orders, orderItems, productLocations, insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema, productAssets, products } from "@shared/schema";
-import { broadcastOrdersUpdated } from "../../websocket";
+import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 
 export function registerInventoryRoutes(app: Express) {
@@ -67,23 +66,8 @@ export function registerInventoryRoutes(app: Express) {
       const limit = parseInt(String(req.query.limit)) || 20;
 
       if (locationId) {
-        const result = await db.execute(sql`
-          SELECT
-            pv.sku as sku,
-            pv.name as name,
-            pv.id as "variantId",
-            il.variant_qty as available,
-            wl.id as "locationId",
-            wl.code as location
-          FROM inventory_levels il
-          JOIN product_variants pv ON pv.id = il.product_variant_id
-          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-          WHERE il.warehouse_location_id = ${locationId}
-            AND il.variant_qty > 0
-          ORDER BY pv.sku
-          LIMIT ${limit}
-        `);
-        return res.json(result.rows);
+        const result = await storage.searchSkusByLocation(locationId, limit);
+        return res.json(result);
       }
 
       if (!query) {
@@ -91,27 +75,8 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const searchPattern = `%${query}%`;
-
-      const result = await db.execute(sql`
-        SELECT
-          pv.sku as sku,
-          pv.name as name,
-          'product_variant' as source,
-          pv.product_id as "productId",
-          pv.id as "productVariantId",
-          pv.units_per_variant as "unitsPerVariant"
-        FROM product_variants pv
-        WHERE pv.is_active = true
-          AND pv.sku IS NOT NULL
-          AND (
-            LOWER(pv.sku) LIKE ${searchPattern} OR
-            LOWER(pv.name) LIKE ${searchPattern}
-          )
-        ORDER BY pv.sku
-        LIMIT ${limit}
-      `);
-
-      res.json(result.rows);
+      const result = await storage.searchSkusByPattern(searchPattern, limit);
+      res.json(result);
     } catch (error) {
       console.error("Error searching SKUs:", error);
       res.status(500).json({ error: "Failed to search SKUs" });
@@ -126,31 +91,8 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const searchPattern = `%${query}%`;
-
-      const result = await db.execute(sql`
-        SELECT
-          pv.sku,
-          pv.name,
-          pv.id as "variantId",
-          wl.code as location,
-          wl.zone,
-          wl.location_type as "locationType",
-          il.variant_qty as available,
-          il.warehouse_location_id as "locationId",
-          w.code as "warehouseCode"
-        FROM inventory_levels il
-        JOIN product_variants pv ON pv.id = il.product_variant_id
-        JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-        LEFT JOIN warehouses w ON w.id = wl.warehouse_id
-        WHERE il.variant_qty > 0
-          AND (
-            LOWER(pv.sku) LIKE ${searchPattern} OR
-            LOWER(pv.name) LIKE ${searchPattern}
-          )
-        ORDER BY pv.sku, wl.code
-      `);
-
-      res.json(result.rows);
+      const result = await storage.searchSkuLocations(searchPattern);
+      res.json(result);
     } catch (error) {
       console.error("Error fetching SKU locations:", error);
       res.status(500).json({ error: "Failed to fetch SKU locations" });
@@ -272,28 +214,8 @@ export function registerInventoryRoutes(app: Express) {
       const noteText = `SKU conversion: ${fromVariant.sku} → ${toVariant.sku}${notes ? '. ' + notes : ''}`;
 
       // Find all inventory for the source variant (optionally filtered to one location)
-      let sourceInventory: any[];
-      if (locationId) {
-        const locId = parseInt(String(locationId));
-        const level = await db.execute(sql`
-          SELECT il.*, wl.code as location_code
-          FROM inventory_levels il
-          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-          WHERE il.product_variant_id = ${fromVarId}
-            AND il.warehouse_location_id = ${locId}
-            AND il.variant_qty > 0
-        `);
-        sourceInventory = level.rows as any[];
-      } else {
-        const levels = await db.execute(sql`
-          SELECT il.*, wl.code as location_code
-          FROM inventory_levels il
-          JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-          WHERE il.product_variant_id = ${fromVarId}
-            AND il.variant_qty > 0
-        `);
-        sourceInventory = levels.rows as any[];
-      }
+      const locId = locationId ? parseInt(String(locationId)) : undefined;
+      const sourceInventory = await storage.getSourceInventoryForConversion(fromVarId, locId) as any[];
 
       if (sourceInventory.length === 0) {
         return res.status(400).json({ error: "No inventory found for source variant" });
@@ -758,10 +680,8 @@ export function registerInventoryRoutes(app: Express) {
       const locationMap = new Map(locations.map(l => [l.id, l]));
 
       // Check which locations have this variant assigned
-      const assignments = await db.select({ warehouseLocationId: productLocations.warehouseLocationId })
-        .from(productLocations)
-        .where(eq(productLocations.productVariantId, variantId));
-      const assignedLocationIds = new Set(assignments.map(a => a.warehouseLocationId));
+      const assignedLocationIdsList = await storage.getAssignedLocationIdsForVariant(variantId);
+      const assignedLocationIds = new Set(assignedLocationIdsList);
 
       const result = levels.map(level => ({
         ...level,
@@ -782,7 +702,7 @@ export function registerInventoryRoutes(app: Express) {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const [level] = await db.select().from(inventoryLevels).where(eq(inventoryLevels.id, id)).limit(1);
+      const level = await storage.getInventoryLevelById(id);
       if (!level) return res.status(404).json({ error: "Inventory level not found" });
 
       // Safety: only allow deletion of fully empty rows
@@ -791,18 +711,12 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       // Safety: don't delete if variant is assigned to this location
-      const [assignment] = await db.select({ id: productLocations.id })
-        .from(productLocations)
-        .where(and(
-          eq(productLocations.productVariantId, level.productVariantId),
-          eq(productLocations.warehouseLocationId, level.warehouseLocationId),
-        ))
-        .limit(1);
-      if (assignment) {
+      const hasAssignment = await storage.hasProductLocationAssignment(level.productVariantId, level.warehouseLocationId);
+      if (hasAssignment) {
         return res.status(400).json({ error: "Cannot delete — variant is assigned to this location" });
       }
 
-      await db.delete(inventoryLevels).where(eq(inventoryLevels.id, id));
+      await storage.deleteInventoryLevel(id);
       res.json({ success: true });
     } catch (error: any) {
       console.error("Error deleting inventory level:", error);
@@ -1148,7 +1062,7 @@ export function registerInventoryRoutes(app: Express) {
       const { returns } = req.app.locals.services;
       const orderNumber = req.params.orderNumber;
 
-      const [order] = await db.select().from(orders).where(eq(orders.orderNumber, orderNumber)).limit(1);
+      const order = await storage.getOrderByOrderNumber(orderNumber);
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
@@ -1282,17 +1196,9 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const channelId = parseInt(req.params.id);
       const { allocationPct, allocationFixedQty } = req.body;
-      const { channels: ch } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
 
-      const [channel] = await db.select().from(ch).where(eq(ch.id, channelId)).limit(1);
-      if (!channel) return res.status(404).json({ error: "Channel not found" });
-
-      const [updated] = await db.update(ch).set({
-        allocationPct: allocationPct != null ? Math.max(0, Math.min(100, allocationPct)) : null,
-        allocationFixedQty: allocationFixedQty != null ? Math.max(0, allocationFixedQty) : null,
-        updatedAt: new Date(),
-      }).where(eq(ch.id, channelId)).returning();
+      const updated = await storage.updateChannelAllocation(channelId, allocationPct ?? null, allocationFixedQty ?? null);
+      if (!updated) return res.status(404).json({ error: "Channel not found" });
 
       res.json(updated);
     } catch (error: any) {
@@ -1846,38 +1752,9 @@ export function registerInventoryRoutes(app: Express) {
 
       const searchPattern = `%${query}%`;
 
-      const result = await db.execute<{
-        product_id: number;
-        variant_id: number;
-        variant_sku: string;
-        variant_name: string;
-        product_sku: string | null;
-        product_title: string | null;
-        image_url: string | null;
-      }>(sql`
-        SELECT
-          p.id as product_id,
-          pv.id as variant_id,
-          pv.sku as variant_sku,
-          pv.name as variant_name,
-          p.sku as product_sku,
-          COALESCE(p.title, p.name) as product_title,
-          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
-        FROM product_variants pv
-        JOIN products p ON p.id = pv.product_id
-        WHERE pv.is_active = true
-          AND pv.sku IS NOT NULL
-          AND (
-            LOWER(pv.sku) LIKE ${searchPattern} OR
-            LOWER(pv.name) LIKE ${searchPattern} OR
-            LOWER(p.sku) LIKE ${searchPattern} OR
-            LOWER(COALESCE(p.title, p.name)) LIKE ${searchPattern}
-          )
-        ORDER BY pv.sku
-        LIMIT ${limit}
-      `);
+      const result = await storage.searchCatalogProductsWithImage(searchPattern, limit);
 
-      res.json(result.rows.map(r => ({
+      res.json(result.map(r => ({
         id: r.product_id,
         variantId: r.variant_id,
         sku: r.variant_sku,
@@ -2157,22 +2034,7 @@ export function registerInventoryRoutes(app: Express) {
       const { getSyncHealth } = await import("../orders/order-sync-listener");
       const health = getSyncHealth();
       
-      const unsyncedCheck = await db.execute(sql`
-        SELECT 
-          (SELECT MAX(created_at) FROM shopify_orders) as latest_shopify_order,
-          (SELECT MAX(created_at) FROM orders WHERE source = 'shopify') as latest_synced_order,
-          (SELECT COUNT(*) FROM shopify_orders so 
-           WHERE NOT EXISTS(SELECT 1 FROM orders WHERE source_table_id = so.id)
-           AND so.created_at > NOW() - INTERVAL '24 hours'
-           AND so.cancelled_at IS NULL
-           AND EXISTS(
-             SELECT 1 FROM shopify_order_items soi 
-             WHERE soi.order_id = so.id 
-             AND (soi.fulfillment_status IS NULL OR soi.fulfillment_status != 'fulfilled')
-           )) as unsynced_24h
-      `);
-      
-      const row = unsyncedCheck.rows[0] as any;
+      const row = await storage.getSyncHealthStats() as any;
       const latestShopifyOrder = row?.latest_shopify_order;
       const latestSyncedOrder = row?.latest_synced_order;
       const unsynced24h = parseInt(row?.unsynced_24h || "0");
@@ -2242,20 +2104,15 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/debug/order-dates/:orderNumber", async (req, res) => {
     try {
       const orderNumber = req.params.orderNumber;
-      const order = await db.execute(sql`
-        SELECT id, order_number, order_placed_at, shopify_created_at, created_at 
-        FROM orders WHERE order_number LIKE ${'%' + orderNumber}
-        LIMIT 1
-      `);
-      if (order.rows.length === 0) {
+      const row = await storage.getDebugOrderDates(orderNumber);
+      if (!row) {
         return res.json({ error: "Order not found" });
       }
-      const row = order.rows[0] as any;
       res.json({
-        orderNumber: row.order_number,
-        orderPlacedAt: row.order_placed_at,
-        shopifyCreatedAt: row.shopify_created_at,
-        createdAt: row.created_at,
+        orderNumber: (row as any).order_number,
+        orderPlacedAt: (row as any).order_placed_at,
+        shopifyCreatedAt: (row as any).shopify_created_at,
+        createdAt: (row as any).created_at,
         serverNow: new Date().toISOString()
       });
     } catch (error) {
@@ -2265,46 +2122,11 @@ export function registerInventoryRoutes(app: Express) {
 
   app.get("/api/debug/sync-status", async (req, res) => {
     try {
-      const missing = await db.execute<{ count: string }>(sql`
-        SELECT COUNT(*) as count FROM shopify_orders 
-        WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
-      `);
-      
-      const sample = await db.execute<{ 
-        id: string;
-        order_number: string | null;
-        created_at: Date | null;
-      }>(sql`
-        SELECT id, order_number, created_at FROM shopify_orders 
-        WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
-        ORDER BY created_at DESC
-        LIMIT 5
-      `);
-      
-      const sampleWithItems = [];
-      for (const order of sample.rows) {
-        const items = await db.execute<{ 
-          id: string;
-          fulfillment_status: string | null;
-          fulfillable_quantity: number | null;
-          quantity: number;
-        }>(sql`
-          SELECT id, fulfillment_status, fulfillable_quantity, quantity FROM shopify_order_items WHERE order_id = ${order.id}
-        `);
-        sampleWithItems.push({
-          ...order,
-          items: items.rows.map(i => ({
-            id: i.id,
-            fulfillmentStatus: i.fulfillment_status,
-            fulfillableQty: i.fulfillable_quantity,
-            qty: i.quantity
-          }))
-        });
-      }
-      
+      const debugStatus = await storage.getDebugSyncStatus();
+
       res.json({
-        missingOrdersCount: parseInt(missing.rows[0].count),
-        sampleMissingOrders: sampleWithItems
+        missingOrdersCount: debugStatus.missingCount,
+        sampleMissingOrders: debugStatus.sampleOrders
       });
     } catch (error) {
       console.error("Debug sync error:", error);
@@ -2320,90 +2142,9 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
       
-      const inventoryResult = await db.execute<{
-        variant_id: number;
-        variant_sku: string;
-        variant_name: string;
-        units_per_variant: number;
-        parent_variant_id: number | null;
-        hierarchy_level: number;
-        product_id: number | null;
-        base_sku: string | null;
-        barcode: string | null;
-        total_variant_qty: string;
-        total_reserved_qty: string;
-        total_picked_qty: string;
-        location_count: string;
-        pickable_variant_qty: string;
-        bin_count: string;
-        has_replen_rule: string;
-        is_base_unit: boolean;
-      }>(warehouseId ? sql`
-        SELECT
-          pv.id as variant_id,
-          pv.sku as variant_sku,
-          pv.name as variant_name,
-          pv.units_per_variant,
-          pv.parent_variant_id,
-          pv.hierarchy_level,
-          pv.is_base_unit,
-          p.id as product_id,
-          p.sku as base_sku,
-          pv.barcode,
-          COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
-          COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
-          COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
-          COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
-          COUNT(DISTINCT pl.id) as bin_count,
-          MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
-                    WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
-                    ELSE 0 END) as has_replen_rule
-        FROM product_variants pv
-        LEFT JOIN products p ON pv.product_id = p.id
-        INNER JOIN inventory_levels il ON il.product_variant_id = pv.id
-        INNER JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
-        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
-        LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
-        LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
-        WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
-        HAVING COALESCE(SUM(il.variant_qty), 0) != 0 OR COALESCE(SUM(il.reserved_qty), 0) != 0
-        ORDER BY pv.sku
-      ` : sql`
-        SELECT
-          pv.id as variant_id,
-          pv.sku as variant_sku,
-          pv.name as variant_name,
-          pv.units_per_variant,
-          pv.parent_variant_id,
-          pv.hierarchy_level,
-          pv.is_base_unit,
-          p.id as product_id,
-          p.sku as base_sku,
-          pv.barcode,
-          COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
-          COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
-          COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
-          COUNT(DISTINCT il.warehouse_location_id) as location_count,
-          COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
-          COUNT(DISTINCT pl.id) as bin_count,
-          MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
-                    WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
-                    ELSE 0 END) as has_replen_rule
-        FROM product_variants pv
-        LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
-        LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
-        LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
-        WHERE pv.is_active = true
-        GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
-        ORDER BY pv.sku
-      `);
-      
-      const levels = inventoryResult.rows.map(row => {
+      const inventoryRows = await storage.getInventoryLevelsSummary(warehouseId);
+
+      const levels = inventoryRows.map((row: any) => {
         const variantQty = parseInt(row.total_variant_qty) || 0;
         const reservedQty = parseInt(row.total_reserved_qty) || 0;
         const binCount = parseInt(row.bin_count) || 0;
@@ -2470,56 +2211,7 @@ export function registerInventoryRoutes(app: Express) {
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
       const search = (req.query.search as string || "").trim();
 
-      const result = await db.execute<{
-        warehouse_location_id: number;
-        location_code: string;
-        location_type: string;
-        zone: string | null;
-        is_pickable: number;
-        warehouse_id: number | null;
-        warehouse_code: string | null;
-        inventory_level_id: number;
-        product_variant_id: number;
-        sku: string | null;
-        variant_name: string | null;
-        product_name: string | null;
-        variant_qty: number;
-        reserved_qty: number;
-        picked_qty: number;
-        is_assigned: number;
-        assigned_sku: string | null;
-      }>(sql`
-        SELECT
-          wl.id as warehouse_location_id,
-          wl.code as location_code,
-          wl.location_type,
-          wl.zone,
-          wl.is_pickable,
-          wl.warehouse_id,
-          w.code as warehouse_code,
-          il.id as inventory_level_id,
-          il.product_variant_id,
-          pv.sku,
-          pv.name as variant_name,
-          COALESCE(p.title, p.name) as product_name,
-          il.variant_qty,
-          il.reserved_qty,
-          il.picked_qty,
-          CASE WHEN pl.id IS NOT NULL THEN 1 ELSE 0 END as is_assigned,
-          (SELECT pv2.sku FROM product_locations pl2
-           JOIN product_variants pv2 ON pl2.product_variant_id = pv2.id
-           WHERE pl2.warehouse_location_id = wl.id LIMIT 1) as assigned_sku
-        FROM inventory_levels il
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        JOIN product_variants pv ON il.product_variant_id = pv.id
-        LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
-        LEFT JOIN warehouses w ON wl.warehouse_id = w.id
-        WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
-          ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
-          ${search ? sql`AND (wl.code LIKE ${'%' + search + '%'} OR pv.sku LIKE ${'%' + search + '%'} OR pv.name LIKE ${'%' + search + '%'})` : sql``}
-        ORDER BY wl.code, pv.sku
-      `);
+      const result = { rows: await storage.getInventoryByBin(warehouseId, search || undefined) as any[] };
 
       const binMap = new Map<number, {
         locationId: number;
@@ -2603,31 +2295,9 @@ export function registerInventoryRoutes(app: Express) {
       const variantId = parseInt(req.params.variantId);
       const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
 
-      const result = await db.execute<{
-        id: number;
-        warehouse_location_id: number;
-        location_code: string | null;
-        zone: string | null;
-        variant_qty: number;
-        reserved_qty: number;
-        picked_qty: number;
-      }>(sql`
-        SELECT
-          il.id,
-          il.warehouse_location_id,
-          wl.code as location_code,
-          wl.zone,
-          il.variant_qty,
-          il.reserved_qty,
-          il.picked_qty
-        FROM inventory_levels il
-        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE il.product_variant_id = ${variantId}
-          ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
-        ORDER BY wl.code
-      `);
+      const resultRows = await storage.getVariantLocationBreakdown(variantId, warehouseId) as any[];
 
-      const locations = result.rows.map(row => ({
+      const locations = resultRows.map((row: any) => ({
         id: row.id,
         warehouseLocationId: row.warehouse_location_id,
         locationCode: row.location_code,
@@ -2649,46 +2319,7 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { locationType, binType, zone } = req.query;
       
-      let query = sql`
-        SELECT
-          pv.sku,
-          pv.name as variant_name,
-          p.sku as base_sku,
-          p.name as item_name,
-          wl.code as location_code,
-          wl.zone,
-          wl.location_type,
-          wl.bin_type,
-          wl.is_pickable,
-          il.variant_qty,
-          il.reserved_qty,
-          il.picked_qty,
-          (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
-        FROM inventory_levels il
-        JOIN product_variants pv ON il.product_variant_id = pv.id
-        LEFT JOIN products p ON pv.product_id = p.id
-        LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
-        WHERE il.variant_qty > 0
-        ORDER BY wl.code, pv.sku
-      `;
-      
-      const resultData = await db.execute<{
-        sku: string;
-        variant_name: string;
-        base_sku: string | null;
-        item_name: string | null;
-        location_code: string | null;
-        zone: string | null;
-        location_type: string | null;
-        bin_type: string | null;
-        is_pickable: number | null;
-        variant_qty: number;
-        reserved_qty: number;
-        picked_qty: number;
-        available_qty: number;
-      }>(query);
-      
-      let rows = resultData.rows;
+      let rows = await storage.getInventoryExport() as any[];
       
       if (locationType && typeof locationType === 'string') {
         const types = locationType.split(',');

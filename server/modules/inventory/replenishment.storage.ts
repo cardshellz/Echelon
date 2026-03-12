@@ -15,7 +15,7 @@ import {
   locationReplenConfig,
   replenTasks,
   warehouseSettings,
-  eq, and, inArray, isNull, desc, asc,
+  eq, and, inArray, isNull, desc, asc, sql,
 } from "../../storage/base";
 
 export interface IReplenishmentStorage {
@@ -53,6 +53,8 @@ export interface IReplenishmentStorage {
   createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings>;
   updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null>;
   deleteWarehouseSettings(id: number): Promise<boolean>;
+  getVelocityLookbackDays(): Promise<number>;
+  updateVelocityLookbackDays(days: number): Promise<void>;
 }
 
 export const replenishmentMethods: IReplenishmentStorage = {
@@ -283,5 +285,14 @@ export const replenishmentMethods: IReplenishmentStorage = {
   async deleteWarehouseSettings(id: number): Promise<boolean> {
     const result = await db.delete(warehouseSettings).where(eq(warehouseSettings.id, id)).returning();
     return result.length > 0;
+  },
+
+  async getVelocityLookbackDays(): Promise<number> {
+    const result = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
+    return (result.rows[0] as any)?.velocity_lookback_days ?? 14;
+  },
+
+  async updateVelocityLookbackDays(days: number): Promise<void> {
+    await db.execute(sql`UPDATE warehouse_settings SET velocity_lookback_days = ${days}, updated_at = NOW()`);
   },
 };

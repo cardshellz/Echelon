@@ -7,9 +7,10 @@ import {
   type ItemStatus,
   orders,
   orderItems,
+  shipments,
 } from "@shared/schema";
 import { db } from "../../db";
-import { eq, inArray, and, or, isNull, desc, sql } from "drizzle-orm";
+import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 
 export interface IOrderStorage {
   getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined>;
@@ -36,8 +37,75 @@ export interface IOrderStorage {
   getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined>;
   areAllItemsFulfilled(orderId: number): Promise<boolean>;
 
+  getOrderByOrderNumber(orderNumber: string): Promise<Order | undefined>;
+
   getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   resolveException(orderId: number, resolution: string, resolvedBy: string, notes?: string): Promise<Order | null>;
+
+  // Shopify raw-table queries (used by sync routes)
+  getUnfulfilledShopifyRawOrders(): Promise<{
+    id: string;
+    order_number: string;
+    legacy_order_id: string | null;
+    member_id: string | null;
+    shopify_customer_id: string | null;
+    order_date: Date | null;
+    financial_status: string | null;
+    fulfillment_status: string | null;
+    total_price_cents: number | null;
+    currency: string | null;
+    note: string | null;
+    tags: string[] | null;
+    discount_codes: any | null;
+    created_at: Date | null;
+    customer_name: string | null;
+    customer_email: string | null;
+    shipping_name: string | null;
+    shipping_address1: string | null;
+    shipping_address2: string | null;
+    shipping_city: string | null;
+    shipping_state: string | null;
+    shipping_postal_code: string | null;
+    shipping_country: string | null;
+    cancelled_at: Date | null;
+  }[]>;
+  getShopifyRawOrderItems(orderId: string): Promise<{
+    id: string;
+    shopify_line_item_id: string;
+    sku: string | null;
+    name: string | null;
+    title: string | null;
+    quantity: number;
+    fulfillable_quantity: number | null;
+    fulfillment_status: string | null;
+    requires_shipping: boolean | null;
+  }[]>;
+  syncFulfilledStatusesFromShopify(): Promise<void>;
+  backfillOrdersFromShopifyRaw(): Promise<{ updated: number }>;
+  countOrdersMissingShippingData(): Promise<number>;
+  updateShopifyRawOrderCustomer(orderId: string, data: {
+    customerName: string;
+    customerEmail: string | null;
+    shippingName: string | null;
+    shippingAddress1: string | null;
+    shippingAddress2: string | null;
+    shippingCity: string | null;
+    shippingState: string | null;
+    shippingPostalCode: string | null;
+    shippingCountry: string | null;
+  }): Promise<number>;
+  countShopifyRawOrdersMissingCustomerName(): Promise<number>;
+
+  // Diagnostic/admin queries
+  debugPickingQueue(): Promise<any[]>;
+  diagnoseOrder(orderNumber: string): Promise<{ order: any; items: any[] }>;
+  diagnoseOvercountedOrders(): Promise<any[]>;
+  fixOrderCounts(): Promise<number>;
+  getStuckInProgressOrders(): Promise<any[]>;
+  transitionStuckOrder(orderId: number, newStatus: string): Promise<void>;
+  completeNonShippableItems(orderId: number): Promise<void>;
+  getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]>;
+  getShipmentsByOrderIds(orderIds: number[]): Promise<any[]>;
 }
 
 export const orderMethods: IOrderStorage = {
@@ -48,6 +116,11 @@ export const orderMethods: IOrderStorage = {
 
   async getOrderById(id: number): Promise<Order | undefined> {
     const result = await db.select().from(orders).where(eq(orders.id, id));
+    return result[0];
+  },
+
+  async getOrderByOrderNumber(orderNumber: string): Promise<Order | undefined> {
+    const result = await db.select().from(orders).where(eq(orders.orderNumber, orderNumber)).limit(1);
     return result[0];
   },
 
@@ -662,5 +735,298 @@ export const orderMethods: IOrderStorage = {
       .returning();
     
     return result[0] || null;
+  },
+
+  // Shopify raw-table queries (used by sync routes)
+
+  async getUnfulfilledShopifyRawOrders() {
+    const result = await db.execute<{
+      id: string;
+      order_number: string;
+      legacy_order_id: string | null;
+      member_id: string | null;
+      shopify_customer_id: string | null;
+      order_date: Date | null;
+      financial_status: string | null;
+      fulfillment_status: string | null;
+      total_price_cents: number | null;
+      currency: string | null;
+      note: string | null;
+      tags: string[] | null;
+      discount_codes: any | null;
+      created_at: Date | null;
+      customer_name: string | null;
+      customer_email: string | null;
+      shipping_name: string | null;
+      shipping_address1: string | null;
+      shipping_address2: string | null;
+      shipping_city: string | null;
+      shipping_state: string | null;
+      shipping_postal_code: string | null;
+      shipping_country: string | null;
+      cancelled_at: Date | null;
+    }>(sql`
+      SELECT * FROM shopify_orders
+      WHERE fulfillment_status IS NULL
+         OR fulfillment_status = 'unfulfilled'
+         OR fulfillment_status = 'partial'
+      ORDER BY order_date DESC
+    `);
+    return result.rows;
+  },
+
+  async getShopifyRawOrderItems(orderId: string) {
+    const result = await db.execute<{
+      id: string;
+      shopify_line_item_id: string;
+      sku: string | null;
+      name: string | null;
+      title: string | null;
+      quantity: number;
+      fulfillable_quantity: number | null;
+      fulfillment_status: string | null;
+      requires_shipping: boolean | null;
+    }>(sql`
+      SELECT * FROM shopify_order_items
+      WHERE order_id = ${orderId}
+    `);
+    return result.rows;
+  },
+
+  async syncFulfilledStatusesFromShopify() {
+    // 1. Update ORDERS status to 'completed' where Shopify shows fulfilled
+    await db.execute(sql`
+      UPDATE orders o SET
+        status = 'completed',
+        completed_at = COALESCE(o.completed_at, NOW())
+      FROM shopify_orders s
+      WHERE o.source_table_id = s.id
+        AND s.fulfillment_status = 'fulfilled'
+        AND o.warehouse_status != 'completed'
+    `);
+
+    // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where Shopify item is fulfilled
+    await db.execute(sql`
+      UPDATE order_items oi SET
+        status = 'completed',
+        picked_quantity = oi.quantity,
+        fulfilled_quantity = oi.quantity
+      FROM shopify_order_items soi
+      WHERE oi.source_item_id = soi.id
+        AND soi.fulfillment_status = 'fulfilled'
+        AND oi.status != 'completed'
+    `);
+
+    // 3. Also update items where the parent ORDER is fulfilled
+    await db.execute(sql`
+      UPDATE order_items oi SET
+        status = 'completed',
+        picked_quantity = oi.quantity,
+        fulfilled_quantity = oi.quantity
+      FROM orders o
+      INNER JOIN shopify_orders s ON o.source_table_id = s.id
+      WHERE oi.order_id = o.id
+        AND s.fulfillment_status = 'fulfilled'
+        AND oi.status != 'completed'
+    `);
+
+    // 4. Handle partial fulfillments - update items individually
+    await db.execute(sql`
+      UPDATE order_items oi SET
+        status = 'completed',
+        picked_quantity = oi.quantity,
+        fulfilled_quantity = oi.quantity
+      FROM shopify_order_items soi
+      WHERE oi.source_item_id = soi.id
+        AND soi.fulfillment_status = 'fulfilled'
+        AND oi.status = 'pending'
+    `);
+  },
+
+  async backfillOrdersFromShopifyRaw(): Promise<{ updated: number }> {
+    const result = await db.execute(sql`
+      UPDATE orders o SET
+        customer_name = COALESCE(s.customer_name, s.shipping_name, o.customer_name),
+        customer_email = COALESCE(s.customer_email, o.customer_email),
+        shipping_address = COALESCE(s.shipping_address1, o.shipping_address),
+        shipping_city = COALESCE(s.shipping_city, o.shipping_city),
+        shipping_state = COALESCE(s.shipping_state, o.shipping_state),
+        shipping_postal_code = COALESCE(s.shipping_postal_code, o.shipping_postal_code),
+        shipping_country = COALESCE(s.shipping_country, o.shipping_country)
+      FROM shopify_orders s
+      WHERE o.source = 'shopify'
+        AND (
+          o.source_table_id = CAST(s.id AS TEXT)
+          OR o.shopify_order_id = s.id
+          OR o.shopify_order_id = REPLACE(s.id, 'gid://shopify/Order/', '')
+          OR CONCAT('gid://shopify/Order/', o.shopify_order_id) = s.id
+        )
+        AND (o.shipping_address IS NULL OR o.shipping_city IS NULL)
+    `);
+    return { updated: result.rowCount || 0 };
+  },
+
+  async countOrdersMissingShippingData(): Promise<number> {
+    const result = await db.execute<{ count: string }>(sql`
+      SELECT COUNT(*) as count FROM orders
+      WHERE source = 'shopify'
+        AND shopify_order_id IS NOT NULL
+        AND (shipping_address IS NULL OR shipping_city IS NULL)
+    `);
+    return parseInt(result.rows[0]?.count || '0', 10);
+  },
+
+  async updateShopifyRawOrderCustomer(orderId: string, data: {
+    customerName: string;
+    customerEmail: string | null;
+    shippingName: string | null;
+    shippingAddress1: string | null;
+    shippingAddress2: string | null;
+    shippingCity: string | null;
+    shippingState: string | null;
+    shippingPostalCode: string | null;
+    shippingCountry: string | null;
+  }): Promise<number> {
+    const result = await db.execute(sql`
+      UPDATE shopify_orders SET
+        customer_name = ${data.customerName},
+        customer_email = ${data.customerEmail},
+        shipping_name = ${data.shippingName},
+        shipping_address1 = ${data.shippingAddress1},
+        shipping_address2 = ${data.shippingAddress2},
+        shipping_city = ${data.shippingCity},
+        shipping_state = ${data.shippingState},
+        shipping_postal_code = ${data.shippingPostalCode},
+        shipping_country = ${data.shippingCountry}
+      WHERE id = ${orderId}
+    `);
+    return result.rowCount || 0;
+  },
+
+  async countShopifyRawOrdersMissingCustomerName(): Promise<number> {
+    const result = await db.execute<{ count: string }>(sql`
+      SELECT COUNT(*) as count FROM shopify_orders WHERE customer_name IS NULL
+    `);
+    return parseInt(result.rows[0]?.count || '0', 10);
+  },
+
+  // Diagnostic/admin queries
+
+  async debugPickingQueue(): Promise<any[]> {
+    const result = await db.execute(`
+      SELECT o.id as order_id, o.warehouse_status, o.order_number,
+             oi.id as item_id, oi.sku, oi.requires_shipping
+      FROM orders o
+      LEFT JOIN order_items oi ON oi.order_id = o.id
+      WHERE o.warehouse_status IN ('ready', 'in_progress')
+      LIMIT 5
+    `);
+    return result.rows as any[];
+  },
+
+  async diagnoseOrder(orderNumber: string): Promise<{ order: any; items: any[] }> {
+    const result = await db.execute(sql`
+      SELECT oi.id, oi.order_id, oi.sku, oi.name, oi.status, oi.quantity,
+             oi.picked_quantity, oi.requires_shipping, oi.location
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.order_number = ${orderNumber}
+    `);
+    const orderResult = await db.execute(sql`
+      SELECT id, order_number, item_count, unit_count, picked_count, warehouse_status
+      FROM orders WHERE order_number = ${orderNumber}
+    `);
+    return { order: (orderResult.rows as any[])[0], items: result.rows as any[] };
+  },
+
+  async diagnoseOvercountedOrders(): Promise<any[]> {
+    const result = await db.execute(sql`
+      SELECT o.id, o.order_number, o.item_count, o.unit_count, o.picked_count,
+             o.warehouse_status,
+             (SELECT SUM(oi.picked_quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
+             (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
+      FROM orders o
+      WHERE o.picked_count > o.unit_count
+        AND o.warehouse_status NOT IN ('cancelled')
+      ORDER BY o.picked_count - o.unit_count DESC
+      LIMIT 20
+    `);
+    return result.rows as any[];
+  },
+
+  async fixOrderCounts(): Promise<number> {
+    const result = await db.execute(sql`
+      UPDATE orders o
+      SET
+        item_count = sub.actual_item_count,
+        unit_count = sub.actual_unit_count,
+        picked_count = sub.actual_picked_count
+      FROM (
+        SELECT
+          oi.order_id,
+          COUNT(*) as actual_item_count,
+          COALESCE(SUM(oi.quantity), 0) as actual_unit_count,
+          COALESCE(SUM(CASE WHEN oi.requires_shipping = 1 THEN oi.picked_quantity ELSE 0 END), 0) as actual_picked_count
+        FROM order_items oi
+        GROUP BY oi.order_id
+      ) sub
+      WHERE o.id = sub.order_id
+        AND (o.item_count != sub.actual_item_count
+             OR o.unit_count != sub.actual_unit_count
+             OR o.picked_count != sub.actual_picked_count)
+    `);
+    return result.rowCount || 0;
+  },
+
+  async getStuckInProgressOrders(): Promise<any[]> {
+    const result = await db.execute(sql`
+      SELECT o.id, o.order_number, o.warehouse_status, o.item_count,
+        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
+        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
+        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
+      FROM orders o
+      WHERE o.warehouse_status = 'in_progress'
+    `);
+    return result.rows as any[];
+  },
+
+  async transitionStuckOrder(orderId: number, newStatus: string): Promise<void> {
+    await db.execute(sql`
+      UPDATE orders
+      SET warehouse_status = ${newStatus}, completed_at = NOW()
+      WHERE id = ${orderId}
+    `);
+  },
+
+  async completeNonShippableItems(orderId: number): Promise<void> {
+    await db.execute(sql`
+      UPDATE order_items
+      SET status = 'completed'
+      WHERE order_id = ${orderId} AND requires_shipping = 0 AND status = 'pending'
+    `);
+  },
+
+  async getOrdersWithShipments(since: Date | null): Promise<{ order: Order; shipment: any | null }[]> {
+    const baseQuery = db
+      .select({
+        order: orders,
+        shipment: shipments,
+      })
+      .from(orders)
+      .leftJoin(shipments, eq(shipments.orderId, orders.id));
+
+    const results = since
+      ? await baseQuery.where(gte(orders.createdAt, since))
+      : await baseQuery;
+
+    return results;
+  },
+
+  async getShipmentsByOrderIds(orderIds: number[]): Promise<any[]> {
+    if (orderIds.length === 0) return [];
+    return await db
+      .select()
+      .from(shipments)
+      .where(inArray(shipments.orderId, orderIds));
   },
 };

@@ -1,12 +1,10 @@
 import type { Express } from "express";
-import { z } from "zod";
-import { eq, sql, and, gte, inArray, isNull } from "drizzle-orm";
-import { db } from "../../db";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
-const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
+import { ordersStorage } from "../orders";
+const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
 import { requirePermission, requireAuth, requireInternalApiKey, upload } from "../../routes/middleware";
 import { PurchasingError } from "./purchasing.service";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
@@ -14,8 +12,6 @@ import * as apLedger from "./ap-ledger.service";
 import { renderPoHtml } from "./po-document";
 import * as emailService from "../notifications/email.service";
 import * as notificationService from "../notifications/notifications.service";
-import { broadcastOrdersUpdated } from "../../websocket";
-import { purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes, orders, orderItems, shipments, inventoryLevels, inventoryTransactions, productVariants, warehouseLocations } from "@shared/schema";
 
 export function registerPurchasingRoutes(app: Express) {
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -1106,8 +1102,7 @@ export function registerPurchasingRoutes(app: Express) {
 
       if (autoExecute === undefined && replenishment) {
         // Caller didn't specify — use warehouse settings to decide
-        const [destLoc] = await db.select().from(warehouseLocations)
-          .where(eq(warehouseLocations.id, toLocationId)).limit(1);
+        const destLoc = await storage.getWarehouseLocationById(toLocationId);
         const whSettings = await replenishment.getSettingsForWarehouse(destLoc?.warehouseId ?? undefined);
         const decision = replenishment.resolveAutoExecute(null, null, whSettings, qtyTargetUnits);
         shouldAutoExecute = decision.shouldAutoExecute;
@@ -1412,84 +1407,16 @@ export function registerPurchasingRoutes(app: Express) {
   app.get("/api/purchasing/reorder-analysis", requirePermission("inventory", "view"), async (req, res) => {
     try {
       // Use velocity_lookback_days from warehouse_settings as the default lookback
-      const wsResult = await db.execute(sql`SELECT velocity_lookback_days FROM warehouse_settings LIMIT 1`);
-      const configuredLookback = (wsResult.rows[0] as any)?.velocity_lookback_days ?? 14;
+      const configuredLookback = await storage.getVelocityLookbackDays();
       const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
 
       // Product-level query: aggregate inventory and velocity in base units (pieces)
       // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
-      const rows = await db.execute(sql`
-        SELECT
-          p.id AS product_id,
-          p.sku AS base_sku,
-          p.name AS product_name,
-          p.lead_time_days,
-          p.safety_stock_days,
-          COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
-          COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
-          COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
-          inv.variant_count,
-          order_uom.variant_id,
-          order_uom.units_per_variant AS order_uom_units,
-          order_uom.sku AS order_uom_sku,
-          order_uom.hierarchy_level AS order_uom_level,
-          COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
-          COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
-          on_order.earliest_expected,
-          (SELECT MAX(it2.created_at)
-           FROM inventory_transactions it2
-           JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
-           WHERE pv2.product_id = p.id
-             AND it2.transaction_type = 'receipt') AS last_received_at
-        FROM products p
-        LEFT JOIN (
-          SELECT pv.product_id,
-                 SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
-                 SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
-                 COUNT(DISTINCT pv.id) AS variant_count
-          FROM inventory_levels il
-          JOIN product_variants pv ON pv.id = il.product_variant_id
-          WHERE pv.is_active = true
-          GROUP BY pv.product_id
-        ) inv ON inv.product_id = p.id
-        LEFT JOIN (
-          SELECT pv.product_id,
-                 SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
-          FROM order_items oi
-          JOIN orders o ON o.id = oi.order_id
-          JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
-          WHERE o.cancelled_at IS NULL
-            AND o.warehouse_status != 'cancelled'
-            AND oi.status != 'cancelled'
-            AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
-          GROUP BY pv.product_id
-        ) vel ON vel.product_id = p.id
-        LEFT JOIN LATERAL (
-          SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
-          FROM product_variants pv
-          WHERE pv.product_id = p.id AND pv.is_active = true
-          ORDER BY pv.hierarchy_level DESC
-          LIMIT 1
-        ) order_uom ON true
-        LEFT JOIN (
-          SELECT pv.product_id,
-                 SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
-                 COUNT(DISTINCT po.id) AS open_po_count,
-                 MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
-          FROM purchase_order_lines pol
-          JOIN purchase_orders po ON po.id = pol.purchase_order_id
-          JOIN product_variants pv ON pv.id = pol.product_variant_id
-          WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
-            AND pol.status IN ('open', 'partially_received')
-          GROUP BY pv.product_id
-        ) on_order ON on_order.product_id = p.id
-        WHERE p.is_active = true
-        ORDER BY p.sku, p.name
-      `);
+      const rawRows = await storage.getReorderAnalysisData(lookbackDays);
 
       const HIERARCHY_LABELS: Record<number, string> = { 1: "Pack", 2: "Box", 3: "Case", 4: "Skid" };
 
-      const items = (rows.rows as any[]).map((r) => {
+      const items = rawRows.map((r: any) => {
         const totalOnHand = Number(r.total_pieces);
         const totalReserved = Number(r.total_reserved_pieces);
         const totalOutbound = Number(r.total_outbound_pieces);
@@ -1589,7 +1516,7 @@ export function registerPurchasingRoutes(app: Express) {
       if (!days || days < 7 || days > 365) {
         return res.status(400).json({ error: "Days must be between 7 and 365" });
       }
-      await db.execute(sql`UPDATE warehouse_settings SET velocity_lookback_days = ${days}, updated_at = NOW()`);
+      await storage.updateVelocityLookbackDays(days);
       res.json({ ok: true, days });
     } catch (error) {
       console.error("Error updating velocity lookback:", error);
@@ -1603,17 +1530,7 @@ export function registerPurchasingRoutes(app: Express) {
     try {
       const since = req.query.since ? new Date(req.query.since as string) : null;
 
-      const baseQuery = db
-        .select({
-          order: orders,
-          shipment: shipments,
-        })
-        .from(orders)
-        .leftJoin(shipments, eq(shipments.orderId, orders.id));
-
-      const results = since
-        ? await baseQuery.where(gte(orders.createdAt, since))
-        : await baseQuery;
+      const results = await storage.getOrdersWithShipments(since);
 
       // Deduplicate: an order may have multiple shipments — take the latest
       const orderMap = new Map<number, (typeof results)[number]>();
@@ -1667,13 +1584,10 @@ export function registerPurchasingRoutes(app: Express) {
         return res.json({ shipments: [] });
       }
 
-      const results = await db
-        .select()
-        .from(shipments)
-        .where(inArray(shipments.orderId, orderIds));
+      const results = await storage.getShipmentsByOrderIds(orderIds);
 
       res.json({
-        shipments: results.map(s => ({
+        shipments: results.map((s: any) => ({
           orderId: s.orderId,
           carrier: s.carrier,
           trackingNumber: s.trackingNumber,
@@ -2198,35 +2112,9 @@ export function registerPurchasingRoutes(app: Express) {
       const limit = Math.min(Number(req.query.limit) || 50, 200);
       const offset = Number(req.query.offset) || 0;
 
-      const rows = await db.execute(sql`
-        SELECT
-          o.id AS order_id,
-          o.order_number,
-          o.customer_name,
-          o.order_placed_at,
-          o.warehouse_status,
-          COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
-          COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
-          COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
-          CASE WHEN SUM(oi.total_price_cents) > 0
-            THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
-            ELSE 0
-          END AS margin_percent,
-          COUNT(DISTINCT oi.id) AS line_count
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        LEFT JOIN (
-          SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-          FROM order_item_costs
-          GROUP BY order_item_id
-        ) oic_agg ON oic_agg.order_item_id = oi.id
-        WHERE oi.total_price_cents IS NOT NULL
-        GROUP BY o.id, o.order_number, o.customer_name, o.order_placed_at, o.warehouse_status
-        ORDER BY o.order_placed_at DESC NULLS LAST
-        LIMIT ${limit} OFFSET ${offset}
-      `);
+      const rows = await storage.getOrderProfitabilityReport(limit, offset);
 
-      res.json({ orders: rows.rows });
+      res.json({ orders: rows });
     } catch (error: any) {
       console.error("Error fetching order profitability:", error);
       res.status(500).json({ error: error.message || "Failed to fetch order profitability" });
@@ -2239,36 +2127,9 @@ export function registerPurchasingRoutes(app: Express) {
       const limit = Math.min(Number(req.query.limit) || 50, 200);
       const offset = Number(req.query.offset) || 0;
 
-      const rows = await db.execute(sql`
-        SELECT
-          pv.id AS product_variant_id,
-          pv.sku,
-          p.title AS product_name,
-          SUM(oi.quantity) AS units_sold,
-          COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
-          COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
-          COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
-          CASE WHEN SUM(oi.total_price_cents) > 0
-            THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
-            ELSE 0
-          END AS margin_percent,
-          pv.last_cost_cents,
-          pv.avg_cost_cents
-        FROM order_items oi
-        JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
-        JOIN products p ON p.id = pv.product_id
-        LEFT JOIN (
-          SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
-          FROM order_item_costs
-          GROUP BY order_item_id
-        ) oic_agg ON oic_agg.order_item_id = oi.id
-        WHERE oi.total_price_cents IS NOT NULL
-        GROUP BY pv.id, pv.sku, p.title, pv.last_cost_cents, pv.avg_cost_cents
-        ORDER BY profit_cents DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `);
+      const rows = await storage.getProductProfitabilityReport(limit, offset);
 
-      res.json({ products: rows.rows });
+      res.json({ products: rows });
     } catch (error: any) {
       console.error("Error fetching product profitability:", error);
       res.status(500).json({ error: error.message || "Failed to fetch product profitability" });
@@ -2290,24 +2151,9 @@ export function registerPurchasingRoutes(app: Express) {
   // --- Vendor Spend ---
   app.get("/api/reports/vendor-spend", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const rows = await db.execute(sql`
-        SELECT
-          v.id AS vendor_id,
-          v.name AS vendor_name,
-          COUNT(DISTINCT po.id) AS po_count,
-          SUM(po.total_cents) AS total_spend_cents,
-          SUM(CASE WHEN po.status = 'closed' THEN po.total_cents ELSE 0 END) AS closed_spend_cents,
-          SUM(CASE WHEN po.status IN ('sent', 'acknowledged', 'partially_received') THEN po.total_cents ELSE 0 END) AS open_spend_cents,
-          MIN(po.order_date) AS first_po_date,
-          MAX(po.order_date) AS last_po_date
-        FROM purchase_orders po
-        JOIN vendors v ON v.id = po.vendor_id
-        WHERE po.status NOT IN ('cancelled', 'draft')
-        GROUP BY v.id, v.name
-        ORDER BY total_spend_cents DESC
-      `);
+      const rows = await storage.getVendorSpendReport();
 
-      res.json({ vendors: rows.rows });
+      res.json({ vendors: rows });
     } catch (error: any) {
       console.error("Error fetching vendor spend:", error);
       res.status(500).json({ error: error.message || "Failed to fetch vendor spend" });
@@ -2317,32 +2163,9 @@ export function registerPurchasingRoutes(app: Express) {
   // --- Cost Variance (PO cost vs actual receipt cost) ---
   app.get("/api/reports/cost-variance", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const rows = await db.execute(sql`
-        SELECT
-          pr.id,
-          po.po_number,
-          v.name AS vendor_name,
-          pol.sku,
-          pol.product_name,
-          pr.po_unit_cost_cents,
-          pr.actual_unit_cost_cents,
-          pr.variance_cents,
-          pr.qty_received,
-          CASE WHEN pr.po_unit_cost_cents > 0
-            THEN ROUND((pr.variance_cents::numeric / pr.po_unit_cost_cents) * 100, 2)
-            ELSE 0
-          END AS variance_percent,
-          pr.created_at
-        FROM po_receipts pr
-        JOIN purchase_orders po ON po.id = pr.purchase_order_id
-        JOIN purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
-        JOIN vendors v ON v.id = po.vendor_id
-        WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
-        ORDER BY ABS(pr.variance_cents) DESC
-        LIMIT 100
-      `);
+      const rows = await storage.getCostVarianceReport();
 
-      res.json({ variances: rows.rows });
+      res.json({ variances: rows });
     } catch (error: any) {
       console.error("Error fetching cost variance:", error);
       res.status(500).json({ error: error.message || "Failed to fetch cost variance" });
@@ -2352,29 +2175,9 @@ export function registerPurchasingRoutes(app: Express) {
   // --- Open PO Summary ---
   app.get("/api/reports/open-po-summary", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const rows = await db.execute(sql`
-        SELECT
-          po.status,
-          COUNT(*) AS po_count,
-          SUM(po.total_cents) AS total_value_cents,
-          SUM(po.line_count) AS total_lines,
-          MIN(po.expected_delivery_date) AS earliest_delivery,
-          MAX(po.expected_delivery_date) AS latest_delivery
-        FROM purchase_orders po
-        WHERE po.status IN ('draft', 'pending_approval', 'approved', 'sent', 'acknowledged', 'partially_received')
-        GROUP BY po.status
-        ORDER BY
-          CASE po.status
-            WHEN 'draft' THEN 1
-            WHEN 'pending_approval' THEN 2
-            WHEN 'approved' THEN 3
-            WHEN 'sent' THEN 4
-            WHEN 'acknowledged' THEN 5
-            WHEN 'partially_received' THEN 6
-          END
-      `);
+      const rows = await storage.getOpenPoSummaryReport();
 
-      const total = (rows.rows as any[]).reduce(
+      const total = (rows as any[]).reduce(
         (acc: any, r: any) => ({
           poCount: acc.poCount + Number(r.po_count),
           valueCents: acc.valueCents + Number(r.total_value_cents || 0),
@@ -2382,7 +2185,7 @@ export function registerPurchasingRoutes(app: Express) {
         { poCount: 0, valueCents: 0 },
       );
 
-      res.json({ byStatus: rows.rows, total });
+      res.json({ byStatus: rows, total });
     } catch (error: any) {
       console.error("Error fetching open PO summary:", error);
       res.status(500).json({ error: error.message || "Failed to fetch open PO summary" });
@@ -2392,29 +2195,9 @@ export function registerPurchasingRoutes(app: Express) {
   // --- PO Aging ---
   app.get("/api/reports/po-aging", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const rows = await db.execute(sql`
-        SELECT
-          po.id,
-          po.po_number,
-          v.name AS vendor_name,
-          po.status,
-          po.total_cents,
-          po.order_date,
-          po.expected_delivery_date,
-          EXTRACT(DAY FROM (NOW() - po.order_date))::integer AS days_open,
-          CASE
-            WHEN po.expected_delivery_date < NOW() THEN 'overdue'
-            WHEN po.expected_delivery_date < NOW() + INTERVAL '7 days' THEN 'due_soon'
-            ELSE 'on_track'
-          END AS delivery_status
-        FROM purchase_orders po
-        JOIN vendors v ON v.id = po.vendor_id
-        WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
-          AND po.order_date IS NOT NULL
-        ORDER BY po.order_date ASC
-      `);
+      const rows = await storage.getPoAgingReport();
 
-      res.json({ orders: rows.rows });
+      res.json({ orders: rows });
     } catch (error: any) {
       console.error("Error fetching PO aging:", error);
       res.status(500).json({ error: error.message || "Failed to fetch PO aging" });
@@ -2424,28 +2207,9 @@ export function registerPurchasingRoutes(app: Express) {
   // --- Expected Receipts ---
   app.get("/api/reports/expected-receipts", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const rows = await db.execute(sql`
-        SELECT
-          po.id AS purchase_order_id,
-          po.po_number,
-          v.name AS vendor_name,
-          po.status,
-          po.expected_delivery_date,
-          po.confirmed_delivery_date,
-          COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) AS eta,
-          SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
-          COUNT(pol.id) AS pending_lines,
-          SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
-        FROM purchase_orders po
-        JOIN vendors v ON v.id = po.vendor_id
-        JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
-          AND pol.status IN ('open', 'partially_received')
-        WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
-        GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
-        ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
-      `);
+      const rows = await storage.getExpectedReceiptsReport();
 
-      res.json({ receipts: rows.rows });
+      res.json({ receipts: rows });
     } catch (error: any) {
       console.error("Error fetching expected receipts:", error);
       res.status(500).json({ error: error.message || "Failed to fetch expected receipts" });
@@ -3214,7 +2978,7 @@ export function registerPurchasingRoutes(app: Express) {
   // List all notification types (admin only, for settings)
   app.get("/api/notification-types", requirePermission("settings", "view"), async (req, res) => {
     try {
-      const types = await db.select().from(notificationTypes).orderBy(notificationTypes.category, notificationTypes.label);
+      const types = await notificationService.getAllNotificationTypes();
       res.json(types);
     } catch (err: any) {
       res.status(500).json({ error: err.message });

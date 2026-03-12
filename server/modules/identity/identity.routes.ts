@@ -1,5 +1,4 @@
 import type { Express } from "express";
-import { db } from "../../db";
 import { identityStorage as storage } from "../identity";
 import { requirePermission, requireAuth } from "../../routes/middleware";
 import bcrypt from "bcrypt";

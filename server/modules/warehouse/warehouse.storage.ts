@@ -3,11 +3,15 @@ import {
   warehouses,
   warehouseZones,
   warehouseLocations,
+  fulfillmentRoutingRules,
+  productLocations,
+  inventoryLevels,
   generateLocationCode,
   eq,
   and,
   asc,
   sql,
+  inArray,
 } from "../../storage/base";
 import type {
   Warehouse,
@@ -16,6 +20,8 @@ import type {
   InsertWarehouseZone,
   WarehouseLocation,
   InsertWarehouseLocation,
+  FulfillmentRoutingRule,
+  InsertFulfillmentRoutingRule,
 } from "../../storage/base";
 
 export interface IWarehouseStorage {
@@ -38,6 +44,19 @@ export interface IWarehouseStorage {
   createWarehouseLocation(location: InsertWarehouseLocation | Omit<InsertWarehouseLocation, 'code'>): Promise<WarehouseLocation>;
   updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>): Promise<WarehouseLocation | null>;
   deleteWarehouseLocation(id: number): Promise<boolean>;
+
+  // Fulfillment routing rules
+  getAllFulfillmentRoutingRules(): Promise<FulfillmentRoutingRule[]>;
+  createFulfillmentRoutingRule(data: InsertFulfillmentRoutingRule): Promise<FulfillmentRoutingRule>;
+  updateFulfillmentRoutingRule(id: number, data: Partial<InsertFulfillmentRoutingRule>): Promise<FulfillmentRoutingRule | null>;
+  deleteFulfillmentRoutingRule(id: number): Promise<FulfillmentRoutingRule | null>;
+
+  // Location aggregate queries
+  getSkusByWarehouseLocation(): Promise<Map<number, string>>;
+  hasProductsAssignedToLocation(warehouseLocationId: number): Promise<boolean>;
+  bulkReassignProducts(sourceLocationIds: number[], targetLocationId: number, targetCode: string, targetZone: string): Promise<number>;
+  getLocationInventoryDetail(warehouseLocationId: number): Promise<any[]>;
+  getWarehouseLocationCodeById(id: number): Promise<string | null>;
 }
 
 export const warehouseMethods: IWarehouseStorage = {
@@ -174,5 +193,111 @@ export const warehouseMethods: IWarehouseStorage = {
   async deleteWarehouseLocation(id: number): Promise<boolean> {
     const result = await db.delete(warehouseLocations).where(eq(warehouseLocations.id, id)).returning();
     return result.length > 0;
+  },
+
+  // Fulfillment routing rules
+
+  async getAllFulfillmentRoutingRules(): Promise<FulfillmentRoutingRule[]> {
+    return await db.select().from(fulfillmentRoutingRules).orderBy(sql`priority DESC, id`);
+  },
+
+  async createFulfillmentRoutingRule(data: InsertFulfillmentRoutingRule): Promise<FulfillmentRoutingRule> {
+    const [rule] = await db.insert(fulfillmentRoutingRules).values(data as any).returning();
+    return rule;
+  },
+
+  async updateFulfillmentRoutingRule(id: number, data: Partial<InsertFulfillmentRoutingRule>): Promise<FulfillmentRoutingRule | null> {
+    const [rule] = await db.update(fulfillmentRoutingRules)
+      .set({ ...data as any, updatedAt: new Date() })
+      .where(eq(fulfillmentRoutingRules.id, id))
+      .returning();
+    return rule || null;
+  },
+
+  async deleteFulfillmentRoutingRule(id: number): Promise<FulfillmentRoutingRule | null> {
+    const [deleted] = await db.delete(fulfillmentRoutingRules)
+      .where(eq(fulfillmentRoutingRules.id, id))
+      .returning();
+    return deleted || null;
+  },
+
+  // Location aggregate queries
+
+  async getSkusByWarehouseLocation(): Promise<Map<number, string>> {
+    const result = await db.execute(sql`
+      SELECT warehouse_location_id, STRING_AGG(sku, ', ' ORDER BY is_primary DESC, sku) as skus
+      FROM product_locations
+      WHERE sku IS NOT NULL
+      GROUP BY warehouse_location_id
+    `);
+    const map = new Map<number, string>();
+    for (const row of result.rows as any[]) {
+      if (row.warehouse_location_id && row.skus) {
+        map.set(row.warehouse_location_id, row.skus);
+      }
+    }
+    return map;
+  },
+
+  async hasProductsAssignedToLocation(warehouseLocationId: number): Promise<boolean> {
+    const result = await db.select({ id: productLocations.id })
+      .from(productLocations)
+      .where(eq(productLocations.warehouseLocationId, warehouseLocationId))
+      .limit(1);
+    return result.length > 0;
+  },
+
+  async bulkReassignProducts(sourceLocationIds: number[], targetLocationId: number, targetCode: string, targetZone: string): Promise<number> {
+    const result = await db.update(productLocations)
+      .set({
+        warehouseLocationId: targetLocationId,
+        location: targetCode,
+        zone: targetZone,
+      })
+      .where(inArray(productLocations.warehouseLocationId, sourceLocationIds));
+    return result.rowCount || 0;
+  },
+
+  async getLocationInventoryDetail(warehouseLocationId: number): Promise<any[]> {
+    const result = await db.execute(sql`
+      SELECT
+        il.id,
+        il.product_variant_id,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty,
+        pv.sku,
+        pv.name as variant_name,
+        pv.units_per_variant,
+        COALESCE(p.title, p.name) as product_title,
+        p.id as product_id,
+        (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url,
+        pv.barcode
+      FROM inventory_levels il
+      JOIN product_variants pv ON il.product_variant_id = pv.id
+      LEFT JOIN products p ON pv.product_id = p.id
+      WHERE il.warehouse_location_id = ${warehouseLocationId}
+        AND il.variant_qty > 0
+      ORDER BY pv.sku
+    `);
+    return (result.rows as any[]).map(row => ({
+      id: row.id,
+      variantId: row.product_variant_id,
+      qty: row.variant_qty,
+      reservedQty: row.reserved_qty,
+      pickedQty: row.picked_qty,
+      sku: row.sku,
+      variantName: row.variant_name,
+      unitsPerVariant: row.units_per_variant,
+      productTitle: row.product_title,
+      productId: row.product_id,
+      imageUrl: row.image_url,
+      barcode: row.barcode,
+    }));
+  },
+
+  async getWarehouseLocationCodeById(id: number): Promise<string | null> {
+    const [loc] = await db.select({ code: warehouseLocations.code }).from(warehouseLocations).where(eq(warehouseLocations.id, id)).limit(1);
+    return loc?.code ?? null;
   },
 };

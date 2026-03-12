@@ -5,6 +5,9 @@ import {
   channelPricing,
   channelListings,
   channelAssetOverrides,
+  channelProductLines,
+  productLines,
+  channels,
   eq,
   and,
   sql,
@@ -42,10 +45,15 @@ export interface IChannelCatalogStorage {
   getChannelListingsByProduct(channelId: number, productId: number): Promise<ChannelListing[]>;
   upsertChannelListing(data: InsertChannelListing): Promise<ChannelListing>;
   getChannelListingByExternalId(channelId: number, externalProductId: string): Promise<ChannelListing | undefined>;
+  getChannelListingsByChannel(channelId: number): Promise<ChannelListing[]>;
 
   getChannelAssetOverridesByProduct(channelId: number, productId: number): Promise<ChannelAssetOverride[]>;
   upsertChannelAssetOverride(data: InsertChannelAssetOverride): Promise<ChannelAssetOverride>;
   deleteChannelAssetOverride(channelId: number, productAssetId: number): Promise<boolean>;
+
+  // Channel product lines (which product lines feed into which channels)
+  replaceChannelProductLines(channelId: number, productLineIds: number[]): Promise<void>;
+  getChannelProductLinesForChannel(channelId: number): Promise<{ id: number; code: string; name: string; isActive: boolean | null }[]>;
 }
 
 export const channelCatalogMethods: IChannelCatalogStorage = {
@@ -270,5 +278,27 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
       ))
       .returning();
     return result.length > 0;
+  },
+
+  async getChannelListingsByChannel(channelId: number): Promise<ChannelListing[]> {
+    return db.select().from(channelListings).where(eq(channelListings.channelId, channelId));
+  },
+
+  async replaceChannelProductLines(channelId: number, productLineIds: number[]): Promise<void> {
+    await db.delete(channelProductLines).where(eq(channelProductLines.channelId, channelId));
+    if (productLineIds.length > 0) {
+      await db.insert(channelProductLines).values(
+        productLineIds.map((plId: number) => ({ channelId, productLineId: plId }))
+      ).onConflictDoNothing();
+    }
+  },
+
+  async getChannelProductLinesForChannel(channelId: number): Promise<{ id: number; code: string; name: string; isActive: boolean | null }[]> {
+    return db
+      .select({ id: productLines.id, code: productLines.code, name: productLines.name, isActive: channelProductLines.isActive })
+      .from(channelProductLines)
+      .innerJoin(productLines, eq(productLines.id, channelProductLines.productLineId))
+      .where(eq(channelProductLines.channelId, channelId))
+      .orderBy(productLines.sortOrder, productLines.name);
   },
 };

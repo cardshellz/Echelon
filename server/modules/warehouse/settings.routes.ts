@@ -1,7 +1,5 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { eq, sql, and, gte } from "drizzle-orm";
-import { db } from "../../db";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...inventoryStorage };

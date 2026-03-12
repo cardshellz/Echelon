@@ -1,7 +1,4 @@
 import type { Express } from "express";
-import { z } from "zod";
-import { eq, sql, and, inArray } from "drizzle-orm";
-import { db } from "../../db";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
@@ -11,7 +8,6 @@ import { procurementStorage } from "../procurement";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission } from "../../routes/middleware";
 import { syncPickQueueForSku } from "../../routes/middleware";
-import { insertProductSchema, insertProductVariantSchema, products, productVariants, productAssets, productLocations, inventoryLevels, warehouseLocations, channels, channelListings, inventoryTransactions, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, orderItems, pickingLogs, orderItemFinancials } from "@shared/schema";
 
 export function registerProductRoutes(app: Express) {
   // ============================================================================
@@ -24,9 +20,7 @@ export function registerProductRoutes(app: Express) {
       const allVariants = await storage.getAllProductVariants(includeInactive);
 
       // Bulk-fetch primary images (one query instead of N)
-      const primaryAssets = await db.select()
-        .from(productAssets)
-        .where(eq(productAssets.isPrimary, 1));
+      const primaryAssets = await storage.getPrimaryProductAssets();
       const primaryImageByProductId = new Map<number, string>();
       for (const asset of primaryAssets) {
         if (asset.productId && asset.url) {
@@ -131,7 +125,6 @@ export function registerProductRoutes(app: Express) {
 
       // Cascade base SKU rename to variants and all downstream tables
       if (newProductSku && oldProductSku && newProductSku !== oldProductSku) {
-        const now = new Date();
         const productVariantsList = await storage.getProductVariantsByProductId(id);
 
         for (const v of productVariantsList) {
@@ -156,18 +149,9 @@ export function registerProductRoutes(app: Express) {
           // Update the variant itself
           await storage.updateProductVariant(v.id, { sku: newVariantSku });
 
-          // Cascade to downstream tables with productVariantId FK
+          // Cascade to downstream tables
           try {
-            await db.update(purchaseOrderLines).set({ sku: newVariantSku }).where(eq(purchaseOrderLines.productVariantId, v.id));
-            await db.update(inboundShipmentLines).set({ sku: newVariantSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, v.id));
-            await db.update(receivingLines).set({ sku: newVariantSku }).where(eq(receivingLines.productVariantId, v.id));
-            await db.update(productLocations).set({ sku: newVariantSku }).where(eq(productLocations.productVariantId, v.id));
-            await db.update(vendorInvoiceLines).set({ sku: newVariantSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, v.id));
-
-            // Tables without productVariantId FK — match by old SKU string
-            await db.update(orderItems).set({ sku: newVariantSku }).where(eq(orderItems.sku, oldVariantSku));
-            await db.update(pickingLogs).set({ sku: newVariantSku }).where(eq(pickingLogs.sku, oldVariantSku));
-            await db.update(orderItemFinancials).set({ sku: newVariantSku }).where(eq(orderItemFinancials.sku, oldVariantSku));
+            await storage.cascadeSkuRename(v.id, oldVariantSku, newVariantSku);
           } catch (err: any) {
             console.warn(`[SKU CASCADE] Partial failure renaming variant ${oldVariantSku} → ${newVariantSku}: ${err.message}`);
           }
@@ -220,12 +204,12 @@ export function registerProductRoutes(app: Express) {
         for (const level of levels) {
           if (level.variantQty > 0) {
             // Get location code
-            const [loc] = await db.select({ code: warehouseLocations.code }).from(warehouseLocations).where(eq(warehouseLocations.id, level.warehouseLocationId)).limit(1);
+            const locCode = await storage.getWarehouseLocationCodeById(level.warehouseLocationId);
             inventoryDetails.push({
               variantId: v.id,
               sku: v.sku,
               warehouseLocationId: level.warehouseLocationId,
-              locationCode: loc?.code ?? `LOC-${level.warehouseLocationId}`,
+              locationCode: locCode ?? `LOC-${level.warehouseLocationId}`,
               variantQty: level.variantQty,
               reservedQty: level.reservedQty,
             });
@@ -245,8 +229,8 @@ export function registerProductRoutes(app: Express) {
         for (const feed of activeFeedList) {
           let channelName = feed.channelType || "Unknown";
           if (feed.channelId) {
-            const [ch] = await db.select({ name: channels.name }).from(channels).where(eq(channels.id, feed.channelId)).limit(1);
-            if (ch) channelName = ch.name;
+            const name = await storage.getChannelNameById(feed.channelId);
+            if (name) channelName = name;
           }
           feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku, variantSku: v.sku });
         }
@@ -401,35 +385,8 @@ export function registerProductRoutes(app: Express) {
   app.get("/api/products/:id/inventory", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const productId = parseInt(req.params.id);
-      const rows = await db.execute(sql`
-        SELECT
-          pv.id AS variant_id,
-          pv.sku,
-          pv.name AS variant_name,
-          pv.hierarchy_level,
-          pv.units_per_variant,
-          pv.is_base_unit,
-          il.id AS level_id,
-          il.warehouse_location_id AS location_id,
-          il.variant_qty,
-          il.reserved_qty,
-          il.picked_qty,
-          COALESCE(il.packed_qty, 0) AS packed_qty,
-          COALESCE(il.backorder_qty, 0) AS backorder_qty,
-          il.updated_at AS level_updated_at,
-          wl.code AS location_code,
-          wl.location_type,
-          wl.zone,
-          wl.is_pickable,
-          w.name AS warehouse_name
-        FROM product_variants pv
-        LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
-        LEFT JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
-        LEFT JOIN warehouses w ON w.id = wl.warehouse_id
-        WHERE pv.product_id = ${productId}
-        ORDER BY pv.hierarchy_level ASC, pv.sku ASC, wl.code ASC
-      `);
-      res.json(rows.rows);
+      const rows = await storage.getProductInventoryByProductId(productId);
+      res.json(rows);
     } catch (error) {
       console.error("Error fetching product inventory:", error);
       res.status(500).json({ error: "Failed to fetch product inventory" });
@@ -603,20 +560,8 @@ export function registerProductRoutes(app: Express) {
 
       // Cascade SKU rename to all downstream tables with cached sku columns
       if (newSku && oldSku && newSku !== oldSku) {
-        const now = new Date();
         try {
-          // Tables with productVariantId FK — match by variant ID
-          await db.update(purchaseOrderLines).set({ sku: newSku }).where(eq(purchaseOrderLines.productVariantId, id));
-          await db.update(inboundShipmentLines).set({ sku: newSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, id));
-          await db.update(receivingLines).set({ sku: newSku }).where(eq(receivingLines.productVariantId, id));
-          await db.update(productLocations).set({ sku: newSku }).where(eq(productLocations.productVariantId, id));
-          await db.update(vendorInvoiceLines).set({ sku: newSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, id));
-
-          // Tables without productVariantId FK — match by old SKU string
-          await db.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
-          await db.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
-          await db.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
-
+          await storage.cascadeSkuRename(id, oldSku, newSku);
           console.log(`[SKU CASCADE] Renamed ${oldSku} → ${newSku} across all downstream tables`);
         } catch (err: any) {
           console.warn(`[SKU CASCADE] Partial failure renaming ${oldSku} → ${newSku}: ${err.message}`);
@@ -645,34 +590,23 @@ export function registerProductRoutes(app: Express) {
       if (!source) return res.status(404).json({ error: "Source variant not found" });
 
       // Move inventory_levels from source to target
-      const movedInventory = await db.update(inventoryLevels)
-        .set({ productVariantId: targetId, updatedAt: new Date() })
-        .where(eq(inventoryLevels.productVariantId, sourceId))
-        .returning();
+      const movedInventoryCount = await storage.reassignInventoryLevelsToVariant(sourceId, targetId);
 
       // Move product_locations from source to target
-      const movedLocations = await db.update(productLocations)
-        .set({ productVariantId: targetId, updatedAt: new Date() })
-        .where(eq(productLocations.productVariantId, sourceId))
-        .returning();
+      const movedLocationCount = await storage.reassignProductLocationsToVariant(sourceId, targetId);
 
       // Log audit transaction
-      await db.insert(inventoryTransactions).values({
-        productVariantId: targetId,
-        transactionType: "adjustment",
-        variantQtyDelta: 0,
-        notes: `Merged from variant ${source.sku || source.id} (id=${sourceId}): ${movedInventory.length} inventory records, ${movedLocations.length} location assignments`,
-      });
+      await storage.createMergeAuditTransaction(targetId, source.sku || '', sourceId, movedInventoryCount, movedLocationCount);
 
       // Deactivate source variant
       await storage.updateProductVariant(sourceId, { isActive: false } as any);
 
-      console.log(`[VARIANT MERGE] ${source.sku} (id=${sourceId}) → ${target.sku} (id=${targetId}): ${movedInventory.length} inventory, ${movedLocations.length} locations`);
+      console.log(`[VARIANT MERGE] ${source.sku} (id=${sourceId}) → ${target.sku} (id=${targetId}): ${movedInventoryCount} inventory, ${movedLocationCount} locations`);
 
       res.json({
         ok: true,
-        movedInventoryCount: movedInventory.length,
-        movedLocationCount: movedLocations.length,
+        movedInventoryCount,
+        movedLocationCount,
         deactivatedVariantId: sourceId,
       });
     } catch (error) {
@@ -702,10 +636,10 @@ export function registerProductRoutes(app: Express) {
       const inventoryDetails: { warehouseLocationId: number; locationCode: string; variantQty: number; reservedQty: number }[] = [];
       for (const level of levels) {
         if (level.variantQty > 0) {
-          const [loc] = await db.select({ code: warehouseLocations.code }).from(warehouseLocations).where(eq(warehouseLocations.id, level.warehouseLocationId)).limit(1);
+          const locCode = await storage.getWarehouseLocationCodeById(level.warehouseLocationId);
           inventoryDetails.push({
             warehouseLocationId: level.warehouseLocationId,
-            locationCode: loc?.code ?? `LOC-${level.warehouseLocationId}`,
+            locationCode: locCode ?? `LOC-${level.warehouseLocationId}`,
             variantQty: level.variantQty,
             reservedQty: level.reservedQty,
           });
@@ -719,9 +653,8 @@ export function registerProductRoutes(app: Express) {
       for (const feed of activeFeedList) {
         let channelName = feed.channelType || "Unknown";
         if (feed.channelId) {
-          const [ch] = await db.select({ name: channels.name, provider: channels.provider })
-            .from(channels).where(eq(channels.id, feed.channelId)).limit(1);
-          if (ch) channelName = ch.name;
+          const name = await storage.getChannelNameById(feed.channelId);
+          if (name) channelName = name;
         }
         feedDetails.push({ channelName, provider: feed.channelType, channelSku: feed.channelSku });
       }

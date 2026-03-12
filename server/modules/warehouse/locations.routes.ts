@@ -1,14 +1,12 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { eq, sql } from "drizzle-orm";
-import { db } from "../../db";
 import { warehouseStorage } from "../warehouse";
 import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...inventoryStorage };
 import { requirePermission, requireAuth, syncPickQueueForSku } from "../../routes/middleware";
-import { insertProductLocationSchema, updateProductLocationSchema, productLocations, productVariants, products, inventoryLevels, warehouseLocations, inventoryTransactions } from "@shared/schema";
+import { insertProductLocationSchema, updateProductLocationSchema, productLocations, productVariants, products, inventoryLevels, warehouseLocations } from "@shared/schema";
 import type { InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
 import { broadcastOrdersUpdated } from "../../websocket";
@@ -244,7 +242,7 @@ export function registerLocationRoutes(app: Express) {
       // Log the move as an inventory transaction (transfer type)
       if (productLocation.productId) {
         const userId = req.session?.user?.id || 'system';
-        await db.insert(inventoryTransactions).values({
+        await storage.createInventoryTransaction({
           productVariantId: null,
           fromLocationId: sourceLocation?.id || null,
           toLocationId: targetLocation.id,

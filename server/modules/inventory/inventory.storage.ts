@@ -6,7 +6,7 @@ import {
   type ChannelFeed, type InsertChannelFeed,
   type ProductVariant,
   inventoryLevels, inventoryTransactions, adjustmentReasons,
-  channelFeeds, productVariants, warehouseLocations,
+  channelFeeds, productVariants, warehouseLocations, productLocations,
 } from "../../storage/base";
 
 export interface IInventoryStorage {
@@ -65,6 +65,27 @@ export interface IInventoryStorage {
   upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed>;
   updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null>;
   getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: ProductVariant })[]>;
+
+  hasInventoryAtLocation(warehouseLocationId: number): Promise<boolean>;
+
+  getInventoryLevelById(id: number): Promise<InventoryLevel | undefined>;
+  deleteInventoryLevel(id: number): Promise<void>;
+  hasProductLocationAssignment(productVariantId: number, warehouseLocationId: number): Promise<boolean>;
+  getAssignedLocationIdsForVariant(productVariantId: number): Promise<number[]>;
+
+  searchSkusByLocation(locationId: number, limit: number): Promise<Record<string, unknown>[]>;
+  searchSkusByPattern(searchPattern: string, limit: number): Promise<Record<string, unknown>[]>;
+  searchSkuLocations(searchPattern: string): Promise<Record<string, unknown>[]>;
+  getSourceInventoryForConversion(variantId: number, locationId?: number): Promise<Record<string, unknown>[]>;
+
+  getInventoryLevelsSummary(warehouseId?: number | null): Promise<Record<string, unknown>[]>;
+  getInventoryByBin(warehouseId?: number | null, search?: string): Promise<Record<string, unknown>[]>;
+  getVariantLocationBreakdown(variantId: number, warehouseId?: number | null): Promise<Record<string, unknown>[]>;
+  getInventoryExport(): Promise<Record<string, unknown>[]>;
+
+  getSyncHealthStats(): Promise<Record<string, unknown>>;
+  getDebugOrderDates(orderNumber: string): Promise<Record<string, unknown> | null>;
+  getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }>;
 }
 
 export const inventoryMethods: IInventoryStorage = {
@@ -537,5 +558,350 @@ export const inventoryMethods: IInventoryStorage = {
       .innerJoin(productVariants, eq(channelFeeds.productVariantId, productVariants.id))
       .where(eq(channelFeeds.channelType, channelType));
     return result as (ChannelFeed & { variant: ProductVariant })[];
+  },
+
+  async hasInventoryAtLocation(warehouseLocationId: number): Promise<boolean> {
+    const result = await db.select({ id: inventoryLevels.id })
+      .from(inventoryLevels)
+      .where(eq(inventoryLevels.warehouseLocationId, warehouseLocationId))
+      .limit(1);
+    return result.length > 0;
+  },
+
+  async getInventoryLevelById(id: number): Promise<InventoryLevel | undefined> {
+    const result = await db.select().from(inventoryLevels).where(eq(inventoryLevels.id, id)).limit(1);
+    return result[0];
+  },
+
+  async deleteInventoryLevel(id: number): Promise<void> {
+    await db.delete(inventoryLevels).where(eq(inventoryLevels.id, id));
+  },
+
+  async hasProductLocationAssignment(productVariantId: number, warehouseLocationId: number): Promise<boolean> {
+    const result = await db.select({ id: productLocations.id })
+      .from(productLocations)
+      .where(and(
+        eq(productLocations.productVariantId, productVariantId),
+        eq(productLocations.warehouseLocationId, warehouseLocationId),
+      ))
+      .limit(1);
+    return result.length > 0;
+  },
+
+  async getAssignedLocationIdsForVariant(productVariantId: number): Promise<number[]> {
+    const result = await db.select({ warehouseLocationId: productLocations.warehouseLocationId })
+      .from(productLocations)
+      .where(eq(productLocations.productVariantId, productVariantId));
+    return result.map(a => a.warehouseLocationId);
+  },
+
+  async searchSkusByLocation(locationId: number, limit: number): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.sku as sku,
+        pv.name as name,
+        pv.id as "variantId",
+        il.variant_qty as available,
+        wl.id as "locationId",
+        wl.code as location
+      FROM inventory_levels il
+      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE il.warehouse_location_id = ${locationId}
+        AND il.variant_qty > 0
+      ORDER BY pv.sku
+      LIMIT ${limit}
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async searchSkusByPattern(searchPattern: string, limit: number): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.sku as sku,
+        pv.name as name,
+        'product_variant' as source,
+        pv.product_id as "productId",
+        pv.id as "productVariantId",
+        pv.units_per_variant as "unitsPerVariant"
+      FROM product_variants pv
+      WHERE pv.is_active = true
+        AND pv.sku IS NOT NULL
+        AND (
+          LOWER(pv.sku) LIKE ${searchPattern} OR
+          LOWER(pv.name) LIKE ${searchPattern}
+        )
+      ORDER BY pv.sku
+      LIMIT ${limit}
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async searchSkuLocations(searchPattern: string): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.sku,
+        pv.name,
+        pv.id as "variantId",
+        wl.code as location,
+        wl.zone,
+        wl.location_type as "locationType",
+        il.variant_qty as available,
+        il.warehouse_location_id as "locationId",
+        w.code as "warehouseCode"
+      FROM inventory_levels il
+      JOIN product_variants pv ON pv.id = il.product_variant_id
+      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouses w ON w.id = wl.warehouse_id
+      WHERE il.variant_qty > 0
+        AND (
+          LOWER(pv.sku) LIKE ${searchPattern} OR
+          LOWER(pv.name) LIKE ${searchPattern}
+        )
+      ORDER BY pv.sku, wl.code
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getSourceInventoryForConversion(variantId: number, locationId?: number): Promise<Record<string, unknown>[]> {
+    if (locationId) {
+      const result = await db.execute(sql`
+        SELECT il.*, wl.code as location_code
+        FROM inventory_levels il
+        JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+        WHERE il.product_variant_id = ${variantId}
+          AND il.warehouse_location_id = ${locationId}
+          AND il.variant_qty > 0
+      `);
+      return result.rows as Record<string, unknown>[];
+    }
+    const result = await db.execute(sql`
+      SELECT il.*, wl.code as location_code
+      FROM inventory_levels il
+      JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      WHERE il.product_variant_id = ${variantId}
+        AND il.variant_qty > 0
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getInventoryLevelsSummary(warehouseId?: number | null): Promise<Record<string, unknown>[]> {
+    const result = warehouseId ? await db.execute(sql`
+      SELECT
+        pv.id as variant_id,
+        pv.sku as variant_sku,
+        pv.name as variant_name,
+        pv.units_per_variant,
+        pv.parent_variant_id,
+        pv.hierarchy_level,
+        pv.is_base_unit,
+        p.id as product_id,
+        p.sku as base_sku,
+        pv.barcode,
+        COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+        COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
+        COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
+        COUNT(DISTINCT il.warehouse_location_id) as location_count,
+        COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
+        COUNT(DISTINCT pl.id) as bin_count,
+        MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
+                  WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
+                  ELSE 0 END) as has_replen_rule
+      FROM product_variants pv
+      LEFT JOIN products p ON pv.product_id = p.id
+      INNER JOIN inventory_levels il ON il.product_variant_id = pv.id
+      INNER JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id AND wl.warehouse_id = ${warehouseId}
+      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
+      LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
+      LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
+      WHERE pv.is_active = true
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
+      HAVING COALESCE(SUM(il.variant_qty), 0) != 0 OR COALESCE(SUM(il.reserved_qty), 0) != 0
+      ORDER BY pv.sku
+    `) : await db.execute(sql`
+      SELECT
+        pv.id as variant_id,
+        pv.sku as variant_sku,
+        pv.name as variant_name,
+        pv.units_per_variant,
+        pv.parent_variant_id,
+        pv.hierarchy_level,
+        pv.is_base_unit,
+        p.id as product_id,
+        p.sku as base_sku,
+        pv.barcode,
+        COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
+        COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
+        COALESCE(SUM(il.picked_qty), 0) as total_picked_qty,
+        COUNT(DISTINCT il.warehouse_location_id) as location_count,
+        COALESCE(SUM(CASE WHEN wl.is_pickable = 1 THEN il.variant_qty ELSE 0 END), 0) as pickable_variant_qty,
+        COUNT(DISTINCT pl.id) as bin_count,
+        MAX(CASE WHEN rr.id IS NOT NULL AND rr.is_active = 1 THEN 1
+                  WHEN rtd.id IS NOT NULL AND rtd.is_active = 1 THEN 1
+                  ELSE 0 END) as has_replen_rule
+      FROM product_variants pv
+      LEFT JOIN products p ON pv.product_id = p.id
+      LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+      LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
+      LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
+      WHERE pv.is_active = true
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
+      ORDER BY pv.sku
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getInventoryByBin(warehouseId?: number | null, search?: string): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        wl.id as warehouse_location_id,
+        wl.code as location_code,
+        wl.location_type,
+        wl.zone,
+        wl.is_pickable,
+        wl.warehouse_id,
+        w.code as warehouse_code,
+        il.id as inventory_level_id,
+        il.product_variant_id,
+        pv.sku,
+        pv.name as variant_name,
+        COALESCE(p.title, p.name) as product_name,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty,
+        CASE WHEN pl.id IS NOT NULL THEN 1 ELSE 0 END as is_assigned,
+        (SELECT pv2.sku FROM product_locations pl2
+         JOIN product_variants pv2 ON pl2.product_variant_id = pv2.id
+         WHERE pl2.warehouse_location_id = wl.id LIMIT 1) as assigned_sku
+      FROM inventory_levels il
+      JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      JOIN product_variants pv ON il.product_variant_id = pv.id
+      LEFT JOIN products p ON pv.product_id = p.id
+      LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id AND pl.warehouse_location_id = wl.id
+      LEFT JOIN warehouses w ON wl.warehouse_id = w.id
+      WHERE (il.variant_qty != 0 OR il.reserved_qty != 0)
+        ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
+        ${search ? sql`AND (wl.code LIKE ${'%' + search + '%'} OR pv.sku LIKE ${'%' + search + '%'} OR pv.name LIKE ${'%' + search + '%'})` : sql``}
+      ORDER BY wl.code, pv.sku
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getVariantLocationBreakdown(variantId: number, warehouseId?: number | null): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        il.id,
+        il.warehouse_location_id,
+        wl.code as location_code,
+        wl.zone,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty
+      FROM inventory_levels il
+      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      WHERE il.product_variant_id = ${variantId}
+        ${warehouseId ? sql`AND wl.warehouse_id = ${warehouseId}` : sql``}
+      ORDER BY wl.code
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getInventoryExport(): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.sku,
+        pv.name as variant_name,
+        p.sku as base_sku,
+        p.name as item_name,
+        wl.code as location_code,
+        wl.zone,
+        wl.location_type,
+        wl.bin_type,
+        wl.is_pickable,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty,
+        (il.variant_qty - il.reserved_qty - il.picked_qty) as available_qty
+      FROM inventory_levels il
+      JOIN product_variants pv ON il.product_variant_id = pv.id
+      LEFT JOIN products p ON pv.product_id = p.id
+      LEFT JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+      WHERE il.variant_qty > 0
+      ORDER BY wl.code, pv.sku
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async getSyncHealthStats(): Promise<Record<string, unknown>> {
+    const result = await db.execute(sql`
+      SELECT
+        (SELECT MAX(created_at) FROM shopify_orders) as latest_shopify_order,
+        (SELECT MAX(created_at) FROM orders WHERE source = 'shopify') as latest_synced_order,
+        (SELECT COUNT(*) FROM shopify_orders so
+         WHERE NOT EXISTS(SELECT 1 FROM orders WHERE source_table_id = so.id)
+         AND so.created_at > NOW() - INTERVAL '24 hours'
+         AND so.cancelled_at IS NULL
+         AND EXISTS(
+           SELECT 1 FROM shopify_order_items soi
+           WHERE soi.order_id = so.id
+           AND (soi.fulfillment_status IS NULL OR soi.fulfillment_status != 'fulfilled')
+         )) as unsynced_24h
+    `);
+    return (result.rows[0] || {}) as Record<string, unknown>;
+  },
+
+  async getDebugOrderDates(orderNumber: string): Promise<Record<string, unknown> | null> {
+    const result = await db.execute(sql`
+      SELECT id, order_number, order_placed_at, shopify_created_at, created_at
+      FROM orders WHERE order_number LIKE ${'%' + orderNumber}
+      LIMIT 1
+    `);
+    return (result.rows[0] as Record<string, unknown>) || null;
+  },
+
+  async getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }> {
+    const missing = await db.execute<{ count: string }>(sql`
+      SELECT COUNT(*) as count FROM shopify_orders
+      WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+    `);
+
+    const sample = await db.execute<{
+      id: string;
+      order_number: string | null;
+      created_at: Date | null;
+    }>(sql`
+      SELECT id, order_number, created_at FROM shopify_orders
+      WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+      ORDER BY created_at DESC
+      LIMIT 5
+    `);
+
+    const sampleWithItems = [];
+    for (const order of sample.rows) {
+      const items = await db.execute<{
+        id: string;
+        fulfillment_status: string | null;
+        fulfillable_quantity: number | null;
+        quantity: number;
+      }>(sql`
+        SELECT id, fulfillment_status, fulfillable_quantity, quantity FROM shopify_order_items WHERE order_id = ${order.id}
+      `);
+      sampleWithItems.push({
+        ...order,
+        items: items.rows.map(i => ({
+          id: i.id,
+          fulfillmentStatus: i.fulfillment_status,
+          fulfillableQty: i.fulfillable_quantity,
+          qty: i.quantity
+        }))
+      });
+    }
+
+    return {
+      missingCount: parseInt(missing.rows[0].count),
+      sampleOrders: sampleWithItems,
+    };
   },
 };

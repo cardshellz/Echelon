@@ -1,7 +1,5 @@
 import type { Express } from "express";
 import { z } from "zod";
-import { eq, sql, and } from "drizzle-orm";
-import { db } from "../../db";
 import { channelsStorage } from "../channels";
 import { ordersStorage } from "../orders";
 import { catalogStorage } from "../catalog";
@@ -9,7 +7,7 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...channelsStorage, ...ordersStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
-import { insertChannelSchema, insertChannelConnectionSchema, insertPartnerProfileSchema, insertChannelReservationSchema, channels, channelListings, productVariants, products, orders, orderItems, inventoryLevels } from "@shared/schema";
+import { insertChannelSchema, insertChannelReservationSchema } from "@shared/schema";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -37,15 +35,11 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Check if feed already exists
-      const { channelFeeds: cf } = await import("@shared/schema");
-      const { eq, and } = await import("drizzle-orm");
-      const [existing] = await db.select().from(cf)
-        .where(and(eq(cf.channelId, channelId), eq(cf.productVariantId, productVariantId)))
-        .limit(1);
+      const existing = await storage.getChannelFeedByChannelAndVariant(channelId, productVariantId);
       if (existing) {
         // Reactivate if disabled
         if (existing.isActive !== 1) {
-          await db.update(cf).set({ isActive: 1, updatedAt: new Date() }).where(eq(cf.id, existing.id));
+          await storage.reactivateChannelFeed(existing.id);
         }
         return res.json(existing);
       }
@@ -66,11 +60,9 @@ export function registerChannelRoutes(app: Express) {
 
       // Product line gate: check if this product's lines match the channel's lines
       if (product) {
-        const { productLineProducts: plp, channelProductLines: cpl } = await import("@shared/schema");
-        const { inArray } = await import("drizzle-orm");
-        const prodLines = (await db.select({ plId: plp.productLineId }).from(plp).where(eq(plp.productId, product.id))).map((r: any) => r.plId);
+        const prodLines = await storage.getProductLineIdsByProduct(product.id);
         if (prodLines.length > 0) {
-          const chLines = (await db.select({ plId: cpl.productLineId }).from(cpl).where(and(eq(cpl.channelId, channelId), eq(cpl.isActive, true)))).map((r: any) => r.plId);
+          const chLines = await storage.getActiveChannelProductLineIds(channelId);
           const overlap = prodLines.some((pl: number) => chLines.includes(pl));
           if (!overlap) {
             return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
@@ -82,7 +74,7 @@ export function registerChannelRoutes(app: Express) {
         ? product.shopifyProductId
         : null;
 
-      const [feed] = await db.insert(cf).values({
+      const feed = await storage.createChannelFeedDirect({
         channelId,
         productVariantId,
         channelType: channel.provider || "manual",
@@ -90,7 +82,7 @@ export function registerChannelRoutes(app: Express) {
         channelProductId,
         channelSku: variant.sku || null,
         isActive: 1,
-      }).returning();
+      });
 
       res.json(feed);
     } catch (error: any) {
@@ -107,42 +99,42 @@ export function registerChannelRoutes(app: Express) {
   app.get("/api/oms/orders", requirePermission("orders", "view"), async (req, res) => {
     try {
       const { status, channelId, source, limit = "50", offset = "0" } = req.query;
-      
+
       // Get all orders with items
       const statusFilter = status ? (Array.isArray(status) ? status : [status]) as string[] : undefined;
       const allOrders = await storage.getOrdersWithItems(statusFilter as any);
-      
+
       // Get all channels for enrichment
       const allChannels = await storage.getAllChannels();
       const channelMap = new Map(allChannels.map(c => [c.id, c]));
-      
+
       // Enrich orders with channel info and apply filters
       let enrichedOrders = allOrders.map(order => ({
         ...order,
         channel: order.channelId ? channelMap.get(order.channelId) : null
       }));
-      
+
       // Filter by channelId if specified
       if (channelId) {
         const cid = parseInt(channelId as string);
         enrichedOrders = enrichedOrders.filter(o => o.channelId === cid);
       }
-      
+
       // Filter by source if specified
       if (source) {
         enrichedOrders = enrichedOrders.filter(o => o.source === source);
       }
-      
+
       // Sort by creation date descending (newest first)
-      enrichedOrders.sort((a, b) => 
+      enrichedOrders.sort((a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       );
-      
+
       // Apply pagination
       const limitNum = parseInt(limit as string);
       const offsetNum = parseInt(offset as string);
       const paginatedOrders = enrichedOrders.slice(offsetNum, offsetNum + limitNum);
-      
+
       res.json({
         orders: paginatedOrders,
         total: enrichedOrders.length,
@@ -185,14 +177,14 @@ export function registerChannelRoutes(app: Express) {
     try {
       const parseResult = createOrderSchema.safeParse(req.body);
       if (!parseResult.success) {
-        return res.status(400).json({ 
-          error: "Invalid order data", 
-          details: parseResult.error.errors 
+        return res.status(400).json({
+          error: "Invalid order data",
+          details: parseResult.error.errors
         });
       }
-      
+
       const data = parseResult.data;
-      
+
       // Create order
       const orderData = {
         orderNumber: data.orderNumber,
@@ -216,7 +208,7 @@ export function registerChannelRoutes(app: Express) {
         shopifyOrderId: null, // Manual orders don't have Shopify ID
         externalOrderId: null, // Manual orders don't have external ID
       };
-      
+
       // Create items
       const itemsData = data.items.map(item => ({
         sku: item.sku,
@@ -226,9 +218,9 @@ export function registerChannelRoutes(app: Express) {
         zone: item.zone || "U",
         status: "pending" as const,
       }));
-      
+
       const order = await storage.createOrderWithItems(orderData as any, itemsData as any);
-      
+
       res.status(201).json(order);
     } catch (error) {
       console.error("Error creating manual order:", error);
@@ -243,12 +235,12 @@ export function registerChannelRoutes(app: Express) {
       if (isNaN(id)) {
         return res.status(400).json({ error: "Invalid order ID" });
       }
-      
+
       const order = await storage.getOrderById(id);
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
-      
+
       const items = await storage.getOrderItems(id);
       const channel = order.channelId ? await storage.getChannelById(order.channelId) : null;
 
@@ -273,36 +265,17 @@ export function registerChannelRoutes(app: Express) {
 
       if (order.sourceTableId) {
         try {
-          const rawFinancials = await db.execute<{
-            total_price_cents: number | null;
-            subtotal_price_cents: number | null;
-            total_tax_cents: number | null;
-            total_shipping_cents: number | null;
-            total_discounts_cents: number | null;
-            discount_codes: any;
-          }>(sql`
-            SELECT
-              total_price_cents,
-              subtotal_price_cents,
-              total_tax_cents,
-              total_shipping_cents,
-              total_discounts_cents,
-              discount_codes
-            FROM shopify_orders
-            WHERE id = ${order.sourceTableId}
-            LIMIT 1
-          `);
+          const rawFinancials = await storage.getShopifyOrderFinancials(order.sourceTableId);
 
-          if (rawFinancials.rows.length > 0) {
-            const raw = rawFinancials.rows[0];
+          if (rawFinancials) {
             financials = {
-              subtotalCents: raw.subtotal_price_cents,
-              taxCents: raw.total_tax_cents,
-              shippingCents: raw.total_shipping_cents,
-              discountCents: raw.total_discounts_cents,
-              totalCents: raw.total_price_cents,
-              discountCodes: Array.isArray(raw.discount_codes)
-                ? raw.discount_codes.map((dc: any) => typeof dc === "string" ? dc : dc.code || dc.title || String(dc))
+              subtotalCents: rawFinancials.subtotalCents,
+              taxCents: rawFinancials.taxCents,
+              shippingCents: rawFinancials.shippingCents,
+              discountCents: rawFinancials.discountCents,
+              totalCents: rawFinancials.totalCents,
+              discountCodes: Array.isArray(rawFinancials.discountCodes)
+                ? rawFinancials.discountCodes.map((dc: any) => typeof dc === "string" ? dc : dc.code || dc.title || String(dc))
                 : [],
               shippingMethod: null,
             };
@@ -333,16 +306,7 @@ export function registerChannelRoutes(app: Express) {
       let memberPlan: string | null = null;
       if (order.customerEmail) {
         try {
-          const memberResult = await db.execute<{ plan_name: string }>(sql`
-            SELECT p.name as plan_name
-            FROM members m
-            JOIN plans p ON m.plan_id = p.id
-            WHERE LOWER(m.email) = LOWER(${order.customerEmail})
-            LIMIT 1
-          `);
-          if (memberResult.rows.length > 0) {
-            memberPlan = memberResult.rows[0].plan_name;
-          }
+          memberPlan = await storage.getMemberPlanByEmail(order.customerEmail);
         } catch {
           // members/plans tables may not exist — ignore
         }
@@ -362,25 +326,25 @@ export function registerChannelRoutes(app: Express) {
       if (isNaN(id)) {
         return res.status(400).json({ error: "Invalid order ID" });
       }
-      
+
       const order = await storage.getOrderById(id);
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
-      
+
       const { priority, notes, status, onHold } = req.body;
-      
+
       // Only allow updating certain fields
       const updates: any = {};
       if (priority !== undefined) updates.priority = priority;
       if (notes !== undefined) updates.notes = notes;
       if (status !== undefined) updates.status = status;
       if (onHold !== undefined) updates.onHold = onHold ? 1 : 0;
-      
+
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No valid updates provided" });
       }
-      
+
       // Use existing update methods for special fields that have side effects
       if (updates.status) {
         await storage.updateOrderStatus(id, updates.status);
@@ -398,12 +362,12 @@ export function registerChannelRoutes(app: Express) {
         }
         delete updates.onHold;
       }
-      
+
       // Use generic update for remaining fields (notes, etc.)
       if (Object.keys(updates).length > 0) {
         await storage.updateOrderFields(id, updates);
       }
-      
+
       // Fetch updated order
       const updatedOrder = await storage.getOrderById(id);
       res.json(updatedOrder);
@@ -416,17 +380,17 @@ export function registerChannelRoutes(app: Express) {
   // ============================================
   // CHANNELS MANAGEMENT API
   // ============================================
-  
+
   // Get all channels
   app.get("/api/channels", requirePermission("channels", "view"), async (req, res) => {
     try {
       const allChannels = await storage.getAllChannels();
-      
+
       // Enrich with connection info
       const enrichedChannels = await Promise.all(
         allChannels.map(async (channel) => {
           const connection = await storage.getChannelConnection(channel.id);
-          const partnerProfile = channel.type === 'partner' 
+          const partnerProfile = channel.type === 'partner'
             ? await storage.getPartnerProfile(channel.id)
             : null;
           return {
@@ -436,29 +400,29 @@ export function registerChannelRoutes(app: Express) {
           };
         })
       );
-      
+
       res.json(enrichedChannels);
     } catch (error) {
       console.error("Error fetching channels:", error);
       res.status(500).json({ error: "Failed to fetch channels" });
     }
   });
-  
+
   // Get single channel
   app.get("/api/channels/:id", requirePermission("channels", "view"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
       const channel = await storage.getChannelById(channelId);
-      
+
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       const connection = await storage.getChannelConnection(channelId);
-      const partnerProfile = channel.type === 'partner' 
+      const partnerProfile = channel.type === 'partner'
         ? await storage.getPartnerProfile(channelId)
         : null;
-      
+
       res.json({
         ...channel,
         connection: connection || null,
@@ -469,7 +433,7 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: "Failed to fetch channel" });
     }
   });
-  
+
   // Create channel
   app.post("/api/channels", requirePermission("channels", "create"), async (req, res) => {
     try {
@@ -479,12 +443,12 @@ export function registerChannelRoutes(app: Express) {
         isDefault: req.body.isDefault ?? 0,
         status: req.body.status ?? "pending_setup",
       };
-      
+
       const parseResult = insertChannelSchema.safeParse(channelData);
       if (!parseResult.success) {
         return res.status(400).json({ error: "Invalid channel data", details: parseResult.error.errors });
       }
-      
+
       const channel = await storage.createChannel(parseResult.data);
       res.status(201).json(channel);
     } catch (error) {
@@ -492,77 +456,77 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: "Failed to create channel" });
     }
   });
-  
+
   // Update channel
   app.put("/api/channels/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
       const channel = await storage.updateChannel(channelId, req.body);
-      
+
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       res.json(channel);
     } catch (error) {
       console.error("Error updating channel:", error);
       res.status(500).json({ error: "Failed to update channel" });
     }
   });
-  
+
   // Delete channel
   app.delete("/api/channels/:id", requirePermission("channels", "delete"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
       const deleted = await storage.deleteChannel(channelId);
-      
+
       if (!deleted) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting channel:", error);
       res.status(500).json({ error: "Failed to delete channel" });
     }
   });
-  
+
   // Update channel connection
   app.put("/api/channels/:id/connection", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
       const channel = await storage.getChannelById(channelId);
-      
+
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       const connection = await storage.upsertChannelConnection({
         channelId,
         ...req.body
       });
-      
+
       res.json(connection);
     } catch (error) {
       console.error("Error updating channel connection:", error);
       res.status(500).json({ error: "Failed to update channel connection" });
     }
   });
-  
+
   // Auto-setup Shopify connection using configured secrets
   app.post("/api/channels/:id/setup-shopify", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
       const channel = await storage.getChannelById(channelId);
-      
+
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       if (channel.provider !== 'shopify') {
         return res.status(400).json({ error: "This channel is not a Shopify channel" });
       }
-      
+
       // Read credentials from request body (per-channel, not env vars)
       const { shopDomain: rawDomain, accessToken } = req.body as { shopDomain?: string; accessToken?: string };
       if (!rawDomain || !accessToken) {
@@ -603,10 +567,10 @@ export function registerChannelRoutes(app: Express) {
         syncStatus: 'connected',
         lastSyncAt: new Date(),
       });
-      
+
       // Update channel status to active
       await storage.updateChannel(channelId, { status: 'active' });
-      
+
       // Fetch Shopify locations
       let locations: any[] = [];
       try {
@@ -791,20 +755,20 @@ export function registerChannelRoutes(app: Express) {
     try {
       const channelId = parseInt(req.params.id);
       const channel = await storage.getChannelById(channelId);
-      
+
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
       }
-      
+
       if (channel.type !== 'partner') {
         return res.status(400).json({ error: "Partner profile only available for partner channels" });
       }
-      
+
       const profile = await storage.upsertPartnerProfile({
         channelId,
         ...req.body
       });
-      
+
       res.json(profile);
     } catch (error) {
       console.error("Error updating partner profile:", error);
@@ -1071,8 +1035,8 @@ export function registerChannelRoutes(app: Express) {
         const listings = await storage.getChannelListingsByProduct(channelId, productId);
         res.json(listings);
       } else {
-        // Return all listings for this channel - use raw query
-        const allListings = await db.select().from(channelListings).where(eq(channelListings.channelId, channelId));
+        // Return all listings for this channel
+        const allListings = await storage.getChannelListingsByChannel(channelId);
         res.json(allListings);
       }
     } catch (error) {
@@ -1083,7 +1047,7 @@ export function registerChannelRoutes(app: Express) {
   // ============================================
   // CHANNEL RESERVATIONS API
   // ============================================
-  
+
   // Get all reservations (optionally filtered by channel)
   app.get("/api/channel-reservations", requirePermission("channels", "view"), async (req, res) => {
     try {
@@ -1095,7 +1059,7 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: "Failed to fetch reservations" });
     }
   });
-  
+
   // Upsert reservation
   app.post("/api/channel-reservations", requirePermission("channels", "edit"), async (req, res) => {
     try {
@@ -1103,7 +1067,7 @@ export function registerChannelRoutes(app: Express) {
       if (!parseResult.success) {
         return res.status(400).json({ error: "Invalid reservation data", details: parseResult.error.errors });
       }
-      
+
       const reservation = await storage.upsertChannelReservation(parseResult.data);
       res.json(reservation);
     } catch (error) {
@@ -1111,17 +1075,17 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: "Failed to create reservation" });
     }
   });
-  
+
   // Delete reservation
   app.delete("/api/channel-reservations/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const deleted = await storage.deleteChannelReservation(id);
-      
+
       if (!deleted) {
         return res.status(404).json({ error: "Reservation not found" });
       }
-      
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting reservation:", error);
@@ -1133,8 +1097,7 @@ export function registerChannelRoutes(app: Express) {
 
   app.get("/api/channel-product-allocation", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelProductAllocation: cpa } = await import("@shared/schema");
-      const rows = await db.select().from(cpa);
+      const rows = await storage.getAllChannelProductAllocations();
       res.json(rows);
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to get allocations" });
@@ -1143,13 +1106,9 @@ export function registerChannelRoutes(app: Express) {
 
   app.get("/api/channel-product-allocation/:channelId/:productId", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelProductAllocation: cpa } = await import("@shared/schema");
-      const { and, eq } = await import("drizzle-orm");
       const channelId = parseInt(req.params.channelId);
       const productId = parseInt(req.params.productId);
-      const [row] = await db.select().from(cpa).where(
-        and(eq(cpa.channelId, channelId), eq(cpa.productId, productId))
-      ).limit(1);
+      const row = await storage.getChannelProductAllocation(channelId, productId);
       res.json(row || null);
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to get allocation" });
@@ -1158,39 +1117,21 @@ export function registerChannelRoutes(app: Express) {
 
   app.put("/api/channel-product-allocation", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductAllocation: cpa } = await import("@shared/schema");
-      const { eq, and } = await import("drizzle-orm");
       const { channelId, productId, minAtpBase, maxAtpBase, isListed, notes } = req.body;
 
       if (!channelId || !productId) {
         return res.status(400).json({ error: "channelId and productId are required" });
       }
 
-      // Upsert
-      const [existing] = await db.select().from(cpa).where(
-        and(eq(cpa.channelId, channelId), eq(cpa.productId, productId))
-      ).limit(1);
-
-      if (existing) {
-        const [updated] = await db.update(cpa).set({
-          minAtpBase: minAtpBase ?? null,
-          maxAtpBase: maxAtpBase ?? null,
-          isListed: isListed ?? 1,
-          notes: notes ?? null,
-          updatedAt: new Date(),
-        }).where(eq(cpa.id, existing.id)).returning();
-        res.json(updated);
-      } else {
-        const [created] = await db.insert(cpa).values({
-          channelId,
-          productId,
-          minAtpBase: minAtpBase ?? null,
-          maxAtpBase: maxAtpBase ?? null,
-          isListed: isListed ?? 1,
-          notes: notes ?? null,
-        }).returning();
-        res.json(created);
-      }
+      const result = await storage.upsertChannelProductAllocation({
+        channelId,
+        productId,
+        minAtpBase: minAtpBase ?? null,
+        maxAtpBase: maxAtpBase ?? null,
+        isListed: isListed ?? 1,
+        notes: notes ?? null,
+      });
+      res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to save allocation" });
     }
@@ -1198,10 +1139,8 @@ export function registerChannelRoutes(app: Express) {
 
   app.delete("/api/channel-product-allocation/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductAllocation: cpa } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const id = parseInt(req.params.id);
-      await db.delete(cpa).where(eq(cpa.id, id));
+      await storage.deleteChannelProductAllocation(id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message || "Failed to delete allocation" });
@@ -1212,34 +1151,21 @@ export function registerChannelRoutes(app: Express) {
 
   app.get("/api/products/:productId/allocation", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv } = await import("@shared/schema");
-      const { eq, and, inArray } = await import("drizzle-orm");
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
 
-      const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
-      const variants = await db.select().from(pv).where(eq(pv.productId, productId));
+      const activeChannels = await storage.getActiveChannels();
+      const variants = await storage.getProductVariantsByProductId(productId);
       const variantIds = variants.map((v: any) => v.id);
 
       // Product-level allocation rules per channel
-      const productAllocs = await db.select().from(cpa).where(eq(cpa.productId, productId));
+      const productAllocs = await storage.getChannelProductAllocationsByProduct(productId);
 
       // Variant-level reservations for this product's variants
-      const variantReservations = variantIds.length > 0
-        ? await db.select().from(cr).where(inArray(cr.productVariantId, variantIds))
-        : [];
+      const variantReservations = await storage.getChannelReservationsByVariantIds(variantIds);
 
       // Feed data for this product's variants
-      const feeds = variantIds.length > 0
-        ? await db.select({
-            id: cf.id,
-            channelId: cf.channelId,
-            productVariantId: cf.productVariantId,
-            lastSyncedQty: cf.lastSyncedQty,
-            lastSyncedAt: cf.lastSyncedAt,
-            isActive: cf.isActive,
-          }).from(cf).where(inArray(cf.productVariantId, variantIds))
-        : [];
+      const feeds = await storage.getChannelFeedsByVariantIds(variantIds);
 
       // ATP data
       const { atp: inventoryAtp } = req.app.locals.services;
@@ -1269,34 +1195,10 @@ export function registerChannelRoutes(app: Express) {
   // --- SKU typeahead for channel allocation ---
   app.get("/api/channel-allocation/search", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { productVariants: pv, products: p, inventoryLevels: il } = await import("@shared/schema");
-      const { eq, and, gt, or, ilike } = await import("drizzle-orm");
-
       const q = ((req.query.q as string) || "").trim();
       if (q.length < 2) return res.json([]);
 
-      const pattern = `%${q}%`;
-      const results = await db
-        .selectDistinct({
-          variantId: pv.id,
-          sku: pv.sku,
-          variantName: pv.name,
-          productName: p.name,
-        })
-        .from(pv)
-        .innerJoin(p, eq(p.id, pv.productId))
-        .innerJoin(il, eq(il.productVariantId, pv.id))
-        .where(and(
-          eq(pv.isActive, true),
-          gt(il.variantQty, 0),
-          or(
-            ilike(pv.sku, pattern),
-            ilike(pv.name, pattern),
-            ilike(p.name, pattern),
-          ),
-        ))
-        .limit(15);
-
+      const results = await storage.searchVariantsWithInventory(q);
       res.json(results);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1308,32 +1210,7 @@ export function registerChannelRoutes(app: Express) {
   // List all product lines
   app.get("/api/product-lines", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { productLines, productLineProducts, channelProductLines } = await import("@shared/schema");
-      const { eq, sql, count } = await import("drizzle-orm");
-
-      const lines = await db.select().from(productLines).orderBy(productLines.sortOrder, productLines.name);
-
-      // Get product counts per line
-      const productCounts = await db
-        .select({ productLineId: productLineProducts.productLineId, count: count() })
-        .from(productLineProducts)
-        .groupBy(productLineProducts.productLineId);
-      const countMap = new Map(productCounts.map((r: any) => [r.productLineId, Number(r.count)]));
-
-      // Get channel counts per line
-      const channelCounts = await db
-        .select({ productLineId: channelProductLines.productLineId, count: count() })
-        .from(channelProductLines)
-        .where(eq(channelProductLines.isActive, true))
-        .groupBy(channelProductLines.productLineId);
-      const chCountMap = new Map(channelCounts.map((r: any) => [r.productLineId, Number(r.count)]));
-
-      const result = lines.map((l: any) => ({
-        ...l,
-        productCount: countMap.get(l.id) ?? 0,
-        channelCount: chCountMap.get(l.id) ?? 0,
-      }));
-
+      const result = await storage.getProductLinesWithCounts();
       res.json(result);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1343,28 +1220,16 @@ export function registerChannelRoutes(app: Express) {
   // Get single product line with details
   app.get("/api/product-lines/:id", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { productLines, productLineProducts, channelProductLines, products, channels } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const lineId = parseInt(req.params.id);
 
-      const [line] = await db.select().from(productLines).where(eq(productLines.id, lineId));
+      const line = await storage.getProductLineById(lineId);
       if (!line) return res.status(404).json({ error: "Product line not found" });
 
       // Get assigned products
-      const assignedProducts = await db
-        .select({ productId: productLineProducts.productId, productName: products.name, sku: products.sku })
-        .from(productLineProducts)
-        .innerJoin(products, eq(products.id, productLineProducts.productId))
-        .where(eq(productLineProducts.productLineId, lineId))
-        .orderBy(products.name);
+      const assignedProducts = await storage.getProductLineAssignedProducts(lineId);
 
       // Get assigned channels
-      const assignedChannels = await db
-        .select({ channelId: channelProductLines.channelId, channelName: channels.name, provider: channels.provider, isActive: channelProductLines.isActive })
-        .from(channelProductLines)
-        .innerJoin(channels, eq(channels.id, channelProductLines.channelId))
-        .where(eq(channelProductLines.productLineId, lineId))
-        .orderBy(channels.name);
+      const assignedChannels = await storage.getProductLineAssignedChannels(lineId);
 
       res.json({ ...line, products: assignedProducts, channels: assignedChannels });
     } catch (error: any) {
@@ -1375,16 +1240,10 @@ export function registerChannelRoutes(app: Express) {
   // Create product line
   app.post("/api/product-lines", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { productLines } = await import("@shared/schema");
       const { code, name, description } = req.body;
       if (!code || !name) return res.status(400).json({ error: "code and name required" });
 
-      const [created] = await db.insert(productLines).values({
-        code: code.toUpperCase().replace(/\s+/g, "_"),
-        name,
-        description: description || null,
-      }).returning();
-
+      const created = await storage.createProductLine({ code, name, description });
       res.json(created);
     } catch (error: any) {
       if (error.code === "23505") return res.status(409).json({ error: "Product line code already exists" });
@@ -1395,18 +1254,10 @@ export function registerChannelRoutes(app: Express) {
   // Update product line
   app.put("/api/product-lines/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { productLines } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const lineId = parseInt(req.params.id);
       const { name, description, isActive, sortOrder } = req.body;
 
-      const updates: any = { updatedAt: new Date() };
-      if (name !== undefined) updates.name = name;
-      if (description !== undefined) updates.description = description;
-      if (isActive !== undefined) updates.isActive = isActive;
-      if (sortOrder !== undefined) updates.sortOrder = sortOrder;
-
-      const [updated] = await db.update(productLines).set(updates).where(eq(productLines.id, lineId)).returning();
+      const updated = await storage.updateProductLine(lineId, { name, description, isActive, sortOrder });
       if (!updated) return res.status(404).json({ error: "Product line not found" });
 
       res.json(updated);
@@ -1418,19 +1269,11 @@ export function registerChannelRoutes(app: Express) {
   // Assign products to a product line (bulk)
   app.put("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { productLineProducts } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const lineId = parseInt(req.params.id);
       const { productIds } = req.body as { productIds: number[] };
       if (!Array.isArray(productIds)) return res.status(400).json({ error: "productIds array required" });
 
-      // Replace all assignments: delete existing, insert new
-      await db.delete(productLineProducts).where(eq(productLineProducts.productLineId, lineId));
-      if (productIds.length > 0) {
-        await db.insert(productLineProducts).values(
-          productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
-        ).onConflictDoNothing();
-      }
+      await storage.replaceProductLineProducts(lineId, productIds);
 
       res.json({ productLineId: lineId, productCount: productIds.length });
     } catch (error: any) {
@@ -1441,16 +1284,11 @@ export function registerChannelRoutes(app: Express) {
   // Add single product to a product line
   app.post("/api/product-lines/:id/products", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { productLineProducts } = await import("@shared/schema");
       const lineId = parseInt(req.params.id);
       const { productId } = req.body;
       if (!productId) return res.status(400).json({ error: "productId required" });
 
-      const [created] = await db.insert(productLineProducts).values({
-        productLineId: lineId,
-        productId,
-      }).onConflictDoNothing().returning();
-
+      const created = await storage.addProductToProductLine(lineId, productId);
       res.json(created || { productLineId: lineId, productId, alreadyAssigned: true });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1460,14 +1298,10 @@ export function registerChannelRoutes(app: Express) {
   // Remove product from a product line
   app.delete("/api/product-lines/:lineId/products/:productId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { productLineProducts } = await import("@shared/schema");
-      const { eq, and } = await import("drizzle-orm");
       const lineId = parseInt(req.params.lineId);
       const productId = parseInt(req.params.productId);
 
-      await db.delete(productLineProducts).where(
-        and(eq(productLineProducts.productLineId, lineId), eq(productLineProducts.productId, productId))
-      );
+      await storage.removeProductFromProductLine(lineId, productId);
 
       res.json({ ok: true });
     } catch (error: any) {
@@ -1478,19 +1312,11 @@ export function registerChannelRoutes(app: Express) {
   // Assign product lines to a channel
   app.put("/api/channels/:id/product-lines", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductLines } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const channelId = parseInt(req.params.id);
       const { productLineIds } = req.body as { productLineIds: number[] };
       if (!Array.isArray(productLineIds)) return res.status(400).json({ error: "productLineIds array required" });
 
-      // Replace all assignments
-      await db.delete(channelProductLines).where(eq(channelProductLines.channelId, channelId));
-      if (productLineIds.length > 0) {
-        await db.insert(channelProductLines).values(
-          productLineIds.map((plId: number) => ({ channelId, productLineId: plId }))
-        ).onConflictDoNothing();
-      }
+      await storage.replaceChannelProductLines(channelId, productLineIds);
 
       res.json({ channelId, productLineCount: productLineIds.length });
     } catch (error: any) {
@@ -1501,17 +1327,8 @@ export function registerChannelRoutes(app: Express) {
   // Get product lines assigned to a channel
   app.get("/api/channels/:id/product-lines", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelProductLines, productLines } = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
       const channelId = parseInt(req.params.id);
-
-      const assigned = await db
-        .select({ id: productLines.id, code: productLines.code, name: productLines.name, isActive: channelProductLines.isActive })
-        .from(channelProductLines)
-        .innerJoin(productLines, eq(productLines.id, channelProductLines.productLineId))
-        .where(eq(channelProductLines.channelId, channelId))
-        .orderBy(productLines.sortOrder, productLines.name);
-
+      const assigned = await storage.getChannelProductLinesForChannel(channelId);
       res.json(assigned);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -1523,8 +1340,6 @@ export function registerChannelRoutes(app: Express) {
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
     try {
       const { atp: inventoryAtp } = req.app.locals.services;
-      const { channelProductAllocation: cpa, channelReservations: cr, channelFeeds: cf, channels: ch, productVariants: pv, products: p, productLines: pl, productLineProducts: plp, channelProductLines: cpl } = await import("@shared/schema");
-      const { eq, and, inArray, gt, like, or } = await import("drizzle-orm");
 
       const search = ((req.query.search as string) || "").trim().toLowerCase();
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -1534,32 +1349,20 @@ export function registerChannelRoutes(app: Express) {
       const productLineId = req.query.productLineId ? parseInt(req.query.productLineId as string) : null;
 
       // Load available product lines for the dropdown
-      const allProductLines = await db.select({ id: pl.id, code: pl.code, name: pl.name }).from(pl).where(eq(pl.isActive, true)).orderBy(pl.sortOrder, pl.name);
+      const allProductLines = await storage.getActiveProductLinesForDropdown();
 
       // Get all active channels
-      const activeChannels = await db.select().from(ch).where(eq(ch.status, "active"));
+      const activeChannels = await storage.getActiveChannels();
 
       // Get ALL variants that have inventory (not just ones with feeds)
-      const variantsWithInventoryRaw = await db
-        .selectDistinct({ id: pv.id })
-        .from(pv)
-        .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, pv.id))
-        .where(and(eq(pv.isActive, true), gt(inventoryLevels.variantQty, 0)));
-
-      let allVariantIds = variantsWithInventoryRaw.map((v: any) => v.id);
+      let allVariantIds = await storage.getVariantIdsWithInventory();
 
       // Product line filter: restrict to products in the selected line
       if (productLineId) {
-        const lineProductIds = (await db
-          .select({ productId: plp.productId })
-          .from(plp)
-          .where(eq(plp.productLineId, productLineId))
-        ).map((r: any) => r.productId);
+        const lineProductIds = await storage.getProductLineProductIds(productLineId);
 
         if (lineProductIds.length > 0) {
-          const lineVariantIds = new Set(
-            (await db.select({ id: pv.id }).from(pv).where(inArray(pv.productId, lineProductIds))).map((v: any) => v.id)
-          );
+          const lineVariantIds = new Set(await storage.getVariantIdsByProductIds(lineProductIds));
           allVariantIds = allVariantIds.filter((id: number) => lineVariantIds.has(id));
         } else {
           allVariantIds = [];
@@ -1574,23 +1377,17 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Load all variants and products
-      const allVariants = await db.select().from(pv).where(inArray(pv.id, allVariantIds));
+      const allVariants = await storage.getProductVariantsByIds(allVariantIds);
       const productIds = Array.from(new Set(allVariants.map((v: any) => v.productId)));
-      const prods = await db.select().from(p).where(inArray(p.id, productIds));
+      const prods = await storage.getProductsByIds(productIds);
       const prodMap = new Map(prods.map((pr: any) => [pr.id, pr]));
 
       // Load active feeds (for hasFeed display per cell)
-      const feeds = await db.select({
-        feedId: cf.id,
-        channelId: cf.channelId,
-        productVariantId: cf.productVariantId,
-        lastSyncedQty: cf.lastSyncedQty,
-        lastSyncedAt: cf.lastSyncedAt,
-      }).from(cf).where(eq(cf.isActive, 1));
+      const feeds = await storage.getActiveChannelFeeds();
 
       // Load all allocation rules + reservations (needed for stats and filtering)
-      const productAllocs = await db.select().from(cpa);
-      const allReservations = await db.select().from(cr);
+      const productAllocs = await storage.getAllChannelProductAllocations();
+      const allReservations = await storage.getChannelReservationsByVariantIds(allVariantIds);
 
       // Build feed lookup: channelId -> Set of variantIds
       const feedsByChannel = new Map<number, Set<number>>();
@@ -1615,18 +1412,8 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Build product line eligibility maps: product -> lines, channel -> lines
-      const plpRows = await db.select({ productId: plp.productId, productLineId: plp.productLineId }).from(plp);
-      const cplRows = await db.select({ channelId: cpl.channelId, productLineId: cpl.productLineId }).from(cpl);
-      const productLineMap = new Map<number, Set<number>>();
-      for (const r of plpRows) {
-        if (!productLineMap.has(r.productId)) productLineMap.set(r.productId, new Set());
-        productLineMap.get(r.productId)!.add(r.productLineId);
-      }
-      const channelLineMap = new Map<number, Set<number>>();
-      for (const r of cplRows) {
-        if (!channelLineMap.has(r.channelId)) channelLineMap.set(r.channelId, new Set());
-        channelLineMap.get(r.channelId)!.add(r.productLineId);
-      }
+      const productLineMap = await storage.getProductLineProductMap();
+      const channelLineMap = await storage.getChannelProductLineMap();
 
       // Compute global stats (across ALL variants, not filtered)
       const channelStats: Record<number, { fed: number; unfed: number; blocked: number; overrides: number }> = {};
@@ -1648,8 +1435,6 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Sync stats per channel (last sync, recent errors)
-      const { channelSyncLog: csl, channelConnections: cc } = await import("@shared/schema");
-      const { desc, sql: sqlTag, max } = await import("drizzle-orm");
       const syncStatsPerChannel: Record<number, { lastSyncAt: string | null; lastError: string | null; recentErrors: number; syncStatus: string | null }> = {};
       for (const c of activeChannels) {
         // Last successful sync from feeds
@@ -1664,29 +1449,24 @@ export function registerChannelRoutes(app: Express) {
 
         // Recent errors (last 24h)
         const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const [errorRow] = await db.select({ cnt: sqlTag`COUNT(*)::int` }).from(csl)
-          .where(and(eq(csl.channelId, c.id), eq(csl.status, "error"), gt(csl.createdAt, oneDayAgo)));
-        const recentErrors = (errorRow as any)?.cnt ?? 0;
+        const recentErrors = await storage.getChannelSyncErrorCount(c.id, oneDayAgo);
 
         // Last error message
         let lastError: string | null = null;
         if (recentErrors > 0) {
-          const [lastErrRow] = await db.select({ errorMessage: csl.errorMessage }).from(csl)
-            .where(and(eq(csl.channelId, c.id), eq(csl.status, "error")))
-            .orderBy(desc(csl.createdAt)).limit(1);
-          lastError = (lastErrRow as any)?.errorMessage ?? null;
+          lastError = await storage.getLastChannelSyncError(c.id);
           // Truncate long HTML errors
           if (lastError && lastError.length > 200) lastError = lastError.substring(0, 200) + "...";
         }
 
         // Connection status
-        const [conn] = await db.select({ syncStatus: cc.syncStatus }).from(cc).where(eq(cc.channelId, c.id)).limit(1);
+        const syncStatus = await storage.getChannelConnectionStatus(c.id);
 
         syncStatsPerChannel[c.id] = {
           lastSyncAt,
           lastError,
           recentErrors,
-          syncStatus: (conn as any)?.syncStatus ?? null,
+          syncStatus,
         };
       }
 

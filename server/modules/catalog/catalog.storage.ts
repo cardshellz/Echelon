@@ -11,6 +11,14 @@ import {
   shipments,
   shipmentItems,
   warehouseLocations,
+  purchaseOrderLines,
+  inboundShipmentLines,
+  receivingLines,
+  vendorInvoiceLines,
+  orderItems,
+  pickingLogs,
+  orderItemFinancials,
+  inventoryTransactions,
   eq,
   and,
   inArray,
@@ -42,6 +50,8 @@ export interface IProductStorage {
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
   getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
   getProductVariantsByProductId(productId: number): Promise<ProductVariant[]>;
+  getProductVariantsByIds(ids: number[]): Promise<ProductVariant[]>;
+  getProductsByIds(ids: number[]): Promise<Product[]>;
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
@@ -63,6 +73,8 @@ export interface IProductStorage {
   reorderProductAssets(productId: number, orderedIds: number[]): Promise<void>;
   setPrimaryProductAsset(productId: number, assetId: number): Promise<void>;
 
+  getItemImageUrlBySku(sku: string): Promise<string | null>;
+
   getAllProductsWithLocations(): Promise<{
     id: number;
     productLocationId: number | null;
@@ -83,6 +95,28 @@ export interface IProductStorage {
     sku: string | null;
     title: string;
     imageUrl: string | null;
+  }[]>;
+
+  getPrimaryProductAssets(): Promise<ProductAsset[]>;
+
+  getProductInventoryByProductId(productId: number): Promise<Record<string, unknown>[]>;
+
+  cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void>;
+
+  reassignInventoryLevelsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
+
+  reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number>;
+
+  createMergeAuditTransaction(targetVariantId: number, sourceSku: string, sourceId: number, movedInventory: number, movedLocations: number): Promise<void>;
+
+  searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
+    product_id: number;
+    variant_id: number;
+    variant_sku: string;
+    variant_name: string;
+    product_sku: string | null;
+    product_title: string | null;
+    image_url: string | null;
   }[]>;
 }
 
@@ -157,6 +191,16 @@ export const productMethods: IProductStorage = {
     return await db.select().from(productVariants)
       .where(eq(productVariants.productId, productId))
       .orderBy(asc(productVariants.hierarchyLevel));
+  },
+
+  async getProductVariantsByIds(ids: number[]): Promise<ProductVariant[]> {
+    if (ids.length === 0) return [];
+    return db.select().from(productVariants).where(inArray(productVariants.id, ids));
+  },
+
+  async getProductsByIds(ids: number[]): Promise<Product[]> {
+    if (ids.length === 0) return [];
+    return db.select().from(products).where(inArray(products.id, ids));
   },
 
   async createProductVariant(variant: InsertProductVariant): Promise<ProductVariant> {
@@ -285,6 +329,26 @@ export const productMethods: IProductStorage = {
       .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
   },
 
+  async getItemImageUrlBySku(sku: string): Promise<string | null> {
+    const upperSku = sku.toUpperCase();
+    const result = await db.execute<{ image_url: string | null }>(sql`
+      SELECT image_url FROM (
+        SELECT pl.image_url FROM product_locations pl
+        WHERE UPPER(pl.sku) = ${upperSku} AND pl.image_url IS NOT NULL
+        UNION ALL
+        SELECT COALESCE(
+          (SELECT pa.url FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
+          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
+        ) as image_url
+        FROM product_variants pv
+        WHERE UPPER(pv.sku) = ${upperSku}
+          AND EXISTS (SELECT 1 FROM product_assets pa WHERE (pa.product_variant_id = pv.id OR (pa.product_id = pv.product_id AND pa.product_variant_id IS NULL)) AND pa.is_primary = 1)
+      ) sub
+      LIMIT 1
+    `);
+    return result.rows[0]?.image_url || null;
+  },
+
   async getAllProductsWithLocations(): Promise<{
     id: number;
     productLocationId: number | null;
@@ -341,5 +405,123 @@ export const productMethods: IProductStorage = {
       .where(isNull(productLocations.id))
       .orderBy(sql`COALESCE(${products.title}, ${products.name})`);
     return result;
+  },
+
+  async getPrimaryProductAssets(): Promise<ProductAsset[]> {
+    return await db.select().from(productAssets).where(eq(productAssets.isPrimary, 1));
+  },
+
+  async getProductInventoryByProductId(productId: number): Promise<Record<string, unknown>[]> {
+    const result = await db.execute(sql`
+      SELECT
+        pv.id AS variant_id,
+        pv.sku,
+        pv.name AS variant_name,
+        pv.hierarchy_level,
+        pv.units_per_variant,
+        pv.is_base_unit,
+        il.id AS level_id,
+        il.warehouse_location_id AS location_id,
+        il.variant_qty,
+        il.reserved_qty,
+        il.picked_qty,
+        COALESCE(il.packed_qty, 0) AS packed_qty,
+        COALESCE(il.backorder_qty, 0) AS backorder_qty,
+        il.updated_at AS level_updated_at,
+        wl.code AS location_code,
+        wl.location_type,
+        wl.zone,
+        wl.is_pickable,
+        w.name AS warehouse_name
+      FROM product_variants pv
+      LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id
+      LEFT JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+      LEFT JOIN warehouses w ON w.id = wl.warehouse_id
+      WHERE pv.product_id = ${productId}
+      ORDER BY pv.hierarchy_level ASC, pv.sku ASC, wl.code ASC
+    `);
+    return result.rows as Record<string, unknown>[];
+  },
+
+  async cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void> {
+    const now = new Date();
+    // Tables with productVariantId FK — match by variant ID
+    await db.update(purchaseOrderLines).set({ sku: newSku }).where(eq(purchaseOrderLines.productVariantId, variantId));
+    await db.update(inboundShipmentLines).set({ sku: newSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, variantId));
+    await db.update(receivingLines).set({ sku: newSku }).where(eq(receivingLines.productVariantId, variantId));
+    await db.update(productLocations).set({ sku: newSku }).where(eq(productLocations.productVariantId, variantId));
+    await db.update(vendorInvoiceLines).set({ sku: newSku, updatedAt: now }).where(eq(vendorInvoiceLines.productVariantId, variantId));
+
+    // Tables without productVariantId FK — match by old SKU string
+    await db.update(orderItems).set({ sku: newSku }).where(eq(orderItems.sku, oldSku));
+    await db.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
+    await db.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
+  },
+
+  async reassignInventoryLevelsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
+    const result = await db.update(inventoryLevels)
+      .set({ productVariantId: targetVariantId, updatedAt: new Date() })
+      .where(eq(inventoryLevels.productVariantId, sourceVariantId))
+      .returning();
+    return result.length;
+  },
+
+  async reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
+    const result = await db.update(productLocations)
+      .set({ productVariantId: targetVariantId, updatedAt: new Date() })
+      .where(eq(productLocations.productVariantId, sourceVariantId))
+      .returning();
+    return result.length;
+  },
+
+  async createMergeAuditTransaction(targetVariantId: number, sourceSku: string, sourceId: number, movedInventory: number, movedLocations: number): Promise<void> {
+    await db.insert(inventoryTransactions).values({
+      productVariantId: targetVariantId,
+      transactionType: "adjustment",
+      variantQtyDelta: 0,
+      notes: `Merged from variant ${sourceSku || sourceId} (id=${sourceId}): ${movedInventory} inventory records, ${movedLocations} location assignments`,
+    });
+  },
+
+  async searchCatalogProductsWithImage(searchPattern: string, limit: number): Promise<{
+    product_id: number;
+    variant_id: number;
+    variant_sku: string;
+    variant_name: string;
+    product_sku: string | null;
+    product_title: string | null;
+    image_url: string | null;
+  }[]> {
+    const result = await db.execute<{
+      product_id: number;
+      variant_id: number;
+      variant_sku: string;
+      variant_name: string;
+      product_sku: string | null;
+      product_title: string | null;
+      image_url: string | null;
+    }>(sql`
+      SELECT
+        p.id as product_id,
+        pv.id as variant_id,
+        pv.sku as variant_sku,
+        pv.name as variant_name,
+        p.sku as product_sku,
+        COALESCE(p.title, p.name) as product_title,
+        (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
+      FROM product_variants pv
+      JOIN products p ON p.id = pv.product_id
+      WHERE pv.is_active = true
+        AND pv.sku IS NOT NULL
+        AND (
+          LOWER(pv.sku) LIKE ${searchPattern} OR
+          LOWER(pv.name) LIKE ${searchPattern} OR
+          LOWER(p.sku) LIKE ${searchPattern} OR
+          LOWER(COALESCE(p.title, p.name)) LIKE ${searchPattern}
+        )
+      ORDER BY pv.sku
+      LIMIT ${limit}
+    `);
+    return result.rows;
   },
 };

@@ -157,6 +157,14 @@ export interface IProcurementStorage {
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
   getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]>;
+  getReorderAnalysisData(lookbackDays: number): Promise<any[]>;
+  getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]>;
+  getProductProfitabilityReport(limit: number, offset: number): Promise<any[]>;
+  getVendorSpendReport(): Promise<any[]>;
+  getCostVarianceReport(): Promise<any[]>;
+  getOpenPoSummaryReport(): Promise<any[]>;
+  getPoAgingReport(): Promise<any[]>;
+  getExpectedReceiptsReport(): Promise<any[]>;
 }
 
 export const procurementMethods: IProcurementStorage = {
@@ -861,5 +869,262 @@ export const procurementMethods: IProcurementStorage = {
   async getProvisionalLotsByShipment(inboundShipmentId: number): Promise<InventoryLot[]> {
     return await db.select().from(inventoryLots)
       .where(eq((inventoryLots as any).inboundShipmentId, inboundShipmentId));
+  },
+
+  async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        p.id AS product_id,
+        p.sku AS base_sku,
+        p.name AS product_name,
+        p.lead_time_days,
+        p.safety_stock_days,
+        COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
+        COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
+        COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
+        inv.variant_count,
+        order_uom.variant_id,
+        order_uom.units_per_variant AS order_uom_units,
+        order_uom.sku AS order_uom_sku,
+        order_uom.hierarchy_level AS order_uom_level,
+        COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
+        COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
+        on_order.earliest_expected,
+        (SELECT MAX(it2.created_at)
+         FROM inventory_transactions it2
+         JOIN product_variants pv2 ON pv2.id = it2.product_variant_id
+         WHERE pv2.product_id = p.id
+           AND it2.transaction_type = 'receipt') AS last_received_at
+      FROM products p
+      LEFT JOIN (
+        SELECT pv.product_id,
+               SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
+               SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
+               COUNT(DISTINCT pv.id) AS variant_count
+        FROM inventory_levels il
+        JOIN product_variants pv ON pv.id = il.product_variant_id
+        WHERE pv.is_active = true
+        GROUP BY pv.product_id
+      ) inv ON inv.product_id = p.id
+      LEFT JOIN (
+        SELECT pv.product_id,
+               SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        WHERE o.cancelled_at IS NULL
+          AND o.warehouse_status != 'cancelled'
+          AND oi.status != 'cancelled'
+          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+        GROUP BY pv.product_id
+      ) vel ON vel.product_id = p.id
+      LEFT JOIN LATERAL (
+        SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
+        FROM product_variants pv
+        WHERE pv.product_id = p.id AND pv.is_active = true
+        ORDER BY pv.hierarchy_level DESC
+        LIMIT 1
+      ) order_uom ON true
+      LEFT JOIN (
+        SELECT pv.product_id,
+               SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
+               COUNT(DISTINCT po.id) AS open_po_count,
+               MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
+        FROM purchase_order_lines pol
+        JOIN purchase_orders po ON po.id = pol.purchase_order_id
+        JOIN product_variants pv ON pv.id = pol.product_variant_id
+        WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
+          AND pol.status IN ('open', 'partially_received')
+        GROUP BY pv.product_id
+      ) on_order ON on_order.product_id = p.id
+      WHERE p.is_active = true
+      ORDER BY p.sku, p.name
+    `);
+    return rows.rows as any[];
+  },
+
+  async getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        o.id AS order_id,
+        o.order_number,
+        o.customer_name,
+        o.order_placed_at,
+        o.warehouse_status,
+        COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
+        COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
+        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+        CASE WHEN SUM(oi.total_price_cents) > 0
+          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+          ELSE 0
+        END AS margin_percent,
+        COUNT(DISTINCT oi.id) AS line_count
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN (
+        SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+        FROM order_item_costs
+        GROUP BY order_item_id
+      ) oic_agg ON oic_agg.order_item_id = oi.id
+      WHERE oi.total_price_cents IS NOT NULL
+      GROUP BY o.id, o.order_number, o.customer_name, o.order_placed_at, o.warehouse_status
+      ORDER BY o.order_placed_at DESC NULLS LAST
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+    return rows.rows as any[];
+  },
+
+  async getProductProfitabilityReport(limit: number, offset: number): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        pv.id AS product_variant_id,
+        pv.sku,
+        p.title AS product_name,
+        SUM(oi.quantity) AS units_sold,
+        COALESCE(SUM(oi.total_price_cents), 0) AS revenue_cents,
+        COALESCE(SUM(oic_agg.cogs_cents), 0) AS cogs_cents,
+        COALESCE(SUM(oi.total_price_cents), 0) - COALESCE(SUM(oic_agg.cogs_cents), 0) AS profit_cents,
+        CASE WHEN SUM(oi.total_price_cents) > 0
+          THEN ROUND((SUM(oi.total_price_cents) - COALESCE(SUM(oic_agg.cogs_cents), 0))::numeric / SUM(oi.total_price_cents) * 100, 2)
+          ELSE 0
+        END AS margin_percent,
+        pv.last_cost_cents,
+        pv.avg_cost_cents
+      FROM order_items oi
+      JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
+      JOIN products p ON p.id = pv.product_id
+      LEFT JOIN (
+        SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
+        FROM order_item_costs
+        GROUP BY order_item_id
+      ) oic_agg ON oic_agg.order_item_id = oi.id
+      WHERE oi.total_price_cents IS NOT NULL
+      GROUP BY pv.id, pv.sku, p.title, pv.last_cost_cents, pv.avg_cost_cents
+      ORDER BY profit_cents DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `);
+    return rows.rows as any[];
+  },
+
+  async getVendorSpendReport(): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        v.id AS vendor_id,
+        v.name AS vendor_name,
+        COUNT(DISTINCT po.id) AS po_count,
+        SUM(po.total_cents) AS total_spend_cents,
+        SUM(CASE WHEN po.status = 'closed' THEN po.total_cents ELSE 0 END) AS closed_spend_cents,
+        SUM(CASE WHEN po.status IN ('sent', 'acknowledged', 'partially_received') THEN po.total_cents ELSE 0 END) AS open_spend_cents,
+        MIN(po.order_date) AS first_po_date,
+        MAX(po.order_date) AS last_po_date
+      FROM purchase_orders po
+      JOIN vendors v ON v.id = po.vendor_id
+      WHERE po.status NOT IN ('cancelled', 'draft')
+      GROUP BY v.id, v.name
+      ORDER BY total_spend_cents DESC
+    `);
+    return rows.rows as any[];
+  },
+
+  async getCostVarianceReport(): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        pr.id,
+        po.po_number,
+        v.name AS vendor_name,
+        pol.sku,
+        pol.product_name,
+        pr.po_unit_cost_cents,
+        pr.actual_unit_cost_cents,
+        pr.variance_cents,
+        pr.qty_received,
+        CASE WHEN pr.po_unit_cost_cents > 0
+          THEN ROUND((pr.variance_cents::numeric / pr.po_unit_cost_cents) * 100, 2)
+          ELSE 0
+        END AS variance_percent,
+        pr.created_at
+      FROM po_receipts pr
+      JOIN purchase_orders po ON po.id = pr.purchase_order_id
+      JOIN purchase_order_lines pol ON pol.id = pr.purchase_order_line_id
+      JOIN vendors v ON v.id = po.vendor_id
+      WHERE pr.variance_cents IS NOT NULL AND pr.variance_cents != 0
+      ORDER BY ABS(pr.variance_cents) DESC
+      LIMIT 100
+    `);
+    return rows.rows as any[];
+  },
+
+  async getOpenPoSummaryReport(): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        po.status,
+        COUNT(*) AS po_count,
+        SUM(po.total_cents) AS total_value_cents,
+        SUM(po.line_count) AS total_lines,
+        MIN(po.expected_delivery_date) AS earliest_delivery,
+        MAX(po.expected_delivery_date) AS latest_delivery
+      FROM purchase_orders po
+      WHERE po.status IN ('draft', 'pending_approval', 'approved', 'sent', 'acknowledged', 'partially_received')
+      GROUP BY po.status
+      ORDER BY
+        CASE po.status
+          WHEN 'draft' THEN 1
+          WHEN 'pending_approval' THEN 2
+          WHEN 'approved' THEN 3
+          WHEN 'sent' THEN 4
+          WHEN 'acknowledged' THEN 5
+          WHEN 'partially_received' THEN 6
+        END
+    `);
+    return rows.rows as any[];
+  },
+
+  async getPoAgingReport(): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        po.id,
+        po.po_number,
+        v.name AS vendor_name,
+        po.status,
+        po.total_cents,
+        po.order_date,
+        po.expected_delivery_date,
+        EXTRACT(DAY FROM (NOW() - po.order_date))::integer AS days_open,
+        CASE
+          WHEN po.expected_delivery_date < NOW() THEN 'overdue'
+          WHEN po.expected_delivery_date < NOW() + INTERVAL '7 days' THEN 'due_soon'
+          ELSE 'on_track'
+        END AS delivery_status
+      FROM purchase_orders po
+      JOIN vendors v ON v.id = po.vendor_id
+      WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
+        AND po.order_date IS NOT NULL
+      ORDER BY po.order_date ASC
+    `);
+    return rows.rows as any[];
+  },
+
+  async getExpectedReceiptsReport(): Promise<any[]> {
+    const rows = await db.execute(sql`
+      SELECT
+        po.id AS purchase_order_id,
+        po.po_number,
+        v.name AS vendor_name,
+        po.status,
+        po.expected_delivery_date,
+        po.confirmed_delivery_date,
+        COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) AS eta,
+        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS pending_units,
+        COUNT(pol.id) AS pending_lines,
+        SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0) * pol.unit_cost_cents) AS pending_value_cents
+      FROM purchase_orders po
+      JOIN vendors v ON v.id = po.vendor_id
+      JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+        AND pol.status IN ('open', 'partially_received')
+      WHERE po.status IN ('sent', 'acknowledged', 'partially_received')
+      GROUP BY po.id, po.po_number, v.name, po.status, po.expected_delivery_date, po.confirmed_delivery_date
+      ORDER BY COALESCE(po.confirmed_delivery_date, po.expected_delivery_date) ASC NULLS LAST
+    `);
+    return rows.rows as any[];
   },
 };
