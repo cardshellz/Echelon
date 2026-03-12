@@ -16,7 +16,7 @@ import {
   replenTasks,
   warehouseSettings,
   eq, and, inArray, isNull, desc, asc,
-} from "./base";
+} from "../../storage/base";
 
 export interface IReplenishmentStorage {
   getAllReplenTierDefaults(): Promise<ReplenTierDefault[]>;

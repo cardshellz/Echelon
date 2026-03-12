@@ -7,7 +7,7 @@ import {
   type ProductVariant,
   inventoryLevels, inventoryTransactions, adjustmentReasons,
   channelFeeds, productVariants, warehouseLocations,
-} from "./base";
+} from "../../storage/base";
 
 export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;

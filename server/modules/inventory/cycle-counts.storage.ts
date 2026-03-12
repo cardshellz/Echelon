@@ -7,7 +7,7 @@ import {
   cycleCounts,
   cycleCountItems,
   eq, desc, asc,
-} from "./base";
+} from "../../storage/base";
 
 export interface ICycleCountStorage {
   getAllCycleCounts(): Promise<CycleCount[]>;

@@ -8,7 +8,7 @@ import { registerPickingRoutes } from "./routes/picking.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
-import { registerInventoryRoutes } from "./routes/inventory.routes";
+import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerChannelRoutes } from "./routes/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPurchasingRoutes } from "./routes/purchasing.routes";

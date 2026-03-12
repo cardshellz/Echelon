@@ -26,22 +26,22 @@
  *     └── returns          (depends on core)
  */
 
-import { createInventoryCoreService } from "./inventory-core";
-import { createInventoryLotService } from "./inventory-lots";
-import { createInventoryAtpService } from "./inventory-atp";
-import { createBreakAssemblyService } from "./break-assembly";
+import { createInventoryCoreService } from "../modules/inventory/core.service";
+import { createInventoryLotService } from "../modules/inventory/lots.service";
+import { createInventoryAtpService } from "../modules/inventory/atp.service";
+import { createBreakAssemblyService } from "../modules/inventory/break-assembly.service";
 import { createFulfillmentService } from "./fulfillment";
 import { createReservationService } from "./reservation";
-import { createReplenishmentService } from "./replenishment";
+import { createReplenishmentService } from "../modules/inventory/replen.service";
 import { createChannelSyncService } from "./channel-sync";
 import { createReturnsService } from "./returns";
-import { createInventoryAlertService } from "./inventory-alerts";
+import { createInventoryAlertService } from "../modules/inventory/alerts.service";
 import { createFulfillmentRouterService } from "./fulfillment-router";
-import { createInventorySourceService } from "./inventory-source";
+import { createInventorySourceService } from "../modules/inventory/source.service";
 import { createSLAMonitorService } from "./sla-monitor";
 import { createPickingService } from "./picking";
 import { createOrderCombiningService } from "./order-combining";
-import { createCycleCountService } from "./cycle-count";
+import { createCycleCountService } from "../modules/inventory/cycle-count.service";
 import { createOperationsDashboardService } from "./operations-dashboard";
 import { createReceivingService } from "./receiving";
 import { createProductImportService } from "../modules/catalog/product-import.service";
@@ -129,39 +129,39 @@ export function createServices(db: any) {
 }
 
 // Re-export factory functions for individual service creation
-export { createInventoryCoreService } from "./inventory-core";
-export { createInventoryAtpService } from "./inventory-atp";
-export { createBreakAssemblyService } from "./break-assembly";
+export { createInventoryCoreService } from "../modules/inventory/core.service";
+export { createInventoryAtpService } from "../modules/inventory/atp.service";
+export { createBreakAssemblyService } from "../modules/inventory/break-assembly.service";
 export { createFulfillmentService } from "./fulfillment";
 export { createReservationService } from "./reservation";
-export { createReplenishmentService } from "./replenishment";
+export { createReplenishmentService } from "../modules/inventory/replen.service";
 export { createChannelSyncService } from "./channel-sync";
 export { createReturnsService } from "./returns";
-export { createInventoryAlertService } from "./inventory-alerts";
+export { createInventoryAlertService } from "../modules/inventory/alerts.service";
 export { createFulfillmentRouterService } from "./fulfillment-router";
-export { createInventorySourceService } from "./inventory-source";
+export { createInventorySourceService } from "../modules/inventory/source.service";
 export { createSLAMonitorService } from "./sla-monitor";
 export { createPickingService } from "./picking";
 export { createOrderCombiningService } from "./order-combining";
-export { createCycleCountService } from "./cycle-count";
+export { createCycleCountService } from "../modules/inventory/cycle-count.service";
 export { createOperationsDashboardService } from "./operations-dashboard";
 export { createReceivingService } from "./receiving";
 export { createProductImportService } from "../modules/catalog/product-import.service";
 export { createChannelProductPushService } from "./channel-product-push";
 
 // Re-export service types
-export type { InventoryCoreService } from "./inventory-core";
-export type { BreakResult, AssembleResult, ConversionPreview } from "./break-assembly";
-export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./inventory-atp";
+export type { InventoryCoreService } from "../modules/inventory/core.service";
+export type { BreakResult, AssembleResult, ConversionPreview } from "../modules/inventory/break-assembly.service";
+export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "../modules/inventory/atp.service";
 export type { SyncResult } from "./channel-sync";
 export type { ReservationResult } from "./reservation";
 export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "./returns";
 export type { OrderRoutingContext, RoutingResult } from "./fulfillment-router";
-export type { SyncResult as InventorySourceSyncResult } from "./inventory-source";
+export type { SyncResult as InventorySourceSyncResult } from "../modules/inventory/source.service";
 export type { SLAAlert, SLASummary } from "./sla-monitor";
 export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "./picking";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "./order-combining";
-export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count";
+export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "../modules/inventory/cycle-count.service";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "./operations-dashboard";
 export type { ReceivingService, ReceivingError } from "./receiving";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
@@ -172,5 +172,5 @@ export { createPurchasingService } from "./purchasing";
 export type { PurchasingService, PurchasingError } from "./purchasing";
 export { createShipmentTrackingService } from "./shipment-tracking";
 export type { ShipmentTrackingService, ShipmentTrackingError } from "./shipment-tracking";
-export { createInventoryLotService } from "./inventory-lots";
-export type { InventoryLotService } from "./inventory-lots";
+export { createInventoryLotService } from "../modules/inventory/lots.service";
+export type { InventoryLotService } from "../modules/inventory/lots.service";

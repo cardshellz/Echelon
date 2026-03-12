@@ -11,7 +11,7 @@ import type {
   InsertInventoryTransaction,
   ProductVariant,
 } from "@shared/schema";
-import type { InventoryLotService } from "./inventory-lots";
+import type { InventoryLotService } from "./lots.service";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
