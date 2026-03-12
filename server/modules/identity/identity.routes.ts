@@ -1,9 +1,9 @@
 import type { Express } from "express";
-import { db } from "../db";
-import { storage } from "../storage";
-import { requirePermission, requireAuth } from "./middleware";
+import { db } from "../../db";
+import { storage } from "../../storage";
+import { requirePermission, requireAuth } from "../../routes/middleware";
 import bcrypt from "bcrypt";
-import { getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles } from "../rbac";
+import { getUserPermissions, getUserRoles, getAllRoles, getAllPermissions, getRolePermissions, createRole, updateRolePermissions, deleteRole, assignUserRoles } from "./rbac";
 import type { SafeUser } from "@shared/schema";
 
 export function registerAuthRoutes(app: Express) {

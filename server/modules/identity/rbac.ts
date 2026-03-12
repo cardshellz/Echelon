@@ -1,4 +1,4 @@
-import { db } from "./db";
+import { db } from "../../db";
 import { 
   authRoles, authPermissions, authRolePermissions, authUserRoles, users, channels, adjustmentReasons,
   type AuthRole, type AuthPermission, type InsertAuthPermission, type InsertAdjustmentReason

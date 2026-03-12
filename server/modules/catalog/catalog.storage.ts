@@ -17,7 +17,7 @@ import {
   isNull,
   asc,
   sql,
-} from "./base";
+} from "../../storage/base";
 import type {
   Product,
   InsertProduct,
@@ -26,7 +26,7 @@ import type {
   InventoryLevel,
   ProductAsset,
   InsertProductAsset,
-} from "./base";
+} from "../../storage/base";
 
 export interface IProductStorage {
   getAllProducts(includeInactive?: boolean): Promise<Product[]>;

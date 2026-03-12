@@ -3,7 +3,7 @@ import {
   type EchelonSetting,
   echelonSettings,
   eq,
-} from "./base";
+} from "../../storage/base";
 
 export interface ISettingsStorage {
   getAllSettings(): Promise<Record<string, string | null>>;

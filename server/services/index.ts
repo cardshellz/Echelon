@@ -44,9 +44,9 @@ import { createOrderCombiningService } from "./order-combining";
 import { createCycleCountService } from "./cycle-count";
 import { createOperationsDashboardService } from "./operations-dashboard";
 import { createReceivingService } from "./receiving";
-import { createProductImportService } from "./product-import";
+import { createProductImportService } from "../modules/catalog/product-import.service";
 import { createChannelProductPushService } from "./channel-product-push";
-import { createBinAssignmentService } from "./bin-assignment";
+import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "./purchasing";
 import { createShipmentTrackingService } from "./shipment-tracking";
 import { storage } from "../storage";
@@ -146,7 +146,7 @@ export { createOrderCombiningService } from "./order-combining";
 export { createCycleCountService } from "./cycle-count";
 export { createOperationsDashboardService } from "./operations-dashboard";
 export { createReceivingService } from "./receiving";
-export { createProductImportService } from "./product-import";
+export { createProductImportService } from "../modules/catalog/product-import.service";
 export { createChannelProductPushService } from "./channel-product-push";
 
 // Re-export service types
@@ -164,10 +164,10 @@ export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineRe
 export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "./operations-dashboard";
 export type { ReceivingService, ReceivingError } from "./receiving";
-export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import";
+export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./channel-product-push";
-export { createBinAssignmentService } from "./bin-assignment";
-export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment";
+export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
+export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
 export { createPurchasingService } from "./purchasing";
 export type { PurchasingService, PurchasingError } from "./purchasing";
 export { createShipmentTrackingService } from "./shipment-tracking";

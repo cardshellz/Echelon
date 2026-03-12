@@ -7,12 +7,12 @@ import {
   inArray,
   notInArray,
   sql,
-} from "./base";
+} from "../../storage/base";
 import type {
   ProductLocation,
   InsertProductLocation,
   UpdateProductLocation,
-} from "./base";
+} from "../../storage/base";
 
 export interface IProductLocationStorage {
   getAllProductLocations(): Promise<ProductLocation[]>;

@@ -1,5 +1,5 @@
-import { db, users, eq } from "./base";
-import type { User, InsertUser, SafeUser } from "./base";
+import { db, users, eq } from "../../storage/base";
+import type { User, InsertUser, SafeUser } from "../../storage/base";
 
 export interface IUserStorage {
   getUser(id: string): Promise<User | undefined>;

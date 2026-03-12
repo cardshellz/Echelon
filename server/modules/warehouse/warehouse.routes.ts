@@ -1,9 +1,9 @@
 import type { Express } from "express";
 import { eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "../db";
-import { storage } from "../storage";
-import { requirePermission, syncPickQueueForSku } from "./middleware";
+import { db } from "../../db";
+import { storage } from "../../storage";
+import { requirePermission, syncPickQueueForSku } from "../../routes/middleware";
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, generateLocationCode, warehouses, warehouseLocations, fulfillmentRoutingRules, routingMatchTypeEnum, productLocations, inventoryLevels } from "@shared/schema";
 
 export function registerWarehouseRoutes(app: Express) {

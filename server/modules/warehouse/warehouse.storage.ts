@@ -8,7 +8,7 @@ import {
   and,
   asc,
   sql,
-} from "./base";
+} from "../../storage/base";
 import type {
   Warehouse,
   InsertWarehouse,
@@ -16,7 +16,7 @@ import type {
   InsertWarehouseZone,
   WarehouseLocation,
   InsertWarehouseLocation,
-} from "./base";
+} from "../../storage/base";
 
 export interface IWarehouseStorage {
   getAllWarehouses(): Promise<Warehouse[]>;

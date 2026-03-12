@@ -1,10 +1,10 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { eq, sql, and, inArray } from "drizzle-orm";
-import { db } from "../db";
-import { storage } from "../storage";
-import { requirePermission } from "./middleware";
-import { syncPickQueueForSku } from "./middleware";
+import { db } from "../../db";
+import { storage } from "../../storage";
+import { requirePermission } from "../../routes/middleware";
+import { syncPickQueueForSku } from "../../routes/middleware";
 import { insertProductSchema, insertProductVariantSchema, products, productVariants, productAssets, productLocations, inventoryLevels, warehouseLocations, channels, channelListings, inventoryTransactions, purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, orderItems, pickingLogs, orderItemFinancials } from "@shared/schema";
 
 export function registerProductRoutes(app: Express) {

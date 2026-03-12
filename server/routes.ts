@@ -1,16 +1,16 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./rbac";
+import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity/rbac";
 
-import { registerAuthRoutes } from "./routes/auth.routes";
-import { registerLocationRoutes } from "./routes/locations.routes";
+import { registerAuthRoutes } from "./modules/identity/identity.routes";
+import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
 import { registerPickingRoutes } from "./routes/picking.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
-import { registerWarehouseRoutes } from "./routes/warehouse.routes";
-import { registerProductRoutes } from "./routes/products.routes";
+import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
+import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerInventoryRoutes } from "./routes/inventory.routes";
 import { registerChannelRoutes } from "./routes/channels.routes";
-import { registerSettingsRoutes } from "./routes/settings.routes";
+import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPurchasingRoutes } from "./routes/purchasing.routes";
 
 export async function registerRoutes(

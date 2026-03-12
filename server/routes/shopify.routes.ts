@@ -4,7 +4,7 @@ import { eq, sql, and } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { requirePermission, requireAuth } from "./middleware";
-import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../shopify";
+import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
 import { broadcastOrdersUpdated } from "../websocket";
 import { orders, orderItems, channels, channelListings, productVariants, products, productAssets, inventoryLevels } from "@shared/schema";
 import type { InsertOrderItem } from "@shared/schema";
