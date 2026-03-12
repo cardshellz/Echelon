@@ -6,7 +6,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
-import { setupOrderSyncListener, initOrderSyncServices } from "./orderSyncListener";
+import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { warehouseSettings } from "@shared/schema";

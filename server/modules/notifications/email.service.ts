@@ -11,8 +11,8 @@
  */
 
 import nodemailer from "nodemailer";
-import { renderPoHtml } from "../../services/po-document";
-import { createPurchasingService } from "../../services/purchasing";
+import { renderPoHtml } from "../procurement/po-document";
+import { createPurchasingService } from "../procurement/purchasing.service";
 import { storage } from "../../storage";
 import { db } from "../../db";
 

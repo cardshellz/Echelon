@@ -3,7 +3,7 @@ import {
   type PickingLog, type InsertPickingLog,
   type Order, type OrderItem, type ProductVariant,
   pickingLogs, orders,
-} from "./base";
+} from "../../storage/base";
 
 export interface IPickingLogStorage {
   createPickingLog(log: InsertPickingLog): Promise<PickingLog>;

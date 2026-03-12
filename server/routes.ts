@@ -4,14 +4,14 @@ import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/
 
 import { registerAuthRoutes } from "./modules/identity/identity.routes";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
-import { registerPickingRoutes } from "./routes/picking.routes";
+import { registerPickingRoutes } from "./modules/orders/picking.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
-import { registerPurchasingRoutes } from "./routes/purchasing.routes";
+import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
 
 export async function registerRoutes(
   httpServer: Server,

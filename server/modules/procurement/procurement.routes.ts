@@ -1,16 +1,16 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { eq, sql, and, gte, inArray, isNull } from "drizzle-orm";
-import { db } from "../db";
-import { storage } from "../storage";
-import { requirePermission, requireAuth, requireInternalApiKey, upload } from "./middleware";
-import { PurchasingError } from "../services/purchasing";
-import { ShipmentTrackingError } from "../services/shipment-tracking";
-import * as apLedger from "../services/ap-ledger";
-import { renderPoHtml } from "../services/po-document";
-import * as emailService from "../modules/notifications/email.service";
-import * as notificationService from "../modules/notifications/notifications.service";
-import { broadcastOrdersUpdated } from "../websocket";
+import { db } from "../../db";
+import { storage } from "../../storage";
+import { requirePermission, requireAuth, requireInternalApiKey, upload } from "../../routes/middleware";
+import { PurchasingError } from "./purchasing.service";
+import { ShipmentTrackingError } from "./shipment-tracking.service";
+import * as apLedger from "./ap-ledger.service";
+import { renderPoHtml } from "./po-document";
+import * as emailService from "../notifications/email.service";
+import * as notificationService from "../notifications/notifications.service";
+import { broadcastOrdersUpdated } from "../../websocket";
 import { purchaseOrderLines, inboundShipmentLines, receivingLines, vendorInvoiceLines, pickingLogs, orderItemFinancials, notificationTypes, orders, orderItems, shipments, inventoryLevels, inventoryTransactions, productVariants, warehouseLocations } from "@shared/schema";
 
 export function registerPurchasingRoutes(app: Express) {

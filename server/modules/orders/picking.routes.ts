@@ -1,10 +1,10 @@
 import type { Express } from "express";
 import { sql } from "drizzle-orm";
-import { db } from "../db";
-import { storage } from "../storage";
-import { requirePermission, requireAuth } from "./middleware";
+import { db } from "../../db";
+import { storage } from "../../storage";
+import { requirePermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, shipments } from "@shared/schema";
-import { broadcastOrdersUpdated } from "../websocket";
+import { broadcastOrdersUpdated } from "../../websocket";
 import Papa from "papaparse";
 
 export function registerPickingRoutes(app: Express) {

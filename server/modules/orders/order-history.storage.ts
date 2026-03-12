@@ -2,7 +2,7 @@ import {
   db, eq, and, or, inArray, sql, desc, asc, gte, lte, like,
   type Order, type OrderItem, type PickingLog,
   orders, orderItems, pickingLogs, users, shipments, shipmentItems, productVariants,
-} from "./base";
+} from "../../storage/base";
 
 export interface IOrderHistoryStorage {
   getOrderHistory(filters: {

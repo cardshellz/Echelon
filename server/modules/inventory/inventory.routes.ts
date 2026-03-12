@@ -2128,7 +2128,7 @@ export function registerInventoryRoutes(app: Express) {
 
   app.post("/api/sync/trigger", requirePermission("shopify", "sync"), async (req, res) => {
     try {
-      const { syncNewOrders } = await import("../../orderSyncListener");
+      const { syncNewOrders } = await import("../orders/order-sync-listener");
       await syncNewOrders();
       res.json({ success: true, message: "Sync triggered - check logs" });
     } catch (error) {
@@ -2139,7 +2139,7 @@ export function registerInventoryRoutes(app: Express) {
   
   app.post("/api/debug/trigger-sync", requirePermission("shopify", "sync"), async (req, res) => {
     try {
-      const { syncNewOrders } = await import("../../orderSyncListener");
+      const { syncNewOrders } = await import("../orders/order-sync-listener");
       await syncNewOrders();
       res.json({ success: true, message: "Sync triggered - check logs" });
     } catch (error) {
@@ -2150,7 +2150,7 @@ export function registerInventoryRoutes(app: Express) {
 
   app.get("/api/sync/health", async (req, res) => {
     try {
-      const { getSyncHealth } = await import("../../orderSyncListener");
+      const { getSyncHealth } = await import("../orders/order-sync-listener");
       const health = getSyncHealth();
       
       const unsyncedCheck = await db.execute(sql`
@@ -2202,7 +2202,7 @@ export function registerInventoryRoutes(app: Express) {
 
   app.post("/api/sync/send-alert", requirePermission("system", "admin"), async (req, res) => {
     try {
-      const { getSyncHealth } = await import("../../orderSyncListener");
+      const { getSyncHealth } = await import("../orders/order-sync-listener");
       const health = getSyncHealth();
       
       const adminEmail = await storage.getSetting("admin_alert_email");

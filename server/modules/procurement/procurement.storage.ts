@@ -55,7 +55,7 @@ import {
   landedCostSnapshots,
   inboundShipmentStatusHistory,
   eq, and, or, inArray, sql, desc, asc, lte, like,
-} from "./base";
+} from "../../storage/base";
 
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;

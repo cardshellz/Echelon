@@ -8,7 +8,7 @@ import {
   orders,
   orderItems,
 } from "@shared/schema";
-import { db } from "../db";
+import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, sql } from "drizzle-orm";
 
 export interface IOrderStorage {

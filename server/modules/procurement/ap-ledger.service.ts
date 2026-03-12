@@ -3,7 +3,7 @@
  * Handles vendor invoice lifecycle, payment recording, and invoice balance tracking.
  */
 
-import { db } from "../db";
+import { db } from "../../db";
 import {
   vendorInvoices,
   vendorInvoicePoLinks,
@@ -16,7 +16,7 @@ import {
   vendors,
   shipmentCosts,
   inboundShipments,
-} from "../../shared/schema";
+} from "@shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
 import { format } from "date-fns";
 
