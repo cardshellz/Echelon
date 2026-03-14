@@ -56,3 +56,22 @@ export type { AllocationEngine, ProductAllocationResult, VariantChannelAllocatio
 
 // Shopify Adapter (Phase 1)
 export { ShopifyAdapter, createShopifyAdapter } from "./adapters/shopify.adapter";
+
+// Phase 2: Source-of-Truth Wiring
+export { createCatalogBackfillService } from "./catalog-backfill.service";
+export type { CatalogBackfillService, BackfillOptions, BackfillResult } from "./catalog-backfill.service";
+
+export { createEchelonSyncOrchestrator } from "./echelon-sync-orchestrator.service";
+export type {
+  EchelonSyncOrchestrator,
+  SyncOrchestratorConfig,
+  InventorySyncResult,
+  PricingSyncResult,
+  ListingSyncResult,
+  FullSyncResult,
+} from "./echelon-sync-orchestrator.service";
+
+export { createScheduledSyncService } from "./scheduled-sync.service";
+export type { ScheduledSyncService, ScheduledSyncConfig, ScheduledSyncStatus } from "./scheduled-sync.service";
+
+export { initializeSourceLockDefaults, initializeAllChannelDefaults } from "./source-lock-init";
