@@ -145,6 +145,8 @@ export const warehouseLocations = pgTable("warehouse_locations", {
   depthMm: integer("depth_mm"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  isActive: integer("is_active").notNull().default(1),
+  pickSequence: integer("pick_sequence"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 

@@ -255,6 +255,7 @@ class CatalogBackfillService {
       } catch (err: any) {
         result.errors.push(`Inventory backfill failed: ${err.message}`);
         console.error(`[CatalogBackfill] Inventory backfill error:`, err.message);
+        console.error(`[CatalogBackfill] Inventory backfill stack:`, err.stack);
       }
     } else if (shouldBackfillInventory && isDryRun) {
       console.log(`[CatalogBackfill] Inventory backfill skipped (dry run)`);
@@ -468,7 +469,7 @@ class CatalogBackfillService {
   ): Promise<BackfillResult["mappings"][0]["variants"][0] | null> {
     const shopifyVariantId = String(shopifyVariant.id);
     const shopifyInventoryItemId = String(shopifyVariant.inventory_item_id);
-    const sku = shopifyVariant.sku?.trim()?.toUpperCase() || null;
+    const sku = shopifyVariant.sku?.trim()?.toUpperCase() || `SHOPIFY-${shopifyVariant.id}`;
     const priceCents = Math.round(parseFloat(shopifyVariant.price || "0") * 100);
     const compareAtPriceCents = shopifyVariant.compare_at_price
       ? Math.round(parseFloat(shopifyVariant.compare_at_price) * 100)
