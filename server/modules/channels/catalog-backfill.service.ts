@@ -513,6 +513,7 @@ class CatalogBackfillService {
         const [updated] = await this.db
           .update(productVariants)
           .set({
+            sku,
             name: variantName,
             barcode: shopifyVariant.barcode,
             priceCents,
