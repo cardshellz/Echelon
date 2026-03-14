@@ -438,6 +438,104 @@ export async function syncNewOrders() {
   }
 }
 
+/**
+ * Release pickedQty back to variantQty when an order is cancelled after items
+ * have been picked. This is the inverse of the pick operation: move units from
+ * the pickedQty bucket back to variantQty (making them available for other orders).
+ *
+ * Steps per item:
+ * 1. Find order_items with picked_quantity > 0
+ * 2. Look up the pick location from inventory_transactions
+ * 3. Atomically: pickedQty -= qty, variantQty += qty
+ * 4. Log an 'unreserve' transaction with sourceState: 'picked', targetState: 'on_hand'
+ * 5. Reset order_items.picked_quantity = 0 and status = 'cancelled'
+ */
+async function releasePickedInventoryOnCancellation(orderId: number): Promise<void> {
+  const items = await db.execute<{
+    id: number;
+    sku: string;
+    picked_quantity: number;
+  }>(sql`
+    SELECT id, sku, picked_quantity
+    FROM order_items
+    WHERE order_id = ${orderId}
+      AND picked_quantity > 0
+      AND sku IS NOT NULL
+  `);
+
+  if (items.rows.length === 0) return;
+
+  for (const item of items.rows) {
+    const variant = await storage.getProductVariantBySku(item.sku);
+    if (!variant) continue;
+
+    // Find the location this item was picked from via the pick transaction
+    const pickTx = await db.execute<{ from_location_id: number }>(sql`
+      SELECT from_location_id FROM inventory_transactions
+      WHERE order_id = ${orderId}
+        AND product_variant_id = ${variant.id}
+        AND transaction_type = 'pick'
+        AND from_location_id IS NOT NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `);
+
+    if (pickTx.rows.length === 0) continue;
+    const locationId = pickTx.rows[0].from_location_id;
+
+    // Check if there's actually pickedQty at this location to release
+    const level = await db.execute<{ id: number; picked_qty: number; variant_qty: number }>(sql`
+      SELECT id, picked_qty, variant_qty FROM inventory_levels
+      WHERE product_variant_id = ${variant.id}
+        AND warehouse_location_id = ${locationId}
+        AND picked_qty > 0
+    `);
+
+    if (level.rows.length === 0) continue;
+
+    const qtyToRelease = Math.min(item.picked_quantity, level.rows[0].picked_qty);
+    if (qtyToRelease <= 0) continue;
+
+    try {
+      // Atomically move pickedQty back to variantQty
+      await inventoryCore.adjustLevel(level.rows[0].id, {
+        pickedQty: -qtyToRelease,
+        variantQty: qtyToRelease,
+      });
+
+      // Log the unreserve transaction for audit trail
+      await inventoryCore.logTransaction({
+        productVariantId: variant.id,
+        fromLocationId: locationId,
+        toLocationId: locationId,
+        transactionType: "unreserve",
+        variantQtyDelta: qtyToRelease,
+        variantQtyBefore: level.rows[0].variant_qty,
+        variantQtyAfter: level.rows[0].variant_qty + qtyToRelease,
+        sourceState: "picked",
+        targetState: "on_hand",
+        orderId,
+        orderItemId: item.id,
+        referenceType: "order",
+        referenceId: String(orderId),
+        notes: "Cancellation after pick — pickedQty released back to on-hand",
+        userId: "system",
+      });
+
+      // Reset order item's picked_quantity and mark as cancelled
+      await db.execute(sql`
+        UPDATE order_items
+        SET picked_quantity = 0, status = 'cancelled'
+        WHERE id = ${item.id}
+      `);
+
+      console.log(`[ORDER SYNC] Cancellation: released ${qtyToRelease}x ${item.sku} from pickedQty back to variantQty at location ${locationId} for order ${orderId}`);
+    } catch (err: any) {
+      console.error(`[ORDER SYNC] Failed to release pickedQty on cancellation for ${item.sku} (order ${orderId}): ${err.message}`);
+    }
+  }
+}
+
 // Release pickedQty for items that were picked through the Echelon pick flow
 // but never had recordShipment called (because the fulfillment webhook wasn't wired up).
 // Finds items with picked_quantity > 0 and calls recordShipment to clear pickedQty.
@@ -509,6 +607,19 @@ async function releasePickedInventoryOnShipment(orderId: number): Promise<void> 
 // decrements variantQty (and any pickedQty/reservedQty) in one step — the
 // item went straight from shelf to out-the-door, no intermediate "picked" state.
 async function deductInventoryForExternalShipment(orderId: number): Promise<void> {
+  // Fix 2 Prong C: Check if a 'ship' transaction already exists for this order.
+  // If the fulfillment webhook already processed this order, we must not deduct again.
+  const existingShipTxns = await db.execute<{ id: number }>(sql`
+    SELECT id FROM inventory_transactions
+    WHERE order_id = ${orderId}
+      AND transaction_type = 'ship'
+    LIMIT 1
+  `);
+  if (existingShipTxns.rows.length > 0) {
+    console.log(`[ORDER SYNC] Ship transactions already exist for order ${orderId}, skipping external deduction (idempotency guard)`);
+    return;
+  }
+
   // Find items not yet fully deducted: either not picked at all, or partially picked
   const items = await db.execute<{
     id: number;
@@ -635,7 +746,7 @@ async function syncOrderUpdate(shopifyOrderId: string) {
       WHERE source_table_id = ${shopifyOrderId}
     `);
 
-    // Auto-release bin reservations when order is cancelled
+    // Auto-release bin reservations AND picked inventory when order is cancelled
     if (shopifyOrder.cancelled_at && existingOrder.rows.length > 0) {
       const orderId = existingOrder.rows[0].id;
       try {
@@ -644,6 +755,19 @@ async function syncOrderUpdate(shopifyOrderId: string) {
       } catch (e) {
         console.error(`[ORDER SYNC] Failed to release reservations for ${shopifyOrderId}:`, e);
       }
+
+      // Fix 1: Release pickedQty back to variantQty for items picked before cancellation
+      try {
+        await releasePickedInventoryOnCancellation(orderId);
+      } catch (e) {
+        console.error(`[ORDER SYNC] Failed to release pickedQty for cancelled order ${shopifyOrderId}:`, e);
+      }
+
+      // Update warehouse_status to cancelled
+      await db.execute(sql`
+        UPDATE orders SET warehouse_status = 'cancelled'
+        WHERE id = ${orderId} AND warehouse_status NOT IN ('shipped', 'cancelled')
+      `);
     }
 
     // Safety net: transition warehouse_status to shipped when Shopify says fulfilled
@@ -658,20 +782,47 @@ async function syncOrderUpdate(shopifyOrderId: string) {
     ) {
       const orderId = existingOrder.rows[0].id;
       const prevStatus = existingOrder.rows[0].warehouse_status;
-      await db.execute(sql`
-        UPDATE orders SET warehouse_status = 'shipped'
-        WHERE id = ${orderId}
-      `);
-      // Release pickedQty for items that were picked through Echelon pick flow
-      await releasePickedInventoryOnShipment(orderId);
-      // Deduct inventory for anything not picked through the normal pick flow
-      await deductInventoryForExternalShipment(orderId);
-      await db.execute(sql`
-        UPDATE order_items SET status = 'completed'
+
+      // Fix 2 Prong A: Check if a shipment already exists for this order
+      // (created by the fulfillment webhook). If so, skip inventory operations
+      // to prevent double deduction.
+      const existingShipments = await db.execute<{ id: number }>(sql`
+        SELECT id FROM shipments
         WHERE order_id = ${orderId}
-          AND status NOT IN ('completed', 'short')
+          AND status IN ('shipped', 'pending')
       `);
-      console.log(`[ORDER SYNC] Transitioned order ${orderId} to shipped (was ${prevStatus}, Shopify says fulfilled)`);
+
+      if (existingShipments.rows.length > 0) {
+        console.log(`[ORDER SYNC] Shipment already exists for order ${orderId} (shipment IDs: ${existingShipments.rows.map(r => r.id).join(', ')}), skipping inventory deduction`);
+        // Still update warehouse_status to 'shipped' and mark items completed
+        await db.execute(sql`
+          UPDATE orders SET warehouse_status = 'shipped'
+          WHERE id = ${orderId}
+        `);
+        await db.execute(sql`
+          UPDATE order_items SET status = 'completed'
+          WHERE order_id = ${orderId}
+            AND status NOT IN ('completed', 'short')
+        `);
+        console.log(`[ORDER SYNC] Transitioned order ${orderId} to shipped (was ${prevStatus}, shipment already processed by webhook)`);
+      } else {
+        // No existing shipment — this is an external fulfillment not seen via webhook.
+        // Proceed with inventory deduction.
+        await db.execute(sql`
+          UPDATE orders SET warehouse_status = 'shipped'
+          WHERE id = ${orderId}
+        `);
+        // Release pickedQty for items that were picked through Echelon pick flow
+        await releasePickedInventoryOnShipment(orderId);
+        // Deduct inventory for anything not picked through the normal pick flow
+        await deductInventoryForExternalShipment(orderId);
+        await db.execute(sql`
+          UPDATE order_items SET status = 'completed'
+          WHERE order_id = ${orderId}
+            AND status NOT IN ('completed', 'short')
+        `);
+        console.log(`[ORDER SYNC] Transitioned order ${orderId} to shipped (was ${prevStatus}, Shopify says fulfilled)`);
+      }
     }
 
     console.log(`[ORDER SYNC] Updated order from shopify order ${shopifyOrderId}`);

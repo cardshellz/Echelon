@@ -9,7 +9,10 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "test": "vitest run",
+    "test:unit": "vitest run --testPathPattern='__tests__/unit'",
+    "test:integration": "vitest run --testPathPattern='__tests__/integration'"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -101,14 +104,17 @@
     "@types/react-dom": "^19.2.0",
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^5.0.4",
+    "@vitest/coverage-v8": "^4.1.0",
     "autoprefixer": "^10.4.21",
+    "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.8",
     "esbuild": "^0.25.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.20.5",
     "typescript": "5.6.3",
-    "vite": "^7.1.9"
+    "vite": "^7.1.9",
+    "vitest": "^4.1.0"
   },
   "optionalDependencies": {
     "bufferutil": "^4.0.8"

@@ -26,6 +26,10 @@ export const products = pgTable("products", {
   status: varchar("status", { length: 20 }).default("active"), // active, draft, archived
   inventoryType: varchar("inventory_type", { length: 20 }).notNull().default("inventory"), // inventory, non_inventory, expense
   isActive: boolean("is_active").notNull().default(true),
+  condition: varchar("condition", { length: 30 }).default("new"), // new, used, refurbished
+  countryOfOrigin: varchar("country_of_origin", { length: 2 }), // ISO 3166-1 alpha-2
+  harmonizedCode: varchar("harmonized_code", { length: 20 }), // HS tariff code
+  itemSpecifics: jsonb("item_specifics"), // Structured marketplace attributes (eBay item specifics, etc.)
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -74,6 +78,9 @@ export const productVariants = pgTable("product_variants", {
   option2Value: varchar("option2_value", { length: 100 }),
   option3Name: varchar("option3_name", { length: 100 }),
   option3Value: varchar("option3_value", { length: 100 }),
+  gtin: varchar("gtin", { length: 14 }), // UPC/EAN/ISBN — required by eBay/Amazon
+  mpn: varchar("mpn", { length: 100 }), // Manufacturer Part Number
+  conditionNote: text("condition_note"), // Per-variant condition details
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

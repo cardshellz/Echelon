@@ -51,6 +51,8 @@ export interface ResolvedVariant {
   sku: string | null;
   name: string;
   barcode: string | null;
+  gtin: string | null;
+  mpn: string | null;
   weight: number | null;
   price: number | null;
   compareAtPrice: number | null;
@@ -133,6 +135,8 @@ export function createChannelProductPushService(db: any) {
         sku: vo?.skuOverride || v.sku,
         name: vo?.nameOverride || v.name,
         barcode: vo?.barcodeOverride || v.barcode,
+        gtin: v.gtin || null,
+        mpn: v.mpn || null,
         weight: vo?.weightOverride || null,
         price: pr?.price ?? null,
         compareAtPrice: pr?.compareAtPrice ?? null,
@@ -445,7 +449,7 @@ export function createChannelProductPushService(db: any) {
         const variant: any = {
           sku: v.sku,
           title: v.name,
-          barcode: v.barcode,
+          barcode: v.barcode || v.gtin, // Prefer barcode, fall back to GTIN
         };
         if (v.price != null) {
           variant.price = (v.price / 100).toFixed(2);

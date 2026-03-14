@@ -214,6 +214,10 @@ export const channelProductOverrides = pgTable("channel_product_overrides", {
   bulletPointsOverride: jsonb("bullet_points_override"),
   categoryOverride: varchar("category_override", { length: 200 }), // Channel-specific category mapping
   tagsOverride: jsonb("tags_override"),
+  itemSpecifics: jsonb("item_specifics"), // Channel-specific item specifics overrides (eBay, etc.)
+  marketplaceCategoryId: varchar("marketplace_category_id", { length: 100 }), // e.g., eBay category ID
+  listingFormat: varchar("listing_format", { length: 30 }), // eBay: auction/fixed_price/both
+  conditionId: integer("condition_id"), // eBay condition ID (1000=New, etc.)
   isListed: integer("is_listed").notNull().default(1), // 0 = hide from this channel
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -331,3 +335,60 @@ export const insertChannelAssetOverrideSchema = createInsertSchema(channelAssetO
 
 export type InsertChannelAssetOverride = z.infer<typeof insertChannelAssetOverrideSchema>;
 export type ChannelAssetOverride = typeof channelAssetOverrides.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Source Lock System — per-field-type, per-channel sync direction control
+// ---------------------------------------------------------------------------
+
+export const sourceLockFieldTypeEnum = [
+  "inventory",    // Always locked (Echelon → channel only)
+  "pricing",      // Always locked (Echelon → channel only)
+  "variants",     // Always locked (Echelon → channel only)
+  "title",        // Toggle (default: unlocked/2-way)
+  "description",  // Toggle (default: unlocked/2-way)
+  "images",       // Toggle (default: locked/1-way)
+] as const;
+export type SourceLockFieldType = typeof sourceLockFieldTypeEnum[number];
+
+export const sourceLockConfig = pgTable("source_lock_config", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  fieldType: varchar("field_type", { length: 30 }).notNull(), // from sourceLockFieldTypeEnum
+  isLocked: integer("is_locked").notNull().default(1), // 1 = Echelon-only (1-way push), 0 = 2-way sync
+  lockedBy: varchar("locked_by", { length: 100 }),
+  lockedAt: timestamp("locked_at").defaultNow(),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("source_lock_config_channel_field_idx").on(table.channelId, table.fieldType),
+]);
+
+export const insertSourceLockConfigSchema = createInsertSchema(sourceLockConfig).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertSourceLockConfig = z.infer<typeof insertSourceLockConfigSchema>;
+export type SourceLockConfig = typeof sourceLockConfig.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Allocation Audit Log — tracks allocation engine decisions
+// ---------------------------------------------------------------------------
+
+export const allocationAuditLog = pgTable("allocation_audit_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productId: integer("product_id").references(() => products.id),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id),
+  channelId: integer("channel_id").references(() => channels.id),
+  totalAtpBase: integer("total_atp_base").notNull(),
+  allocatedQty: integer("allocated_qty").notNull(),
+  previousQty: integer("previous_qty"),
+  allocationMethod: varchar("allocation_method", { length: 30 }).notNull(), // priority, percentage, fixed, override
+  details: jsonb("details"), // Full breakdown of allocation decision
+  triggeredBy: varchar("triggered_by", { length: 30 }), // inventory_change, config_change, manual, scheduled
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type AllocationAuditLogEntry = typeof allocationAuditLog.$inferSelect;

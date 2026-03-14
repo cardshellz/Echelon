@@ -438,6 +438,24 @@ class FulfillmentService {
         trackingUrl: params.trackingUrl,
       });
 
+      // Fix 2 Prong B: Update order_items.picked_quantity so the sync path
+      // sees these items as already processed and won't double-deduct.
+      // Uses LEAST to cap at the item's total quantity.
+      for (const si of shipmentItemValues) {
+        if (si.orderItemId && si.qty > 0) {
+          await tx.execute(sql`
+            UPDATE order_items
+            SET picked_quantity = LEAST(quantity, picked_quantity + ${si.qty}),
+                fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${si.qty}),
+                status = CASE
+                  WHEN LEAST(quantity, picked_quantity + ${si.qty}) >= quantity THEN 'completed'
+                  ELSE status
+                END
+            WHERE id = ${si.orderItemId}
+          `);
+        }
+      }
+
       // Re-read the shipment after confirmation to return the updated row
       const [updated] = await tx
         .select()
