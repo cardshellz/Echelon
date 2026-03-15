@@ -344,9 +344,13 @@ export const sourceLockFieldTypeEnum = [
   "inventory",    // Always locked (Echelon → channel only)
   "pricing",      // Always locked (Echelon → channel only)
   "variants",     // Always locked (Echelon → channel only)
-  "title",        // Toggle (default: unlocked/2-way)
-  "description",  // Toggle (default: unlocked/2-way)
-  "images",       // Toggle (default: locked/1-way)
+  "sku",          // Always locked (Echelon → channel only) — SKU drift caused dupes, locked 2026-03-15
+  "title",        // Always locked (Echelon → channel, with per-channel overrides)
+  "description",  // Always locked (Echelon → channel, with per-channel overrides)
+  "images",       // Always locked (Echelon → channel only)
+  "weight",       // Always locked (Echelon → channel only)
+  "tags",         // Always locked (Echelon → channel, with per-channel overrides)
+  "barcodes",     // Toggle (default: unlocked — GS1 generator not yet built)
 ] as const;
 export type SourceLockFieldType = typeof sourceLockFieldTypeEnum[number];
 

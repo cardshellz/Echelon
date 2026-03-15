@@ -4,13 +4,17 @@
  * Sets up default source lock configuration for channels.
  * Called during initial setup or when a new channel is created.
  *
- * Default lock config for Shopify:
- *   inventory:   LOCKED (Echelon → Shopify only) [always locked]
- *   pricing:     LOCKED (Echelon → Shopify only) [always locked]
- *   variants:    LOCKED (Echelon → Shopify only) [always locked]
- *   title:       UNLOCKED (2-way during transition)
- *   description: UNLOCKED (2-way during transition)
- *   images:      LOCKED (Echelon → Shopify only)
+ * Default lock config (all channels):
+ *   inventory:   🔒 LOCKED (always)
+ *   pricing:     🔒 LOCKED (always)
+ *   variants:    🔒 LOCKED (always)
+ *   sku:         🔒 LOCKED (always) — SKU drift caused dupes, locked 2026-03-15
+ *   title:       🔒 LOCKED (always) — per-channel overrides via channel_product_attributes
+ *   description: 🔒 LOCKED (always) — per-channel overrides
+ *   images:      🔒 LOCKED (always)
+ *   weight:      🔒 LOCKED (always)
+ *   tags:        🔒 LOCKED (always) — per-channel overrides
+ *   barcodes:    🔓 UNLOCKED (GS1 generator not yet built)
  */
 
 import { eq } from "drizzle-orm";

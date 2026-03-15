@@ -5,6 +5,9 @@
  * - CRUD operations on source_lock_config
  * - Lock enforcement with real data
  * - Channel defaults initialization
+ *
+ * Updated 2026-03-15: Nearly all fields now always-locked.
+ * Only "barcodes" remains toggleable.
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -55,76 +58,80 @@ describe("Source Lock System (Integration)", () => {
   // -----------------------------------------------------------------------
 
   describe("CRUD operations", () => {
-    it("should create lock config and read it back", async () => {
+    it("should create lock config for barcodes and read it back", async () => {
       const result = await service.setFieldLock(
         testChannelId,
-        "title",
+        "barcodes",
         true,
         "admin",
-        "Migration complete",
+        "GS1 generator built",
       );
 
       expect(result.channelId).toBe(testChannelId);
-      expect(result.fieldType).toBe("title");
+      expect(result.fieldType).toBe("barcodes");
       expect(result.isLocked).toBe(1);
       expect(result.lockedBy).toBe("admin");
-      expect(result.notes).toBe("Migration complete");
+      expect(result.notes).toBe("GS1 generator built");
 
       // Read it back
-      const isLocked = await service.isFieldLocked(testChannelId, "title");
+      const isLocked = await service.isFieldLocked(testChannelId, "barcodes");
       expect(isLocked).toBe(true);
     });
 
     it("should update existing lock config", async () => {
       // Create
-      await service.setFieldLock(testChannelId, "title", true, "admin");
+      await service.setFieldLock(testChannelId, "barcodes", true, "admin");
 
       // Update
       const updated = await service.setFieldLock(
         testChannelId,
-        "title",
+        "barcodes",
         false,
         "admin",
-        "Reopening for edits",
+        "Reopening for manual entry",
       );
 
       expect(updated.isLocked).toBe(0);
-      expect(updated.notes).toBe("Reopening for edits");
+      expect(updated.notes).toBe("Reopening for manual entry");
 
       // Verify
-      const isLocked = await service.isFieldLocked(testChannelId, "title");
+      const isLocked = await service.isFieldLocked(testChannelId, "barcodes");
       expect(isLocked).toBe(false);
     });
 
     it("should initialize channel defaults and create config rows", async () => {
       const created = await service.initializeChannelDefaults(testChannelId, "setup-wizard");
 
-      // Should create 3 rows (title, description, images)
-      expect(created).toBe(3);
+      // Should create 1 row (barcodes) — all others are always-locked
+      expect(created).toBe(1);
 
       // Verify defaults
       const status = await service.getChannelLockStatus(testChannelId);
-      expect(status.title).toBe(false);       // Default: unlocked
-      expect(status.description).toBe(false);  // Default: unlocked
-      expect(status.images).toBe(true);        // Default: locked
+      expect(status.barcodes).toBe(false);     // Default: unlocked
       expect(status.inventory).toBe(true);     // Always locked
       expect(status.pricing).toBe(true);       // Always locked
       expect(status.variants).toBe(true);      // Always locked
+      expect(status.sku).toBe(true);           // Always locked
+      expect(status.title).toBe(true);         // Always locked
+      expect(status.description).toBe(true);   // Always locked
+      expect(status.images).toBe(true);        // Always locked
+      expect(status.weight).toBe(true);        // Always locked
+      expect(status.tags).toBe(true);          // Always locked
     });
 
     it("should be idempotent on repeated initialization", async () => {
       const first = await service.initializeChannelDefaults(testChannelId);
-      expect(first).toBe(3);
+      expect(first).toBe(1);
 
       const second = await service.initializeChannelDefaults(testChannelId);
       expect(second).toBe(0); // Nothing new to create
 
-      // Verify DB has exactly 3 config rows
+      // Verify DB has exactly 1 config row (barcodes)
       const rows = await db
         .select()
         .from(sourceLockConfig)
         .where(eq(sourceLockConfig.channelId, testChannelId));
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(1);
     });
   });
 
@@ -133,34 +140,23 @@ describe("Source Lock System (Integration)", () => {
   // -----------------------------------------------------------------------
 
   describe("lock enforcement", () => {
-    it("should always report inventory as locked even without config row", async () => {
-      const isLocked = await service.isFieldLocked(testChannelId, "inventory");
-      expect(isLocked).toBe(true);
-    });
+    const alwaysLockedFields = [
+      "inventory", "pricing", "variants", "sku",
+      "title", "description", "images", "weight", "tags",
+    ] as const;
 
-    it("should always report pricing as locked even without config row", async () => {
-      const isLocked = await service.isFieldLocked(testChannelId, "pricing");
-      expect(isLocked).toBe(true);
-    });
+    for (const field of alwaysLockedFields) {
+      it(`should always report ${field} as locked even without config row`, async () => {
+        const isLocked = await service.isFieldLocked(testChannelId, field);
+        expect(isLocked).toBe(true);
+      });
 
-    it("should always report variants as locked even without config row", async () => {
-      const isLocked = await service.isFieldLocked(testChannelId, "variants");
-      expect(isLocked).toBe(true);
-    });
-
-    it("should reject attempts to unlock always-locked fields", async () => {
-      await expect(
-        service.setFieldLock(testChannelId, "inventory", false),
-      ).rejects.toThrow(/Cannot unlock/);
-
-      await expect(
-        service.setFieldLock(testChannelId, "pricing", false),
-      ).rejects.toThrow(/Cannot unlock/);
-
-      await expect(
-        service.setFieldLock(testChannelId, "variants", false),
-      ).rejects.toThrow(/Cannot unlock/);
-    });
+      it(`should reject attempts to unlock ${field}`, async () => {
+        await expect(
+          service.setFieldLock(testChannelId, field, false),
+        ).rejects.toThrow(/Cannot unlock/);
+      });
+    }
 
     it("should correctly report locked vs syncable fields", async () => {
       await service.initializeChannelDefaults(testChannelId);
@@ -169,14 +165,18 @@ describe("Source Lock System (Integration)", () => {
       expect(locked.has("inventory")).toBe(true);
       expect(locked.has("pricing")).toBe(true);
       expect(locked.has("variants")).toBe(true);
+      expect(locked.has("sku")).toBe(true);
+      expect(locked.has("title")).toBe(true);
+      expect(locked.has("description")).toBe(true);
       expect(locked.has("images")).toBe(true);
-      expect(locked.has("title")).toBe(false);
-      expect(locked.has("description")).toBe(false);
+      expect(locked.has("weight")).toBe(true);
+      expect(locked.has("tags")).toBe(true);
+      expect(locked.has("barcodes")).toBe(false);
 
       const syncable = await service.getSyncableFields(testChannelId);
-      expect(syncable.has("title")).toBe(true);
-      expect(syncable.has("description")).toBe(true);
+      expect(syncable.has("barcodes")).toBe(true);
       expect(syncable.has("inventory")).toBe(false);
+      expect(syncable.has("title")).toBe(false);
     });
   });
 
@@ -198,13 +198,13 @@ describe("Source Lock System (Integration)", () => {
         })
         .returning();
 
-      // Lock title on channel 1, leave unlocked on channel 2
-      await service.setFieldLock(testChannelId, "title", true, "admin");
+      // Lock barcodes on channel 1, leave unlocked on channel 2
+      await service.setFieldLock(testChannelId, "barcodes", true, "admin");
       await service.initializeChannelDefaults(channel2.id);
 
       // Verify isolation
-      expect(await service.isFieldLocked(testChannelId, "title")).toBe(true);
-      expect(await service.isFieldLocked(channel2.id, "title")).toBe(false);
+      expect(await service.isFieldLocked(testChannelId, "barcodes")).toBe(true);
+      expect(await service.isFieldLocked(channel2.id, "barcodes")).toBe(false);
     });
   });
 });

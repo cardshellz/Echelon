@@ -24,21 +24,33 @@ import {
   sourceLockFieldTypeEnum,
 } from "@shared/schema";
 
-// Field types that are ALWAYS locked regardless of configuration
+// Field types that are ALWAYS locked regardless of configuration.
+// Changed 2026-03-15: Nearly all fields now locked. Echelon is the single source of truth.
+// Per-channel content differences handled via channel_product_attributes overrides, not 2-way sync.
 const ALWAYS_LOCKED_FIELDS: ReadonlySet<SourceLockFieldType> = new Set([
   "inventory",
   "pricing",
   "variants",
+  "sku",          // SKU drift from Shopify caused duplicate products — locked permanently
+  "title",        // Per-channel overrides via channel_product_attributes (null = master)
+  "description",  // Per-channel overrides (eBay HTML ≠ Shopify copy)
+  "images",
+  "weight",
+  "tags",         // Per-channel overrides
 ]);
 
 // Default lock state for toggleable fields (when no config row exists)
 const DEFAULT_LOCK_STATE: Record<SourceLockFieldType, boolean> = {
-  inventory: true,   // Always locked
-  pricing: true,     // Always locked
-  variants: true,    // Always locked
-  title: false,      // Default: unlocked (2-way sync during migration)
-  description: false, // Default: unlocked (2-way sync during migration)
-  images: true,      // Default: locked (1-way push)
+  inventory: true,    // Always locked
+  pricing: true,      // Always locked
+  variants: true,     // Always locked
+  sku: true,          // Always locked
+  title: true,        // Always locked (per-channel overrides, not 2-way)
+  description: true,  // Always locked (per-channel overrides, not 2-way)
+  images: true,       // Always locked
+  weight: true,       // Always locked
+  tags: true,         // Always locked (per-channel overrides, not 2-way)
+  barcodes: false,    // Unlocked — GS1 barcode generator not yet built
 };
 
 type DrizzleDb = {
