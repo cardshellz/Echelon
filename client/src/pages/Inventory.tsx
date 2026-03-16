@@ -1481,6 +1481,9 @@ export default function Inventory() {
                                 )}
                                 <div className="min-w-0">
                                   <div className="whitespace-nowrap">{level.sku}</div>
+                                  {level.productName && (
+                                    <div className="text-xs font-sans font-normal text-muted-foreground truncate max-w-[280px]">{level.productName}</div>
+                                  )}
                                   {(level.isDuplicate || !level.productId || level.negativeQty || level.overReserved || level.noBin || level.noReplen || level.noCaseBreak || level.noBarcode) && (
                                     <div className="flex flex-wrap gap-0.5 mt-0.5">
                                       {level.isDuplicate && (
