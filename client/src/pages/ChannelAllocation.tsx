@@ -451,236 +451,247 @@ function RuleDialog({
   });
 
   return (
-    <DialogContent className="max-w-xl w-[95vw] overflow-y-auto max-h-[85vh]">
+    <DialogContent className="sm:max-w-[540px] overflow-y-auto max-h-[90vh]">
       <DialogHeader>
         <DialogTitle>{isEdit ? "Edit" : "Create"} Allocation Rule</DialogTitle>
+        <p className="text-sm text-muted-foreground">
+          {isEdit ? "Modify how inventory is allocated." : "Set how much inventory a channel can see for a product or variant."}
+        </p>
       </DialogHeader>
-      <div className="space-y-4 py-2">
-        {!isEdit && (
-          <div className="space-y-2">
-            <Label>Channel</Label>
-            <Select value={String(channelId)} onValueChange={(v) => setChannelId(parseInt(v))}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {channels.map((c) => (
-                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        )}
 
-        <div className="space-y-1 relative">
-          <Label className="text-xs">
-            Product / Variant
-            <InfoTip text="Leave blank to create a channel-wide default rule. Type a SKU to target a specific variant. The most specific rule wins." />
-          </Label>
-          {selectedLabel && !isEdit ? (
-            <div className="flex items-center gap-2 border rounded-md px-3 py-2 bg-muted/50">
-              <span className="text-sm flex-1 truncate">{selectedLabel}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-5 w-5 p-0"
-                onClick={() => {
-                  setSelectedProductId(null);
-                  setSelectedVariantId(null);
-                  setSelectedLabel("");
-                  setSkuSearch("");
-                }}
-              >
-                <X className="h-3 w-3" />
-              </Button>
-            </div>
-          ) : isEdit ? (
-            <div className="text-sm text-muted-foreground border rounded-md px-3 py-2 bg-muted/30">
-              {selectedLabel || "Channel default (all products)"}
-            </div>
-          ) : (
-            <>
-              <div className="relative">
-                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input
-                  placeholder="Search SKU or product name... (blank = channel default)"
-                  value={skuSearch}
-                  onChange={(e) => {
-                    setSkuSearch(e.target.value);
-                    setShowSkuResults(true);
-                  }}
-                  onFocus={() => setShowSkuResults(true)}
-                  onBlur={() => setTimeout(() => setShowSkuResults(false), 200)}
-                  className="pl-9"
-                  autoComplete="off"
-                />
+      <div className="space-y-5 py-1">
+        {/* ── Target: Channel + SKU ── */}
+        <Card className="border-dashed">
+          <CardContent className="pt-4 pb-3 space-y-3">
+            {!isEdit && (
+              <div className="space-y-1.5">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Channel</Label>
+                <Select value={String(channelId)} onValueChange={(v) => setChannelId(parseInt(v))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {channels.map((c) => (
+                      <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-              {showSkuResults && skuResults.length > 0 && (
-                <div className="absolute z-50 w-full mt-1 bg-popover border rounded-md shadow-lg max-h-48 overflow-y-auto">
-                  {skuResults.map((r) => (
-                    <button
-                      key={r.variantId}
-                      className="w-full text-left px-3 py-2 hover:bg-accent text-sm flex justify-between items-center"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        setSelectedProductId(r.productId);
-                        setSelectedVariantId(r.variantId);
-                        setSelectedLabel(`${r.sku} — ${r.productName}${r.variantName ? ` (${r.variantName})` : ""}`);
-                        setSkuSearch("");
-                        setShowSkuResults(false);
-                      }}
-                    >
-                      <span className="font-mono text-xs">{r.sku}</span>
-                      <span className="text-muted-foreground text-xs truncate ml-2">{r.productName}{r.variantName ? ` · ${r.variantName}` : ""}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+            )}
 
-        <div className="flex items-center justify-between">
-          <Label>
-            Eligible for this channel
-            <InfoTip text="When off, this product/variant is completely blocked from selling on this channel. Inventory will show as 0." />
-          </Label>
+            <div className="space-y-1.5 relative">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Product / Variant
+                <InfoTip text="Leave blank for a channel-wide default. Type a SKU to target a specific variant. Most specific rule wins." />
+              </Label>
+              {selectedLabel && !isEdit ? (
+                <div className="flex items-start gap-2 border rounded-lg px-3 py-2.5 bg-muted/40">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-mono font-medium">{selectedLabel.split(" — ")[0]}</p>
+                    <p className="text-xs text-muted-foreground truncate">{selectedLabel.split(" — ").slice(1).join(" — ")}</p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 shrink-0 mt-0.5"
+                    onClick={() => {
+                      setSelectedProductId(null);
+                      setSelectedVariantId(null);
+                      setSelectedLabel("");
+                      setSkuSearch("");
+                    }}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ) : isEdit ? (
+                <div className="border rounded-lg px-3 py-2.5 bg-muted/30">
+                  {selectedLabel ? (
+                    <>
+                      <p className="text-sm font-mono font-medium">{selectedLabel.split(" — ")[0]}</p>
+                      <p className="text-xs text-muted-foreground">{selectedLabel.split(" — ").slice(1).join(" — ")}</p>
+                    </>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Channel default (all products)</p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      placeholder="Search by SKU or product name..."
+                      value={skuSearch}
+                      onChange={(e) => {
+                        setSkuSearch(e.target.value);
+                        setShowSkuResults(true);
+                      }}
+                      onFocus={() => setShowSkuResults(true)}
+                      onBlur={() => setTimeout(() => setShowSkuResults(false), 200)}
+                      className="pl-9"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">Leave blank to set a channel-wide default rule.</p>
+                  {showSkuResults && skuResults.length > 0 && (
+                    <div className="absolute z-50 left-4 right-4 mt-1 bg-popover border rounded-lg shadow-lg max-h-52 overflow-y-auto">
+                      {skuResults.map((r) => (
+                        <button
+                          key={r.variantId}
+                          className="w-full text-left px-3 py-2.5 hover:bg-accent border-b last:border-0 transition-colors"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setSelectedProductId(r.productId);
+                            setSelectedVariantId(r.variantId);
+                            setSelectedLabel(`${r.sku} — ${r.productName}${r.variantName ? ` (${r.variantName})` : ""}`);
+                            setSkuSearch("");
+                            setShowSkuResults(false);
+                          }}
+                        >
+                          <span className="font-mono text-sm font-medium block">{r.sku}</span>
+                          <span className="text-xs text-muted-foreground">{r.productName}{r.variantName ? ` · ${r.variantName}` : ""}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ── Eligibility ── */}
+        <div className="flex items-center justify-between rounded-lg border px-4 py-3">
+          <div>
+            <Label className="text-sm font-medium">Eligible for this channel</Label>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {eligible ? "Product can be sold on this channel" : "Blocked — inventory will show as 0"}
+            </p>
+          </div>
           <Switch checked={eligible} onCheckedChange={setEligible} />
         </div>
 
         {eligible && (
           <>
-            <div className="space-y-2">
-              <Label>
+            {/* ── Allocation Mode ── */}
+            <div className="space-y-2.5">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Allocation Mode
-                <InfoTip text="Controls how much of your available inventory this channel can see. Each channel gets its own independent view — no channel 'takes' inventory from another." />
+                <InfoTip text="How much inventory this channel can see. Each channel gets an independent view." />
               </Label>
               <div className="grid grid-cols-3 gap-2">
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={mode === "mirror" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setMode("mirror")}
-                      >
-                        🟢 Mirror
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs text-sm">
-                      <p>Channel sees 100% of available inventory. If you have 500 units, the channel shows 500. First order from any channel gets it.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={mode === "share" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setMode("share")}
-                      >
-                        🔵 Share %
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs text-sm">
-                      <p>Channel sees X% of available inventory. Use to hold back stock — e.g., 80% means 400 shown when you have 500.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={mode === "fixed" ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setMode("fixed")}
-                      >
-                        🟡 Fixed
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="max-w-xs text-sm">
-                      <p>Channel shows a fixed number regardless of actual stock. Use to cap listings — e.g., "only ever show 10 on eBay."</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                {([
+                  { key: "mirror" as const, emoji: "🟢", label: "Mirror", desc: "100% of stock" },
+                  { key: "share" as const, emoji: "🔵", label: "Share %", desc: "X% of stock" },
+                  { key: "fixed" as const, emoji: "🟡", label: "Fixed", desc: "Set quantity" },
+                ] as const).map((m) => (
+                  <button
+                    key={m.key}
+                    onClick={() => setMode(m.key)}
+                    className={cn(
+                      "flex flex-col items-center gap-1 rounded-lg border-2 p-3 transition-all text-center",
+                      mode === m.key
+                        ? "border-primary bg-primary/5 shadow-sm"
+                        : "border-muted hover:border-muted-foreground/30 hover:bg-muted/50"
+                    )}
+                  >
+                    <span className="text-lg">{m.emoji}</span>
+                    <span className="text-sm font-medium">{m.label}</span>
+                    <span className="text-[10px] text-muted-foreground leading-tight">{m.desc}</span>
+                  </button>
+                ))}
               </div>
             </div>
 
+            {/* ── Mode-specific input ── */}
             {mode === "share" && (
-              <div className="space-y-1">
-                <Label>
+              <div className="space-y-1.5">
+                <Label className="text-sm">
                   Share Percentage
-                  <InfoTip text="What percentage of total available inventory this channel can see. 100% = same as Mirror. 50% = channel sees half your stock." />
+                  <InfoTip text="What % of available stock this channel sees. 100% = same as Mirror. 50% = half your stock." />
                 </Label>
-                <Input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={sharePct}
-                  onChange={(e) => setSharePct(e.target.value)}
-                  autoComplete="off"
-                />
+                <div className="flex items-center gap-3">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={sharePct}
+                    onChange={(e) => setSharePct(e.target.value)}
+                    className="w-24"
+                    autoComplete="off"
+                  />
+                  <span className="text-sm text-muted-foreground">% of available inventory</span>
+                </div>
               </div>
             )}
 
             {mode === "fixed" && (
-              <div className="space-y-1">
-                <Label>
-                  Fixed Quantity (base units)
-                  <InfoTip text="The exact number of base units to show on this channel. If actual stock is lower, the lower number is used." />
+              <div className="space-y-1.5">
+                <Label className="text-sm">
+                  Fixed Quantity
+                  <InfoTip text="Exact base units to show. If actual stock is lower, the lower number is used." />
                 </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={fixedQty}
-                  onChange={(e) => setFixedQty(e.target.value)}
-                  autoComplete="off"
-                />
+                <div className="flex items-center gap-3">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={fixedQty}
+                    onChange={(e) => setFixedQty(e.target.value)}
+                    className="w-24"
+                    autoComplete="off"
+                  />
+                  <span className="text-sm text-muted-foreground">base units</span>
+                </div>
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">
-                  Floor ATP
-                  <InfoTip text="If total stock drops below this number, push 0 to this channel. Prevents selling the last few units — e.g., 'stop selling on eBay when below 20 units.'" />
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={floorAtp}
-                  onChange={(e) => setFloorAtp(e.target.value)}
-                  autoComplete="off"
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">
-                  Ceiling
-                  <InfoTip text="Never show more than this many units, even if stock is higher. Use to control perception — e.g., 'cap TikTok at 100 even though we have 5,000.'" />
-                </Label>
-                <Input
-                  type="number"
-                  min={0}
-                  placeholder="No limit"
-                  value={ceilingQty}
-                  onChange={(e) => setCeilingQty(e.target.value)}
-                  autoComplete="off"
-                />
+            {/* ── Guardrails ── */}
+            <div className="space-y-2">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Guardrails</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-sm">
+                    Floor ATP
+                    <InfoTip text="If stock drops below this, push 0. Prevents selling the last few units." />
+                  </Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={floorAtp}
+                    onChange={(e) => setFloorAtp(e.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-sm">
+                    Ceiling
+                    <InfoTip text="Never show more than this, even if stock is higher." />
+                  </Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    placeholder="No limit"
+                    value={ceilingQty}
+                    onChange={(e) => setCeilingQty(e.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
               </div>
             </div>
           </>
         )}
 
-        <div className="space-y-1">
-          <Label className="text-xs">Notes</Label>
+        {/* ── Notes ── */}
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Notes</Label>
           <Textarea
-            placeholder="Optional notes..."
+            placeholder="Why this rule exists..."
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            className="h-16"
+            className="h-16 resize-none"
           />
         </div>
       </div>
-      <DialogFooter>
+
+      <DialogFooter className="gap-2 sm:gap-0">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
         <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
           {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
