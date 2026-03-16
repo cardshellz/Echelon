@@ -47,7 +47,14 @@ import {
   Copy,
   Ban,
   CheckCircle2,
+  HelpCircle,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 // ============================================
@@ -137,6 +144,22 @@ function apiDelete(url: string) {
 }
 
 // ============================================
+// Info tip component
+function InfoTip({ text }: { text: string }) {
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <HelpCircle className="inline h-3.5 w-3.5 ml-1 text-muted-foreground cursor-help" />
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-xs text-sm">
+          <p>{text}</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 // Mode display helpers
 // ============================================
 
@@ -459,42 +482,78 @@ function RuleDialog({
         </div>
 
         <div className="flex items-center justify-between">
-          <Label>Eligible for this channel</Label>
+          <Label>
+            Eligible for this channel
+            <InfoTip text="When off, this product/variant is completely blocked from selling on this channel. Inventory will show as 0." />
+          </Label>
           <Switch checked={eligible} onCheckedChange={setEligible} />
         </div>
 
         {eligible && (
           <>
             <div className="space-y-2">
-              <Label>Allocation Mode</Label>
+              <Label>
+                Allocation Mode
+                <InfoTip text="Controls how much of your available inventory this channel can see. Each channel gets its own independent view — no channel 'takes' inventory from another." />
+              </Label>
               <div className="grid grid-cols-3 gap-2">
-                <Button
-                  variant={mode === "mirror" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setMode("mirror")}
-                >
-                  🟢 Mirror
-                </Button>
-                <Button
-                  variant={mode === "share" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setMode("share")}
-                >
-                  🔵 Share %
-                </Button>
-                <Button
-                  variant={mode === "fixed" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setMode("fixed")}
-                >
-                  🟡 Fixed
-                </Button>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={mode === "mirror" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setMode("mirror")}
+                      >
+                        🟢 Mirror
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs text-sm">
+                      <p>Channel sees 100% of available inventory. If you have 500 units, the channel shows 500. First order from any channel gets it.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={mode === "share" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setMode("share")}
+                      >
+                        🔵 Share %
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs text-sm">
+                      <p>Channel sees X% of available inventory. Use to hold back stock — e.g., 80% means 400 shown when you have 500.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={mode === "fixed" ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => setMode("fixed")}
+                      >
+                        🟡 Fixed
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-xs text-sm">
+                      <p>Channel shows a fixed number regardless of actual stock. Use to cap listings — e.g., "only ever show 10 on eBay."</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             </div>
 
             {mode === "share" && (
               <div className="space-y-1">
-                <Label>Share Percentage</Label>
+                <Label>
+                  Share Percentage
+                  <InfoTip text="What percentage of total available inventory this channel can see. 100% = same as Mirror. 50% = channel sees half your stock." />
+                </Label>
                 <Input
                   type="number"
                   min={1}
@@ -508,7 +567,10 @@ function RuleDialog({
 
             {mode === "fixed" && (
               <div className="space-y-1">
-                <Label>Fixed Quantity (base units)</Label>
+                <Label>
+                  Fixed Quantity (base units)
+                  <InfoTip text="The exact number of base units to show on this channel. If actual stock is lower, the lower number is used." />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -521,7 +583,10 @@ function RuleDialog({
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <Label className="text-xs">Floor ATP (push 0 if below)</Label>
+                <Label className="text-xs">
+                  Floor ATP
+                  <InfoTip text="If total stock drops below this number, push 0 to this channel. Prevents selling the last few units — e.g., 'stop selling on eBay when below 20 units.'" />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -531,7 +596,10 @@ function RuleDialog({
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Ceiling (max units)</Label>
+                <Label className="text-xs">
+                  Ceiling
+                  <InfoTip text="Never show more than this many units, even if stock is higher. Use to control perception — e.g., 'cap TikTok at 100 even though we have 5,000.'" />
+                </Label>
                 <Input
                   type="number"
                   min={0}
@@ -633,9 +701,12 @@ function AllocationRulesSection() {
       {/* Channel Default Cards */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Channel Defaults</h3>
+          <h3 className="text-lg font-semibold">
+            Channel Defaults
+            <InfoTip text="The base rule for each channel. Applies to all products unless overridden at the product or variant level below. Most setups only need this — set Mirror for full visibility, or Share % to hold back stock." />
+          </h3>
           <p className="text-xs text-muted-foreground">
-            Base allocation rule per channel. Overrides below take precedence.
+            Base allocation rule per channel. Product and variant overrides below take precedence.
           </p>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -744,9 +815,12 @@ function AllocationRulesSection() {
       <div>
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
           <div>
-            <h3 className="text-lg font-semibold">Product & Variant Overrides</h3>
+            <h3 className="text-lg font-semibold">
+              Product & Variant Overrides
+              <InfoTip text="Override the channel default for specific products or variants. Example: block cases from Shopify CA, or cap a hot item to 10 units on eBay. The most specific rule wins — a variant rule beats a product rule, which beats the channel default." />
+            </h3>
             <p className="text-xs text-muted-foreground">
-              Rules scoped to specific products or variants. Most specific wins (variant &gt; product &gt; channel default).
+              Most specific wins: variant override &gt; product override &gt; channel default.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -945,7 +1019,7 @@ export default function ChannelAllocation() {
             <CardHeader>
               <CardTitle>Warehouse → Channel Assignments</CardTitle>
               <CardDescription>
-                Each channel sees ATP only from its assigned warehouses. Unassigned channels use all fulfillment warehouses.
+                Controls which warehouses feed inventory to each sales channel. A channel only sees stock from its assigned warehouses. If no warehouses are assigned, all fulfillment warehouses are used as a fallback.
               </CardDescription>
             </CardHeader>
             <CardContent>
