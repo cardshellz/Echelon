@@ -27,6 +27,7 @@ import {
   channelProductAllocation,
   channelReservations,
   allocationAuditLog,
+  warehouses,
 } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
@@ -70,7 +71,24 @@ describe("Allocation Engine (Integration)", () => {
   // Helper: seed test data
   // -----------------------------------------------------------------------
 
+  async function seedWarehouse() {
+    const [warehouse] = await db
+      .insert(warehouses)
+      .values({
+        code: "TEST-WH",
+        name: "Test Warehouse",
+        warehouseType: "operations",
+        isActive: 1,
+        isDefault: 1,
+      })
+      .returning();
+    return warehouse;
+  }
+
   async function seedProduct() {
+    // Ensure a warehouse exists for allocation engine fallback
+    await seedWarehouse();
+
     const [product] = await db
       .insert(products)
       .values({
@@ -142,7 +160,7 @@ describe("Allocation Engine (Integration)", () => {
   // -----------------------------------------------------------------------
 
   describe("allocation with real inventory data", () => {
-    it("should allocate all inventory to highest priority channel (uncapped)", async () => {
+    it("should allocate full inventory to both channels in mirror mode (parallel)", async () => {
       const { product, variant100 } = await seedProduct();
       const { shopify, ebay } = await seedChannels();
 
@@ -162,42 +180,32 @@ describe("Allocation Engine (Integration)", () => {
 
       expect(result.totalAtpBase).toBe(1000);
 
+      // Parallel model: both channels see full ATP (mirror mode default)
       const shopifyAlloc = result.allocations.find(a => a.channelId === shopify.id);
       expect(shopifyAlloc).toBeDefined();
       expect(shopifyAlloc!.allocatedUnits).toBe(10); // 1000 / 100
 
       const ebayAlloc = result.allocations.find(a => a.channelId === ebay.id);
       expect(ebayAlloc).toBeDefined();
-      expect(ebayAlloc!.allocatedUnits).toBe(0); // Pool exhausted
+      expect(ebayAlloc!.allocatedUnits).toBe(10); // Same — parallel, not drawdown
     });
 
-    it("should split inventory by percentage when configured", async () => {
+    it("should split inventory by percentage using allocation rules", async () => {
       const { product, variant100 } = await seedProduct();
+      const { shopify, ebay } = await seedChannels();
 
-      // Create channels with percentage allocation
-      const [shopify] = await db
-        .insert(channels)
-        .values({
-          name: "Shopify",
-          type: "internal",
-          provider: "shopify",
-          status: "active",
-          priority: 10,
-          allocationPct: 70,
-        })
-        .returning();
-
-      const [ebay] = await db
-        .insert(channels)
-        .values({
-          name: "eBay",
-          type: "internal",
-          provider: "ebay",
-          status: "active",
-          priority: 5,
-          allocationPct: 30,
-        })
-        .returning();
+      // Configure share rules via channel_allocation_rules
+      const { channelAllocationRules } = await import("@shared/schema");
+      await db.insert(channelAllocationRules).values({
+        channelId: shopify.id,
+        mode: "share",
+        sharePct: 70,
+      });
+      await db.insert(channelAllocationRules).values({
+        channelId: ebay.id,
+        mode: "share",
+        sharePct: 30,
+      });
 
       const atpService = createTestAtpService({
         variants: [{
@@ -214,10 +222,10 @@ describe("Allocation Engine (Integration)", () => {
       const result = await engine.allocateProduct(product.id);
 
       const shopifyAlloc = result.allocations.find(a => a.channelId === shopify.id);
-      expect(shopifyAlloc!.allocatedUnits).toBe(700);
+      expect(shopifyAlloc!.allocatedUnits).toBe(700); // 70% of 1000
 
       const ebayAlloc = result.allocations.find(a => a.channelId === ebay.id);
-      expect(ebayAlloc!.allocatedUnits).toBe(300);
+      expect(ebayAlloc!.allocatedUnits).toBe(300); // 30% of 1000
     });
   });
 
@@ -320,7 +328,7 @@ describe("Allocation Engine (Integration)", () => {
       // 1. Create product with variants
       const { product, variant100, variant200 } = await seedProduct();
 
-      // 2. Create channels
+      // 2. Create channels (no allocationPct — use allocation rules instead)
       const [shopify] = await db
         .insert(channels)
         .values({
@@ -329,7 +337,6 @@ describe("Allocation Engine (Integration)", () => {
           provider: "shopify",
           status: "active",
           priority: 10,
-          allocationPct: 70,
         })
         .returning();
 
@@ -341,15 +348,27 @@ describe("Allocation Engine (Integration)", () => {
           provider: "ebay",
           status: "active",
           priority: 5,
-          allocationPct: 30,
         })
         .returning();
 
-      // 3. Set up variant reservation (eBay override for 200ct)
-      await db.insert(channelReservations).values({
+      // 3. Set up allocation rules
+      const { channelAllocationRules } = await import("@shared/schema");
+      await db.insert(channelAllocationRules).values({
+        channelId: shopify.id,
+        mode: "share",
+        sharePct: 70,
+      });
+      await db.insert(channelAllocationRules).values({
+        channelId: ebay.id,
+        mode: "share",
+        sharePct: 30,
+      });
+      // Variant-level override: eBay 200ct fixed at 50 base units
+      await db.insert(channelAllocationRules).values({
         channelId: ebay.id,
         productVariantId: variant200.id,
-        overrideQty: 50, // Fixed 50 base units on eBay for 200ct
+        mode: "fixed",
+        fixedQty: 50,
       });
 
       // 4. Simulate ATP
@@ -389,14 +408,14 @@ describe("Allocation Engine (Integration)", () => {
         a => a.channelId === shopify.id && a.productVariantId === variant100.id,
       );
       expect(shopify100!.allocatedUnits).toBe(7); // floor(700/100)
-      expect(shopify100!.method).toBe("percentage");
+      expect(shopify100!.method).toBe("share");
 
-      // eBay 200ct should use override
+      // eBay 200ct should use fixed override
       const ebay200 = allocation.allocations.find(
         a => a.channelId === ebay.id && a.productVariantId === variant200.id,
       );
       expect(ebay200!.allocatedUnits).toBe(0); // floor(50/200) = 0
-      expect(ebay200!.method).toBe("override");
+      expect(ebay200!.method).toBe("fixed");
 
       // Sync targets should be grouped by channel
       expect(syncTargets.length).toBeGreaterThan(0);

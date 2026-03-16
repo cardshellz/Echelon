@@ -336,6 +336,8 @@ export async function runMigrations(): Promise<void> {
 
 /** Tables to truncate between tests, in dependency-safe order */
 const TRUNCATE_TABLES = [
+  "channel_warehouse_assignments",
+  "channel_allocation_rules",
   "allocation_audit_log",
   "source_lock_config",
   "channel_sync_log",
@@ -356,6 +358,7 @@ const TRUNCATE_TABLES = [
   "product_assets",
   "product_variants",
   "products",
+  "warehouses",
   // Legacy names (test DB may have these)
   "catalog_products",
   "catalog_assets",

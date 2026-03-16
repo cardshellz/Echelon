@@ -1,35 +1,36 @@
 /**
- * Inventory Allocation Engine
+ * Inventory Allocation Engine — Parallel Percentage Model
  *
- * Calculates per-channel, per-variant allocated inventory using:
- *   1. Total ATP (on_hand - reserved - picked - packed - safety_stock)
- *   2. Channel priority (higher priority channels get inventory first)
- *   3. Channel allocation rules (%, fixed qty, or uncapped)
- *   4. Per-variant per-channel limits (min/max, stop selling, overrides)
- *   5. Product-level gates (isListed, min/max ATP)
- *   6. Product line gates (which channels carry which product lines)
+ * Three-layer parallel allocation:
  *
- * Priority drawdown: when stock is scarce, lower-priority channels
- * zero out first. The highest-priority channel gets as much as it can.
+ *   Layer 1: Warehouse → Channel Assignment
+ *     Each channel sees ATP only from its assigned warehouses.
+ *     If no assignments exist, all fulfillment warehouses are used.
  *
- * All operations are atomic and audit-logged.
+ *   Layer 2: Channel Allocation Rules
+ *     Three modes: mirror (100%), share (X%), fixed (N units)
+ *     Rules are scoped: channel default → product override → variant override
+ *     Most-specific rule wins. Includes floor/ceiling/eligible controls.
+ *
+ *   Layer 3: ATP Calculation (parallel, not serial)
+ *     Each channel computes its ATP independently — no drawdown.
+ *     Channels see independent parallel views of inventory.
+ *
+ * All operations are idempotent and audit-logged.
  */
 
-import { eq, and, sql, inArray } from "drizzle-orm";
+import { eq, and, sql, inArray, isNull } from "drizzle-orm";
 import {
   channels,
-  channelReservations,
-  channelProductAllocation,
-  channelFeeds,
+  channelWarehouseAssignments,
+  channelAllocationRules,
   channelProductLines,
   productVariants,
-  products,
   productLineProducts,
   allocationAuditLog,
+  warehouses,
   type Channel,
-  type ChannelReservation,
-  type ChannelProductAllocation,
-  type ChannelFeed,
+  type ChannelAllocationRule,
 } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,7 @@ type AtpService = {
     atpUnits: number;
     atpBase: number;
   }>>;
+  getAtpBaseByWarehouse?(productId: number, warehouseId: number): Promise<number>;
 };
 
 /** Per-channel allocation result for a single variant */
@@ -77,7 +79,7 @@ export interface VariantChannelAllocation {
   allocatedUnits: number;
   /** Allocated base units */
   allocatedBase: number;
-  /** Method used: priority, percentage, fixed, override, zero (blocked) */
+  /** Method used: mirror, share, fixed, zero (blocked/floor/ineligible) */
   method: string;
   /** Why this amount was allocated */
   reason: string;
@@ -92,6 +94,28 @@ export interface ProductAllocationResult {
   blocked: Array<{ channelId: number; reason: string }>;
 }
 
+/** Resolved allocation rule after scope resolution */
+interface ResolvedRule {
+  mode: "mirror" | "share" | "fixed";
+  sharePct: number | null;
+  fixedQty: number | null;
+  floorAtp: number;
+  ceilingQty: number | null;
+  eligible: boolean;
+  scope: "channel" | "product" | "variant";
+}
+
+/** Default rule when no rules exist for a channel */
+const DEFAULT_RULE: ResolvedRule = {
+  mode: "mirror",
+  sharePct: null,
+  fixedQty: null,
+  floorAtp: 0,
+  ceilingQty: null,
+  eligible: true,
+  scope: "channel",
+};
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -103,25 +127,20 @@ class AllocationEngine {
   ) {}
 
   // -------------------------------------------------------------------------
-  // 1. ALLOCATE — compute allocations for a product across all channels
+  // 1. ALLOCATE — compute parallel allocations for a product
   // -------------------------------------------------------------------------
 
   /**
    * Calculate inventory allocation for all active channels for a product.
-   * Does NOT push to channels — returns the allocation map for the sync
-   * service to consume.
    *
-   * Algorithm:
-   * 1. Get total ATP in base units
-   * 2. Load all active channels sorted by priority (descending = highest first)
-   * 3. Check product line gates (which channels carry this product)
-   * 4. Check product-level allocation rules (isListed, min/max ATP)
-   * 5. For each variant, for each eligible channel (in priority order):
-   *    a. Check variant-level overrides (hard override qty)
-   *    b. Apply channel allocation (% or fixed qty cap)
-   *    c. Apply product floor/cap
-   *    d. Apply variant floor/cap
-   *    e. Priority drawdown: consume from remaining pool
+   * Algorithm (parallel — each channel independently):
+   * 1. Load active channels
+   * 2. For each channel:
+   *    a. Determine assigned warehouses (or all fulfillment warehouses)
+   *    b. Sum ATP across assigned warehouses → base_atp
+   *    c. Load allocation rules (channel default, product override, variant override)
+   *    d. For each variant, resolve most-specific rule and compute channel ATP
+   * 3. Audit log all decisions
    */
   async allocateProduct(
     productId: number,
@@ -134,14 +153,13 @@ class AllocationEngine {
       blocked: [],
     };
 
-    // 1. Get ATP
-    const variantAtp = await this.atpService.getAtpPerVariant(productId);
-    if (variantAtp.length === 0) return result;
+    // 1. Get global ATP (for the result summary)
+    const globalVariantAtp = await this.atpService.getAtpPerVariant(productId);
+    if (globalVariantAtp.length === 0) return result;
 
-    const atpBase = variantAtp[0].atpBase;
-    result.totalAtpBase = atpBase;
+    result.totalAtpBase = globalVariantAtp[0].atpBase;
 
-    // 2. Load active channels sorted by priority (higher = first in line)
+    // 2. Load active channels
     const activeChannels: Channel[] = await this.db
       .select()
       .from(channels)
@@ -152,7 +170,7 @@ class AllocationEngine {
 
     const channelIds = activeChannels.map((c) => c.id);
 
-    // 3. Product line gate
+    // 3. Product line gate check
     const productLineRows = await this.db
       .select({ productLineId: productLineProducts.productLineId })
       .from(productLineProducts)
@@ -182,212 +200,283 @@ class AllocationEngine {
       }
     }
 
-    // 4. Load product-level allocation rules
-    const productAllocations: ChannelProductAllocation[] = channelIds.length > 0
-      ? await this.db
-          .select()
-          .from(channelProductAllocation)
-          .where(
-            and(
-              eq(channelProductAllocation.productId, productId),
-              inArray(channelProductAllocation.channelId, channelIds),
-            ),
-          )
-      : [];
-    const productAllocMap = new Map(
-      productAllocations.map((pa) => [pa.channelId, pa]),
-    );
+    // 4. Load warehouse assignments for all channels
+    const warehouseAssignments = await this.db
+      .select()
+      .from(channelWarehouseAssignments)
+      .where(
+        and(
+          inArray(channelWarehouseAssignments.channelId, channelIds),
+          eq(channelWarehouseAssignments.enabled, true),
+        ),
+      );
 
-    // 5. Load variant-level reservation rules
-    const variantIds = variantAtp.map((v) => v.productVariantId);
-    const reservations: ChannelReservation[] = variantIds.length > 0
-      ? await this.db
-          .select()
-          .from(channelReservations)
-          .where(inArray(channelReservations.productVariantId, variantIds))
-      : [];
-    const reservationMap = new Map<string, ChannelReservation>();
-    for (const r of reservations) {
-      reservationMap.set(`${r.channelId}:${r.productVariantId}`, r);
+    // Group warehouse IDs by channel
+    const warehousesByChannel = new Map<number, number[]>();
+    for (const wa of warehouseAssignments) {
+      const list = warehousesByChannel.get(wa.channelId) ?? [];
+      list.push(wa.warehouseId);
+      warehousesByChannel.set(wa.channelId, list);
     }
 
-    // 6. Priority drawdown allocation for each variant
-    for (const variant of variantAtp) {
-      // Track remaining pool for this variant (priority drawdown)
-      let remainingBase = Math.max(0, atpBase);
+    // 5. Load all fulfillment warehouses (fallback when no assignments)
+    let allFulfillmentWarehouseIds: number[] | null = null;
+    const channelsNeedingDefault = activeChannels.filter(
+      (c) => !warehousesByChannel.has(c.id),
+    );
+    if (channelsNeedingDefault.length > 0) {
+      const fulfillmentWarehouses = await this.db
+        .select({ id: warehouses.id })
+        .from(warehouses)
+        .where(
+          and(
+            eq(warehouses.isActive, 1),
+            inArray(warehouses.warehouseType, ["operations", "3pl"]),
+          ),
+        );
+      allFulfillmentWarehouseIds = fulfillmentWarehouses.map((w: any) => w.id);
+    }
 
-      // Process channels in priority order (highest first)
-      for (const channel of activeChannels) {
-        // Product line gate
-        if (eligibleChannelIds !== null && !eligibleChannelIds.has(channel.id)) {
-          // Only record block once per channel (not per variant)
-          if (variant === variantAtp[0]) {
-            result.blocked.push({
-              channelId: channel.id,
-              reason: "Product line not assigned to this channel",
-            });
-          }
-          continue;
-        }
+    // 6. Load allocation rules for all channels
+    const allRules: ChannelAllocationRule[] = await this.db
+      .select()
+      .from(channelAllocationRules)
+      .where(inArray(channelAllocationRules.channelId, channelIds));
 
-        // Product-level isListed gate
-        const prodAlloc = productAllocMap.get(channel.id);
-        if (prodAlloc && prodAlloc.isListed === 0) {
-          if (variant === variantAtp[0]) {
-            result.blocked.push({
-              channelId: channel.id,
-              reason: "Product unlisted on this channel (isListed=0)",
-            });
-          }
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Product unlisted on this channel",
-          });
-          continue;
-        }
+    // Index rules by channel for fast lookup
+    const rulesByChannel = new Map<number, ChannelAllocationRule[]>();
+    for (const rule of allRules) {
+      const list = rulesByChannel.get(rule.channelId) ?? [];
+      list.push(rule);
+      rulesByChannel.set(rule.channelId, list);
+    }
 
-        const reservation = reservationMap.get(`${channel.id}:${variant.productVariantId}`);
-
-        // --- Variant hard override ---
-        if (reservation && reservation.overrideQty != null) {
-          const overrideUnits = Math.floor(reservation.overrideQty / variant.unitsPerVariant);
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: overrideUnits,
-            allocatedBase: reservation.overrideQty,
-            method: "override",
-            reason: reservation.overrideQty === 0
-              ? "Variant override: stop selling"
-              : `Variant override: fixed ${reservation.overrideQty} base units`,
-          });
-          // Overrides don't consume from the shared pool (they're hard-set)
-          continue;
-        }
-
-        // --- Calculate channel's share of the pool ---
-        let channelCap = remainingBase; // Default: can take whatever's left
-        let method = "priority";
-        let reason = "Priority drawdown";
-
-        // Channel allocation constraint (% or fixed)
-        if (channel.allocationFixedQty != null) {
-          channelCap = Math.min(channelCap, channel.allocationFixedQty);
-          method = "fixed";
-          reason = `Fixed allocation: ${channel.allocationFixedQty} base units`;
-        } else if (channel.allocationPct != null) {
-          const pctCap = Math.floor(atpBase * channel.allocationPct / 100);
-          channelCap = Math.min(channelCap, pctCap);
-          method = "percentage";
-          reason = `${channel.allocationPct}% allocation = ${pctCap} base units`;
-        }
-
-        // Product floor: if total ATP below threshold, zero out
-        if (prodAlloc?.minAtpBase != null && atpBase < prodAlloc.minAtpBase) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: `Product floor: ATP ${atpBase} < min ${prodAlloc.minAtpBase}`,
-          });
-          continue;
-        }
-
-        // Product cap
-        if (prodAlloc?.maxAtpBase != null) {
-          channelCap = Math.min(channelCap, prodAlloc.maxAtpBase);
-        }
-
-        // Convert to variant units
-        let allocatedUnits = Math.floor(channelCap / variant.unitsPerVariant);
-
-        // Variant floor: if allocated qty below min, zero out
-        if (reservation?.minStockBase != null && reservation.minStockBase > 0) {
-          const minUnits = Math.floor(reservation.minStockBase / variant.unitsPerVariant);
-          if (allocatedUnits < minUnits) {
-            result.allocations.push({
-              channelId: channel.id,
-              channelName: channel.name,
-              channelProvider: channel.provider,
-              channelPriority: channel.priority,
-              productVariantId: variant.productVariantId,
-              sku: variant.sku,
-              unitsPerVariant: variant.unitsPerVariant,
-              allocatedUnits: 0,
-              allocatedBase: 0,
-              method: "zero",
-              reason: `Variant floor: allocated ${allocatedUnits} < min ${minUnits} units`,
-            });
-            continue;
-          }
-        }
-
-        // Variant cap
-        if (reservation?.maxStockBase != null) {
-          const maxUnits = Math.floor(reservation.maxStockBase / variant.unitsPerVariant);
-          allocatedUnits = Math.min(allocatedUnits, maxUnits);
-        }
-
-        // Ensure non-negative
-        allocatedUnits = Math.max(0, allocatedUnits);
-        const allocatedBase = allocatedUnits * variant.unitsPerVariant;
-
-        // Consume from remaining pool (priority drawdown)
-        remainingBase = Math.max(0, remainingBase - allocatedBase);
-
-        result.allocations.push({
+    // 7. For each channel, compute ATP independently (parallel model)
+    for (const channel of activeChannels) {
+      // Product line gate
+      if (eligibleChannelIds !== null && !eligibleChannelIds.has(channel.id)) {
+        result.blocked.push({
           channelId: channel.id,
-          channelName: channel.name,
-          channelProvider: channel.provider,
-          channelPriority: channel.priority,
-          productVariantId: variant.productVariantId,
-          sku: variant.sku,
-          unitsPerVariant: variant.unitsPerVariant,
-          allocatedUnits,
-          allocatedBase,
-          method,
-          reason,
+          reason: "Product line not assigned to this channel",
         });
+        continue;
+      }
+
+      // Determine assigned warehouses
+      const assignedWarehouseIds = warehousesByChannel.get(channel.id)
+        ?? allFulfillmentWarehouseIds
+        ?? [];
+
+      // Calculate base ATP summed across assigned warehouses
+      let channelBaseAtp = 0;
+      for (const whId of assignedWarehouseIds) {
+        if (this.atpService.getAtpBaseByWarehouse) {
+          channelBaseAtp += await this.atpService.getAtpBaseByWarehouse(productId, whId);
+        } else {
+          // Fallback: use per-variant-by-warehouse (first variant's atpBase)
+          const whVariants = await this.atpService.getAtpPerVariantByWarehouse(productId, whId);
+          if (whVariants.length > 0) {
+            channelBaseAtp += whVariants[0].atpBase;
+          }
+        }
+      }
+
+      // Get channel's rules
+      const channelRules = rulesByChannel.get(channel.id) ?? [];
+
+      // Resolve channel-level default rule
+      const channelDefaultRule = channelRules.find(
+        (r) => r.productId === null && r.productVariantId === null,
+      );
+
+      // Resolve product-level rule
+      const productRule = channelRules.find(
+        (r) => r.productId === productId && r.productVariantId === null,
+      );
+
+      // Check product-level eligibility first
+      const productResolvedRule = this.resolveRule(channelDefaultRule, productRule, undefined);
+      if (!productResolvedRule.eligible) {
+        result.blocked.push({
+          channelId: channel.id,
+          reason: "Product ineligible for this channel",
+        });
+        // Push zero allocations for all variants
+        for (const variant of globalVariantAtp) {
+          result.allocations.push({
+            channelId: channel.id,
+            channelName: channel.name,
+            channelProvider: channel.provider,
+            channelPriority: channel.priority,
+            productVariantId: variant.productVariantId,
+            sku: variant.sku,
+            unitsPerVariant: variant.unitsPerVariant,
+            allocatedUnits: 0,
+            allocatedBase: 0,
+            method: "zero",
+            reason: "Product ineligible for this channel",
+          });
+        }
+        continue;
+      }
+
+      // Per-variant allocation
+      for (const variant of globalVariantAtp) {
+        // Find variant-level rule (productId may be null on variant-scoped rules)
+        const variantRule = channelRules.find(
+          (r) => r.productVariantId === variant.productVariantId,
+        );
+
+        const resolved = this.resolveRule(channelDefaultRule, productRule, variantRule);
+        const allocation = this.computeAllocation(
+          channelBaseAtp,
+          variant,
+          resolved,
+          channel,
+          assignedWarehouseIds,
+        );
+
+        result.allocations.push(allocation);
       }
     }
 
-    // Audit log the allocation
+    // Audit log
     await this.logAllocation(result, triggeredBy);
 
     return result;
   }
 
   // -------------------------------------------------------------------------
-  // 2. GET ALLOCATED QTY — quick lookup for a specific variant+channel
+  // Rule Resolution — most specific wins
   // -------------------------------------------------------------------------
 
   /**
-   * Get the allocated quantity for a specific variant on a specific channel.
-   * Runs the full allocation and extracts the relevant result.
-   *
-   * For high-frequency use, consider caching the full allocation result.
+   * Resolve the most specific rule. Variant > Product > Channel default.
+   * If no rules exist at all, returns the DEFAULT_RULE (mirror, 100%).
    */
+  private resolveRule(
+    channelDefault?: ChannelAllocationRule | null,
+    productOverride?: ChannelAllocationRule | null,
+    variantOverride?: ChannelAllocationRule | null,
+  ): ResolvedRule {
+    // Most specific wins
+    const rule = variantOverride ?? productOverride ?? channelDefault;
+    if (!rule) return { ...DEFAULT_RULE };
+
+    const scope = variantOverride ? "variant"
+      : productOverride ? "product"
+      : "channel";
+
+    return {
+      mode: rule.mode as "mirror" | "share" | "fixed",
+      sharePct: rule.sharePct,
+      fixedQty: rule.fixedQty,
+      floorAtp: rule.floorAtp ?? 0,
+      ceilingQty: rule.ceilingQty,
+      eligible: rule.eligible,
+      scope,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // ATP Computation — single variant, single channel
+  // -------------------------------------------------------------------------
+
+  private computeAllocation(
+    channelBaseAtp: number,
+    variant: { productVariantId: number; sku: string; name: string; unitsPerVariant: number },
+    rule: ResolvedRule,
+    channel: Channel,
+    assignedWarehouseIds: number[],
+  ): VariantChannelAllocation {
+    const base = {
+      channelId: channel.id,
+      channelName: channel.name,
+      channelProvider: channel.provider,
+      channelPriority: channel.priority,
+      productVariantId: variant.productVariantId,
+      sku: variant.sku,
+      unitsPerVariant: variant.unitsPerVariant,
+    };
+
+    // Step 1: Eligibility check
+    if (!rule.eligible) {
+      return {
+        ...base,
+        allocatedUnits: 0,
+        allocatedBase: 0,
+        method: "zero",
+        reason: "Variant ineligible for this channel",
+      };
+    }
+
+    // Step 2: Floor check — if base ATP below threshold, zero out
+    if (channelBaseAtp < rule.floorAtp) {
+      return {
+        ...base,
+        allocatedUnits: 0,
+        allocatedBase: 0,
+        method: "zero",
+        reason: `Floor triggered: ATP ${channelBaseAtp} < floor ${rule.floorAtp}`,
+      };
+    }
+
+    // Step 3: Apply allocation mode
+    let atpBase: number;
+    let method: string;
+    let reason: string;
+
+    switch (rule.mode) {
+      case "mirror":
+        atpBase = channelBaseAtp;
+        method = "mirror";
+        reason = `Mirror: 100% of ${channelBaseAtp} base ATP (warehouses: [${assignedWarehouseIds.join(",")}])`;
+        break;
+
+      case "share":
+        const pct = rule.sharePct ?? 100;
+        atpBase = Math.floor(channelBaseAtp * pct / 100);
+        method = "share";
+        reason = `Share: ${pct}% of ${channelBaseAtp} = ${atpBase} base units (warehouses: [${assignedWarehouseIds.join(",")}])`;
+        break;
+
+      case "fixed":
+        atpBase = Math.min(rule.fixedQty ?? 0, channelBaseAtp);
+        method = "fixed";
+        reason = `Fixed: ${rule.fixedQty} base units (capped by ATP ${channelBaseAtp}, warehouses: [${assignedWarehouseIds.join(",")}])`;
+        break;
+
+      default:
+        atpBase = channelBaseAtp;
+        method = "mirror";
+        reason = `Default mirror: 100% of ${channelBaseAtp}`;
+    }
+
+    // Step 4: Apply ceiling
+    if (rule.ceilingQty != null) {
+      if (atpBase > rule.ceilingQty) {
+        reason += ` → ceiling capped from ${atpBase} to ${rule.ceilingQty}`;
+        atpBase = rule.ceilingQty;
+      }
+    }
+
+    // Step 5: Convert to variant units
+    const allocatedUnits = Math.max(0, Math.floor(atpBase / variant.unitsPerVariant));
+    const allocatedBase = allocatedUnits * variant.unitsPerVariant;
+
+    return {
+      ...base,
+      allocatedUnits,
+      allocatedBase,
+      method,
+      reason,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. GET ALLOCATED QTY — quick lookup for a specific variant+channel
+  // -------------------------------------------------------------------------
+
   async getAllocatedQty(
     productId: number,
     productVariantId: number,
@@ -401,13 +490,9 @@ class AllocationEngine {
   }
 
   // -------------------------------------------------------------------------
-  // 3. ALLOCATE AND SYNC — allocate then trigger channel inventory pushes
+  // 3. ALLOCATE AND GET SYNC TARGETS
   // -------------------------------------------------------------------------
 
-  /**
-   * Run allocation for a product and trigger channel sync for any changes.
-   * Returns the allocation result and which channels need syncing.
-   */
   async allocateAndGetSyncTargets(
     productId: number,
     triggeredBy?: string,
@@ -424,7 +509,6 @@ class AllocationEngine {
   }> {
     const allocation = await this.allocateProduct(productId, triggeredBy);
 
-    // Group allocations by channel
     const byChannel = new Map<number, {
       provider: string;
       variants: Array<{ productVariantId: number; allocatedUnits: number }>;
@@ -463,14 +547,13 @@ class AllocationEngine {
     if (result.allocations.length === 0) return;
 
     try {
-      // Batch insert audit entries (one per variant-channel combination)
       const entries = result.allocations.map((a) => ({
         productId: result.productId,
         productVariantId: a.productVariantId,
         channelId: a.channelId,
         totalAtpBase: result.totalAtpBase,
         allocatedQty: a.allocatedUnits,
-        previousQty: null as number | null, // Could be loaded from last sync, but adds latency
+        previousQty: null as number | null,
         allocationMethod: a.method,
         details: {
           reason: a.reason,
@@ -481,13 +564,11 @@ class AllocationEngine {
         triggeredBy: triggeredBy ?? null,
       }));
 
-      // Batch in chunks of 100
       for (let i = 0; i < entries.length; i += 100) {
         const chunk = entries.slice(i, i + 100);
         await this.db.insert(allocationAuditLog).values(chunk);
       }
     } catch (err: any) {
-      // Don't let audit logging failures break allocation
       console.warn(`[AllocationEngine] Failed to log allocation audit: ${err.message}`);
     }
   }

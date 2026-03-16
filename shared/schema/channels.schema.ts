@@ -378,6 +378,74 @@ export type InsertSourceLockConfig = z.infer<typeof insertSourceLockConfigSchema
 export type SourceLockConfig = typeof sourceLockConfig.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// Channel Warehouse Assignments — which warehouses fulfill for which channels
+// ---------------------------------------------------------------------------
+
+export const channelWarehouseAssignments = pgTable("channel_warehouse_assignments", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  warehouseId: integer("warehouse_id").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  priority: integer("priority").notNull().default(0), // Higher = preferred fulfillment source
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("cwa_channel_warehouse_idx").on(table.channelId, table.warehouseId),
+]);
+
+export const insertChannelWarehouseAssignmentSchema = createInsertSchema(channelWarehouseAssignments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelWarehouseAssignment = z.infer<typeof insertChannelWarehouseAssignmentSchema>;
+export type ChannelWarehouseAssignment = typeof channelWarehouseAssignments.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Channel Allocation Rules — parallel percentage/fixed/mirror allocation
+// ---------------------------------------------------------------------------
+
+export const allocationModeEnum = ["mirror", "share", "fixed"] as const;
+export type AllocationMode = typeof allocationModeEnum[number];
+
+export const channelAllocationRules = pgTable("channel_allocation_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  /** NULL = channel default. Set for product-level override. */
+  productId: integer("product_id").references(() => products.id, { onDelete: "cascade" }),
+  /** NULL = product-level or channel default. Set for variant-level override. */
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }),
+  /** Allocation mode: mirror (100%), share (% of ATP), fixed (N units) */
+  mode: varchar("mode", { length: 10 }).notNull().default("mirror"),
+  /** Share percentage (1-100). Only used when mode = 'share'. */
+  sharePct: integer("share_pct"),
+  /** Fixed quantity in base units. Only used when mode = 'fixed'. */
+  fixedQty: integer("fixed_qty"),
+  /** Floor: if base ATP < this threshold, push 0. Prevents selling dregs. */
+  floorAtp: integer("floor_atp").default(0),
+  /** Ceiling: never show more than this many base units, regardless of ATP. */
+  ceilingQty: integer("ceiling_qty"),
+  /** Eligible flag: false = block this product/variant from this channel entirely. */
+  eligible: boolean("eligible").notNull().default(true),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  // Each scope level (channel-only, channel+product, channel+product+variant) is unique
+  uniqueIndex("car_channel_product_variant_idx").on(table.channelId, table.productId, table.productVariantId),
+]);
+
+export const insertChannelAllocationRuleSchema = createInsertSchema(channelAllocationRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertChannelAllocationRule = z.infer<typeof insertChannelAllocationRuleSchema>;
+export type ChannelAllocationRule = typeof channelAllocationRules.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // Allocation Audit Log — tracks allocation engine decisions
 // ---------------------------------------------------------------------------
 
