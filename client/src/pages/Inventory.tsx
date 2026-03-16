@@ -147,6 +147,7 @@ interface VariantLevel {
   isBaseUnit: boolean;
   baseSku: string | null;
   productId: number | null;
+  productName: string | null;
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
@@ -846,7 +847,8 @@ export default function Inventory() {
   const sortedVariantLevels = [...variantLevels]
     .filter(v =>
       (v.sku || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (v.name || '').toLowerCase().includes(searchQuery.toLowerCase())
+      (v.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (v.productName || '').toLowerCase().includes(searchQuery.toLowerCase())
     )
     .filter(v =>
       stockFilter === "order_now" ? (v.baseSku && orderNowSkus.has(v.baseSku)) :
@@ -1381,7 +1383,12 @@ export default function Inventory() {
                               </span>
                             )}
                           </div>
-                          <div className="text-sm font-medium mt-1">{level.name}</div>
+                          {level.productName && (
+                            <div className="text-sm text-muted-foreground mt-0.5">{level.productName}</div>
+                          )}
+                          {level.name && level.name !== "Each" && level.name !== level.sku && (
+                            <div className="text-xs text-muted-foreground">{level.name}</div>
+                          )}
                         </div>
                         {level.locationCount > 0 && (
                           <span className="text-xs text-muted-foreground">{level.locationCount} bins</span>

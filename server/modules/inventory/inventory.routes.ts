@@ -2165,6 +2165,7 @@ export function registerInventoryRoutes(app: Express) {
           isBaseUnit,
           baseSku: row.base_sku,
           productId: row.product_id,
+          productName: row.product_name || null,
           barcode,
           variantQty,
           reservedQty,

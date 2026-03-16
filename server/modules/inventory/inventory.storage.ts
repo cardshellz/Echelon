@@ -697,6 +697,7 @@ export const inventoryMethods: IInventoryStorage = {
         pv.is_base_unit,
         p.id as product_id,
         p.sku as base_sku,
+        p.name as product_name,
         pv.barcode,
         COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
         COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
@@ -715,7 +716,7 @@ export const inventoryMethods: IInventoryStorage = {
       LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
-      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, pv.barcode
       HAVING COALESCE(SUM(il.variant_qty), 0) != 0 OR COALESCE(SUM(il.reserved_qty), 0) != 0
       ORDER BY pv.sku
     `) : await db.execute(sql`
@@ -729,6 +730,7 @@ export const inventoryMethods: IInventoryStorage = {
         pv.is_base_unit,
         p.id as product_id,
         p.sku as base_sku,
+        p.name as product_name,
         pv.barcode,
         COALESCE(SUM(il.variant_qty), 0) as total_variant_qty,
         COALESCE(SUM(il.reserved_qty), 0) as total_reserved_qty,
@@ -747,7 +749,7 @@ export const inventoryMethods: IInventoryStorage = {
       LEFT JOIN replen_rules rr ON rr.product_id = pv.product_id
       LEFT JOIN replen_tier_defaults rtd ON rtd.hierarchy_level = pv.hierarchy_level AND rtd.is_active = 1
       WHERE pv.is_active = true
-      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, pv.barcode
+      GROUP BY pv.id, pv.sku, pv.name, pv.units_per_variant, pv.parent_variant_id, pv.hierarchy_level, pv.is_base_unit, p.id, p.sku, p.name, pv.barcode
       ORDER BY pv.sku
     `);
     return result.rows as Record<string, unknown>[];
