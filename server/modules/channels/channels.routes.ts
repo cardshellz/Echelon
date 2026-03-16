@@ -8,6 +8,16 @@ import { inventoryStorage } from "../inventory";
 const storage = { ...channelsStorage, ...ordersStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
 import { insertChannelSchema, insertChannelReservationSchema } from "@shared/schema";
+import { db } from "../../storage/base";
+import {
+  channelWarehouseAssignments,
+  channelAllocationRules,
+  channels as channelsTable,
+  warehouses,
+  products,
+  productVariants,
+  eq, and, inArray, isNull,
+} from "../../storage/base";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -1662,6 +1672,312 @@ export function registerChannelRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error building allocation grid:", error);
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL WAREHOUSE ASSIGNMENTS API (new parallel model)
+  // ============================================
+
+  // List all assignments (with warehouse name)
+  app.get("/api/channel-warehouse-assignments", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const rows = await db
+        .select({
+          id: channelWarehouseAssignments.id,
+          channelId: channelWarehouseAssignments.channelId,
+          warehouseId: channelWarehouseAssignments.warehouseId,
+          priority: channelWarehouseAssignments.priority,
+          enabled: channelWarehouseAssignments.enabled,
+          createdAt: channelWarehouseAssignments.createdAt,
+          updatedAt: channelWarehouseAssignments.updatedAt,
+          warehouseName: warehouses.name,
+          warehouseCode: warehouses.code,
+          warehouseType: warehouses.warehouseType,
+          channelName: channelsTable.name,
+        })
+        .from(channelWarehouseAssignments)
+        .leftJoin(warehouses, eq(channelWarehouseAssignments.warehouseId, warehouses.id))
+        .leftJoin(channelsTable, eq(channelWarehouseAssignments.channelId, channelsTable.id))
+        .orderBy(channelWarehouseAssignments.channelId, channelWarehouseAssignments.priority);
+
+      res.json(rows);
+    } catch (error: any) {
+      console.error("Error fetching warehouse assignments:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch warehouse assignments" });
+    }
+  });
+
+  // Create assignment
+  app.post("/api/channel-warehouse-assignments", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const schema = z.object({
+        channelId: z.number().int().positive(),
+        warehouseId: z.number().int().positive(),
+        priority: z.number().int().default(0),
+        enabled: z.boolean().default(true),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const [created] = await db.insert(channelWarehouseAssignments).values(parsed.data).returning();
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "This warehouse is already assigned to this channel" });
+      }
+      console.error("Error creating warehouse assignment:", error);
+      res.status(500).json({ error: error.message || "Failed to create warehouse assignment" });
+    }
+  });
+
+  // Update assignment (priority, enabled)
+  app.put("/api/channel-warehouse-assignments/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const schema = z.object({
+        priority: z.number().int().optional(),
+        enabled: z.boolean().optional(),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const updates: any = { ...parsed.data, updatedAt: new Date() };
+      const [updated] = await db
+        .update(channelWarehouseAssignments)
+        .set(updates)
+        .where(eq(channelWarehouseAssignments.id, id))
+        .returning();
+
+      if (!updated) return res.status(404).json({ error: "Assignment not found" });
+      res.json(updated);
+    } catch (error: any) {
+      console.error("Error updating warehouse assignment:", error);
+      res.status(500).json({ error: error.message || "Failed to update warehouse assignment" });
+    }
+  });
+
+  // Delete assignment
+  app.delete("/api/channel-warehouse-assignments/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const [deleted] = await db
+        .delete(channelWarehouseAssignments)
+        .where(eq(channelWarehouseAssignments.id, id))
+        .returning();
+
+      if (!deleted) return res.status(404).json({ error: "Assignment not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting warehouse assignment:", error);
+      res.status(500).json({ error: error.message || "Failed to delete warehouse assignment" });
+    }
+  });
+
+  // ============================================
+  // CHANNEL ALLOCATION RULES API (new parallel model)
+  // ============================================
+
+  const allocationRuleSchema = z.object({
+    channelId: z.number().int().positive(),
+    productId: z.number().int().positive().nullable().optional(),
+    productVariantId: z.number().int().positive().nullable().optional(),
+    mode: z.enum(["mirror", "share", "fixed"]),
+    sharePct: z.number().int().min(1).max(100).nullable().optional(),
+    fixedQty: z.number().int().min(0).nullable().optional(),
+    floorAtp: z.number().int().min(0).default(0),
+    ceilingQty: z.number().int().min(0).nullable().optional(),
+    eligible: z.boolean().default(true),
+    notes: z.string().nullable().optional(),
+  }).refine((data) => {
+    if (data.mode === "share" && (data.sharePct == null || data.sharePct <= 0)) return false;
+    if (data.mode === "fixed" && data.fixedQty == null) return false;
+    return true;
+  }, { message: "share mode requires sharePct; fixed mode requires fixedQty" });
+
+  // List all rules (with optional ?channelId= filter)
+  app.get("/api/channel-allocation-rules", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = req.query.channelId ? parseInt(req.query.channelId as string) : undefined;
+
+      let query = db
+        .select({
+          id: channelAllocationRules.id,
+          channelId: channelAllocationRules.channelId,
+          productId: channelAllocationRules.productId,
+          productVariantId: channelAllocationRules.productVariantId,
+          mode: channelAllocationRules.mode,
+          sharePct: channelAllocationRules.sharePct,
+          fixedQty: channelAllocationRules.fixedQty,
+          floorAtp: channelAllocationRules.floorAtp,
+          ceilingQty: channelAllocationRules.ceilingQty,
+          eligible: channelAllocationRules.eligible,
+          notes: channelAllocationRules.notes,
+          createdAt: channelAllocationRules.createdAt,
+          updatedAt: channelAllocationRules.updatedAt,
+          channelName: channelsTable.name,
+          productName: products.name,
+          variantName: productVariants.name,
+          variantSku: productVariants.sku,
+        })
+        .from(channelAllocationRules)
+        .leftJoin(channelsTable, eq(channelAllocationRules.channelId, channelsTable.id))
+        .leftJoin(products, eq(channelAllocationRules.productId, products.id))
+        .leftJoin(productVariants, eq(channelAllocationRules.productVariantId, productVariants.id));
+
+      if (channelId) {
+        query = query.where(eq(channelAllocationRules.channelId, channelId)) as any;
+      }
+
+      const rows = await (query as any).orderBy(channelAllocationRules.channelId, channelAllocationRules.productId, channelAllocationRules.productVariantId);
+      res.json(rows);
+    } catch (error: any) {
+      console.error("Error fetching allocation rules:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch allocation rules" });
+    }
+  });
+
+  // Get rules for a specific channel (with product/variant names)
+  app.get("/api/channel-allocation-rules/:channelId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      if (isNaN(channelId)) return res.status(400).json({ error: "Invalid channel ID" });
+
+      const rows = await db
+        .select({
+          id: channelAllocationRules.id,
+          channelId: channelAllocationRules.channelId,
+          productId: channelAllocationRules.productId,
+          productVariantId: channelAllocationRules.productVariantId,
+          mode: channelAllocationRules.mode,
+          sharePct: channelAllocationRules.sharePct,
+          fixedQty: channelAllocationRules.fixedQty,
+          floorAtp: channelAllocationRules.floorAtp,
+          ceilingQty: channelAllocationRules.ceilingQty,
+          eligible: channelAllocationRules.eligible,
+          notes: channelAllocationRules.notes,
+          createdAt: channelAllocationRules.createdAt,
+          updatedAt: channelAllocationRules.updatedAt,
+          channelName: channelsTable.name,
+          productName: products.name,
+          variantName: productVariants.name,
+          variantSku: productVariants.sku,
+        })
+        .from(channelAllocationRules)
+        .leftJoin(channelsTable, eq(channelAllocationRules.channelId, channelsTable.id))
+        .leftJoin(products, eq(channelAllocationRules.productId, products.id))
+        .leftJoin(productVariants, eq(channelAllocationRules.productVariantId, productVariants.id))
+        .where(eq(channelAllocationRules.channelId, channelId))
+        .orderBy(channelAllocationRules.productId, channelAllocationRules.productVariantId);
+
+      res.json(rows);
+    } catch (error: any) {
+      console.error("Error fetching channel allocation rules:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch channel allocation rules" });
+    }
+  });
+
+  // Create rule
+  app.post("/api/channel-allocation-rules", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const parsed = allocationRuleSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid rule data", details: parsed.error.errors });
+      }
+
+      const data = {
+        channelId: parsed.data.channelId,
+        productId: parsed.data.productId ?? null,
+        productVariantId: parsed.data.productVariantId ?? null,
+        mode: parsed.data.mode,
+        sharePct: parsed.data.mode === "share" ? parsed.data.sharePct! : null,
+        fixedQty: parsed.data.mode === "fixed" ? parsed.data.fixedQty! : null,
+        floorAtp: parsed.data.floorAtp,
+        ceilingQty: parsed.data.ceilingQty ?? null,
+        eligible: parsed.data.eligible,
+        notes: parsed.data.notes ?? null,
+      };
+
+      const [created] = await db.insert(channelAllocationRules).values(data).returning();
+      res.status(201).json(created);
+    } catch (error: any) {
+      if (error.code === "23505") {
+        return res.status(409).json({ error: "A rule already exists for this channel/product/variant combination" });
+      }
+      console.error("Error creating allocation rule:", error);
+      res.status(500).json({ error: error.message || "Failed to create allocation rule" });
+    }
+  });
+
+  // Update rule
+  app.put("/api/channel-allocation-rules/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const updateSchema = z.object({
+        mode: z.enum(["mirror", "share", "fixed"]).optional(),
+        sharePct: z.number().int().min(1).max(100).nullable().optional(),
+        fixedQty: z.number().int().min(0).nullable().optional(),
+        floorAtp: z.number().int().min(0).optional(),
+        ceilingQty: z.number().int().min(0).nullable().optional(),
+        eligible: z.boolean().optional(),
+        notes: z.string().nullable().optional(),
+      });
+
+      const parsed = updateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const updates: any = { ...parsed.data, updatedAt: new Date() };
+
+      // Clean up mode-dependent fields
+      if (updates.mode) {
+        if (updates.mode !== "share") updates.sharePct = null;
+        if (updates.mode !== "fixed") updates.fixedQty = null;
+      }
+
+      const [updated] = await db
+        .update(channelAllocationRules)
+        .set(updates)
+        .where(eq(channelAllocationRules.id, id))
+        .returning();
+
+      if (!updated) return res.status(404).json({ error: "Rule not found" });
+      res.json(updated);
+    } catch (error: any) {
+      console.error("Error updating allocation rule:", error);
+      res.status(500).json({ error: error.message || "Failed to update allocation rule" });
+    }
+  });
+
+  // Delete rule
+  app.delete("/api/channel-allocation-rules/:id", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
+
+      const [deleted] = await db
+        .delete(channelAllocationRules)
+        .where(eq(channelAllocationRules.id, id))
+        .returning();
+
+      if (!deleted) return res.status(404).json({ error: "Rule not found" });
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting allocation rule:", error);
+      res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
     }
   });
 }

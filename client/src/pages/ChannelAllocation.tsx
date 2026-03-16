@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { Slider } from "@/components/ui/slider";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -15,21 +15,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { useToast } from "@/hooks/use-toast";
-import { useDebounce } from "@/hooks/use-debounce";
 import {
   Select,
   SelectContent,
@@ -37,847 +31,933 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
+import { useDebounce } from "@/hooks/use-debounce";
 import {
-  RefreshCw,
   Loader2,
   Search,
-  ChevronLeft,
-  ChevronRight,
+  Warehouse,
   Layers,
-  Radio,
-  Ban,
-  Eye,
-  EyeOff,
-  Settings2,
-  Lock,
+  Plus,
+  Trash2,
+  Pencil,
   X,
-  AlertTriangle,
+  Copy,
+  Ban,
   CheckCircle2,
-  XCircle,
-  Clock,
-  Tag,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// --- Types ---
+// ============================================
+// Types
+// ============================================
 
 interface Channel {
   id: number;
   name: string;
   provider: string;
   status: string;
-  allocationPct: number | null;
-  allocationFixedQty: number | null;
-  productLineNames: string[];
 }
 
-interface ChannelStats {
-  fed: number;
-  unfed: number;
-  blocked: number;
-  overrides: number;
-}
-
-interface ChannelCellData {
-  hasFeed: boolean;
-  lastSyncedQty: number;
-  lastSyncedAt: string | null;
-  productFloor: number | null;
-  productCap: number | null;
-  isListed: number;
-  variantFloor: number | null;
-  variantCap: number | null;
-  overrideQty: number | null;
-  effectiveAtp: number;
-  status: string;
-  isEligible: boolean;
-}
-
-interface AllocationRow {
-  productVariantId: number;
-  productId: number;
-  sku: string;
-  productName: string;
-  variantName: string;
-  unitsPerVariant: number;
-  atpBase: number;
-  atpUnits: number;
-  channels: Record<string, ChannelCellData>;
-}
-
-interface SyncStats {
-  lastSyncAt: string | null;
-  lastError: string | null;
-  recentErrors: number;
-  syncStatus: string | null;
-}
-
-interface SearchResult {
-  variantId: number;
-  sku: string;
-  variantName: string;
-  productName: string;
-}
-
-interface ProductLineOption {
+interface WarehouseInfo {
   id: number;
   code: string;
   name: string;
+  warehouseType: string;
+  isActive: number;
 }
 
-interface AllocationGrid {
-  channels: Channel[];
-  rows: AllocationRow[];
-  totalCount: number;
-  page: number;
-  limit: number;
-  productLines: ProductLineOption[];
-  activeProductLineId: number | null;
-  stats: {
-    totalVariants: number;
-    channels: Record<string, ChannelStats>;
-    sync: Record<string, SyncStats>;
-  };
+interface WarehouseAssignment {
+  id: number;
+  channelId: number;
+  warehouseId: number;
+  priority: number;
+  enabled: boolean;
+  warehouseName: string | null;
+  warehouseCode: string | null;
+  warehouseType: string | null;
+  channelName: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
-// --- Channel allocation dialog ---
+interface AllocationRule {
+  id: number;
+  channelId: number;
+  productId: number | null;
+  productVariantId: number | null;
+  mode: "mirror" | "share" | "fixed";
+  sharePct: number | null;
+  fixedQty: number | null;
+  floorAtp: number;
+  ceilingQty: number | null;
+  eligible: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  channelName: string | null;
+  productName: string | null;
+  variantName: string | null;
+  variantSku: string | null;
+}
 
-function ChannelAllocationDialog({ channel }: { channel: Channel }) {
+// ============================================
+// API helpers
+// ============================================
+
+async function apiFetch(url: string, opts?: RequestInit) {
+  const res = await fetch(url, { credentials: "include", ...opts });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  return res.json();
+}
+
+function apiPost(url: string, body: any) {
+  return apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function apiPut(url: string, body: any) {
+  return apiFetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function apiDelete(url: string) {
+  return apiFetch(url, { method: "DELETE" });
+}
+
+// ============================================
+// Mode display helpers
+// ============================================
+
+function modeIndicator(mode: string, eligible: boolean) {
+  if (!eligible) return { icon: "🔴", label: "Blocked", color: "text-red-500" };
+  switch (mode) {
+    case "mirror": return { icon: "🟢", label: "Mirror", color: "text-green-600" };
+    case "share": return { icon: "🔵", label: "Share %", color: "text-blue-600" };
+    case "fixed": return { icon: "🟡", label: "Fixed", color: "text-amber-600" };
+    default: return { icon: "⚪", label: mode, color: "text-muted-foreground" };
+  }
+}
+
+function ruleDescription(rule: AllocationRule): string {
+  if (!rule.eligible) return "Blocked — ineligible";
+  switch (rule.mode) {
+    case "mirror": return "Mirror (100%)";
+    case "share": return `Share ${rule.sharePct ?? 0}%`;
+    case "fixed": return `Fixed ${rule.fixedQty ?? 0} units`;
+    default: return rule.mode;
+  }
+}
+
+function ruleScope(rule: AllocationRule): string {
+  if (rule.productVariantId) return "variant";
+  if (rule.productId) return "product";
+  return "channel default";
+}
+
+// ============================================
+// Section A: Warehouse Assignments
+// ============================================
+
+function WarehouseAssignmentsSection() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<"none" | "pct" | "fixed">("none");
-  const [pct, setPct] = useState(100);
-  const [fixedQty, setFixedQty] = useState("");
 
-  useEffect(() => {
-    if (open) {
-      setMode(channel.allocationFixedQty != null ? "fixed" : channel.allocationPct != null ? "pct" : "none");
-      setPct(channel.allocationPct ?? 100);
-      setFixedQty(String(channel.allocationFixedQty ?? ""));
-    }
-  }, [open, channel]);
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      const body: any = {};
-      if (mode === "pct") { body.allocationPct = pct; body.allocationFixedQty = null; }
-      else if (mode === "fixed") { body.allocationPct = null; body.allocationFixedQty = fixedQty === "" ? null : parseInt(fixedQty, 10); }
-      else { body.allocationPct = null; body.allocationFixedQty = null; }
-      const res = await fetch(`/api/channels/${channel.id}/allocation`, {
-        method: "PUT", headers: { "Content-Type": "application/json" }, credentials: "include",
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
-      setOpen(false);
-      toast({ title: `${channel.name} allocation updated` });
-    },
-    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
+  const { data: allChannels = [] } = useQuery<Channel[]>({
+    queryKey: ["/api/channels"],
+    queryFn: () => apiFetch("/api/channels"),
   });
 
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-6 px-2">
-          <Settings2 className="h-3 w-3" />
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>{channel.name} — Allocation</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4 pt-2">
-          <p className="text-sm text-muted-foreground">
-            Control how much of your total inventory pool this channel can see.
-          </p>
-          <div className="grid grid-cols-3 gap-2">
-            <Button variant={mode === "none" ? "default" : "outline"} size="sm" onClick={() => setMode("none")}>No Limit</Button>
-            <Button variant={mode === "pct" ? "default" : "outline"} size="sm" onClick={() => setMode("pct")}>Percentage</Button>
-            <Button variant={mode === "fixed" ? "default" : "outline"} size="sm" onClick={() => setMode("fixed")}>Fixed Qty</Button>
-          </div>
-          {mode === "pct" && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label>Allocation</Label>
-                <span className="text-2xl font-bold">{pct}%</span>
-              </div>
-              <Slider value={[pct]} onValueChange={([v]) => setPct(v)} min={0} max={100} step={5} />
-              <p className="text-xs text-muted-foreground">This channel sees up to {pct}% of each product's ATP.</p>
-            </div>
-          )}
-          {mode === "fixed" && (
-            <div className="space-y-2">
-              <Label>Fixed quantity (base units)</Label>
-              <Input type="number" min={0} placeholder="e.g. 500" value={fixedQty} onChange={(e) => setFixedQty(e.target.value)} autoComplete="off" />
-              <p className="text-xs text-muted-foreground">Cap each product at this many base units for this channel.</p>
-            </div>
-          )}
-          {mode === "none" && (
-            <p className="text-sm text-muted-foreground bg-muted/50 rounded-md p-3">No limit — sees the full pool.</p>
-          )}
-          <Button className="w-full" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-            {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-            Save Allocation
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+  const { data: allWarehouses = [] } = useQuery<WarehouseInfo[]>({
+    queryKey: ["/api/warehouses"],
+    queryFn: () => apiFetch("/api/warehouses"),
+  });
+
+  const { data: assignments = [], isLoading } = useQuery<WarehouseAssignment[]>({
+    queryKey: ["/api/channel-warehouse-assignments"],
+    queryFn: () => apiFetch("/api/channel-warehouse-assignments"),
+  });
+
+  const activeChannels = useMemo(() =>
+    allChannels.filter((c) => c.status === "active"),
+    [allChannels]
   );
-}
 
-// --- Cell edit popover ---
+  // Only show operations/3pl warehouses, not pure storage
+  const fulfillmentWarehouses = useMemo(() =>
+    allWarehouses.filter((w) => w.isActive && w.warehouseType !== "bulk_storage"),
+    [allWarehouses]
+  );
 
-function CellEditPopover({ channelId, channelName, row, cellData }: {
-  channelId: number; channelName: string; row: AllocationRow; cellData: ChannelCellData;
-}) {
-  const { toast } = useToast();
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [useOverride, setUseOverride] = useState(false);
-  const [overrideQty, setOverrideQty] = useState("");
-  const [floor, setFloor] = useState("");
-  const [cap, setCap] = useState("");
-  const [isListed, setIsListed] = useState(true);
-  const [productFloor, setProductFloor] = useState("");
-  const [productCap, setProductCap] = useState("");
+  const storageWarehouses = useMemo(() =>
+    allWarehouses.filter((w) => w.isActive && w.warehouseType === "bulk_storage"),
+    [allWarehouses]
+  );
 
-  useEffect(() => {
-    if (open) {
-      setUseOverride(cellData.overrideQty != null);
-      setOverrideQty(cellData.overrideQty != null ? String(cellData.overrideQty) : "");
-      setFloor(cellData.variantFloor != null ? String(cellData.variantFloor) : "");
-      setCap(cellData.variantCap != null ? String(cellData.variantCap) : "");
-      setIsListed(cellData.isListed !== 0);
-      setProductFloor(cellData.productFloor != null ? String(cellData.productFloor) : "");
-      setProductCap(cellData.productCap != null ? String(cellData.productCap) : "");
+  // Build assignment lookup: "channelId:warehouseId" -> assignment
+  const assignmentMap = useMemo(() => {
+    const map = new Map<string, WarehouseAssignment>();
+    for (const a of assignments) {
+      map.set(`${a.channelId}:${a.warehouseId}`, a);
     }
-  }, [open, cellData]);
+    return map;
+  }, [assignments]);
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["/api/channel-warehouse-assignments"] });
 
-  const saveVariantMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/channel-reservations", {
-        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
-        body: JSON.stringify({
-          channelId, productVariantId: row.productVariantId, reserveBaseQty: 0,
-          overrideQty: useOverride ? (overrideQty === "" ? 0 : parseInt(overrideQty, 10)) : null,
-          minStockBase: floor === "" ? 0 : parseInt(floor, 10),
-          maxStockBase: cap === "" ? null : parseInt(cap, 10),
-        }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      return res.json();
-    },
-    onSuccess: () => { invalidate(); setOpen(false); toast({ title: "Variant settings saved" }); },
+  const createMutation = useMutation({
+    mutationFn: (data: { channelId: number; warehouseId: number }) =>
+      apiPost("/api/channel-warehouse-assignments", { ...data, priority: 0, enabled: true }),
+    onSuccess: () => { invalidate(); toast({ title: "Assignment created" }); },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  const saveProductMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/channel-product-allocation", {
-        method: "PUT", headers: { "Content-Type": "application/json" }, credentials: "include",
-        body: JSON.stringify({
-          channelId, productId: row.productId,
-          minAtpBase: productFloor === "" ? null : parseInt(productFloor, 10),
-          maxAtpBase: productCap === "" ? null : parseInt(productCap, 10),
-          isListed: isListed ? 1 : 0,
-        }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      return res.json();
-    },
-    onSuccess: () => { invalidate(); setOpen(false); toast({ title: "Product rules saved" }); },
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => apiDelete(`/api/channel-warehouse-assignments/${id}`),
+    onSuccess: () => { invalidate(); toast({ title: "Assignment removed" }); },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  const enableFeedMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/channel-feeds/enable", {
-        method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include",
-        body: JSON.stringify({ channelId, productVariantId: row.productVariantId }),
-      });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      return res.json();
-    },
-    onSuccess: () => { invalidate(); toast({ title: "Feed enabled" }); },
+  const updateMutation = useMutation({
+    mutationFn: ({ id, ...data }: { id: number; priority?: number; enabled?: boolean }) =>
+      apiPut(`/api/channel-warehouse-assignments/${id}`, data),
+    onSuccess: () => { invalidate(); },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  const display = getCellDisplay(cellData);
-  const saving = saveVariantMutation.isPending || saveProductMutation.isPending;
+  const handleToggle = (channelId: number, warehouseId: number) => {
+    const key = `${channelId}:${warehouseId}`;
+    const existing = assignmentMap.get(key);
+    if (existing) {
+      deleteMutation.mutate(existing.id);
+    } else {
+      createMutation.mutate({ channelId, warehouseId });
+    }
+  };
+
+  const handlePriorityChange = (assignmentId: number, priority: number) => {
+    updateMutation.mutate({ id: assignmentId, priority });
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (activeChannels.length === 0) {
+    return (
+      <div className="text-center py-12 text-muted-foreground">
+        <Warehouse className="h-10 w-10 mx-auto mb-3 opacity-30" />
+        <p>No active channels. Set up channels first.</p>
+      </div>
+    );
+  }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button className={cn("w-full text-left px-2 py-1.5 rounded hover:bg-muted/50 transition-colors text-sm", display.colorClass)}>
-          {display.content}
-        </button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80 p-0" align="start">
-        <div className="px-4 py-3 border-b bg-muted/30">
-          <p className="text-sm font-medium font-mono">{row.sku}</p>
-          <p className="text-xs text-muted-foreground truncate">{row.productName} → {channelName}</p>
-          <div className="flex items-center gap-3 mt-1.5 text-xs">
-            <span>Raw: <strong>{row.atpUnits}</strong></span>
-            <span>Effective: <strong className={cellData.effectiveAtp === 0 ? "text-red-500" : "text-green-600"}>{cellData.effectiveAtp}</strong></span>
-          </div>
-        </div>
-        <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
-          {!cellData.hasFeed && (
-            <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md p-3">
-              <p className="text-xs text-amber-800 dark:text-amber-200 mb-2">No feed — won't sync.</p>
-              <Button variant="outline" size="sm" className="w-full" onClick={() => enableFeedMutation.mutate()} disabled={enableFeedMutation.isPending}>
-                {enableFeedMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin mr-2" /> : <Radio className="h-3 w-3 mr-2" />}
-                Enable Feed
-              </Button>
-            </div>
-          )}
-
-          {/* Hard Override */}
-          <div className="border rounded-md p-3 space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs font-semibold uppercase tracking-wide flex items-center gap-1.5">
-                <Lock className="h-3 w-3" /> Hard Override
-              </Label>
-              <Switch checked={useOverride} onCheckedChange={setUseOverride} />
-            </div>
-            {useOverride ? (
+    <div className="space-y-4">
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="min-w-[200px]">Warehouse</TableHead>
+              <TableHead className="min-w-[100px]">Type</TableHead>
+              {activeChannels.map((ch) => (
+                <TableHead key={ch.id} className="text-center min-w-[140px]">{ch.name}</TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {fulfillmentWarehouses.map((wh) => (
+              <TableRow key={wh.id}>
+                <TableCell className="font-medium">
+                  <div>
+                    <span className="font-mono text-xs text-muted-foreground mr-2">{wh.code}</span>
+                    {wh.name}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className="text-xs capitalize">{wh.warehouseType.replace(/_/g, " ")}</Badge>
+                </TableCell>
+                {activeChannels.map((ch) => {
+                  const key = `${ch.id}:${wh.id}`;
+                  const assignment = assignmentMap.get(key);
+                  return (
+                    <TableCell key={ch.id} className="text-center">
+                      <div className="flex flex-col items-center gap-1.5">
+                        <Checkbox
+                          checked={!!assignment}
+                          onCheckedChange={() => handleToggle(ch.id, wh.id)}
+                        />
+                        {assignment && (
+                          <Input
+                            type="number"
+                            min={0}
+                            className="h-7 w-16 text-xs text-center"
+                            value={assignment.priority}
+                            onChange={(e) => handlePriorityChange(assignment.id, parseInt(e.target.value) || 0)}
+                            title="Priority (higher = preferred)"
+                          />
+                        )}
+                      </div>
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            ))}
+            {storageWarehouses.length > 0 && (
               <>
-                <p className="text-xs text-muted-foreground">Push exactly this qty. Set 0 to stop selling this variant here.</p>
-                <Input type="number" min={0} placeholder="0" value={overrideQty} onChange={(e) => setOverrideQty(e.target.value)} autoComplete="off" className="h-8 text-sm" />
+                <TableRow>
+                  <TableCell colSpan={2 + activeChannels.length} className="bg-muted/30 text-xs text-muted-foreground font-medium py-2">
+                    Storage Warehouses (not assignable for fulfillment)
+                  </TableCell>
+                </TableRow>
+                {storageWarehouses.map((wh) => (
+                  <TableRow key={wh.id} className="opacity-50">
+                    <TableCell>
+                      <span className="font-mono text-xs text-muted-foreground mr-2">{wh.code}</span>
+                      {wh.name}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline" className="text-xs">Storage</Badge>
+                    </TableCell>
+                    {activeChannels.map((ch) => (
+                      <TableCell key={ch.id} className="text-center text-muted-foreground text-xs">—</TableCell>
+                    ))}
+                  </TableRow>
+                ))}
               </>
-            ) : (
-              <p className="text-xs text-muted-foreground">Uses calculated allocation.</p>
             )}
-          </div>
-
-          {/* Variant floor/cap */}
-          {!useOverride && (
-            <div>
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2 block">Variant Guards</span>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-muted-foreground">Floor</label>
-                  <Input type="number" min={0} placeholder="None" value={floor} onChange={(e) => setFloor(e.target.value)} autoComplete="off" className="h-8 text-sm" />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground">Cap</label>
-                  <Input type="number" min={0} placeholder="None" value={cap} onChange={(e) => setCap(e.target.value)} autoComplete="off" className="h-8 text-sm" />
-                </div>
-              </div>
-            </div>
-          )}
-
-          <Button className="w-full" size="sm" onClick={() => saveVariantMutation.mutate()} disabled={saving}>
-            {saveVariantMutation.isPending && <Loader2 className="h-3 w-3 animate-spin mr-2" />}
-            Save Variant Settings
-          </Button>
-
-          <Separator />
-
-          {/* Product rules */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Product Rules</span>
-              <Badge variant="outline" className="text-[10px]">All variants</Badge>
-            </div>
-            <div className="flex items-center justify-between mb-3">
-              <Label className="text-sm">
-                {isListed ? <span className="flex items-center gap-1.5 text-green-600"><Eye className="h-3.5 w-3.5" /> Listed</span>
-                  : <span className="flex items-center gap-1.5 text-red-500"><EyeOff className="h-3.5 w-3.5" /> Blocked</span>}
-              </Label>
-              <Switch checked={isListed} onCheckedChange={setIsListed} />
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-muted-foreground">Floor (base)</label>
-                <Input type="number" min={0} placeholder="None" value={productFloor} onChange={(e) => setProductFloor(e.target.value)} autoComplete="off" className="h-8 text-sm" />
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Cap (base)</label>
-                <Input type="number" min={0} placeholder="None" value={productCap} onChange={(e) => setProductCap(e.target.value)} autoComplete="off" className="h-8 text-sm" />
-              </div>
-            </div>
-            <Button className="w-full mt-2" size="sm" variant="outline" onClick={() => saveProductMutation.mutate()} disabled={saving}>
-              {saveProductMutation.isPending && <Loader2 className="h-3 w-3 animate-spin mr-2" />}
-              Save Product Rules
-            </Button>
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-// --- Display logic ---
-
-function getCellDisplay(cellData: ChannelCellData): { content: React.ReactNode; colorClass: string } {
-  if (cellData.isEligible === false) {
-    return {
-      content: <span className="text-[10px] tracking-wide opacity-40">N/A</span>,
-      colorClass: "text-muted-foreground/30 cursor-default",
-    };
-  }
-
-  if (cellData.overrideQty != null) {
-    return {
-      content: (
-        <span className="flex items-center justify-center gap-1.5">
-          <Lock className="h-3 w-3" />
-          <span className="font-bold tabular-nums">{cellData.overrideQty}</span>
-        </span>
-      ),
-      colorClass: cellData.overrideQty === 0 ? "text-red-500" : "text-blue-600 dark:text-blue-400",
-    };
-  }
-
-  if (cellData.isListed === 0) {
-    return {
-      content: <span className="flex items-center justify-center gap-1.5"><Ban className="h-3 w-3" /> <span className="text-xs">BLOCKED</span></span>,
-      colorClass: "text-red-500",
-    };
-  }
-
-  if (!cellData.hasFeed) {
-    return {
-      content: (
-        <span className="flex items-center justify-center gap-1.5 text-muted-foreground/40">
-          <AlertTriangle className="h-3 w-3" />
-          <span className="text-xs">NO FEED</span>
-        </span>
-      ),
-      colorClass: "text-muted-foreground/40",
-    };
-  }
-
-  if (cellData.status === "product_floor" || cellData.status === "variant_floor") {
-    return {
-      content: (
-        <span className="flex items-center justify-center gap-1.5">
-          <span>0</span>
-          <Badge variant="destructive" className="text-[10px] px-1 py-0 leading-tight">FLOOR</Badge>
-        </span>
-      ),
-      colorClass: "text-red-500",
-    };
-  }
-
-  const badges: React.ReactNode[] = [];
-  if (cellData.variantCap != null) badges.push(<Badge key="c" variant="secondary" className="text-[10px] px-1 py-0">≤{cellData.variantCap}</Badge>);
-  if (cellData.variantFloor != null && cellData.variantFloor > 0) badges.push(<Badge key="f" variant="secondary" className="text-[10px] px-1 py-0">≥{cellData.variantFloor}</Badge>);
-
-  let syncColor = "text-foreground";
-  if (cellData.lastSyncedAt) {
-    const age = Date.now() - new Date(cellData.lastSyncedAt).getTime();
-    if (age <= 5 * 60 * 1000) syncColor = "text-green-600 dark:text-green-400";
-    else if (age > 60 * 60 * 1000) syncColor = "text-amber-600 dark:text-amber-400";
-  }
-
-  return {
-    content: (
-      <span className="flex items-center justify-center gap-1.5">
-        <span className="font-medium tabular-nums">{cellData.effectiveAtp.toLocaleString()}</span>
-        {badges}
-      </span>
-    ),
-    colorClass: syncColor,
-  };
-}
-
-// --- Helpers ---
-
-function formatRelativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
-
-// --- Typeahead search ---
-
-function SkuTypeahead({ value, onChange }: { value: string; onChange: (val: string) => void }) {
-  const [input, setInput] = useState(value);
-  const [open, setOpen] = useState(false);
-  const debouncedInput = useDebounce(input, 250);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const { data: suggestions } = useQuery<SearchResult[]>({
-    queryKey: ["/api/channel-allocation/search", debouncedInput],
-    queryFn: async () => {
-      if (debouncedInput.length < 2) return [];
-      const res = await fetch(`/api/channel-allocation/search?q=${encodeURIComponent(debouncedInput)}`, { credentials: "include" });
-      if (!res.ok) return [];
-      return res.json();
-    },
-    enabled: debouncedInput.length >= 2,
-  });
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
-  // Sync external value changes
-  useEffect(() => { setInput(value); }, [value]);
-
-  const selectItem = useCallback((item: SearchResult) => {
-    setInput(item.sku);
-    onChange(item.sku);
-    setOpen(false);
-  }, [onChange]);
-
-  const handleClear = useCallback(() => {
-    setInput("");
-    onChange("");
-    setOpen(false);
-  }, [onChange]);
-
-  return (
-    <div ref={containerRef} className="relative flex-1 md:w-72">
-      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-      <Input
-        placeholder="Search SKU or product..."
-        value={input}
-        onChange={(e) => { setInput(e.target.value); setOpen(true); if (!e.target.value) onChange(""); }}
-        onFocus={() => { if (input.length >= 2) setOpen(true); }}
-        onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
-        className="pl-9 h-10 pr-8"
-        autoComplete="off"
-      />
-      {input && (
-        <button
-          onClick={handleClear}
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      )}
-      {open && suggestions && suggestions.length > 0 && (
-        <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-popover border rounded-md shadow-lg max-h-64 overflow-y-auto">
-          {suggestions.map((item) => (
-            <button
-              key={item.variantId}
-              onClick={() => selectItem(item)}
-              className="w-full text-left px-3 py-2 hover:bg-muted/50 flex flex-col border-b last:border-b-0"
-            >
-              <span className="font-mono text-sm font-medium">{item.sku}</span>
-              <span className="text-xs text-muted-foreground truncate">{item.productName} — {item.variantName}</span>
-            </button>
-          ))}
-        </div>
-      )}
+          </TableBody>
+        </Table>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Priority: higher number = preferred fulfillment source. If no warehouses are assigned to a channel, all fulfillment warehouses are used.
+      </p>
     </div>
   );
 }
 
-// --- Main component ---
+// ============================================
+// Section B: Allocation Rules
+// ============================================
 
-export default function ChannelAllocation() {
+// Rule edit/create dialog
+function RuleDialog({
+  rule,
+  channels,
+  onClose,
+}: {
+  rule?: AllocationRule;
+  channels: Channel[];
+  onClose: () => void;
+}) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
-  const [activeFilter, setActiveFilter] = useState("");
-  const [productLineId, setProductLineId] = useState<number | null>(null);
-  const pageSize = 100;
-  const debouncedSearch = useDebounce(search, 300);
+  const isEdit = !!rule;
 
-  useEffect(() => { setPage(1); }, [debouncedSearch, activeFilter, productLineId]);
+  const [channelId, setChannelId] = useState(rule?.channelId ?? (channels[0]?.id ?? 0));
+  const [mode, setMode] = useState<"mirror" | "share" | "fixed">(rule?.mode ?? "mirror");
+  const [sharePct, setSharePct] = useState(String(rule?.sharePct ?? 100));
+  const [fixedQty, setFixedQty] = useState(String(rule?.fixedQty ?? 0));
+  const [floorAtp, setFloorAtp] = useState(String(rule?.floorAtp ?? 0));
+  const [ceilingQty, setCeilingQty] = useState(rule?.ceilingQty != null ? String(rule.ceilingQty) : "");
+  const [eligible, setEligible] = useState(rule?.eligible ?? true);
+  const [notes, setNotes] = useState(rule?.notes ?? "");
+  const [productIdInput, setProductIdInput] = useState(rule?.productId != null ? String(rule.productId) : "");
+  const [variantIdInput, setVariantIdInput] = useState(rule?.productVariantId != null ? String(rule.productVariantId) : "");
 
-  const { data, isLoading } = useQuery<AllocationGrid>({
-    queryKey: ["/api/channel-allocation/grid", debouncedSearch, page, activeFilter, productLineId],
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      if (debouncedSearch) params.set("search", debouncedSearch);
-      if (activeFilter) params.set("filter", activeFilter);
-      if (productLineId) params.set("productLineId", String(productLineId));
-      params.set("page", String(page));
-      params.set("limit", String(pageSize));
-      const res = await fetch(`/api/channel-allocation/grid?${params}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to fetch allocation grid");
-      return res.json();
-    },
-  });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation-rules"] });
+  };
 
-  const syncAllMutation = useMutation({
+  const saveMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/channel-sync/all", { method: "POST", credentials: "include" });
-      if (!res.ok) throw new Error((await res.text()) || res.statusText);
-      return res.json();
+      const body = {
+        channelId,
+        productId: productIdInput ? parseInt(productIdInput) : null,
+        productVariantId: variantIdInput ? parseInt(variantIdInput) : null,
+        mode,
+        sharePct: mode === "share" ? parseInt(sharePct) : null,
+        fixedQty: mode === "fixed" ? parseInt(fixedQty) : null,
+        floorAtp: parseInt(floorAtp) || 0,
+        ceilingQty: ceilingQty ? parseInt(ceilingQty) : null,
+        eligible,
+        notes: notes || null,
+      };
+
+      if (isEdit) {
+        return apiPut(`/api/channel-allocation-rules/${rule!.id}`, body);
+      } else {
+        return apiPost("/api/channel-allocation-rules", body);
+      }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation/grid"] });
-      toast({ title: "Sync triggered for all channels" });
+      invalidate();
+      toast({ title: isEdit ? "Rule updated" : "Rule created" });
+      onClose();
     },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
-  const channels = data?.channels ?? [];
-  const rows = data?.rows ?? [];
-  const totalCount = data?.totalCount ?? 0;
-  const totalPages = Math.ceil(totalCount / pageSize);
-  const stats = data?.stats;
-  const productLines = data?.productLines ?? [];
-
-  const toggleFilter = (f: string) => setActiveFilter(prev => prev === f ? "" : f);
-
   return (
-    <div className="space-y-4 p-2 md:p-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Channel Allocation</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Allocate inventory across channels. Click any cell for variant overrides.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {productLines.length > 1 && (
-            <Select
-              value={productLineId ? String(productLineId) : "all"}
-              onValueChange={(v) => setProductLineId(v === "all" ? null : parseInt(v))}
-            >
-              <SelectTrigger className="w-[200px] h-10">
-                <Tag className="h-4 w-4 mr-2 text-muted-foreground" />
-                <SelectValue placeholder="All Product Lines" />
-              </SelectTrigger>
+    <DialogContent className="max-w-lg">
+      <DialogHeader>
+        <DialogTitle>{isEdit ? "Edit" : "Create"} Allocation Rule</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-4 py-2">
+        {!isEdit && (
+          <div className="space-y-2">
+            <Label>Channel</Label>
+            <Select value={String(channelId)} onValueChange={(v) => setChannelId(parseInt(v))}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All Product Lines</SelectItem>
-                {productLines.map((pl) => (
-                  <SelectItem key={pl.id} value={String(pl.id)}>{pl.name}</SelectItem>
+                {channels.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          )}
-          <SkuTypeahead value={search} onChange={setSearch} />
-          <Button variant="outline" onClick={() => syncAllMutation.mutate()} disabled={syncAllMutation.isPending}>
-            {syncAllMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-            Sync All
-          </Button>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <Label className="text-xs">Product ID (blank = channel default)</Label>
+            <Input
+              type="number"
+              placeholder="All products"
+              value={productIdInput}
+              onChange={(e) => setProductIdInput(e.target.value)}
+              disabled={isEdit}
+              autoComplete="off"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Variant ID (blank = product level)</Label>
+            <Input
+              type="number"
+              placeholder="All variants"
+              value={variantIdInput}
+              onChange={(e) => setVariantIdInput(e.target.value)}
+              disabled={isEdit}
+              autoComplete="off"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <Label>Eligible for this channel</Label>
+          <Switch checked={eligible} onCheckedChange={setEligible} />
+        </div>
+
+        {eligible && (
+          <>
+            <div className="space-y-2">
+              <Label>Allocation Mode</Label>
+              <div className="grid grid-cols-3 gap-2">
+                <Button
+                  variant={mode === "mirror" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setMode("mirror")}
+                >
+                  🟢 Mirror
+                </Button>
+                <Button
+                  variant={mode === "share" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setMode("share")}
+                >
+                  🔵 Share %
+                </Button>
+                <Button
+                  variant={mode === "fixed" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setMode("fixed")}
+                >
+                  🟡 Fixed
+                </Button>
+              </div>
+            </div>
+
+            {mode === "share" && (
+              <div className="space-y-1">
+                <Label>Share Percentage</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={sharePct}
+                  onChange={(e) => setSharePct(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+            )}
+
+            {mode === "fixed" && (
+              <div className="space-y-1">
+                <Label>Fixed Quantity (base units)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={fixedQty}
+                  onChange={(e) => setFixedQty(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs">Floor ATP (push 0 if below)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={floorAtp}
+                  onChange={(e) => setFloorAtp(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Ceiling (max units)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  placeholder="No limit"
+                  value={ceilingQty}
+                  onChange={(e) => setCeilingQty(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+            </div>
+          </>
+        )}
+
+        <div className="space-y-1">
+          <Label className="text-xs">Notes</Label>
+          <Textarea
+            placeholder="Optional notes..."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            className="h-16"
+          />
         </div>
       </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
+          {saveMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+          {isEdit ? "Save Changes" : "Create Rule"}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
 
-      {/* Channel cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        {channels.map((ch) => {
-          const s = stats?.channels?.[ch.id];
-          const allocLabel = ch.allocationFixedQty != null
-            ? `${ch.allocationFixedQty.toLocaleString()} units`
-            : ch.allocationPct != null ? `${ch.allocationPct}%` : "No limit";
+function AllocationRulesSection() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [filterChannelId, setFilterChannelId] = useState<number | null>(null);
+  const [editingRule, setEditingRule] = useState<AllocationRule | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const debouncedSearch = useDebounce(search, 250);
 
-          const syncInfo = stats?.sync?.[ch.id];
+  const { data: allChannels = [] } = useQuery<Channel[]>({
+    queryKey: ["/api/channels"],
+    queryFn: () => apiFetch("/api/channels"),
+  });
 
-          return (
-            <Card key={ch.id}>
-              <CardContent className="p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
+  const activeChannels = useMemo(() =>
+    allChannels.filter((c) => c.status === "active"),
+    [allChannels]
+  );
+
+  const queryUrl = filterChannelId
+    ? `/api/channel-allocation-rules?channelId=${filterChannelId}`
+    : "/api/channel-allocation-rules";
+
+  const { data: rules = [], isLoading } = useQuery<AllocationRule[]>({
+    queryKey: ["/api/channel-allocation-rules", filterChannelId],
+    queryFn: () => apiFetch(queryUrl),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => apiDelete(`/api/channel-allocation-rules/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation-rules"] });
+      toast({ title: "Rule deleted" });
+    },
+    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
+  });
+
+  // Separate channel defaults from overrides
+  const channelDefaults = useMemo(() =>
+    rules.filter((r) => r.productId === null && r.productVariantId === null),
+    [rules]
+  );
+
+  const overrides = useMemo(() => {
+    let items = rules.filter((r) => r.productId !== null || r.productVariantId !== null);
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase();
+      items = items.filter((r) =>
+        (r.productName || "").toLowerCase().includes(q) ||
+        (r.variantName || "").toLowerCase().includes(q) ||
+        (r.variantSku || "").toLowerCase().includes(q)
+      );
+    }
+    return items;
+  }, [rules, debouncedSearch]);
+
+  // Build a set of channelIds that have defaults
+  const channelsWithDefaults = useMemo(() =>
+    new Set(channelDefaults.map((r) => r.channelId)),
+    [channelDefaults]
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Channel Default Cards */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">Channel Defaults</h3>
+          <p className="text-xs text-muted-foreground">
+            Base allocation rule per channel. Overrides below take precedence.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {activeChannels.map((ch) => {
+            const defaultRule = channelDefaults.find((r) => r.channelId === ch.id);
+            const m = defaultRule
+              ? modeIndicator(defaultRule.mode, defaultRule.eligible)
+              : modeIndicator("mirror", true);
+
+            return (
+              <Card key={ch.id} className={cn(
+                "transition-colors",
+                defaultRule && !defaultRule.eligible && "border-red-300 dark:border-red-800"
+              )}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
                     <div>
                       <p className="font-medium">{ch.name}</p>
                       <p className="text-xs text-muted-foreground">{ch.provider}</p>
                     </div>
+                    <span className="text-2xl">{m.icon}</span>
                   </div>
-                  <div className="flex items-center gap-1">
-                    <Badge variant={ch.allocationPct != null || ch.allocationFixedQty != null ? "default" : "outline"} className="text-xs">
-                      {allocLabel}
-                    </Badge>
-                    <ChannelAllocationDialog channel={ch} />
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Mode</span>
+                      <span className={cn("font-medium", m.color)}>
+                        {defaultRule ? ruleDescription(defaultRule) : "Mirror (100%) — implicit"}
+                      </span>
+                    </div>
+                    {defaultRule && (
+                      <>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Floor</span>
+                          <span>{defaultRule.floorAtp || "None"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Ceiling</span>
+                          <span>{defaultRule.ceilingQty ?? "None"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Eligible</span>
+                          <span>{defaultRule.eligible ? "✅ Yes" : "❌ No"}</span>
+                        </div>
+                        {defaultRule.notes && (
+                          <p className="text-xs text-muted-foreground mt-1 italic">{defaultRule.notes}</p>
+                        )}
+                      </>
+                    )}
                   </div>
-                </div>
-
-                {/* Sync status row */}
-                {syncInfo && (
-                  <div className="flex items-center gap-2 mb-2 text-xs">
-                    {syncInfo.recentErrors > 0 ? (
-                      <Popover>
-                        <PopoverTrigger asChild>
-                          <button className="flex items-center gap-1 text-red-500 hover:underline cursor-pointer">
-                            <XCircle className="h-3 w-3" />
-                            {syncInfo.recentErrors} errors (24h)
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent className="w-80 text-xs">
-                          <p className="font-medium mb-1">Last error:</p>
-                          <p className="text-muted-foreground break-words">{syncInfo.lastError || "Unknown"}</p>
-                        </PopoverContent>
-                      </Popover>
+                  <div className="flex gap-2 mt-3">
+                    {defaultRule ? (
+                      <>
+                        <Dialog>
+                          <DialogTrigger asChild>
+                            <Button variant="outline" size="sm" className="flex-1" onClick={() => setEditingRule(defaultRule)}>
+                              <Pencil className="h-3 w-3 mr-1" /> Edit
+                            </Button>
+                          </DialogTrigger>
+                          {editingRule?.id === defaultRule.id && (
+                            <RuleDialog
+                              rule={editingRule}
+                              channels={activeChannels}
+                              onClose={() => setEditingRule(null)}
+                            />
+                          )}
+                        </Dialog>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-red-500 hover:text-red-600"
+                          onClick={() => deleteMutation.mutate(defaultRule.id)}
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </>
                     ) : (
-                      <span className="flex items-center gap-1 text-green-600">
-                        <CheckCircle2 className="h-3 w-3" /> No errors
-                      </span>
-                    )}
-                    {syncInfo.lastSyncAt && (
-                      <span className="flex items-center gap-1 text-muted-foreground ml-auto">
-                        <Clock className="h-3 w-3" />
-                        {formatRelativeTime(syncInfo.lastSyncAt)}
-                      </span>
+                      <Dialog>
+                        <DialogTrigger asChild>
+                          <Button variant="outline" size="sm" className="w-full" onClick={() => {
+                            setShowCreate(true);
+                            setEditingRule({ channelId: ch.id, mode: "mirror", eligible: true } as any);
+                          }}>
+                            <Plus className="h-3 w-3 mr-1" /> Set Default
+                          </Button>
+                        </DialogTrigger>
+                        {showCreate && editingRule?.channelId === ch.id && !editingRule?.id && (
+                          <RuleDialog
+                            channels={activeChannels}
+                            onClose={() => { setShowCreate(false); setEditingRule(null); }}
+                          />
+                        )}
+                      </Dialog>
                     )}
                   </div>
-                )}
-
-                {ch.productLineNames?.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mb-2">
-                    {ch.productLineNames.map((name) => (
-                      <Badge key={name} variant="outline" className="text-[10px] px-1.5 py-0">
-                        <Tag className="h-2.5 w-2.5 mr-1" />{name}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
-
-                {s && (
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <span className="text-green-600">{s.fed} synced</span>
-                    {s.unfed > 0 && (
-                      <button
-                        onClick={() => toggleFilter(`unfed:${ch.id}`)}
-                        className={cn(
-                          "text-amber-600 hover:underline cursor-pointer",
-                          activeFilter === `unfed:${ch.id}` && "font-bold underline"
-                        )}
-                      >
-                        {s.unfed} unfed
-                      </button>
-                    )}
-                    {s.blocked > 0 && (
-                      <button
-                        onClick={() => toggleFilter("blocked")}
-                        className={cn(
-                          "text-red-500 hover:underline cursor-pointer",
-                          activeFilter === "blocked" && "font-bold underline"
-                        )}
-                      >
-                        {s.blocked} blocked
-                      </button>
-                    )}
-                    {s.overrides > 0 && (
-                      <button
-                        onClick={() => toggleFilter("override")}
-                        className={cn(
-                          "text-blue-600 hover:underline cursor-pointer",
-                          activeFilter === "override" && "font-bold underline"
-                        )}
-                      >
-                        {s.overrides} overrides
-                      </button>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          );
-        })}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
       </div>
 
-      {/* Active filter banner */}
-      {activeFilter && (
-        <div className="flex items-center gap-2 bg-muted/50 border rounded-md px-3 py-2 text-sm">
-          <span className="text-muted-foreground">Filtering:</span>
-          <Badge variant="secondary">
-            {activeFilter.startsWith("unfed:") ? `Unfed on ${channels.find(c => c.id === parseInt(activeFilter.split(":")[1]))?.name ?? "channel"}` :
-              activeFilter === "override" ? "With overrides" :
-                activeFilter === "blocked" ? "Blocked" : activeFilter}
-          </Badge>
-          <span className="text-muted-foreground">({totalCount} results)</span>
-          <Button variant="ghost" size="sm" className="h-6 px-1 ml-auto" onClick={() => setActiveFilter("")}>
-            <X className="h-3 w-3" /> Clear
-          </Button>
+      <Separator />
+
+      {/* Product/Variant Overrides */}
+      <div>
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-lg font-semibold">Product & Variant Overrides</h3>
+            <p className="text-xs text-muted-foreground">
+              Rules scoped to specific products or variants. Most specific wins (variant &gt; product &gt; channel default).
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1 md:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search product, variant, SKU..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9 h-9"
+                autoComplete="off"
+              />
+              {search && (
+                <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+            <Select
+              value={filterChannelId ? String(filterChannelId) : "all"}
+              onValueChange={(v) => setFilterChannelId(v === "all" ? null : parseInt(v))}
+            >
+              <SelectTrigger className="w-[180px] h-9">
+                <SelectValue placeholder="All Channels" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Channels</SelectItem>
+                {activeChannels.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Dialog open={showCreate && !editingRule?.id && !editingRule?.channelId} onOpenChange={(o) => { if (!o) { setShowCreate(false); setEditingRule(null); } }}>
+              <DialogTrigger asChild>
+                <Button size="sm" onClick={() => { setShowCreate(true); setEditingRule(null); }}>
+                  <Plus className="h-4 w-4 mr-1" /> Add Override
+                </Button>
+              </DialogTrigger>
+              {showCreate && !editingRule?.id && !editingRule?.channelId && (
+                <RuleDialog
+                  channels={activeChannels}
+                  onClose={() => { setShowCreate(false); setEditingRule(null); }}
+                />
+              )}
+            </Dialog>
+          </div>
         </div>
-      )}
 
-      {/* Grid */}
-      <Card>
-        <CardContent className="p-0">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-16">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
-          ) : rows.length === 0 ? (
-            <div className="text-center py-16">
-              <Layers className="h-12 w-12 mx-auto text-muted-foreground/30 mb-3" />
-              <p className="text-muted-foreground">
-                {search.trim() ? "No variants match your search." : activeFilter ? "No variants match this filter." : "No variants with inventory found."}
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="sticky left-0 bg-card z-10 min-w-[140px]">SKU</TableHead>
-                    <TableHead className="min-w-[180px]">Product</TableHead>
-                    <TableHead className="min-w-[120px]">Variant</TableHead>
-                    <TableHead className="text-right min-w-[70px]">ATP</TableHead>
-                    {channels.map((ch) => (
-                      <TableHead key={ch.id} className="text-center min-w-[130px]">
-                        <div>{ch.name}</div>
-                        {ch.allocationPct != null && <span className="text-[10px] font-normal text-muted-foreground">{ch.allocationPct}%</span>}
-                        {ch.allocationFixedQty != null && <span className="text-[10px] font-normal text-muted-foreground">{ch.allocationFixedQty} units</span>}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((row) => (
-                    <TableRow key={row.productVariantId}>
-                      <TableCell className="sticky left-0 bg-card z-10 font-mono text-xs">{row.sku}</TableCell>
-                      <TableCell className="text-sm truncate max-w-[200px]">{row.productName}</TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{row.variantName}</TableCell>
-                      <TableCell className="text-right font-medium tabular-nums">{row.atpBase.toLocaleString()}</TableCell>
-                      {channels.map((ch) => {
-                        const cellData = row.channels[String(ch.id)];
-                        if (!cellData) return <TableCell key={ch.id} className="text-center text-muted-foreground">&mdash;</TableCell>;
-                        if (cellData.isEligible === false) {
-                          const display = getCellDisplay(cellData);
-                          return (
-                            <TableCell key={ch.id} className="text-center p-0">
-                              <div className={cn("px-2 py-1.5 text-sm", display.colorClass)}>{display.content}</div>
-                            </TableCell>
-                          );
-                        }
-                        return (
-                          <TableCell key={ch.id} className="text-center p-0">
-                            <CellEditPopover channelId={ch.id} channelName={ch.name} row={row} cellData={cellData} />
-                          </TableCell>
-                        );
-                      })}
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : overrides.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <Layers className="h-10 w-10 mx-auto mb-3 opacity-30" />
+            <p>{debouncedSearch ? "No overrides match your search." : "No product or variant overrides yet."}</p>
+            <p className="text-xs mt-1">All products use channel defaults above.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="min-w-[120px]">Channel</TableHead>
+                  <TableHead className="min-w-[80px]">Scope</TableHead>
+                  <TableHead className="min-w-[180px]">Product / Variant</TableHead>
+                  <TableHead className="min-w-[100px]">Mode</TableHead>
+                  <TableHead className="text-right min-w-[80px]">Value</TableHead>
+                  <TableHead className="text-right min-w-[60px]">Floor</TableHead>
+                  <TableHead className="text-right min-w-[60px]">Ceiling</TableHead>
+                  <TableHead className="min-w-[70px]">Eligible</TableHead>
+                  <TableHead className="min-w-[150px]">Notes</TableHead>
+                  <TableHead className="w-[80px]"></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {overrides.map((rule) => {
+                  const m = modeIndicator(rule.mode, rule.eligible);
+                  const scope = ruleScope(rule);
+                  return (
+                    <TableRow key={rule.id} className={cn(!rule.eligible && "bg-red-50/50 dark:bg-red-950/10")}>
+                      <TableCell className="font-medium text-sm">{rule.channelName}</TableCell>
+                      <TableCell>
+                        <Badge variant={scope === "variant" ? "default" : "secondary"} className="text-xs">
+                          {scope}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-0.5">
+                          {rule.productName && (
+                            <p className="text-sm truncate max-w-[200px]">{rule.productName}</p>
+                          )}
+                          {rule.variantSku && (
+                            <p className="text-xs text-muted-foreground font-mono">{rule.variantSku}</p>
+                          )}
+                          {rule.variantName && (
+                            <p className="text-xs text-muted-foreground">{rule.variantName}</p>
+                          )}
+                          {!rule.productName && !rule.variantName && (
+                            <span className="text-xs text-muted-foreground">
+                              {rule.productId ? `Product #${rule.productId}` : ""}{" "}
+                              {rule.productVariantId ? `Variant #${rule.productVariantId}` : ""}
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className={cn("text-sm font-medium", m.color)}>
+                          {m.icon} {m.label}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">
+                        {rule.mode === "share" && rule.sharePct != null && `${rule.sharePct}%`}
+                        {rule.mode === "fixed" && rule.fixedQty != null && rule.fixedQty.toLocaleString()}
+                        {rule.mode === "mirror" && "100%"}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{rule.floorAtp || "—"}</TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{rule.ceilingQty ?? "—"}</TableCell>
+                      <TableCell>
+                        {rule.eligible ? (
+                          <CheckCircle2 className="h-4 w-4 text-green-500" />
+                        ) : (
+                          <Ban className="h-4 w-4 text-red-500" />
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground truncate max-w-[150px]">
+                        {rule.notes || "—"}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => setEditingRule(rule)}>
+                                <Pencil className="h-3 w-3" />
+                              </Button>
+                            </DialogTrigger>
+                            {editingRule?.id === rule.id && (
+                              <RuleDialog
+                                rule={editingRule}
+                                channels={activeChannels}
+                                onClose={() => setEditingRule(null)}
+                              />
+                            )}
+                          </Dialog>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                            onClick={() => deleteMutation.mutate(rule.id)}
+                            disabled={deleteMutation.isPending}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </TableCell>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between px-4 py-3 border-t">
-              <span className="text-sm text-muted-foreground">
-                {((page - 1) * pageSize + 1).toLocaleString()}-{Math.min(page * pageSize, totalCount).toLocaleString()} of {totalCount.toLocaleString()}
-              </span>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-                  <ChevronLeft className="h-4 w-4 mr-1" /> Previous
-                </Button>
-                <span className="text-sm text-muted-foreground px-2">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
-                  Next <ChevronRight className="h-4 w-4 ml-1" />
-                </Button>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+// ============================================
+// Main Component
+// ============================================
+
+export default function ChannelAllocation() {
+  return (
+    <div className="space-y-4 p-2 md:p-6">
+      <div>
+        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Channel Allocation</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Configure warehouse assignments and allocation rules for the parallel inventory model.
+        </p>
+      </div>
+
+      <Tabs defaultValue="warehouses" className="w-full">
+        <TabsList>
+          <TabsTrigger value="warehouses" className="gap-2">
+            <Warehouse className="h-4 w-4" />
+            Warehouse Assignments
+          </TabsTrigger>
+          <TabsTrigger value="rules" className="gap-2">
+            <Layers className="h-4 w-4" />
+            Allocation Rules
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="warehouses" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Warehouse → Channel Assignments</CardTitle>
+              <CardDescription>
+                Each channel sees ATP only from its assigned warehouses. Unassigned channels use all fulfillment warehouses.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <WarehouseAssignmentsSection />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="rules" className="mt-4">
+          <AllocationRulesSection />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
