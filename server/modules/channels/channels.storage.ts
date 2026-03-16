@@ -106,7 +106,7 @@ export interface IChannelStorage {
     discountCodes: any;
   } | null>;
   getMemberPlanByEmail(email: string): Promise<string | null>;
-  searchVariantsWithInventory(query: string): Promise<{ variantId: number; sku: string | null; variantName: string | null; productName: string | null }[]>;
+  searchVariantsWithInventory(query: string): Promise<{ variantId: number; productId: number; sku: string | null; variantName: string | null; productName: string | null }[]>;
   updateChannelAllocation(channelId: number, allocationPct: number | null, allocationFixedQty: number | null): Promise<Channel | null>;
 }
 
@@ -575,11 +575,12 @@ export const channelMethods: IChannelStorage = {
     return result.rows[0].plan_name;
   },
 
-  async searchVariantsWithInventory(query: string): Promise<{ variantId: number; sku: string | null; variantName: string | null; productName: string | null }[]> {
+  async searchVariantsWithInventory(query: string): Promise<{ variantId: number; productId: number; sku: string | null; variantName: string | null; productName: string | null }[]> {
     const pattern = `%${query}%`;
     return db
       .selectDistinct({
         variantId: productVariants.id,
+        productId: products.id,
         sku: productVariants.sku,
         variantName: productVariants.name,
         productName: products.name,

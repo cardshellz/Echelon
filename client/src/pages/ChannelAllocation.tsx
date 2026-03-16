@@ -400,8 +400,22 @@ function RuleDialog({
   const [ceilingQty, setCeilingQty] = useState(rule?.ceilingQty != null ? String(rule.ceilingQty) : "");
   const [eligible, setEligible] = useState(rule?.eligible ?? true);
   const [notes, setNotes] = useState(rule?.notes ?? "");
-  const [productIdInput, setProductIdInput] = useState(rule?.productId != null ? String(rule.productId) : "");
-  const [variantIdInput, setVariantIdInput] = useState(rule?.productVariantId != null ? String(rule.productVariantId) : "");
+
+  // SKU typeahead state
+  const [skuSearch, setSkuSearch] = useState(rule?.variantSku ?? rule?.productName ?? "");
+  const [selectedProductId, setSelectedProductId] = useState<number | null>(rule?.productId ?? null);
+  const [selectedVariantId, setSelectedVariantId] = useState<number | null>(rule?.productVariantId ?? null);
+  const [selectedLabel, setSelectedLabel] = useState(
+    rule?.variantSku ? `${rule.variantSku} — ${rule.productName ?? ""}${rule.variantName ? ` (${rule.variantName})` : ""}` : ""
+  );
+  const [showSkuResults, setShowSkuResults] = useState(false);
+  const debouncedSkuSearch = useDebounce(skuSearch, 300);
+
+  const { data: skuResults = [] } = useQuery<{ variantId: number; productId: number; sku: string; variantName: string; productName: string }[]>({
+    queryKey: ["/api/channel-allocation/search", debouncedSkuSearch],
+    queryFn: () => fetch(`/api/channel-allocation/search?q=${encodeURIComponent(debouncedSkuSearch)}`).then(r => r.json()),
+    enabled: debouncedSkuSearch.length >= 2 && showSkuResults,
+  });
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation-rules"] });
@@ -411,8 +425,8 @@ function RuleDialog({
     mutationFn: async () => {
       const body = {
         channelId,
-        productId: productIdInput ? parseInt(productIdInput) : null,
-        productVariantId: variantIdInput ? parseInt(variantIdInput) : null,
+        productId: selectedProductId,
+        productVariantId: selectedVariantId,
         mode,
         sharePct: mode === "share" ? parseInt(sharePct) : null,
         fixedQty: mode === "fixed" ? parseInt(fixedQty) : null,
@@ -456,29 +470,72 @@ function RuleDialog({
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <Label className="text-xs">Product ID (blank = channel default)</Label>
-            <Input
-              type="number"
-              placeholder="All products"
-              value={productIdInput}
-              onChange={(e) => setProductIdInput(e.target.value)}
-              disabled={isEdit}
-              autoComplete="off"
-            />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs">Variant ID (blank = product level)</Label>
-            <Input
-              type="number"
-              placeholder="All variants"
-              value={variantIdInput}
-              onChange={(e) => setVariantIdInput(e.target.value)}
-              disabled={isEdit}
-              autoComplete="off"
-            />
-          </div>
+        <div className="space-y-1 relative">
+          <Label className="text-xs">
+            Product / Variant
+            <InfoTip text="Leave blank to create a channel-wide default rule. Type a SKU to target a specific variant. The most specific rule wins." />
+          </Label>
+          {selectedLabel && !isEdit ? (
+            <div className="flex items-center gap-2 border rounded-md px-3 py-2 bg-muted/50">
+              <span className="text-sm flex-1 truncate">{selectedLabel}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-5 w-5 p-0"
+                onClick={() => {
+                  setSelectedProductId(null);
+                  setSelectedVariantId(null);
+                  setSelectedLabel("");
+                  setSkuSearch("");
+                }}
+              >
+                <X className="h-3 w-3" />
+              </Button>
+            </div>
+          ) : isEdit ? (
+            <div className="text-sm text-muted-foreground border rounded-md px-3 py-2 bg-muted/30">
+              {selectedLabel || "Channel default (all products)"}
+            </div>
+          ) : (
+            <>
+              <div className="relative">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search SKU or product name... (blank = channel default)"
+                  value={skuSearch}
+                  onChange={(e) => {
+                    setSkuSearch(e.target.value);
+                    setShowSkuResults(true);
+                  }}
+                  onFocus={() => setShowSkuResults(true)}
+                  onBlur={() => setTimeout(() => setShowSkuResults(false), 200)}
+                  className="pl-9"
+                  autoComplete="off"
+                />
+              </div>
+              {showSkuResults && skuResults.length > 0 && (
+                <div className="absolute z-50 w-full mt-1 bg-popover border rounded-md shadow-lg max-h-48 overflow-y-auto">
+                  {skuResults.map((r) => (
+                    <button
+                      key={r.variantId}
+                      className="w-full text-left px-3 py-2 hover:bg-accent text-sm flex justify-between items-center"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setSelectedProductId(r.productId);
+                        setSelectedVariantId(r.variantId);
+                        setSelectedLabel(`${r.sku} — ${r.productName}${r.variantName ? ` (${r.variantName})` : ""}`);
+                        setSkuSearch("");
+                        setShowSkuResults(false);
+                      }}
+                    >
+                      <span className="font-mono text-xs">{r.sku}</span>
+                      <span className="text-muted-foreground text-xs truncate ml-2">{r.productName}{r.variantName ? ` · ${r.variantName}` : ""}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div className="flex items-center justify-between">
