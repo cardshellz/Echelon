@@ -451,7 +451,7 @@ function RuleDialog({
   });
 
   return (
-    <DialogContent className="max-w-lg">
+    <DialogContent className="max-w-xl w-[95vw] overflow-y-auto max-h-[85vh]">
       <DialogHeader>
         <DialogTitle>{isEdit ? "Edit" : "Create"} Allocation Rule</DialogTitle>
       </DialogHeader>
