@@ -587,10 +587,8 @@ export const channelMethods: IChannelStorage = {
       })
       .from(productVariants)
       .innerJoin(products, eq(products.id, productVariants.productId))
-      .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
       .where(and(
         eq(productVariants.isActive, true),
-        gt(inventoryLevels.variantQty, 0),
         or(
           ilike(productVariants.sku, pattern),
           ilike(productVariants.name, pattern),
