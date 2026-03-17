@@ -30,7 +30,6 @@ import InventoryHistory from "@/pages/InventoryHistory";
 import Replenishment from "@/pages/Replenishment";
 import BinAssignments from "@/pages/BinAssignments";
 import ChannelAllocation from "@/pages/ChannelAllocation";
-import EbaySettings from "@/pages/EbaySettings";
 import ProductLines from "@/pages/ProductLines";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
@@ -153,9 +152,6 @@ function Router() {
         </Route>
         <Route path="/channel-allocation">
           <ProtectedRoute component={ChannelAllocation} allowedRoles={["admin", "lead"]} />
-        </Route>
-        <Route path="/ebay-settings">
-          <ProtectedRoute component={EbaySettings} allowedRoles={["admin"]} />
         </Route>
         <Route path="/catalog">
           <ProtectedRoute component={CatalogPage} allowedRoles={["admin", "lead"]} />

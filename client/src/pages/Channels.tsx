@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
+import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle,
   Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload,
-  ShieldAlert, Radio,
+  ShieldAlert, Radio, FileText, Eye, BarChart3, ShieldCheck, Loader2, XCircle,
 } from "lucide-react";
 
 interface ChannelConnection {
@@ -71,6 +72,70 @@ interface WarehouseOption {
   id: number;
   code: string;
   name: string;
+}
+
+// eBay-specific types
+interface EbaySettings {
+  connected: boolean;
+  configured: boolean;
+  channel: { id: number; name: string; status: string } | null;
+  ebayUsername: string | null;
+  tokenInfo: {
+    accessTokenExpiresAt: string;
+    refreshTokenExpiresAt: string;
+    lastRefreshedAt: string;
+    environment: string;
+  } | null;
+  config: {
+    merchantLocationKey: string | null;
+    fulfillmentPolicyId: string | null;
+    returnPolicyId: string | null;
+    paymentPolicyId: string | null;
+    merchantLocation: {
+      name: string;
+      addressLine1: string;
+      addressLine2: string;
+      city: string;
+      stateOrProvince: string;
+      postalCode: string;
+      country: string;
+    } | null;
+  };
+  lastSyncAt: string | null;
+  syncStatus: string;
+  error?: string;
+}
+
+interface EbayPolicy {
+  id: string;
+  name: string;
+  description: string;
+  marketplaceId: string;
+}
+
+interface EbayPoliciesResponse {
+  fulfillmentPolicies: EbayPolicy[];
+  returnPolicies: EbayPolicy[];
+  paymentPolicies: EbayPolicy[];
+}
+
+interface EbayListingPreview {
+  productId: number;
+  title: string;
+  description: string | null;
+  category: string;
+  categoryId: string;
+  images: string[];
+  variants: { sku: string; name: string; priceCents: number; price: string }[];
+  bulletPoints: string[];
+  brand: string;
+}
+
+interface EbayStats {
+  totalOrders: number;
+  activeListings: number;
+  lastSyncAt: string | null;
+  syncStatus: string;
 }
 
 const PROVIDER_OPTIONS = [
@@ -180,6 +245,116 @@ export default function Channels() {
   const [shopifyLocations, setShopifyLocations] = useState<ShopifyLocation[]>([]);
   const [locationMappings, setLocationMappings] = useState<Record<string, number | null>>({});
   const [locationsLoading, setLocationsLoading] = useState(false);
+
+  // eBay-specific state
+  const [ebayLocationForm, setEbayLocationForm] = useState({
+    name: "Card Shellz HQ",
+    addressLine1: "20 Leonberg Rd",
+    addressLine2: "",
+    city: "Cranberry Township",
+    stateOrProvince: "PA",
+    postalCode: "16066",
+    country: "US",
+    merchantLocationKey: "CARDSHELLZ_HQ",
+  });
+  const [ebayPolicySelections, setEbayPolicySelections] = useState({
+    fulfillmentPolicyId: "",
+    returnPolicyId: "",
+    paymentPolicyId: "",
+  });
+  const [ebayPolicySynced, setEbayPolicySynced] = useState(false);
+
+  const isEbaySelected = selectedChannel?.provider === 'ebay';
+
+  const { data: ebaySettings, isLoading: ebaySettingsLoading } = useQuery<EbaySettings>({
+    queryKey: ["/api/ebay/settings"],
+    enabled: isEbaySelected,
+  });
+
+  const { data: ebayPolicies, isLoading: ebayPoliciesLoading } = useQuery<EbayPoliciesResponse>({
+    queryKey: ["/api/ebay/policies"],
+    enabled: isEbaySelected && !!ebaySettings?.connected,
+  });
+
+  const { data: ebayPreviewData, isLoading: ebayPreviewLoading, refetch: refetchEbayPreview } = useQuery<{ previews: EbayListingPreview[] }>({
+    queryKey: ["/api/ebay/listings/preview"],
+    enabled: isEbaySelected,
+  });
+
+  const { data: ebayStats, isLoading: ebayStatsLoading } = useQuery<EbayStats>({
+    queryKey: ["/api/ebay/stats"],
+    enabled: isEbaySelected && !!ebaySettings?.connected,
+  });
+
+  // Sync policy selections from eBay settings when loaded
+  useEffect(() => {
+    if (ebaySettings?.config && !ebayPolicySynced) {
+      if (ebaySettings.config.fulfillmentPolicyId || ebaySettings.config.returnPolicyId || ebaySettings.config.paymentPolicyId) {
+        setEbayPolicySelections({
+          fulfillmentPolicyId: ebaySettings.config.fulfillmentPolicyId || "",
+          returnPolicyId: ebaySettings.config.returnPolicyId || "",
+          paymentPolicyId: ebaySettings.config.paymentPolicyId || "",
+        });
+        setEbayPolicySynced(true);
+      }
+    }
+  }, [ebaySettings, ebayPolicySynced]);
+
+  // Reset eBay policy sync flag when switching channels
+  useEffect(() => {
+    setEbayPolicySynced(false);
+  }, [selectedChannel?.id]);
+
+  const createEbayLocationMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await apiRequest("POST", "/api/ebay/location", ebayLocationForm);
+      return resp.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Location Created", description: data.message });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/settings"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const saveEbayPoliciesMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await apiRequest("PUT", "/api/ebay/settings", ebayPolicySelections);
+      return resp.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Settings Saved", description: "Business policy selections saved." });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/settings"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const testEbayListingMutation = useMutation({
+    mutationFn: async (productId: number) => {
+      const resp = await apiRequest("POST", "/api/ebay/listings/test", { productId });
+      return resp.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: data.success ? "Test Listing Created!" : "Partial Success",
+        description: data.warning || data.message,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const ebayHasLocation = !!ebaySettings?.config?.merchantLocationKey;
+  const ebayHasPolicies = !!(
+    ebaySettings?.config?.fulfillmentPolicyId &&
+    ebaySettings?.config?.returnPolicyId &&
+    ebaySettings?.config?.paymentPolicyId
+  );
 
   const { data: warehouses = [] } = useQuery<WarehouseOption[]>({
     queryKey: ["/api/warehouses"],
@@ -537,7 +712,7 @@ export default function Channels() {
 
       {/* Channel Detail Dialog */}
       <Dialog open={!!selectedChannel} onOpenChange={(open) => !open && setSelectedChannel(null)}>
-        <DialogContent className="max-w-md md:max-w-2xl max-h-[90vh] overflow-y-auto p-4">
+        <DialogContent className="max-w-md md:max-w-2xl lg:max-w-3xl max-h-[90vh] overflow-y-auto p-4">
           {selectedChannel && (
             <>
               <DialogHeader>
@@ -551,6 +726,9 @@ export default function Channels() {
                 <TabsList className="w-full flex-wrap h-auto">
                   <TabsTrigger value="settings" className="text-sm">Settings</TabsTrigger>
                   <TabsTrigger value="connection" className="text-sm">Connection</TabsTrigger>
+                  {selectedChannel.provider === 'ebay' && (
+                    <TabsTrigger value="ebay" className="text-sm">eBay Config</TabsTrigger>
+                  )}
                   {selectedChannel.type === 'partner' && (
                     <TabsTrigger value="partner" className="text-sm">Partner Info</TabsTrigger>
                   )}
@@ -834,6 +1012,344 @@ export default function Channels() {
                   )}
                 </TabsContent>
                 
+                {/* eBay Config Tab */}
+                {selectedChannel.provider === 'ebay' && (
+                  <TabsContent value="ebay" className="space-y-4 mt-4">
+                    {ebaySettingsLoading ? (
+                      <div className="flex items-center justify-center py-8">
+                        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                      </div>
+                    ) : (
+                      <>
+                        {/* Connection Status */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                            <Label className="text-sm font-medium">Connection Status</Label>
+                          </div>
+                          <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 bg-muted rounded-lg">
+                            <div className="flex items-center gap-3 flex-1">
+                              {ebaySettings?.connected ? (
+                                <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5 py-1 px-3">
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  Connected
+                                </Badge>
+                              ) : (
+                                <Badge variant="destructive" className="gap-1.5 py-1 px-3">
+                                  <XCircle className="h-3.5 w-3.5" />
+                                  Not Connected
+                                </Badge>
+                              )}
+                              {ebaySettings?.ebayUsername && (
+                                <span className="text-sm text-muted-foreground">
+                                  Account: <strong className="text-foreground">{ebaySettings.ebayUsername}</strong>
+                                </span>
+                              )}
+                              {ebaySettings?.tokenInfo?.environment && (
+                                <Badge variant="outline" className="text-xs">{ebaySettings.tokenInfo.environment}</Badge>
+                              )}
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="min-h-[36px] shrink-0"
+                              onClick={() => window.open("/api/ebay/oauth/consent", "_blank")}
+                            >
+                              <ExternalLink className="h-4 w-4 mr-2" />
+                              {ebaySettings?.connected ? "Reconnect" : "Connect eBay"}
+                            </Button>
+                          </div>
+                          {ebaySettings?.tokenInfo && (
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-muted-foreground">
+                              <div className="flex items-center gap-1">
+                                <Clock className="h-3 w-3 shrink-0" />
+                                Access expires: <span className="text-foreground font-medium">{new Date(ebaySettings.tokenInfo.accessTokenExpiresAt).toLocaleDateString()}</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <Clock className="h-3 w-3 shrink-0" />
+                                Refresh expires: <span className="text-foreground font-medium">{ebaySettings.tokenInfo.refreshTokenExpiresAt ? new Date(ebaySettings.tokenInfo.refreshTokenExpiresAt).toLocaleDateString() : "N/A"}</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <Clock className="h-3 w-3 shrink-0" />
+                                Last refreshed: <span className="text-foreground font-medium">{ebaySettings.tokenInfo.lastRefreshedAt ? new Date(ebaySettings.tokenInfo.lastRefreshedAt).toLocaleDateString() : "Never"}</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Merchant Location */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <MapPin className="h-4 w-4 text-muted-foreground" />
+                            <Label className="text-sm font-medium">Merchant Location</Label>
+                          </div>
+                          {ebayHasLocation && ebaySettings?.config?.merchantLocation ? (
+                            <div className="flex items-start gap-3 p-3 border rounded-lg">
+                              <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5 py-1 px-3 shrink-0 mt-0.5">
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                Active
+                              </Badge>
+                              <div className="text-sm">
+                                <p className="font-medium">{ebaySettings.config.merchantLocation.name}</p>
+                                <p className="text-muted-foreground">
+                                  {ebaySettings.config.merchantLocation.addressLine1}
+                                  {ebaySettings.config.merchantLocation.addressLine2 && `, ${ebaySettings.config.merchantLocation.addressLine2}`}
+                                </p>
+                                <p className="text-muted-foreground">
+                                  {ebaySettings.config.merchantLocation.city}, {ebaySettings.config.merchantLocation.stateOrProvince} {ebaySettings.config.merchantLocation.postalCode}
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  Key: <code className="bg-muted px-1 rounded">{ebaySettings.config.merchantLocationKey}</code>
+                                </p>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-3 p-3 border rounded-lg">
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <Label htmlFor="ebay-loc-name" className="text-xs">Location Name</Label>
+                                  <Input id="ebay-loc-name" className="h-9 text-sm" value={ebayLocationForm.name} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, name: e.target.value })} />
+                                </div>
+                                <div>
+                                  <Label htmlFor="ebay-loc-key" className="text-xs">Location Key</Label>
+                                  <Input id="ebay-loc-key" className="h-9 text-sm" value={ebayLocationForm.merchantLocationKey} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, merchantLocationKey: e.target.value })} />
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <Label htmlFor="ebay-loc-addr1" className="text-xs">Address Line 1</Label>
+                                  <Input id="ebay-loc-addr1" className="h-9 text-sm" value={ebayLocationForm.addressLine1} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, addressLine1: e.target.value })} />
+                                </div>
+                                <div>
+                                  <Label htmlFor="ebay-loc-addr2" className="text-xs">Address Line 2</Label>
+                                  <Input id="ebay-loc-addr2" className="h-9 text-sm" value={ebayLocationForm.addressLine2} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, addressLine2: e.target.value })} />
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-4 gap-3">
+                                <div>
+                                  <Label htmlFor="ebay-loc-city" className="text-xs">City</Label>
+                                  <Input id="ebay-loc-city" className="h-9 text-sm" value={ebayLocationForm.city} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, city: e.target.value })} />
+                                </div>
+                                <div>
+                                  <Label htmlFor="ebay-loc-state" className="text-xs">State</Label>
+                                  <Input id="ebay-loc-state" className="h-9 text-sm" value={ebayLocationForm.stateOrProvince} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, stateOrProvince: e.target.value })} />
+                                </div>
+                                <div>
+                                  <Label htmlFor="ebay-loc-zip" className="text-xs">ZIP</Label>
+                                  <Input id="ebay-loc-zip" className="h-9 text-sm" value={ebayLocationForm.postalCode} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, postalCode: e.target.value })} />
+                                </div>
+                                <div>
+                                  <Label htmlFor="ebay-loc-country" className="text-xs">Country</Label>
+                                  <Input id="ebay-loc-country" className="h-9 text-sm" value={ebayLocationForm.country} onChange={(e) => setEbayLocationForm({ ...ebayLocationForm, country: e.target.value })} />
+                                </div>
+                              </div>
+                              <Button
+                                size="sm"
+                                className="min-h-[36px]"
+                                onClick={() => createEbayLocationMutation.mutate()}
+                                disabled={createEbayLocationMutation.isPending || !ebaySettings?.connected}
+                              >
+                                {createEbayLocationMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                                <MapPin className="h-4 w-4 mr-2" />
+                                Create Location on eBay
+                              </Button>
+                              {!ebaySettings?.connected && (
+                                <p className="text-xs text-muted-foreground">Connect to eBay first.</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Business Policies */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <FileText className="h-4 w-4 text-muted-foreground" />
+                            <Label className="text-sm font-medium">Business Policies</Label>
+                          </div>
+                          {!ebaySettings?.connected ? (
+                            <p className="text-sm text-muted-foreground p-3 bg-muted rounded-lg">Connect to eBay to load business policies.</p>
+                          ) : ebayPoliciesLoading ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground p-3">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Loading policies from eBay...
+                            </div>
+                          ) : (
+                            <div className="space-y-3 p-3 border rounded-lg">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                <div>
+                                  <Label className="text-xs">Fulfillment (Shipping)</Label>
+                                  <Select value={ebayPolicySelections.fulfillmentPolicyId} onValueChange={(v) => setEbayPolicySelections({ ...ebayPolicySelections, fulfillmentPolicyId: v })}>
+                                    <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select..." /></SelectTrigger>
+                                    <SelectContent>
+                                      {(ebayPolicies?.fulfillmentPolicies || []).map((p) => (
+                                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div>
+                                  <Label className="text-xs">Return Policy</Label>
+                                  <Select value={ebayPolicySelections.returnPolicyId} onValueChange={(v) => setEbayPolicySelections({ ...ebayPolicySelections, returnPolicyId: v })}>
+                                    <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select..." /></SelectTrigger>
+                                    <SelectContent>
+                                      {(ebayPolicies?.returnPolicies || []).map((p) => (
+                                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div>
+                                  <Label className="text-xs">Payment Policy</Label>
+                                  <Select value={ebayPolicySelections.paymentPolicyId} onValueChange={(v) => setEbayPolicySelections({ ...ebayPolicySelections, paymentPolicyId: v })}>
+                                    <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select..." /></SelectTrigger>
+                                    <SelectContent>
+                                      {(ebayPolicies?.paymentPolicies || []).map((p) => (
+                                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <Button
+                                  size="sm"
+                                  className="min-h-[36px]"
+                                  onClick={() => saveEbayPoliciesMutation.mutate()}
+                                  disabled={saveEbayPoliciesMutation.isPending || !ebayPolicySelections.fulfillmentPolicyId || !ebayPolicySelections.returnPolicyId || !ebayPolicySelections.paymentPolicyId}
+                                >
+                                  {saveEbayPoliciesMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                                  Save Policies
+                                </Button>
+                                {ebayHasPolicies && (
+                                  <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5 text-xs">
+                                    <CheckCircle2 className="h-3 w-3" />
+                                    All configured
+                                  </Badge>
+                                )}
+                              </div>
+                              {ebayPolicies && !ebayPolicies.fulfillmentPolicies.length && !ebayPolicies.returnPolicies.length && !ebayPolicies.paymentPolicies.length && (
+                                <p className="text-xs text-muted-foreground">
+                                  No policies found. Create them in your{" "}
+                                  <a href="https://www.ebay.com/sh/sell-preferences/business-policies" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">eBay Seller Hub</a> first.
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Listing Preview */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Eye className="h-4 w-4 text-muted-foreground" />
+                              <Label className="text-sm font-medium">Listing Preview</Label>
+                            </div>
+                            <Button variant="outline" size="sm" className="min-h-[32px]" onClick={() => refetchEbayPreview()} disabled={ebayPreviewLoading}>
+                              {ebayPreviewLoading ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+                              Refresh
+                            </Button>
+                          </div>
+                          {ebayPreviewLoading ? (
+                            <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                              <Loader2 className="h-4 w-4 animate-spin" /> Generating previews...
+                            </div>
+                          ) : !ebayPreviewData?.previews?.length ? (
+                            <p className="text-sm text-muted-foreground py-4">No products available for preview.</p>
+                          ) : (
+                            <div className="space-y-3">
+                              {ebayPreviewData.previews.map((preview) => (
+                                <div key={preview.productId} className="border rounded-lg p-3 flex gap-3">
+                                  <div className="shrink-0">
+                                    {preview.images.length > 0 ? (
+                                      <img src={preview.images[0]} alt={preview.title} className="w-16 h-16 object-cover rounded border bg-muted" />
+                                    ) : (
+                                      <div className="w-16 h-16 rounded border bg-muted flex items-center justify-center">
+                                        <Package className="h-6 w-6 text-muted-foreground" />
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="flex-1 min-w-0 space-y-1">
+                                    <div className="flex items-start justify-between gap-2">
+                                      <h3 className="font-medium text-xs leading-snug line-clamp-2">{preview.title}</h3>
+                                      {ebayHasLocation && ebayHasPolicies && (
+                                        <Button variant="outline" size="sm" className="shrink-0 text-xs h-7 px-2" onClick={() => testEbayListingMutation.mutate(preview.productId)} disabled={testEbayListingMutation.isPending}>
+                                          {testEbayListingMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <ExternalLink className="h-3 w-3 mr-1" />}
+                                          Test List
+                                        </Button>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <Badge variant="outline" className="text-[10px] py-0 h-5">{preview.category}</Badge>
+                                      <Badge variant="secondary" className="text-[10px] py-0 h-5">{preview.brand}</Badge>
+                                    </div>
+                                    {preview.variants.length > 0 && (
+                                      <div className="flex flex-wrap gap-1">
+                                        {preview.variants.slice(0, 4).map((v) => (
+                                          <span key={v.sku} className="text-[10px] bg-muted rounded px-1.5 py-0.5">
+                                            <span className="font-mono">{v.sku}</span> — <span className="font-medium">${v.price}</span>
+                                          </span>
+                                        ))}
+                                        {preview.variants.length > 4 && <span className="text-[10px] text-muted-foreground">+{preview.variants.length - 4} more</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Channel Stats */}
+                        {ebaySettings?.connected && (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <BarChart3 className="h-4 w-4 text-muted-foreground" />
+                              <Label className="text-sm font-medium">Channel Stats</Label>
+                            </div>
+                            {ebayStatsLoading ? (
+                              <div className="flex items-center gap-2 text-sm text-muted-foreground p-3">
+                                <Loader2 className="h-4 w-4 animate-spin" /> Loading stats...
+                              </div>
+                            ) : ebayStats ? (
+                              <div className="grid grid-cols-3 gap-3">
+                                <div className="border rounded-lg p-3 text-center">
+                                  <p className="text-2xl font-bold">{ebayStats.totalOrders}</p>
+                                  <p className="text-xs text-muted-foreground mt-1">Total Orders</p>
+                                </div>
+                                <div className="border rounded-lg p-3 text-center">
+                                  <p className="text-2xl font-bold">{ebayStats.activeListings}</p>
+                                  <p className="text-xs text-muted-foreground mt-1">Active Listings</p>
+                                </div>
+                                <div className="border rounded-lg p-3 text-center">
+                                  <p className="text-sm font-medium">{ebayStats.lastSyncAt ? new Date(ebayStats.lastSyncAt).toLocaleDateString() : "Never"}</p>
+                                  <p className="text-xs text-muted-foreground mt-1">Last Sync</p>
+                                  <Badge variant={ebayStats.syncStatus === "ok" ? "default" : "secondary"} className={`mt-1 text-[10px] ${ebayStats.syncStatus === "ok" ? "bg-green-600" : ""}`}>
+                                    {ebayStats.syncStatus}
+                                  </Badge>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+
+                        {/* Setup Checklist */}
+                        {ebaySettings?.connected && (!ebayHasLocation || !ebayHasPolicies) && (
+                          <div className="flex items-start gap-3 p-3 border border-amber-500/50 bg-amber-50/50 dark:bg-amber-950/10 rounded-lg">
+                            <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                            <div className="text-xs">
+                              <p className="font-medium text-amber-800 dark:text-amber-400">Setup incomplete</p>
+                              <ul className="mt-1 space-y-0.5 text-amber-700 dark:text-amber-500">
+                                {!ebayHasLocation && <li>• Create a merchant location</li>}
+                                {!ebayHasPolicies && <li>• Select business policies</li>}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </TabsContent>
+                )}
+
                 {selectedChannel.type === 'partner' && (
                   <TabsContent value="partner" className="space-y-4 mt-4">
                     {selectedChannel.partnerProfile ? (
