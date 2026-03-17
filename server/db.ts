@@ -284,6 +284,26 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked ebay_listing_rules table");
 
+    // Migration: ebay_category_mappings table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ebay_category_mappings (
+        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        channel_id INTEGER NOT NULL REFERENCES channels(id),
+        product_type_slug VARCHAR(50) NOT NULL,
+        ebay_browse_category_id VARCHAR(20),
+        ebay_browse_category_name VARCHAR(200),
+        ebay_store_category_id VARCHAR(20),
+        ebay_store_category_name VARCHAR(200),
+        fulfillment_policy_override VARCHAR(20),
+        return_policy_override VARCHAR(20),
+        payment_policy_override VARCHAR(20),
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        UNIQUE(channel_id, product_type_slug)
+      )
+    `);
+    console.log("Checked ebay_category_mappings table");
+
     // Cleanup: delete zombie inventory_levels (all buckets zero, not assigned to bin)
     const zombieResult = await client.query(`
       DELETE FROM inventory_levels il

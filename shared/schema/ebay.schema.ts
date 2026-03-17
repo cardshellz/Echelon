@@ -76,3 +76,33 @@ export const insertEbayListingRuleSchema = createInsertSchema(ebayListingRules).
 
 export type InsertEbayListingRule = z.infer<typeof insertEbayListingRuleSchema>;
 export type EbayListingRule = typeof ebayListingRules.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// eBay Category Mappings — product type → eBay category associations
+// ---------------------------------------------------------------------------
+
+export const ebayCategoryMappings = pgTable("ebay_category_mappings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  productTypeSlug: varchar("product_type_slug", { length: 50 }).notNull(),
+  ebayBrowseCategoryId: varchar("ebay_browse_category_id", { length: 20 }),
+  ebayBrowseCategoryName: varchar("ebay_browse_category_name", { length: 200 }),
+  ebayStoreCategoryId: varchar("ebay_store_category_id", { length: 20 }),
+  ebayStoreCategoryName: varchar("ebay_store_category_name", { length: 200 }),
+  fulfillmentPolicyOverride: varchar("fulfillment_policy_override", { length: 20 }),
+  returnPolicyOverride: varchar("return_policy_override", { length: 20 }),
+  paymentPolicyOverride: varchar("payment_policy_override", { length: 20 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ebay_cat_map_channel_type_idx").on(table.channelId, table.productTypeSlug),
+]);
+
+export const insertEbayCategoryMappingSchema = createInsertSchema(ebayCategoryMappings).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertEbayCategoryMapping = z.infer<typeof insertEbayCategoryMappingSchema>;
+export type EbayCategoryMapping = typeof ebayCategoryMappings.$inferSelect;
