@@ -9,12 +9,14 @@ import { inventoryStorage } from "../inventory";
 const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage };
 import type { InsertOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
+import type { OmsService } from "../oms/oms.service";
 
 interface SyncServices {
   inventoryCore: ServiceRegistry["inventoryCore"];
   reservation: ServiceRegistry["reservation"];
   fulfillmentRouter: ServiceRegistry["fulfillmentRouter"];
   slaMonitor: ServiceRegistry["slaMonitor"];
+  oms?: OmsService;
 }
 
 let services: SyncServices | null = null;
@@ -29,7 +31,7 @@ let reservation: SyncServices["reservation"];
 let fulfillmentRouter: SyncServices["fulfillmentRouter"];
 let slaMonitor: SyncServices["slaMonitor"];
 
-export function initOrderSyncServices(reg: Pick<ServiceRegistry, "inventoryCore" | "reservation" | "fulfillmentRouter" | "slaMonitor">) {
+export function initOrderSyncServices(reg: Pick<ServiceRegistry, "inventoryCore" | "reservation" | "fulfillmentRouter" | "slaMonitor"> & { oms?: OmsService }) {
   services = reg;
   inventoryCore = reg.inventoryCore;
   reservation = reg.reservation;
@@ -341,6 +343,15 @@ async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
   }
 
   console.log(`[ORDER SYNC] Created order ${rawOrder.order_number} (status: ${warehouseStatus}, items: ${enrichedItems.length})`);
+
+  // Bridge to OMS for unified order view (non-blocking)
+  if (services?.oms) {
+    const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
+    bridgeShopifyOrderToOms(db, services.oms, shopifyOrderId).catch((err: any) => {
+      console.error(`[ORDER SYNC] OMS bridge failed for ${rawOrder.order_number}: ${err.message}`);
+    });
+  }
+
   return true;
 }
 

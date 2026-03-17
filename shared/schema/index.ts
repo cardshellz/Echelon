@@ -10,3 +10,4 @@ export * from "./orders.schema";
 export * from "./inventory.schema";
 export * from "./notifications.schema";
 export * from "./ebay.schema";
+export * from "./oms.schema";

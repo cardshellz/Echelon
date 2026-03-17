@@ -9,6 +9,9 @@ import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
+import { startEbayOrderPolling } from "./modules/oms/ebay-order-ingestion";
+import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
+import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { eq } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
 
@@ -240,6 +243,35 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
   startEchelonSyncScheduler(services, db);
+
+  // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
+  try {
+    const { createEbayAuthConfig, EbayAuthService } = require("./modules/channels/adapters/ebay/ebay-auth.service");
+    const { createEbayApiClient } = require("./modules/channels/adapters/ebay/ebay-api.client");
+
+    const ebayConfig = createEbayAuthConfig();
+    const ebayAuthService = new EbayAuthService(db, ebayConfig);
+    const ebayApiClient = createEbayApiClient(ebayAuthService, 67);
+
+    startEbayOrderPolling(services.oms, ebayApiClient);
+
+    // Register eBay order webhook
+    const webhookHandler = createEbayOrderWebhookHandler(services.oms, ebayApiClient);
+    app.get("/api/ebay/webhooks/order", webhookHandler);
+    app.post("/api/ebay/webhooks/order", webhookHandler);
+    log("eBay order polling and webhook registered", "oms");
+  } catch (err: any) {
+    log(`eBay order polling not started (config missing): ${err.message}`, "oms");
+  }
+
+  // Shopify Bridge — backfill existing orders to OMS (runs once at startup, non-blocking)
+  setTimeout(async () => {
+    try {
+      await backfillShopifyOrders(db, services.oms, 500);
+    } catch (err: any) {
+      console.error("[Shopify Bridge] Backfill error:", err.message);
+    }
+  }, 10_000);
 
   await registerRoutes(httpServer, app);
 

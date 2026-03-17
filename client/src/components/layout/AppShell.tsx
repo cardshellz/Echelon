@@ -112,7 +112,8 @@ const navStructure: NavEntry[] = [
     label: "Orders & Fulfillment",
     icon: ShoppingCart,
     children: [
-      { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
+      { label: "Orders (OMS)", icon: Globe, href: "/oms/orders", roles: ["admin", "lead"] },
+      { label: "WMS Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Shipping", icon: Truck, href: "/shipping", roles: ["admin", "lead"] },
       { label: "Returns", icon: RotateCcw, href: "/returns", roles: ["admin", "lead"] },

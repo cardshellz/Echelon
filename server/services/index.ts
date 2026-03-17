@@ -50,6 +50,8 @@ import { createSyncSettingsService } from "../modules/channels/sync-settings.ser
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
+import { createOmsService } from "../modules/oms/oms.service";
+import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
 import { inventoryStorage } from "../modules/inventory";
@@ -152,6 +154,13 @@ export function createServices(db: any) {
     ...warehouseStorage,
   });
 
+  // OMS — Unified Order Management
+  const oms = createOmsService(db);
+
+  // Fulfillment Push — eBay API client created lazily when polling starts
+  // For now, pass null — the eBay client is created in server/index.ts when polling starts
+  const fulfillmentPush = createFulfillmentPushService(db, null);
+
   return {
     inventoryCore,
     inventoryLots,
@@ -178,6 +187,8 @@ export function createServices(db: any) {
     shipmentTracking,
     syncSettings,
     echelonOrchestrator,
+    oms,
+    fulfillmentPush,
   };
 }
 
