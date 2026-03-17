@@ -1,4 +1,4 @@
-import { pgTable, text, varchar, integer, timestamp, jsonb, uniqueIndex, boolean } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants, productAssets, productLines } from "./catalog.schema";
@@ -28,6 +28,9 @@ export const channels = pgTable("channels", {
   priority: integer("priority").notNull().default(0), // Higher = sync first
   allocationPct: integer("allocation_pct"), // % of total ATP pool allocated to this channel (null = no limit)
   allocationFixedQty: integer("allocation_fixed_qty"), // Fixed base-unit qty override (takes precedence over %)
+  syncEnabled: boolean("sync_enabled").default(false),
+  syncMode: varchar("sync_mode", { length: 10 }).default("dry_run"), // 'live' or 'dry_run'
+  sweepIntervalMinutes: integer("sweep_interval_minutes").default(15),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -466,3 +469,43 @@ export const allocationAuditLog = pgTable("allocation_audit_log", {
 });
 
 export type AllocationAuditLogEntry = typeof allocationAuditLog.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Sync Settings — global sync engine configuration
+// ---------------------------------------------------------------------------
+
+export const syncSettings = pgTable("sync_settings", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  globalEnabled: boolean("global_enabled").notNull().default(false),
+  sweepIntervalMinutes: integer("sweep_interval_minutes").notNull().default(15),
+  lastSweepAt: timestamp("last_sweep_at"),
+  lastSweepDurationMs: integer("last_sweep_duration_ms"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type SyncSettings = typeof syncSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Sync Log — unified activity log for all sync operations
+// ---------------------------------------------------------------------------
+
+export const syncLog = pgTable("sync_log", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").references(() => channels.id),
+  channelName: varchar("channel_name", { length: 100 }),
+  action: varchar("action", { length: 30 }).notNull(), // inventory_push, pricing_push, listing_create, listing_update
+  sku: varchar("sku", { length: 100 }),
+  productVariantId: integer("product_variant_id"),
+  previousValue: text("previous_value"),
+  newValue: text("new_value"),
+  status: varchar("status", { length: 20 }).notNull(), // dry_run, pushed, error, skipped
+  errorMessage: text("error_message"),
+  source: varchar("source", { length: 20 }).notNull(), // event, sweep, manual
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_sync_log_channel").on(table.channelId),
+  index("idx_sync_log_created").on(table.createdAt),
+  index("idx_sync_log_status").on(table.status),
+]);
+
+export type SyncLogEntry = typeof syncLog.$inferSelect;

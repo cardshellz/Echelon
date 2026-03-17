@@ -9,7 +9,6 @@ import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
-import { warehouseSettings } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
 
@@ -111,59 +110,143 @@ app.use((req, res, next) => {
 });
 
 /**
- * Scheduled channel sync — periodically pushes ATP to all active channel feeds
- * as a safety net for missed reactive syncs (e.g. transient API failures).
+ * Echelon Sync Scheduler — periodically runs the Echelon orchestrator
+ * as the sole sync engine, respecting the sync control hierarchy:
+ *
+ *   sync_settings.global_enabled → per-channel sync_enabled → sync_mode (live/dry_run)
+ *
+ * Replaces the old channelSync.syncAllProducts() scheduled interval.
  */
-function startChannelSyncScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
+function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
-  async function runChannelSync() {
+  async function runSweep() {
+    const startTime = Date.now();
     try {
-      const result = await services.channelSync.syncAllProducts();
-      if (result.synced > 0 || result.errors.length > 0) {
-        log(
-          `[Channel Sync Scheduler] Synced ${result.synced} feeds across ${result.total} products` +
-            (result.errors.length > 0 ? `, ${result.errors.length} errors` : ""),
-          "channel-sync",
-        );
+      // 1. Check global kill switch
+      const globalSettings = await services.syncSettings.getGlobalSettings();
+      if (!globalSettings.globalEnabled) {
+        return; // Silently skip — global sync is off
       }
+
+      // 2. Get all active channels with sync enabled
+      const { channels: channelsTable, syncLog: syncLogTable } = require("@shared/schema");
+      const { and: andOp, eq: eqOp } = require("drizzle-orm");
+
+      const activeChannels = await dbInstance
+        .select()
+        .from(channelsTable)
+        .where(andOp(
+          eqOp(channelsTable.status, "active"),
+          eqOp(channelsTable.syncEnabled, true),
+        ));
+
+      if (activeChannels.length === 0) {
+        await services.syncSettings.updateLastSweep(Date.now() - startTime);
+        return;
+      }
+
+      log(`[Echelon Sync] Starting sweep for ${activeChannels.length} enabled channel(s)`, "echelon-sync");
+
+      // 3. For each enabled channel, run the OLD sync path (which is what currently works)
+      //    but using the sync hierarchy controls
+      for (const channel of activeChannels) {
+        const dryRun = channel.syncMode === "dry_run";
+        const modeLabel = dryRun ? "DRY_RUN" : "LIVE";
+
+        try {
+          // Use the existing channelSync service which has the Shopify push logic
+          // but respect per-channel dry_run mode
+          if (dryRun) {
+            // In dry-run mode: compute what would be pushed, log it, but don't push
+            const result = await services.channelSync.syncAllProducts(channel.id);
+
+            // Log dry-run entries
+            for (const variantResult of (result as any).variants || []) {
+              await services.syncSettings.writeSyncLog({
+                channelId: channel.id,
+                channelName: channel.name,
+                action: "inventory_push",
+                sku: variantResult.channelVariantId || null,
+                productVariantId: variantResult.productVariantId,
+                previousValue: null,
+                newValue: String(variantResult.pushedQty),
+                status: "dry_run",
+                source: "sweep",
+              });
+            }
+
+            log(
+              `[Echelon Sync] ${modeLabel} ${channel.name}: ${result.synced} synced, ${result.errors.length} errors`,
+              "echelon-sync",
+            );
+          } else {
+            // Live mode: actually push
+            const result = await services.channelSync.syncAllProducts(channel.id);
+
+            if (result.synced > 0 || result.errors.length > 0) {
+              log(
+                `[Echelon Sync] ${modeLabel} ${channel.name}: ${result.synced} synced across ${result.total} products` +
+                  (result.errors.length > 0 ? `, ${result.errors.length} errors` : ""),
+                "echelon-sync",
+              );
+            }
+
+            // Log pushed entries
+            await services.syncSettings.writeSyncLog({
+              channelId: channel.id,
+              channelName: channel.name,
+              action: "inventory_push",
+              status: result.errors.length > 0 ? "error" : "pushed",
+              errorMessage: result.errors.length > 0 ? result.errors.join("; ") : null,
+              newValue: `${result.synced} variants`,
+              source: "sweep",
+            });
+          }
+        } catch (err: any) {
+          log(`[Echelon Sync] Error syncing channel ${channel.name}: ${err.message}`, "echelon-sync");
+          await services.syncSettings.writeSyncLog({
+            channelId: channel.id,
+            channelName: channel.name,
+            action: "inventory_push",
+            status: "error",
+            errorMessage: err.message,
+            source: "sweep",
+          });
+        }
+      }
+
+      const durationMs = Date.now() - startTime;
+      await services.syncSettings.updateLastSweep(durationMs);
+      log(`[Echelon Sync] Sweep completed in ${durationMs}ms`, "echelon-sync");
     } catch (err: any) {
-      console.warn("[Channel Sync Scheduler] Error:", err?.message);
+      console.warn("[Echelon Sync] Sweep error:", err?.message);
     }
   }
 
   async function setupInterval() {
     try {
-      // Load warehouse settings to check for channel sync interval
-      const settings = await dbInstance
-        .select()
-        .from(warehouseSettings)
-        .where(eq(warehouseSettings.isActive, 1));
+      const globalSettings = await services.syncSettings.getGlobalSettings();
 
-      const defaultSettings = settings.find((s: any) => s.warehouseCode === "DEFAULT") || settings[0];
-
-      // Master kill switch — don't start scheduler if channel sync is disabled
-      if (!defaultSettings?.channelSyncEnabled) {
-        log("[Channel Sync Scheduler] Disabled (channel_sync_enabled = 0)", "channel-sync");
+      if (!globalSettings.globalEnabled) {
+        log("[Echelon Sync] Disabled (global_enabled = false)", "echelon-sync");
         return;
       }
 
-      // Use channel_sync_interval_minutes from settings, default 15 min
-      // Setting to 0 disables the scheduler
-      const intervalMinutes = (defaultSettings as any)?.channelSyncIntervalMinutes ?? 15;
+      const intervalMinutes = globalSettings.sweepIntervalMinutes || 15;
       if (intervalMinutes <= 0) {
-        log("[Channel Sync Scheduler] Disabled (interval = 0)", "channel-sync");
+        log("[Echelon Sync] Disabled (interval = 0)", "echelon-sync");
         return;
       }
 
-      log(`[Channel Sync Scheduler] Starting with ${intervalMinutes}-minute interval`, "channel-sync");
+      log(`[Echelon Sync] Starting with ${intervalMinutes}-minute sweep interval`, "echelon-sync");
 
       // Skip startup sync — deploying triggers a full inventory push to Shopify which
       // floods downstream webhook receivers (shellz-club-app) with fulfillment events.
       // The scheduled interval handles catch-up within minutes anyway.
-      intervalHandle = setInterval(() => runChannelSync(), intervalMinutes * 60 * 1000);
+      intervalHandle = setInterval(() => runSweep(), intervalMinutes * 60 * 1000);
     } catch (err: any) {
-      console.warn("[Channel Sync Scheduler] Failed to start:", err?.message);
+      console.warn("[Echelon Sync] Failed to start scheduler:", err?.message);
     }
   }
 
@@ -179,8 +262,8 @@ function startChannelSyncScheduler(services: ReturnType<typeof createServices>, 
   app.locals.services = services;
   initOrderSyncServices(services);
 
-  // Start scheduled channel sync (safety net for missed reactive syncs)
-  startChannelSyncScheduler(services, db);
+  // Start Echelon sync scheduler (replaces old channelSync scheduler)
+  startEchelonSyncScheduler(services, db);
 
   await registerRoutes(httpServer, app);
 

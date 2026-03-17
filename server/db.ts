@@ -322,6 +322,67 @@ export async function runStartupMigrations(): Promise<void> {
       console.log(`Cleaned up ${zombieResult.rowCount} zombie inventory_levels records`);
     }
 
+    // Migration: Sync Control System tables
+    // 1. sync_settings — global sync engine config
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sync_settings (
+        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        global_enabled BOOLEAN NOT NULL DEFAULT false,
+        sweep_interval_minutes INTEGER NOT NULL DEFAULT 15,
+        last_sweep_at TIMESTAMP,
+        last_sweep_duration_ms INTEGER,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      )
+    `);
+    // Insert default row if none exists
+    await client.query(`
+      INSERT INTO sync_settings (global_enabled, sweep_interval_minutes)
+      SELECT true, 15
+      WHERE NOT EXISTS (SELECT 1 FROM sync_settings)
+    `);
+
+    // 2. Per-channel sync settings (add columns to channels table)
+    await client.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS sync_enabled BOOLEAN DEFAULT false`);
+    await client.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS sync_mode VARCHAR(10) DEFAULT 'dry_run'`);
+    await client.query(`ALTER TABLE channels ADD COLUMN IF NOT EXISTS sweep_interval_minutes INTEGER DEFAULT 15`);
+    // Add CHECK constraint if not exists (safe to run multiple times)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'channels_sync_mode_check'
+        ) THEN
+          ALTER TABLE channels ADD CONSTRAINT channels_sync_mode_check
+            CHECK (sync_mode IN ('live', 'dry_run'));
+        END IF;
+      END $$;
+    `);
+
+    // 3. Per-warehouse feed toggle
+    await client.query(`ALTER TABLE warehouses ADD COLUMN IF NOT EXISTS feed_enabled BOOLEAN DEFAULT true`);
+
+    // 4. sync_log — unified activity log
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sync_log (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        channel_id INTEGER REFERENCES channels(id),
+        channel_name VARCHAR(100),
+        action VARCHAR(30) NOT NULL,
+        sku VARCHAR(100),
+        product_variant_id INTEGER,
+        previous_value TEXT,
+        new_value TEXT,
+        status VARCHAR(20) NOT NULL,
+        error_message TEXT,
+        source VARCHAR(20) NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sync_log_channel ON sync_log(channel_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sync_log_created ON sync_log(created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sync_log_status ON sync_log(status)`);
+    console.log("Checked sync control system tables (sync_settings, sync_log, channel sync columns, warehouse feed_enabled)");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

@@ -19,6 +19,8 @@ import {
   ShieldAlert, Radio, Loader2, XCircle,
 } from "lucide-react";
 import { useLocation as useWouterLocation } from "wouter";
+import SyncControlPanel from "@/components/SyncControlPanel";
+import ChannelSyncControls from "@/components/ChannelSyncControls";
 
 interface ChannelConnection {
   id: number;
@@ -520,6 +522,10 @@ export default function Channels() {
           )}
         </Card>
       ) : (
+        <>
+        {/* Sync Control Panel */}
+        <SyncControlPanel />
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {channels.map(channel => (
             <Card 
@@ -570,6 +576,10 @@ export default function Channels() {
                   </p>
                 )}
               </CardContent>
+              {/* Per-channel sync controls */}
+              <div className="px-6 pb-3" onClick={(e) => e.stopPropagation()}>
+                <ChannelSyncControls channelId={channel.id} channelName={channel.name} />
+              </div>
               <CardFooter className="pt-0 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Badge variant={STATUS_BADGES[channel.status]?.variant || 'outline'}>
@@ -597,6 +607,7 @@ export default function Channels() {
             </Card>
           ))}
         </div>
+        </>
       )}
 
       {/* Channel Detail Dialog */}

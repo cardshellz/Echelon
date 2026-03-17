@@ -44,6 +44,7 @@ import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
+import SyncLogPage from "@/pages/SyncLogPage";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ 
@@ -141,6 +142,9 @@ function Router() {
         </Route>
         <Route path="/roles">
           <ProtectedRoute component={Roles} allowedRoles={["admin"]} />
+        </Route>
+        <Route path="/sync-log">
+          <ProtectedRoute component={SyncLogPage} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />

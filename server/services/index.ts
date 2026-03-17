@@ -46,6 +46,7 @@ import { createOperationsDashboardService } from "../modules/orders/operations-d
 import { createReceivingService } from "../modules/procurement/receiving.service";
 import { createProductImportService } from "../modules/catalog/product-import.service";
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
+import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
@@ -126,6 +127,9 @@ export function createServices(db: any) {
   // Channel product push (depends on storage only)
   const channelProductPush = createChannelProductPushService(db);
 
+  // Sync settings (sync control plane)
+  const syncSettings = createSyncSettingsService(db);
+
   // Bin assignment (depends on catalog + warehouse storage)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
@@ -156,6 +160,7 @@ export function createServices(db: any) {
     binAssignment,
     purchasing,
     shipmentTracking,
+    syncSettings,
   };
 }
 
@@ -200,6 +205,8 @@ export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams 
 export type { ReceivingService, ReceivingError } from "../modules/procurement/receiving.service";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";
+export { createSyncSettingsService } from "../modules/channels/sync-settings.service";
+export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/sync-settings.service";
 export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
 export { createPurchasingService } from "../modules/procurement/purchasing.service";

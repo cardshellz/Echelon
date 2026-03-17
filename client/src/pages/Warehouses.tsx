@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -31,6 +32,7 @@ interface WarehouseRecord {
   inventorySourceConfig: Record<string, any> | null;
   lastInventorySyncAt: string | null;
   inventorySyncStatus: string | null;
+  feedEnabled: boolean | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -60,6 +62,42 @@ const inventorySourceLabels: Record<string, string> = {
   integration: "Integration (3PL API)",
   manual: "Manual",
 };
+
+/** Per-warehouse feed toggle — controls whether warehouse inventory feeds into channel sync */
+function FeedToggle({ warehouseId, feedEnabled, canEdit }: { warehouseId: number; feedEnabled: boolean; canEdit: boolean }) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  const mutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest("PUT", `/api/sync/warehouses/${warehouseId}/feed`, { feedEnabled: enabled });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/warehouses"] });
+      toast({
+        title: data.feedEnabled ? "Warehouse feed enabled" : "Warehouse feed disabled",
+      });
+    },
+  });
+
+  if (!canEdit) {
+    return feedEnabled ? (
+      <Badge variant="default" className="bg-green-100 text-green-800 text-xs">On</Badge>
+    ) : (
+      <Badge variant="secondary" className="text-xs">Off</Badge>
+    );
+  }
+
+  return (
+    <Switch
+      checked={feedEnabled}
+      onCheckedChange={(checked) => mutation.mutate(checked)}
+      disabled={mutation.isPending}
+      className="scale-75"
+    />
+  );
+}
 
 export default function Warehouses() {
   const { hasPermission } = useAuth();
@@ -379,12 +417,16 @@ export default function Warehouses() {
                               Source: {inventorySourceLabels[warehouse.inventorySourceType] || warehouse.inventorySourceType}
                             </p>
                           )}
-                          <div className="pt-1">
+                          <div className="pt-1 flex items-center gap-2">
                             {warehouse.isActive === 1 ? (
                               <Badge variant="default" className="bg-green-100 text-green-800 text-xs">Active</Badge>
                             ) : (
                               <Badge variant="secondary" className="text-xs">Inactive</Badge>
                             )}
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-muted-foreground">Feed:</span>
+                              <FeedToggle warehouseId={warehouse.id} feedEnabled={warehouse.feedEnabled ?? true} canEdit={canEdit} />
+                            </div>
                           </div>
                         </div>
                         {canEdit && (
@@ -426,6 +468,7 @@ export default function Warehouses() {
                       <TableHead>Location</TableHead>
                       <TableHead>Inventory Source</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Feed</TableHead>
                       <TableHead>Default</TableHead>
                       {canEdit && <TableHead className="w-24">Actions</TableHead>}
                     </TableRow>
@@ -450,6 +493,9 @@ export default function Warehouses() {
                           ) : (
                             <Badge variant="secondary">Inactive</Badge>
                           )}
+                        </TableCell>
+                        <TableCell>
+                          <FeedToggle warehouseId={warehouse.id} feedEnabled={warehouse.feedEnabled ?? true} canEdit={canEdit} />
                         </TableCell>
                         <TableCell>
                           {warehouse.isDefault === 1 ? (

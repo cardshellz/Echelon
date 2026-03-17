@@ -437,13 +437,32 @@ class ChannelSyncService {
    * Debounced trigger for channel sync after an inventory mutation.
    * Collapses rapid changes to the same product into a single sync
    * after a 2-second quiet window.
+   *
+   * Now respects the Echelon sync control hierarchy:
+   * 1. Check sync_settings.global_enabled
+   * 2. Check per-channel sync_enabled
+   * 3. Respect sync_mode (live vs dry_run)
+   * 4. Log to sync_log
    */
   async queueSyncAfterInventoryChange(
     productVariantId: number,
     triggeredBy?: string,
   ): Promise<void> {
-    // Master kill switch — skip entirely when disabled
-    if (!(await this.isSyncEnabled())) return;
+    // Check new sync control hierarchy first
+    try {
+      const { syncSettings: syncSettingsTable } = await import("@shared/schema");
+      const [globalSettings] = await this.db
+        .select()
+        .from(syncSettingsTable)
+        .limit(1);
+
+      if (globalSettings && !globalSettings.globalEnabled) {
+        return; // Global sync disabled
+      }
+    } catch {
+      // Fallback to old kill switch if sync_settings table doesn't exist yet
+      if (!(await this.isSyncEnabled())) return;
+    }
 
     const [variant] = await this.db
       .select()
@@ -478,7 +497,71 @@ class ChannelSyncService {
     const timeout = setTimeout(async () => {
       this.pendingSyncs.delete(productId);
       try {
+        // Check per-channel sync settings before syncing
+        const feedChannelIds = await this.db
+          .select({ channelId: channelFeeds.channelId })
+          .from(channelFeeds)
+          .where(and(
+            eq(channelFeeds.productVariantId, productVariantId),
+            eq(channelFeeds.isActive, 1),
+          ));
+
+        const uniqueChannelIds = [...new Set(feedChannelIds.map((f: any) => f.channelId).filter(Boolean))];
+
+        // Check which channels have sync enabled
+        if (uniqueChannelIds.length > 0) {
+          const channelRows = await this.db
+            .select()
+            .from(channels)
+            .where(inArray(channels.id, uniqueChannelIds as number[]));
+
+          const hasAnyEnabled = channelRows.some((c: any) => c.syncEnabled === true);
+          if (!hasAnyEnabled) {
+            return; // No channels have sync enabled
+          }
+
+          // Check if any channels are in dry-run mode — log but still sync (live channels proceed normally)
+          for (const ch of channelRows) {
+            if ((ch as any).syncEnabled && (ch as any).syncMode === "dry_run") {
+              // Log dry-run event
+              try {
+                const { syncLog: syncLogTable } = await import("@shared/schema");
+                await this.db.insert(syncLogTable).values({
+                  channelId: ch.id,
+                  channelName: ch.name,
+                  action: "inventory_push",
+                  productVariantId: productVariantId,
+                  status: "dry_run",
+                  source: "event",
+                });
+              } catch {
+                // Don't let logging failures block sync
+              }
+            }
+          }
+        }
+
         await this.syncProduct(productId, triggeredBy ?? "inventory_change");
+
+        // Log event-driven sync to sync_log
+        try {
+          const { syncLog: syncLogTable } = await import("@shared/schema");
+          for (const chId of uniqueChannelIds) {
+            const ch = (await this.db.select().from(channels).where(eq(channels.id, chId as number)).limit(1))[0];
+            if (ch && (ch as any).syncEnabled && (ch as any).syncMode === "live") {
+              await this.db.insert(syncLogTable).values({
+                channelId: ch.id,
+                channelName: ch.name,
+                action: "inventory_push",
+                productVariantId: productVariantId,
+                status: "pushed",
+                source: "event",
+              });
+            }
+          }
+        } catch {
+          // Don't let logging failures block
+        }
       } catch (err: any) {
         console.error(
           `[ChannelSync] Debounced sync failed for product ${productId}: ${err.message}`,

@@ -100,6 +100,7 @@ export const warehouses = pgTable("warehouses", {
   inventorySourceConfig: jsonb("inventory_source_config"), // Source-specific settings: { channelId }, { integrationId, apiType }, etc.
   lastInventorySyncAt: timestamp("last_inventory_sync_at"), // Last time external inventory was pulled
   inventorySyncStatus: varchar("inventory_sync_status", { length: 20 }).default("never"), // never, syncing, ok, error
+  feedEnabled: boolean("feed_enabled").default(true), // Whether this warehouse feeds inventory to channel sync
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

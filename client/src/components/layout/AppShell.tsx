@@ -128,6 +128,7 @@ const navStructure: NavEntry[] = [
       { label: "Product Lines", icon: Tag, href: "/product-lines" },
       { label: "Channels", icon: Store, href: "/channels" },
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
+      { label: "Sync Log", icon: History, href: "/sync-log" },
       { label: "Dropship Network", icon: Globe, href: "/dropship" },
     ],
   },
