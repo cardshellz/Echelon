@@ -476,34 +476,7 @@ export default function Channels() {
         )}
       </div>
 
-      {/* Channel Sync Kill Switch */}
-      {warehouseSettings && canEdit && (
-        <Card className={`border-l-4 ${channelSyncEnabled ? 'border-l-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20' : 'border-l-amber-500 bg-amber-50/50 dark:bg-amber-950/20'}`}>
-          <CardContent className="flex items-center justify-between py-3 px-4">
-            <div className="flex items-center gap-3">
-              {channelSyncEnabled
-                ? <Radio className="h-5 w-5 text-emerald-600" />
-                : <ShieldAlert className="h-5 w-5 text-amber-600" />
-              }
-              <div>
-                <p className="font-medium text-sm">
-                  Inventory Push to Channels: {channelSyncEnabled ? "Active" : "Disabled"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {channelSyncEnabled
-                    ? "ATP quantities are being pushed to connected sales channels."
-                    : "No inventory data is being sent to any sales channel."}
-                </p>
-              </div>
-            </div>
-            <Switch
-              checked={channelSyncEnabled}
-              onCheckedChange={(checked) => toggleChannelSyncMutation.mutate(checked)}
-              disabled={toggleChannelSyncMutation.isPending}
-            />
-          </CardContent>
-        </Card>
-      )}
+      {/* Old Channel Sync Kill Switch — REMOVED, replaced by Sync Engine panel */}
 
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
