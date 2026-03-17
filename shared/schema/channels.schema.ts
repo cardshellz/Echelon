@@ -51,6 +51,7 @@ export const channelConnections = pgTable("channel_connections", {
   webhookSecret: varchar("webhook_secret", { length: 255 }),
   apiVersion: varchar("api_version", { length: 20 }),
   scopes: text("scopes"), // Comma-separated OAuth scopes
+  shopifyLocationId: varchar("shopify_location_id", { length: 50 }), // Primary Shopify location for inventory pushes
   expiresAt: timestamp("expires_at"),
   lastSyncAt: timestamp("last_sync_at"),
   syncStatus: varchar("sync_status", { length: 20 }).default("never"), // ok, error, never, syncing

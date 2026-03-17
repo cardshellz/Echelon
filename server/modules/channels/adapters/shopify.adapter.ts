@@ -50,6 +50,7 @@ interface ShopifyCredentials {
   accessToken: string;
   apiVersion: string;
   webhookSecret: string | null;
+  shopifyLocationId: string | null;
 }
 
 const DEFAULT_API_VERSION = "2024-01";
@@ -254,14 +255,14 @@ export class ShopifyAdapter implements IChannelAdapter {
             );
           }
         } else {
-          // Fall back to env-based location ID
-          const locationId = process.env.SHOPIFY_LOCATION_ID;
+          // Use connection's location ID, fall back to env var
+          const locationId = creds.shopifyLocationId || process.env.SHOPIFY_LOCATION_ID;
           if (!locationId) {
             results.push({
               variantId: item.variantId,
               pushedQty: 0,
               status: "error",
-              error: "No SHOPIFY_LOCATION_ID configured and no warehouse breakdown provided",
+              error: "No shopify_location_id on channel connection and no SHOPIFY_LOCATION_ID env var",
             });
             continue;
           }
@@ -581,6 +582,7 @@ export class ShopifyAdapter implements IChannelAdapter {
       accessToken: conn.accessToken,
       apiVersion: conn.apiVersion || DEFAULT_API_VERSION,
       webhookSecret: conn.webhookSecret,
+      shopifyLocationId: (conn as any).shopifyLocationId || null,
     };
   }
 
