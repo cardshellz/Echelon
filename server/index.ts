@@ -9,7 +9,7 @@ import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
-import { startEbayOrderPolling } from "./modules/oms/ebay-order-ingestion";
+import { startEbayOrderPolling, setShipStationService } from "./modules/oms/ebay-order-ingestion";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { eq } from "drizzle-orm";
@@ -244,6 +244,31 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
   startEchelonSyncScheduler(services, db);
 
+  // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware — unauthenticated) ---
+  app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
+    try {
+      const { resource_url, resource_type } = req.body || {};
+      if (resource_type !== "SHIP_NOTIFY" || !resource_url) {
+        return res.status(400).json({ error: "Invalid webhook payload" });
+      }
+
+      console.log(`[ShipStation Webhook] Received SHIP_NOTIFY`);
+      const processed = await services.shipStation.processShipNotify(resource_url);
+      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s)`);
+
+      res.status(200).json({ status: "ok", processed });
+    } catch (err: any) {
+      console.error(`[ShipStation Webhook] Error: ${err.message}`);
+      res.status(500).json({ error: "Internal error" });
+    }
+  });
+
+  // Wire fulfillment push into ShipStation service for tracking push on ship notify
+  (db as any).__fulfillmentPush = services.fulfillmentPush;
+
+  // Inject ShipStation service into eBay ingestion for auto-push
+  setShipStationService(services.shipStation);
+
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
     const { createEbayAuthConfig, EbayAuthService } = require("./modules/channels/adapters/ebay/ebay-auth.service");
@@ -263,6 +288,19 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   } catch (err: any) {
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
   }
+
+  // Register ShipStation SHIP_NOTIFY webhook (idempotent, non-blocking)
+  setTimeout(async () => {
+    try {
+      if (services.shipStation.isConfigured()) {
+        await services.shipStation.registerWebhook(
+          "https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/shipstation/webhooks/ship-notify",
+        );
+      }
+    } catch (err: any) {
+      console.error(`[ShipStation] Webhook registration error: ${err.message}`);
+    }
+  }, 15_000);
 
   // Shopify Bridge — backfill existing orders to OMS (runs once at startup, non-blocking)
   setTimeout(async () => {

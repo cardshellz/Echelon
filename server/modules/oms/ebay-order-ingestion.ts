@@ -10,6 +10,7 @@
 
 import type { Request, Response } from "express";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
+import type { ShipStationService } from "./shipstation.service";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { EbayAuthService } from "../channels/adapters/ebay/ebay-auth.service";
 import type { EbayOrder, EbayNotificationPayload } from "../channels/adapters/ebay/ebay-types";
@@ -101,6 +102,11 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
 // ---------------------------------------------------------------------------
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let _shipStationService: ShipStationService | null = null;
+
+export function setShipStationService(svc: ShipStationService) {
+  _shipStationService = svc;
+}
 
 export function startEbayOrderPolling(
   omsService: OmsService,
@@ -161,7 +167,7 @@ export async function pollEbayOrders(
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
 
-        // If this was a new order (not a duplicate), do reservation + routing
+        // If this was a new order (not a duplicate), do reservation + routing + ShipStation push
         if (result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000) {
           try {
             await omsService.reserveInventory(result.id);
@@ -169,6 +175,19 @@ export async function pollEbayOrders(
           } catch (e: any) {
             console.error(`[eBay Orders] Post-ingest processing failed for ${ebayOrder.orderId}: ${e.message}`);
           }
+
+          // Auto-push to ShipStation
+          if (_shipStationService?.isConfigured()) {
+            try {
+              const fullOrder = await omsService.getOrderById(result.id);
+              if (fullOrder) {
+                await _shipStationService.pushOrder(fullOrder);
+              }
+            } catch (e: any) {
+              console.error(`[eBay Orders] ShipStation push failed for ${ebayOrder.orderId}: ${e.message}`);
+            }
+          }
+
           totalIngested++;
         }
       } catch (err: any) {
@@ -245,6 +264,18 @@ export function createEbayOrderWebhookHandler(
             if (result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000) {
               await omsService.reserveInventory(result.id);
               await omsService.assignWarehouse(result.id);
+
+              // Auto-push to ShipStation
+              if (_shipStationService?.isConfigured()) {
+                try {
+                  const fullOrder = await omsService.getOrderById(result.id);
+                  if (fullOrder) {
+                    await _shipStationService.pushOrder(fullOrder);
+                  }
+                } catch (e: any) {
+                  console.error(`[eBay Webhook] ShipStation push failed for ${orderId}: ${e.message}`);
+                }
+              }
             }
 
             console.log(`[eBay Webhook] Processed order ${orderId}`);

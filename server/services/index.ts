@@ -52,6 +52,7 @@ import { createPurchasingService } from "../modules/procurement/purchasing.servi
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import { createShipStationService } from "../modules/oms/shipstation.service";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
 import { inventoryStorage } from "../modules/inventory";
@@ -161,6 +162,9 @@ export function createServices(db: any) {
   // For now, pass null — the eBay client is created in server/index.ts when polling starts
   const fulfillmentPush = createFulfillmentPushService(db, null);
 
+  // ShipStation — order push + webhook integration
+  const shipStation = createShipStationService(db);
+
   return {
     inventoryCore,
     inventoryLots,
@@ -189,6 +193,7 @@ export function createServices(db: any) {
     echelonOrchestrator,
     oms,
     fulfillmentPush,
+    shipStation,
   };
 }
 
@@ -243,3 +248,5 @@ export { createShipmentTrackingService } from "../modules/procurement/shipment-t
 export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/shipment-tracking.service";
 export { createInventoryLotService } from "../modules/inventory/lots.service";
 export type { InventoryLotService } from "../modules/inventory/lots.service";
+export { createShipStationService } from "../modules/oms/shipstation.service";
+export type { ShipStationService } from "../modules/oms/shipstation.service";

@@ -460,6 +460,11 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sync_log_status ON sync_log(status)`);
     console.log("Checked sync control system tables (sync_settings, sync_log, channel sync columns, warehouse feed_enabled)");
 
+    // 5. ShipStation integration columns on oms_orders
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_id INTEGER`);
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
+    console.log("Checked ShipStation columns on oms_orders");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

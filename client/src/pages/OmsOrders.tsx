@@ -15,6 +15,8 @@ import {
   AlertCircle,
   Timer,
   Filter,
+  Ship,
+  ExternalLink,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -90,6 +92,8 @@ interface OmsOrder {
   warehouseId: number | null;
   trackingNumber: string | null;
   trackingCarrier: string | null;
+  shipstationOrderId: number | null;
+  shipstationOrderKey: string | null;
   orderedAt: string;
   createdAt: string;
   lines: OmsOrderLine[];
@@ -220,6 +224,27 @@ export default function OmsOrders() {
     },
   });
 
+  const pushToShipStationMutation = useMutation({
+    mutationFn: async (orderId: number) => {
+      const res = await fetch(`/api/oms/orders/${orderId}/push-to-shipstation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "Failed" }));
+        throw new Error(err.error || "Failed to push to ShipStation");
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Pushed to ShipStation", description: `SS Order #${data.shipstationOrderId}` });
+      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "ShipStation push failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const markShippedMutation = useMutation({
     mutationFn: async ({ orderId, trackingNumber, carrier }: any) => {
       const res = await fetch(`/api/oms/orders/${orderId}/mark-shipped`, {
@@ -343,6 +368,7 @@ export default function OmsOrders() {
                 <TableHead className="w-[60px] text-center">Items</TableHead>
                 <TableHead className="w-[100px] text-right">Total</TableHead>
                 <TableHead className="w-[100px]">Status</TableHead>
+                <TableHead className="w-[80px]">SS</TableHead>
                 <TableHead className="w-[80px]">Warehouse</TableHead>
                 <TableHead className="w-[140px]">Date</TableHead>
               </TableRow>
@@ -350,13 +376,13 @@ export default function OmsOrders() {
             <TableBody>
               {isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                     Loading...
                   </TableCell>
                 </TableRow>
               ) : orders.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                     No orders found
                   </TableCell>
                 </TableRow>
@@ -389,6 +415,16 @@ export default function OmsOrders() {
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(order.status)}`}>
                         {order.status}
                       </span>
+                    </TableCell>
+                    <TableCell>
+                      {order.shipstationOrderId ? (
+                        <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300">
+                          <Ship className="h-3 w-3" />
+                          SS
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {order.warehouseId ? `WH-${order.warehouseId}` : "—"}
@@ -519,7 +555,8 @@ export default function OmsOrders() {
                             {event.eventType === "assigned_warehouse" && <Store className="h-4 w-4 text-orange-500" />}
                             {event.eventType === "shipped" && <Truck className="h-4 w-4 text-green-500" />}
                             {event.eventType === "tracking_pushed" && <Globe className="h-4 w-4 text-green-600" />}
-                            {!["created", "inventory_reserved", "assigned_warehouse", "shipped", "tracking_pushed"].includes(event.eventType) && (
+                            {(event.eventType === "pushed_to_shipstation" || event.eventType === "shipped_via_shipstation") && <Ship className="h-4 w-4 text-blue-500" />}
+                            {!["created", "inventory_reserved", "assigned_warehouse", "shipped", "tracking_pushed", "pushed_to_shipstation", "shipped_via_shipstation"].includes(event.eventType) && (
                               <Timer className="h-4 w-4 text-muted-foreground" />
                             )}
                           </div>
@@ -546,10 +583,34 @@ export default function OmsOrders() {
                   </>
                 )}
 
+                {/* ShipStation Info */}
+                {selectedOrder.shipstationOrderId && (
+                  <>
+                    <Separator />
+                    <div>
+                      <h4 className="font-semibold text-sm mb-1">ShipStation</h4>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-300">
+                          <Ship className="h-3 w-3" />
+                          SS Order #{selectedOrder.shipstationOrderId}
+                        </Badge>
+                        <a
+                          href={`https://ss.shipstation.com/#/orders/all?orderNumber=${selectedOrder.shipstationOrderKey || ""}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-blue-500 hover:underline inline-flex items-center gap-1"
+                        >
+                          Open in ShipStation <ExternalLink className="h-3 w-3" />
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+
                 <Separator />
 
                 {/* Actions */}
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   {!selectedOrder.warehouseId && selectedOrder.status !== "cancelled" && selectedOrder.status !== "shipped" && (
                     <Button
                       size="sm"
@@ -558,6 +619,18 @@ export default function OmsOrders() {
                       disabled={assignWarehouseMutation.isPending}
                     >
                       Assign Warehouse
+                    </Button>
+                  )}
+                  {!selectedOrder.shipstationOrderId && selectedOrder.status !== "cancelled" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1"
+                      onClick={() => pushToShipStationMutation.mutate(selectedOrder.id)}
+                      disabled={pushToShipStationMutation.isPending}
+                    >
+                      <Ship className="h-3.5 w-3.5" />
+                      {pushToShipStationMutation.isPending ? "Pushing..." : "Push to ShipStation"}
                     </Button>
                   )}
                   {selectedOrder.status !== "shipped" && selectedOrder.status !== "cancelled" && (

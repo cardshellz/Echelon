@@ -56,6 +56,10 @@ export const omsOrders = pgTable("oms_orders", {
   trackingCarrier: varchar("tracking_carrier", { length: 50 }),
   shippedAt: timestamp("shipped_at"),
 
+  // ShipStation integration
+  shipstationOrderId: integer("shipstation_order_id"),
+  shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),
+
   // Metadata
   rawPayload: jsonb("raw_payload"),
   notes: text("notes"),

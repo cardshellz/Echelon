@@ -7,11 +7,14 @@
 import type { Express, Request, Response } from "express";
 import type { OmsService } from "../modules/oms/oms.service";
 import type { FulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import type { ShipStationService } from "../modules/oms/shipstation.service";
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
   const getFulfillmentPush = (req: Request): FulfillmentPushService | null =>
     (req.app.locals.services as any).fulfillmentPush || null;
+  const getShipStation = (req: Request): ShipStationService | null =>
+    (req.app.locals.services as any).shipStation || null;
 
   // -----------------------------------------------------------------------
   // GET /api/oms/orders/stats — summary stats (must be before :id route)
@@ -129,6 +132,37 @@ export function registerOmsRoutes(app: Express) {
       res.json(result);
     } catch (err: any) {
       console.error("[OMS Routes] Reserve error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /api/oms/orders/:id/push-to-shipstation — manual ShipStation push
+  // -----------------------------------------------------------------------
+  app.post("/api/oms/orders/:id/push-to-shipstation", async (req: Request, res: Response) => {
+    try {
+      const id = Number(req.params.id);
+      const ss = getShipStation(req);
+
+      if (!ss || !ss.isConfigured()) {
+        return res.status(503).json({ error: "ShipStation not configured" });
+      }
+
+      const order = await getOms(req).getOrderById(id);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      const result = await ss.pushOrder(order);
+      const updated = await getOms(req).getOrderById(id);
+
+      res.json({
+        shipstationOrderId: result.shipstationOrderId,
+        orderKey: result.orderKey,
+        order: updated,
+      });
+    } catch (err: any) {
+      console.error("[OMS Routes] Push to ShipStation error:", err);
       res.status(500).json({ error: err.message });
     }
   });
