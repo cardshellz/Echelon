@@ -2008,13 +2008,14 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/sync/trigger", requirePermission("shopify", "sync"), async (req, res) => {
+  // OLD: /api/sync/trigger moved to /api/sync/trigger-orders to avoid conflict with new sync engine
+  app.post("/api/sync/trigger-orders", requirePermission("shopify", "sync"), async (req, res) => {
     try {
       const { syncNewOrders } = await import("../orders/order-sync-listener");
       await syncNewOrders();
-      res.json({ success: true, message: "Sync triggered - check logs" });
+      res.json({ success: true, message: "Order sync triggered - check logs" });
     } catch (error) {
-      console.error("Trigger sync error:", error);
+      console.error("Trigger order sync error:", error);
       res.status(500).json({ error: String(error) });
     }
   });

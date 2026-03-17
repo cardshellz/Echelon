@@ -200,7 +200,7 @@ export function registerSyncControlRoutes(app: Express) {
 
   app.post("/api/sync/trigger", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelSync, syncSettings: syncSettingsSvc } = req.app.locals.services;
+      const { echelonOrchestrator, syncSettings: syncSettingsSvc } = req.app.locals.services;
 
       const global = await syncSettingsSvc.getGlobalSettings();
       if (!global.globalEnabled) {
@@ -209,59 +209,37 @@ export function registerSyncControlRoutes(app: Express) {
 
       const startTime = Date.now();
 
-      // Get enabled channels and run sync for each
-      const { db } = await import("../../storage/base");
-      const { channels: channelsTable } = await import("@shared/schema");
-      const { and: andOp, eq: eqOp } = await import("drizzle-orm");
+      // Run the Echelon orchestrator
+      const result = await echelonOrchestrator.runFullSync({ dryRun: false });
 
-      const enabledChannels = await db
-        .select()
-        .from(channelsTable)
-        .where(andOp(
-          eqOp(channelsTable.status, "active"),
-          eqOp(channelsTable.syncEnabled, true),
-        ));
-
-      let totalSynced = 0;
-      let totalErrors = 0;
-
-      for (const channel of enabledChannels) {
-        const dryRun = (channel as any).syncMode === "dry_run";
-        try {
-          const result = await channelSync.syncAllProducts(channel.id);
-          totalSynced += result.synced;
-          totalErrors += result.errors.length;
-
+      // Log results
+      for (const inv of result.inventory) {
+        for (const detail of (inv.details || [])) {
           await syncSettingsSvc.writeSyncLog({
-            channelId: channel.id,
-            channelName: channel.name,
+            channelId: inv.channelId,
+            channelName: inv.channelName,
             action: "inventory_push",
-            status: dryRun ? "dry_run" : (result.errors.length > 0 ? "error" : "pushed"),
-            errorMessage: result.errors.length > 0 ? result.errors.join("; ") : null,
-            newValue: `${result.synced} variants`,
-            source: "manual",
-          });
-        } catch (err: any) {
-          totalErrors++;
-          await syncSettingsSvc.writeSyncLog({
-            channelId: channel.id,
-            channelName: channel.name,
-            action: "inventory_push",
-            status: "error",
-            errorMessage: err.message,
+            sku: detail.sku,
+            productVariantId: detail.variantId,
+            previousValue: detail.previousQty != null ? String(detail.previousQty) : null,
+            newValue: String(detail.allocatedQty),
+            status: detail.status === "success" ? "pushed" : detail.status === "error" ? "error" : "skipped",
+            errorMessage: detail.error || null,
             source: "manual",
           });
         }
       }
 
+      const totalPushed = result.inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0);
+      const totalErrors = result.inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0);
       const durationMs = Date.now() - startTime;
       await syncSettingsSvc.updateLastSweep(durationMs);
 
       res.json({
-        message: "Sync triggered",
+        message: "Sync triggered via Echelon orchestrator",
         result: {
-          channels: enabledChannels.length,
-          synced: totalSynced,
+          channels: result.inventory.length,
+          pushed: totalPushed,
           errors: totalErrors,
           durationMs,
         },

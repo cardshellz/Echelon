@@ -130,6 +130,22 @@ export function createServices(db: any) {
   // Sync settings (sync control plane)
   const syncSettings = createSyncSettingsService(db);
 
+  // Echelon sync orchestrator — the REAL sync engine (allocation + per-channel push)
+  const { createAllocationEngine } = require("../modules/channels/allocation-engine.service");
+  const { createSourceLockService } = require("../modules/channels/source-lock.service");
+  const { createShopifyAdapter } = require("../modules/channels/adapters/shopify.adapter");
+  const { ChannelAdapterRegistry } = require("../modules/channels/channel-adapter.interface");
+  const { createEchelonSyncOrchestrator } = require("../modules/channels/echelon-sync-orchestrator.service");
+
+  const allocationEngine = createAllocationEngine(db, atp);
+  const sourceLockService = createSourceLockService(db);
+  const shopifyAdapter = createShopifyAdapter(db);
+  const adapterRegistry = new ChannelAdapterRegistry();
+  adapterRegistry.register(shopifyAdapter);
+  const echelonOrchestrator = createEchelonSyncOrchestrator(
+    db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush,
+  );
+
   // Bin assignment (depends on catalog + warehouse storage)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
@@ -161,6 +177,7 @@ export function createServices(db: any) {
     purchasing,
     shipmentTracking,
     syncSettings,
+    echelonOrchestrator,
   };
 }
 

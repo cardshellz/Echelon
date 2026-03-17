@@ -148,72 +148,48 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       log(`[Echelon Sync] Starting sweep for ${activeChannels.length} enabled channel(s)`, "echelon-sync");
 
-      // 3. For each enabled channel, run the OLD sync path (which is what currently works)
-      //    but using the sync hierarchy controls
-      for (const channel of activeChannels) {
-        const dryRun = channel.syncMode === "dry_run";
-        const modeLabel = dryRun ? "DRY_RUN" : "LIVE";
+      // 3. Run the Echelon orchestrator for all enabled channels
+      try {
+        // Determine if ALL channels are dry_run or if any are live
+        const hasDryRunOnly = activeChannels.every((c: any) => c.syncMode === "dry_run");
+        const dryRun = hasDryRunOnly;
 
-        try {
-          // Use the existing channelSync service which has the Shopify push logic
-          // but respect per-channel dry_run mode
-          if (dryRun) {
-            // In dry-run mode: compute what would be pushed, log it, but don't push
-            const result = await services.channelSync.syncAllProducts(channel.id);
+        const result = await services.echelonOrchestrator.runFullSync({ dryRun });
 
-            // Log dry-run entries
-            for (const variantResult of (result as any).variants || []) {
-              await services.syncSettings.writeSyncLog({
-                channelId: channel.id,
-                channelName: channel.name,
-                action: "inventory_push",
-                sku: variantResult.channelVariantId || null,
-                productVariantId: variantResult.productVariantId,
-                previousValue: null,
-                newValue: String(variantResult.pushedQty),
-                status: "dry_run",
-                source: "sweep",
-              });
-            }
-
-            log(
-              `[Echelon Sync] ${modeLabel} ${channel.name}: ${result.synced} synced, ${result.errors.length} errors`,
-              "echelon-sync",
-            );
-          } else {
-            // Live mode: actually push
-            const result = await services.channelSync.syncAllProducts(channel.id);
-
-            if (result.synced > 0 || result.errors.length > 0) {
-              log(
-                `[Echelon Sync] ${modeLabel} ${channel.name}: ${result.synced} synced across ${result.total} products` +
-                  (result.errors.length > 0 ? `, ${result.errors.length} errors` : ""),
-                "echelon-sync",
-              );
-            }
-
-            // Log pushed entries
+        // Log results to sync_log
+        for (const inv of result.inventory) {
+          for (const detail of (inv.details || [])) {
             await services.syncSettings.writeSyncLog({
-              channelId: channel.id,
-              channelName: channel.name,
+              channelId: inv.channelId,
+              channelName: inv.channelName,
               action: "inventory_push",
-              status: result.errors.length > 0 ? "error" : "pushed",
-              errorMessage: result.errors.length > 0 ? result.errors.join("; ") : null,
-              newValue: `${result.synced} variants`,
+              sku: detail.sku,
+              productVariantId: detail.variantId,
+              previousValue: detail.previousQty != null ? String(detail.previousQty) : null,
+              newValue: String(detail.allocatedQty),
+              status: detail.status === "success" ? "pushed" : detail.status === "dry_run" ? "dry_run" : detail.status === "error" ? "error" : "skipped",
+              errorMessage: detail.error || null,
               source: "sweep",
             });
           }
-        } catch (err: any) {
-          log(`[Echelon Sync] Error syncing channel ${channel.name}: ${err.message}`, "echelon-sync");
-          await services.syncSettings.writeSyncLog({
-            channelId: channel.id,
-            channelName: channel.name,
-            action: "inventory_push",
-            status: "error",
-            errorMessage: err.message,
-            source: "sweep",
-          });
         }
+
+        const totalPushed = result.inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0);
+        const totalErrors = result.inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0);
+        log(
+          `[Echelon Sync] Orchestrator: ${totalPushed} pushed, ${totalErrors} errors across ${result.inventory.length} channels`,
+          "echelon-sync",
+        );
+      } catch (err: any) {
+        log(`[Echelon Sync] Orchestrator error: ${err.message}`, "echelon-sync");
+        await services.syncSettings.writeSyncLog({
+          channelId: null,
+          channelName: "ALL",
+          action: "inventory_push",
+          status: "error",
+          errorMessage: err.message,
+          source: "sweep",
+        });
       }
 
       const durationMs = Date.now() - startTime;
