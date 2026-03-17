@@ -726,9 +726,6 @@ export default function Channels() {
                 <TabsList className="w-full flex-wrap h-auto">
                   <TabsTrigger value="settings" className="text-sm">Settings</TabsTrigger>
                   <TabsTrigger value="connection" className="text-sm">Connection</TabsTrigger>
-                  {selectedChannel.provider === 'ebay' && (
-                    <TabsTrigger value="ebay" className="text-sm">eBay Config</TabsTrigger>
-                  )}
                   {selectedChannel.type === 'partner' && (
                     <TabsTrigger value="partner" className="text-sm">Partner Info</TabsTrigger>
                   )}
@@ -1010,11 +1007,9 @@ export default function Channels() {
                       )}
                     </div>
                   )}
-                </TabsContent>
-                
-                {/* eBay Config Tab */}
-                {selectedChannel.provider === 'ebay' && (
-                  <TabsContent value="ebay" className="space-y-4 mt-4">
+                  {/* eBay Connection & Config */}
+                  {selectedChannel.provider === 'ebay' && (
+                    <>
                     {ebaySettingsLoading ? (
                       <div className="flex items-center justify-center py-8">
                         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -1347,8 +1342,9 @@ export default function Channels() {
                         )}
                       </>
                     )}
-                  </TabsContent>
-                )}
+                    </>
+                  )}
+                </TabsContent>
 
                 {selectedChannel.type === 'partner' && (
                   <TabsContent value="partner" className="space-y-4 mt-4">
