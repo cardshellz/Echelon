@@ -306,23 +306,12 @@ class EchelonSyncOrchestrator {
         continue;
       }
 
-      if (!variant.shopifyInventoryItemId) {
-        result.details.push({
-          productId: 0,
-          variantId: a.productVariantId,
-          sku: a.sku,
-          allocatedQty: a.allocatedUnits,
-          previousQty: null,
-          status: "skipped",
-          error: "No shopifyInventoryItemId — run catalog backfill first",
-        });
-        result.variantsSkipped++;
-        continue;
-      }
-
-      // Get previous synced qty from channel_feeds
+      // Get previous synced qty and per-channel inventory item ID from channel_feeds
       const [feed] = await this.db
-        .select({ lastSyncedQty: channelFeeds.lastSyncedQty })
+        .select({ 
+          lastSyncedQty: channelFeeds.lastSyncedQty,
+          channelInventoryItemId: channelFeeds.channelInventoryItemId,
+        })
         .from(channelFeeds)
         .where(
           and(
@@ -332,11 +321,28 @@ class EchelonSyncOrchestrator {
         )
         .limit(1);
 
+      // Prefer per-channel inventory item ID over global (supports multi-store)
+      const inventoryItemId = feed?.channelInventoryItemId || variant.shopifyInventoryItemId;
+
+      if (!inventoryItemId) {
+        result.details.push({
+          productId: 0,
+          variantId: a.productVariantId,
+          sku: a.sku,
+          allocatedQty: a.allocatedUnits,
+          previousQty: null,
+          status: "skipped",
+          error: "No inventoryItemId (channel or global) — run catalog backfill first",
+        });
+        result.variantsSkipped++;
+        continue;
+      }
+
       pushItems.push({
         variantId: a.productVariantId,
         sku: variant.sku,
         externalVariantId: variant.shopifyVariantId,
-        externalInventoryItemId: variant.shopifyInventoryItemId,
+        externalInventoryItemId: inventoryItemId,
         allocatedQty: a.allocatedUnits,
       });
 

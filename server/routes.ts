@@ -12,6 +12,7 @@ import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
+import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -31,6 +32,7 @@ export async function registerRoutes(
   registerChannelRoutes(app);
   registerSettingsRoutes(app);
   registerPurchasingRoutes(app);
+  registerEbayOAuthRoutes(app);
 
   return httpServer;
 }

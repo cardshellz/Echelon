@@ -107,6 +107,7 @@ export const channelFeeds = pgTable("channel_feeds", {
   channelVariantId: varchar("channel_variant_id", { length: 100 }).notNull(), // Shopify variant ID
   channelProductId: varchar("channel_product_id", { length: 100 }), // Shopify product ID
   channelSku: varchar("channel_sku", { length: 100 }), // SKU as it appears in channel
+  channelInventoryItemId: varchar("channel_inventory_item_id", { length: 100 }), // Per-channel inventory item ID (multi-store)
   isActive: integer("is_active").notNull().default(1), // 1 = sync enabled
   lastSyncedAt: timestamp("last_synced_at"),
   lastSyncedQty: integer("last_synced_qty"), // Last quantity pushed to channel
