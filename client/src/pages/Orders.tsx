@@ -195,9 +195,9 @@ const priorityColors: Record<string, string> = {
 
 function CombineOrderItems({ orderId }: { orderId: number }) {
   const { data, isLoading } = useQuery<{ items: { id: number; sku: string; name: string; quantity: number; pickedQuantity: number; requiresShipping: number }[] }>({
-    queryKey: ["/api/oms/orders", orderId],
+    queryKey: ["/api/wms/orders", orderId],
     queryFn: async () => {
-      const res = await fetch(`/api/oms/orders/${orderId}`);
+      const res = await fetch(`/api/wms/orders/${orderId}`);
       if (!res.ok) throw new Error("Failed to fetch order items");
       return res.json();
     },
@@ -265,9 +265,9 @@ const financialStatusColors: Record<string, string> = {
 
 function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () => void }) {
   const { data: order, isLoading } = useQuery<OrderDetail>({
-    queryKey: ["/api/oms/orders", orderId, "detail"],
+    queryKey: ["/api/wms/orders", orderId, "detail"],
     queryFn: async () => {
-      const res = await fetch(`/api/oms/orders/${orderId}`, { credentials: "include" });
+      const res = await fetch(`/api/wms/orders/${orderId}`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch order");
       return res.json();
     },
@@ -663,7 +663,7 @@ export default function Orders() {
   });
 
   const { data: ordersData, isLoading: ordersLoading, refetch: refetchOrders } = useQuery<OrdersResponse>({
-    queryKey: ["/api/oms/orders", channelFilter, statusFilter],
+    queryKey: ["/api/wms/orders", channelFilter, statusFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (channelFilter !== "all") params.append("channelId", channelFilter);
@@ -677,7 +677,7 @@ export default function Orders() {
         params.append("status", statusFilter);
       }
       params.append("limit", "100");
-      const res = await fetch(`/api/oms/orders?${params}`);
+      const res = await fetch(`/api/wms/orders?${params}`);
       if (!res.ok) throw new Error("Failed to fetch orders");
       return res.json();
     },
@@ -717,7 +717,7 @@ export default function Orders() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/orders/combinable"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/wms/orders"] });
       setIsCombineOpen(false);
       setSelectedCombineGroup(null);
       setSelectedOrderIds([]);
@@ -743,7 +743,7 @@ export default function Orders() {
     },
     onSuccess: (data: { groupsCreated: number; totalOrdersCombined: number }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/orders/combinable"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/wms/orders"] });
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       setIsCombineOpen(false);
       toast({ title: "All orders combined", description: `Created ${data.groupsCreated} groups from ${data.totalOrdersCombined} orders.` });
@@ -755,7 +755,7 @@ export default function Orders() {
 
   const createOrderMutation = useMutation({
     mutationFn: async (orderData: any) => {
-      const res = await fetch("/api/oms/orders", {
+      const res = await fetch("/api/wms/orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(orderData),
@@ -767,7 +767,7 @@ export default function Orders() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/oms/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/wms/orders"] });
       setIsCreateOpen(false);
       setNewOrder({
         orderNumber: "",

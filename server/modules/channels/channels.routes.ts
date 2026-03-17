@@ -106,7 +106,7 @@ export function registerChannelRoutes(app: Express) {
   // ============================================
 
   // Get all orders with channel info (for OMS page)
-  app.get("/api/oms/orders", requirePermission("orders", "view"), async (req, res) => {
+  app.get("/api/wms/orders", requirePermission("orders", "view"), async (req, res) => {
     try {
       const { status, channelId, source, limit = "50", offset = "0" } = req.query;
 
@@ -183,7 +183,7 @@ export function registerChannelRoutes(app: Express) {
     })).min(1, "At least one item required"),
   });
 
-  app.post("/api/oms/orders", requirePermission("orders", "edit"), async (req, res) => {
+  app.post("/api/wms/orders", requirePermission("orders", "edit"), async (req, res) => {
     try {
       const parseResult = createOrderSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -239,7 +239,7 @@ export function registerChannelRoutes(app: Express) {
   });
 
   // Get single order with channel info
-  app.get("/api/oms/orders/:id", requirePermission("orders", "view"), async (req, res) => {
+  app.get("/api/wms/orders/:id", requirePermission("orders", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) {
@@ -330,7 +330,7 @@ export function registerChannelRoutes(app: Express) {
   });
 
   // Update order (for editing manual orders)
-  app.put("/api/oms/orders/:id", requirePermission("orders", "edit"), async (req, res) => {
+  app.put("/api/wms/orders/:id", requirePermission("orders", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) {
