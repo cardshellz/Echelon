@@ -5,7 +5,7 @@
  * that don't fit in the generic channels schema.
  */
 
-import { pgTable, text, varchar, integer, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, integer, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
@@ -45,3 +45,34 @@ export const insertEbayOauthTokenSchema = createInsertSchema(ebayOauthTokens).om
 
 export type InsertEbayOauthToken = z.infer<typeof insertEbayOauthTokenSchema>;
 export type EbayOauthToken = typeof ebayOauthTokens.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// eBay Listing Rules — cascading config (default → product_type → SKU)
+// ---------------------------------------------------------------------------
+
+export const ebayListingRules = pgTable("ebay_listing_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  scopeType: varchar("scope_type", { length: 20 }).notNull(), // 'default' | 'product_type' | 'sku'
+  scopeValue: varchar("scope_value", { length: 100 }), // null for default, product_type slug, or SKU
+  ebayCategoryId: varchar("ebay_category_id", { length: 20 }),
+  ebayStoreCategoryId: varchar("ebay_store_category_id", { length: 20 }),
+  fulfillmentPolicyId: varchar("fulfillment_policy_id", { length: 20 }),
+  returnPolicyId: varchar("return_policy_id", { length: 20 }),
+  paymentPolicyId: varchar("payment_policy_id", { length: 20 }),
+  sortOrder: integer("sort_order").default(0),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ebay_listing_rules_channel_scope_idx").on(table.channelId, table.scopeType, table.scopeValue),
+]);
+
+export const insertEbayListingRuleSchema = createInsertSchema(ebayListingRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertEbayListingRule = z.infer<typeof insertEbayListingRuleSchema>;
+export type EbayListingRule = typeof ebayListingRules.$inferSelect;

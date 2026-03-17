@@ -14,6 +14,7 @@ import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
 import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 import { registerEbaySettingsRoutes } from "./routes/ebay-settings.routes";
+import { registerEbayListingRulesRoutes } from "./routes/ebay-listing-rules.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -35,6 +36,7 @@ export async function registerRoutes(
   registerPurchasingRoutes(app);
   registerEbayOAuthRoutes(app);
   registerEbaySettingsRoutes(app);
+  registerEbayListingRulesRoutes(app);
 
   return httpServer;
 }

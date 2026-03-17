@@ -16,8 +16,10 @@ import { useToast } from "@/hooks/use-toast";
 import {
   Store, Plus, Settings, RefreshCw, Trash2, CheckCircle2, AlertCircle,
   Clock, Pause, Play, ExternalLink, Building2, Package, Lock, MapPin, Link2, Save, Upload,
-  ShieldAlert, Radio, FileText, Eye, BarChart3, ShieldCheck, Loader2, XCircle,
+  ShieldAlert, Radio, FileText, Eye, BarChart3, ShieldCheck, Loader2, XCircle, Layers, Tag,
 } from "lucide-react";
+import { EbayListingRules } from "@/components/ebay/EbayListingRules";
+import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 
 interface ChannelConnection {
   id: number;
@@ -263,6 +265,7 @@ export default function Channels() {
     paymentPolicyId: "",
   });
   const [ebayPolicySynced, setEbayPolicySynced] = useState(false);
+  const [productTypeManagerOpen, setProductTypeManagerOpen] = useState(false);
 
   const isEbaySelected = selectedChannel?.provider === 'ebay';
 
@@ -1231,6 +1234,38 @@ export default function Channels() {
                             </div>
                           )}
                         </div>
+
+                        {/* Listing Rules */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Layers className="h-4 w-4 text-muted-foreground" />
+                              <Label className="text-sm font-medium">Listing Rules</Label>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="min-h-[32px] gap-1 text-xs"
+                              onClick={() => setProductTypeManagerOpen(true)}
+                            >
+                              <Tag className="h-3 w-3" />
+                              Manage Product Types
+                            </Button>
+                          </div>
+                          <EbayListingRules
+                            policies={ebayPolicies ? {
+                              fulfillmentPolicies: ebayPolicies.fulfillmentPolicies,
+                              returnPolicies: ebayPolicies.returnPolicies,
+                              paymentPolicies: ebayPolicies.paymentPolicies,
+                            } : null}
+                            connected={!!ebaySettings?.connected}
+                          />
+                        </div>
+
+                        <ProductTypeManager
+                          open={productTypeManagerOpen}
+                          onOpenChange={setProductTypeManagerOpen}
+                        />
 
                         {/* Listing Preview */}
                         <div className="space-y-2">

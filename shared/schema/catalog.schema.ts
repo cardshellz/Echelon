@@ -3,6 +3,26 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 // ============================================================================
+// PRODUCT TYPES - Canonical product classification
+// ============================================================================
+export const productTypes = pgTable("product_types", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  slug: varchar("slug", { length: 50 }).notNull().unique(),
+  name: varchar("name", { length: 100 }).notNull(),
+  description: text("description"),
+  sortOrder: integer("sort_order").default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertProductTypeSchema = createInsertSchema(productTypes).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertProductType = z.infer<typeof insertProductTypeSchema>;
+export type ProductType = typeof productTypes.$inferSelect;
+
+// ============================================================================
 // PRODUCTS - Master product catalog (source of truth for product identity)
 // ============================================================================
 export const products = pgTable("products", {
@@ -30,6 +50,7 @@ export const products = pgTable("products", {
   countryOfOrigin: varchar("country_of_origin", { length: 2 }), // ISO 3166-1 alpha-2
   harmonizedCode: varchar("harmonized_code", { length: 20 }), // HS tariff code
   itemSpecifics: jsonb("item_specifics"), // Structured marketplace attributes (eBay item specifics, etc.)
+  productType: varchar("product_type", { length: 50 }), // References product_types.slug
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
