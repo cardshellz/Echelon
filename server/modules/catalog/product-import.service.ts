@@ -15,6 +15,41 @@ const storage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 
 // ---------------------------------------------------------------------------
+// Shopify product_type → Echelon product_type slug mapping
+// ---------------------------------------------------------------------------
+const PRODUCT_TYPE_SLUG_MAP: Record<string, string> = {
+  "toploader": "toploaders",
+  "easy glide": "easy-glide-sleeves",
+  "magnetic holder": "magnetic-holders",
+  "semi-rigid": "semi-rigids",
+  "armalope": "armalopes",
+  "armalopes": "armalopes",
+  "hero": "hero-cases",
+  "quad box": "storage-boxes",
+  "tough box": "storage-boxes",
+  "accessories": "accessories",
+  "glove-fit": "glove-fit-toploader", // default, refined by SKU below
+  "sleeves and bags": "sleeves-bags",
+  "donation": "other",
+};
+
+function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: string): string {
+  if (!shopifyType || shopifyType.trim() === "") return "other";
+  const key = shopifyType.toLowerCase().trim();
+  let slug = PRODUCT_TYPE_SLUG_MAP[key] || "other";
+  
+  // Refine glove-fit by SKU prefix
+  if (slug === "glove-fit-toploader" && sku) {
+    const skuUp = sku.toUpperCase();
+    if (skuUp.startsWith("GLV-MAG")) slug = "glove-fit-mag";
+    else if (skuUp.startsWith("GLV-GRD")) slug = "glove-fit-graded";
+    else if (skuUp.startsWith("GLV-SR") || skuUp.startsWith("GLV-SLV-SEMI")) slug = "glove-fit-semi";
+  }
+  
+  return slug;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -101,6 +136,7 @@ export function createProductImportService() {
           description: firstVariant.description,
           brand: firstVariant.vendor,
           category: firstVariant.productType,
+          productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
           tags: firstVariant.tags,
           status: firstVariant.status,
           shopifyProductId: String(shopifyProductId),
@@ -279,6 +315,7 @@ export function createProductImportService() {
         await storage.updateProduct(product.id, {
           name: data.baseName,
           category: data.productType,
+          productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
           shopifyProductId: String(data.shopifyProductId),
@@ -289,6 +326,7 @@ export function createProductImportService() {
           sku: baseSku,
           name: data.baseName,
           category: data.productType,
+          productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
           shopifyProductId: String(data.shopifyProductId),
