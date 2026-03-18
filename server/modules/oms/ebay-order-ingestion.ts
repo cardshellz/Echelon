@@ -37,18 +37,30 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   const address = shipTo?.contactAddress;
   const pricingSummary = ebayOrder.pricingSummary;
 
-  const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => ({
-    externalLineItemId: item.lineItemId,
-    sku: item.sku,
-    title: item.title,
-    quantity: item.quantity,
-    unitPriceCents: dollarsToCents(item.lineItemCost?.value),
-    totalCents: dollarsToCents(item.total?.value),
-    taxCents: dollarsToCents(item.tax?.amount?.value),
-    discountCents: item.discountedLineItemCost
-      ? dollarsToCents(item.lineItemCost?.value) - dollarsToCents(item.discountedLineItemCost?.value)
-      : 0,
-  }));
+  const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => {
+    // lineItemCost = total product cost for this line (unit price × qty)
+    // item.total = lineItemCost + shipping + tax (NOT what we want for line total)
+    // For unit price: lineItemCost / quantity
+    const lineItemCostCents = dollarsToCents(item.lineItemCost?.value);
+    const qty = item.quantity || 1;
+    const unitPriceCents = Math.round(lineItemCostCents / qty);
+
+    // Tax: can be at line item level or in the tax field
+    const taxCents = dollarsToCents(item.tax?.amount?.value);
+
+    return {
+      externalLineItemId: item.lineItemId,
+      sku: item.sku,
+      title: item.title,
+      quantity: qty,
+      unitPriceCents,
+      totalCents: lineItemCostCents, // product cost only, no shipping/tax
+      taxCents,
+      discountCents: item.discountedLineItemCost
+        ? lineItemCostCents - dollarsToCents(item.discountedLineItemCost?.value)
+        : 0,
+    };
+  });
 
   // Map eBay payment status → financial_status
   let financialStatus = "paid";
@@ -85,11 +97,23 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     shipToState: address?.stateOrProvince,
     shipToZip: address?.postalCode,
     shipToCountry: address?.countryCode,
+    // Subtotal = sum of product costs (no shipping/tax)
     subtotalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value),
-    shippingCents: dollarsToCents(pricingSummary?.deliveryCost?.value),
-    taxCents: dollarsToCents(pricingSummary?.tax?.value),
-    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value),
-    totalCents: dollarsToCents(pricingSummary?.total?.value),
+    // Shipping = deliveryCost - deliveryDiscount (net shipping the buyer paid)
+    shippingCents: Math.max(0,
+      dollarsToCents(pricingSummary?.deliveryCost?.value) +
+      dollarsToCents(pricingSummary?.deliveryDiscount?.value) // deliveryDiscount is negative
+    ),
+    // Tax: pricingSummary.tax OR sum from line items (eBay often omits order-level tax)
+    taxCents: dollarsToCents(pricingSummary?.tax?.value) ||
+      lineItems.reduce((sum, li) => sum + li.taxCents, 0),
+    // Discounts: product discounts + delivery discount
+    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value) +
+      Math.abs(dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
+    // Total: recalculate = subtotal + net shipping + tax
+    totalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value) +
+      Math.max(0, dollarsToCents(pricingSummary?.deliveryCost?.value) + dollarsToCents(pricingSummary?.deliveryDiscount?.value)) +
+      (dollarsToCents(pricingSummary?.tax?.value) || lineItems.reduce((sum, li) => sum + li.taxCents, 0)),
     currency: pricingSummary?.total?.currency || "USD",
     rawPayload: ebayOrder as unknown,
     orderedAt: new Date(ebayOrder.creationDate),
