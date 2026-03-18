@@ -410,6 +410,42 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // PUT /api/ebay/toggle-type-listing/:productTypeSlug — Toggle listingEnabled for a product type
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/toggle-type-listing/:productTypeSlug", async (req: Request, res: Response) => {
+    try {
+      const { productTypeSlug } = req.params;
+      if (!productTypeSlug) {
+        res.status(400).json({ error: "productTypeSlug is required" });
+        return;
+      }
+      const { listingEnabled } = req.body as { listingEnabled: boolean };
+      if (typeof listingEnabled !== "boolean") {
+        res.status(400).json({ error: "listingEnabled (boolean) is required" });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query(`
+          INSERT INTO ebay_category_mappings (
+            channel_id, product_type_slug, listing_enabled, created_at, updated_at
+          ) VALUES ($1, $2, $3, NOW(), NOW())
+          ON CONFLICT (channel_id, product_type_slug)
+          DO UPDATE SET listing_enabled = EXCLUDED.listing_enabled, updated_at = NOW()
+        `, [EBAY_CHANNEL_ID, productTypeSlug, listingEnabled]);
+
+        res.json({ success: true, productTypeSlug, listingEnabled });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Toggle Type Listing] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // PUT /api/ebay/product-exclusion/:productId — Toggle individual product exclusion
   // -----------------------------------------------------------------------
   app.put("/api/ebay/product-exclusion/:productId", async (req: Request, res: Response) => {

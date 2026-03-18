@@ -329,6 +329,22 @@ export default function EbayChannelPage() {
     },
   });
 
+  const toggleTypeListingMutation = useMutation({
+    mutationFn: async ({ productTypeSlug, listingEnabled }: { productTypeSlug: string; listingEnabled: boolean }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/toggle-type-listing/${encodeURIComponent(productTypeSlug)}`, { listingEnabled });
+      return resp.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+      // Revert local state on error by re-syncing from server
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+    },
+  });
+
   const toggleExclusionMutation = useMutation({
     mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
       const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
@@ -769,9 +785,17 @@ export default function EbayChannelPage() {
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={mapping.listingEnabled !== false}
-                                    onCheckedChange={(checked) =>
-                                      updateMapping(pt.slug, { listingEnabled: checked })
-                                    }
+                                    onCheckedChange={(checked) => {
+                                      // Optimistic local update
+                                      setLocalMappings((prev) => {
+                                        const next = new Map(prev);
+                                        const existing = next.get(pt.slug) || { productTypeSlug: pt.slug } as CategoryMapping;
+                                        next.set(pt.slug, { ...existing, listingEnabled: checked });
+                                        return next;
+                                      });
+                                      // Immediately persist to server
+                                      toggleTypeListingMutation.mutate({ productTypeSlug: pt.slug, listingEnabled: checked });
+                                    }}
                                     className="scale-75"
                                   />
                                   <div>
