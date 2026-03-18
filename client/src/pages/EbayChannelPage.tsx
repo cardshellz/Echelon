@@ -722,12 +722,12 @@ export default function EbayChannelPage() {
             <>
               <div className="border rounded-lg overflow-hidden">
                 <Table>
-                  <TableHeader>
+                  <TableHeader className="hidden sm:table-header-group">
                     <TableRow>
                       <TableHead className="w-[200px]">Product Type</TableHead>
                       <TableHead>eBay Browse Category</TableHead>
                       <TableHead className="w-[200px]">eBay Store Category</TableHead>
-                      <TableHead className="w-[100px] text-center">Overrides</TableHead>
+                      <TableHead className="w-[80px] text-center">Policies</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -740,8 +740,8 @@ export default function EbayChannelPage() {
 
                       return (
                         <React.Fragment key={pt.slug}>
-                            <TableRow className="group">
-                              <TableCell>
+                            <TableRow className="group sm:table-row flex flex-col sm:flex-row gap-2 sm:gap-0 p-3 sm:p-0 border-b">
+                              <TableCell className="sm:table-cell block pb-1 sm:pb-0">
                                 <div>
                                   <span className="font-medium text-sm">{pt.name}</span>
                                   <span className="text-xs text-muted-foreground ml-2">
@@ -846,19 +846,20 @@ export default function EbayChannelPage() {
                                   </SelectContent>
                                 </Select>
                               </TableCell>
-                              <TableCell className="text-center">
+                              <TableCell className="sm:table-cell block sm:text-center pt-1 sm:pt-0">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="h-7 px-2 text-xs"
+                                  className="h-7 px-2 text-xs gap-1"
                                   onClick={() => toggleOverride(pt.slug)}
                                 >
+                                  <Settings2 className="h-3.5 w-3.5" />
+                                  <span className="sm:hidden">Policy Overrides</span>
                                   {isOverrideExpanded ? (
                                     <ChevronDown className="h-3.5 w-3.5" />
                                   ) : (
                                     <ChevronRight className="h-3.5 w-3.5" />
                                   )}
-                                  <Settings2 className="h-3.5 w-3.5 ml-1" />
                                 </Button>
                               </TableCell>
                             </TableRow>
@@ -869,20 +870,20 @@ export default function EbayChannelPage() {
                                     <p className="text-xs text-muted-foreground mb-2 font-medium">
                                       Policy overrides for {pt.name} (leave blank to use store defaults)
                                     </p>
-                                    <div className="grid grid-cols-3 gap-3">
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                       <div>
                                         <Label className="text-xs">Shipping Override</Label>
                                         <Select
-                                          value={mapping.fulfillmentPolicyOverride || ""}
+                                          value={mapping.fulfillmentPolicyOverride || "__default__"}
                                           onValueChange={(v) =>
-                                            updateMapping(pt.slug, { fulfillmentPolicyOverride: v || null })
+                                            updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
                                           }
                                         >
                                           <SelectTrigger className="mt-1 h-8 text-xs">
                                             <SelectValue placeholder="Use default" />
                                           </SelectTrigger>
                                           <SelectContent>
-                                            <SelectItem value="" className="text-xs">Use default</SelectItem>
+                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
                                             {(policies?.fulfillmentPolicies || []).map((p) => (
                                               <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
                                             ))}
@@ -892,16 +893,16 @@ export default function EbayChannelPage() {
                                       <div>
                                         <Label className="text-xs">Returns Override</Label>
                                         <Select
-                                          value={mapping.returnPolicyOverride || ""}
+                                          value={mapping.returnPolicyOverride || "__default__"}
                                           onValueChange={(v) =>
-                                            updateMapping(pt.slug, { returnPolicyOverride: v || null })
+                                            updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
                                           }
                                         >
                                           <SelectTrigger className="mt-1 h-8 text-xs">
                                             <SelectValue placeholder="Use default" />
                                           </SelectTrigger>
                                           <SelectContent>
-                                            <SelectItem value="" className="text-xs">Use default</SelectItem>
+                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
                                             {(policies?.returnPolicies || []).map((p) => (
                                               <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
                                             ))}
@@ -911,16 +912,16 @@ export default function EbayChannelPage() {
                                       <div>
                                         <Label className="text-xs">Payment Override</Label>
                                         <Select
-                                          value={mapping.paymentPolicyOverride || ""}
+                                          value={mapping.paymentPolicyOverride || "__default__"}
                                           onValueChange={(v) =>
-                                            updateMapping(pt.slug, { paymentPolicyOverride: v || null })
+                                            updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
                                           }
                                         >
                                           <SelectTrigger className="mt-1 h-8 text-xs">
                                             <SelectValue placeholder="Use default" />
                                           </SelectTrigger>
                                           <SelectContent>
-                                            <SelectItem value="" className="text-xs">Use default</SelectItem>
+                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
                                             {(policies?.paymentPolicies || []).map((p) => (
                                               <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
                                             ))}
