@@ -45,8 +45,8 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     const qty = item.quantity || 1;
     const unitPriceCents = Math.round(lineItemCostCents / qty);
 
-    // Tax: can be at line item level or in the tax field
-    const taxCents = dollarsToCents(item.tax?.amount?.value);
+    // Tax: eBay collects and remits — omit from line items
+    const taxCents = 0;
 
     return {
       externalLineItemId: item.lineItemId,
@@ -104,16 +104,15 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
       dollarsToCents(pricingSummary?.deliveryCost?.value) +
       dollarsToCents(pricingSummary?.deliveryDiscount?.value) // deliveryDiscount is negative
     ),
-    // Tax: pricingSummary.tax OR sum from line items (eBay often omits order-level tax)
-    taxCents: dollarsToCents(pricingSummary?.tax?.value) ||
-      lineItems.reduce((sum, li) => sum + li.taxCents, 0),
+    // Tax: eBay collects and remits — we never see this money. Omit from OMS totals.
+    // Raw tax data preserved in raw_payload for reference.
+    taxCents: 0,
     // Discounts: product discounts + delivery discount
     discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value) +
       Math.abs(dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
-    // Total: recalculate = subtotal + net shipping + tax
+    // Total: subtotal + net shipping (no tax — eBay handles it)
     totalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value) +
-      Math.max(0, dollarsToCents(pricingSummary?.deliveryCost?.value) + dollarsToCents(pricingSummary?.deliveryDiscount?.value)) +
-      (dollarsToCents(pricingSummary?.tax?.value) || lineItems.reduce((sum, li) => sum + li.taxCents, 0)),
+      Math.max(0, dollarsToCents(pricingSummary?.deliveryCost?.value) + dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
     currency: pricingSummary?.total?.currency || "USD",
     rawPayload: ebayOrder as unknown,
     orderedAt: new Date(ebayOrder.creationDate),
