@@ -348,7 +348,13 @@ ${categoriesXml}
           FROM products p
           LEFT JOIN product_types pt ON pt.slug = p.product_type
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
-          LEFT JOIN channel_listings cl ON cl.product_id = p.id AND cl.channel_id = $1
+          LEFT JOIN LATERAL (
+            SELECT cl2.id, cl2.sync_status, cl2.external_listing_id
+            FROM channel_listings cl2
+            JOIN product_variants pv2 ON pv2.id = cl2.product_variant_id
+            WHERE pv2.product_id = p.id AND cl2.channel_id = $1
+            LIMIT 1
+          ) cl ON true
           WHERE p.is_active = true AND p.product_type IS NOT NULL
           ORDER BY pt.sort_order ASC, p.name ASC
         `, [EBAY_CHANNEL_ID]);
