@@ -149,6 +149,7 @@ export function registerEbayChannelRoutes(app: Express): void {
             fulfillmentPolicyOverride: m.fulfillmentPolicyOverride || m.fulfillment_policy_override,
             returnPolicyOverride: m.returnPolicyOverride || m.return_policy_override,
             paymentPolicyOverride: m.paymentPolicyOverride || m.payment_policy_override,
+            listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
           })),
           productTypes: typesResult.rows,
           lastSyncAt: conn?.lastSyncAt || conn?.last_sync_at || null,
@@ -178,6 +179,7 @@ export function registerEbayChannelRoutes(app: Express): void {
           fulfillmentPolicyOverride?: string;
           returnPolicyOverride?: string;
           paymentPolicyOverride?: string;
+          listingEnabled?: boolean;
         }>;
       };
 
@@ -197,8 +199,9 @@ export function registerEbayChannelRoutes(app: Express): void {
               ebay_browse_category_id, ebay_browse_category_name,
               ebay_store_category_id, ebay_store_category_name,
               fulfillment_policy_override, return_policy_override, payment_policy_override,
+              listing_enabled,
               created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
             ON CONFLICT (channel_id, product_type_slug)
             DO UPDATE SET
               ebay_browse_category_id = EXCLUDED.ebay_browse_category_id,
@@ -208,6 +211,7 @@ export function registerEbayChannelRoutes(app: Express): void {
               fulfillment_policy_override = EXCLUDED.fulfillment_policy_override,
               return_policy_override = EXCLUDED.return_policy_override,
               payment_policy_override = EXCLUDED.payment_policy_override,
+              listing_enabled = EXCLUDED.listing_enabled,
               updated_at = NOW()
           `, [
             EBAY_CHANNEL_ID,
@@ -219,6 +223,7 @@ export function registerEbayChannelRoutes(app: Express): void {
             m.fulfillmentPolicyOverride || null,
             m.returnPolicyOverride || null,
             m.paymentPolicyOverride || null,
+            m.listingEnabled !== false,
           ]);
         }
 
@@ -337,7 +342,9 @@ ${categoriesXml}
             (SELECT COUNT(*) FROM product_assets pa WHERE pa.product_id = p.id) AS image_count,
             cl.id AS listing_id,
             cl.sync_status AS listing_status,
-            cl.external_listing_id
+            cl.external_listing_id,
+            p.ebay_listing_excluded,
+            COALESCE(ecm.listing_enabled, true) AS type_listing_enabled
           FROM products p
           LEFT JOIN product_types pt ON pt.slug = p.product_type
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
@@ -353,8 +360,13 @@ ${categoriesXml}
           const hasImages = (row.image_count || 0) > 0;
           const isListed = !!row.listing_id && row.listing_status === "synced";
 
+          const isExcluded = row.ebay_listing_excluded === true;
+          const isTypeDisabled = row.type_listing_enabled === false;
+
           let status: string;
-          if (isListed) status = "listed";
+          if (isExcluded) status = "excluded";
+          else if (isTypeDisabled) status = "type_disabled";
+          else if (isListed) status = "listed";
           else if (hasCategoryMapping && hasVariants && hasImages) status = "ready";
           else status = "missing_config";
 
@@ -374,6 +386,7 @@ ${categoriesXml}
             status,
             missingItems,
             isListed,
+            isExcluded,
             externalListingId: row.external_listing_id,
             variantCount: parseInt(row.variant_count) || 0,
             imageCount: parseInt(row.image_count) || 0,
@@ -386,6 +399,33 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Listing Feed] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /api/ebay/product-exclusion/:productId — Toggle individual product exclusion
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/product-exclusion/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const { excluded } = req.body as { excluded: boolean };
+      const client = await pool.connect();
+      try {
+        await client.query(
+          "UPDATE products SET ebay_listing_excluded = $1 WHERE id = $2",
+          [excluded, productId]
+        );
+        res.json({ success: true, productId, excluded });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Exclusion] Error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });

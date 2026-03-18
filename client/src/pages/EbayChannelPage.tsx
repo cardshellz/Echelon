@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -110,6 +111,7 @@ interface CategoryMapping {
   fulfillmentPolicyOverride: string | null;
   returnPolicyOverride: string | null;
   paymentPolicyOverride: string | null;
+  listingEnabled: boolean;
 }
 
 interface ProductTypeWithCount {
@@ -742,11 +744,20 @@ export default function EbayChannelPage() {
                         <React.Fragment key={pt.slug}>
                             <TableRow className="group sm:table-row flex flex-col sm:flex-row gap-2 sm:gap-0 p-3 sm:p-0 border-b">
                               <TableCell className="sm:table-cell block pb-1 sm:pb-0">
-                                <div>
-                                  <span className="font-medium text-sm">{pt.name}</span>
-                                  <span className="text-xs text-muted-foreground ml-2">
-                                    ({pt.product_count} product{pt.product_count !== 1 ? "s" : ""})
-                                  </span>
+                                <div className="flex items-center gap-2">
+                                  <Switch
+                                    checked={mapping.listingEnabled !== false}
+                                    onCheckedChange={(checked) =>
+                                      updateMapping(pt.slug, { listingEnabled: checked })
+                                    }
+                                    className="scale-75"
+                                  />
+                                  <div>
+                                    <span className={`font-medium text-sm ${mapping.listingEnabled === false ? 'text-muted-foreground line-through' : ''}`}>{pt.name}</span>
+                                    <span className="text-xs text-muted-foreground ml-2">
+                                      ({pt.product_count} product{pt.product_count !== 1 ? "s" : ""})
+                                    </span>
+                                  </div>
                                 </div>
                               </TableCell>
                               <TableCell>
