@@ -446,6 +446,69 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // GET /api/ebay/category-search — Search eBay browse categories (Taxonomy API)
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/category-search", async (req: Request, res: Response) => {
+    try {
+      const q = (req.query.q as string || "").trim();
+      if (!q || q.length < 2) {
+        res.json({ categories: [] });
+        return;
+      }
+
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const environment = process.env.EBAY_ENVIRONMENT || "production";
+      const baseUrl = environment === "sandbox"
+        ? "https://api.sandbox.ebay.com"
+        : "https://api.ebay.com";
+
+      const url = `${baseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_suggestions?q=${encodeURIComponent(q)}`;
+      const resp = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error("[eBay Category Search] API error:", resp.status, errText);
+        res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
+        return;
+      }
+
+      const data = await resp.json();
+      const suggestions = data.categorySuggestions || [];
+
+      const categories = suggestions.slice(0, 10).map((s: any) => {
+        const cat = s.category || {};
+        const ancestors = s.categoryTreeNodeAncestors || [];
+        // Build breadcrumb from ancestors (root → leaf)
+        const ancestorNames = ancestors
+          .sort((a: any, b: any) => (b.categoryTreeNodeLevel || 0) - (a.categoryTreeNodeLevel || 0))
+          .map((a: any) => a.categoryName);
+        const breadcrumb = [...ancestorNames, cat.categoryName].join(" > ");
+        return {
+          categoryId: cat.categoryId,
+          categoryName: cat.categoryName,
+          breadcrumb,
+        };
+      });
+
+      res.json({ categories });
+    } catch (err: any) {
+      console.error("[eBay Category Search] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // PUT /api/ebay/product-exclusion/:productId — Toggle individual product exclusion
   // -----------------------------------------------------------------------
   app.put("/api/ebay/product-exclusion/:productId", async (req: Request, res: Response) => {

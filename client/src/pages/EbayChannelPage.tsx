@@ -65,6 +65,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
+import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 
 // ============================================================================
 // Types
@@ -132,12 +133,6 @@ interface PoliciesResponse {
   fulfillmentPolicies: Policy[];
   returnPolicies: Policy[];
   paymentPolicies: Policy[];
-}
-
-interface BrowseCategory {
-  id: string;
-  name: string;
-  path: string;
 }
 
 interface StoreCategory {
@@ -212,10 +207,7 @@ export default function EbayChannelPage() {
   const [mappingsDirty, setMappingsDirty] = useState(false);
   const [expandedOverrides, setExpandedOverrides] = useState<Set<string>>(new Set());
 
-  // Browse category search
-  const [browseCategorySearch, setBrowseCategorySearch] = useState<Record<string, string>>({});
-  const [browseCategoryResults, setBrowseCategoryResults] = useState<Record<string, BrowseCategory[]>>({});
-  const [searchingCategory, setSearchingCategory] = useState<string | null>(null);
+  // Browse category search (legacy state — now handled by EbayCategoryPicker)
 
   // Feed filters
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "listed" | "excluded">("all");
@@ -258,26 +250,6 @@ export default function EbayChannelPage() {
       setLocalMappings(map);
     }
   }, [config?.categoryMappings, mappingsDirty]);
-
-  // ---- Browse category search handler ----
-  const searchBrowseCategories = useCallback(async (slug: string, query: string) => {
-    if (query.length < 2) {
-      setBrowseCategoryResults((prev) => ({ ...prev, [slug]: [] }));
-      return;
-    }
-    setSearchingCategory(slug);
-    try {
-      const resp = await fetch(`/api/ebay/browse-categories?q=${encodeURIComponent(query)}`, {
-        credentials: "include",
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        setBrowseCategoryResults((prev) => ({ ...prev, [slug]: data.categories || [] }));
-      }
-    } catch {} finally {
-      setSearchingCategory(null);
-    }
-  }, []);
 
   // ---- Mutations ----
 
@@ -774,9 +746,6 @@ export default function EbayChannelPage() {
                     {(config?.productTypes || []).map((pt) => {
                       const mapping = localMappings.get(pt.slug) || {} as Partial<CategoryMapping>;
                       const isOverrideExpanded = expandedOverrides.has(pt.slug);
-                      const searchQuery = browseCategorySearch[pt.slug] || "";
-                      const results = browseCategoryResults[pt.slug] || [];
-                      const isSearching = searchingCategory === pt.slug;
 
                       return (
                         <React.Fragment key={pt.slug}>
@@ -807,78 +776,16 @@ export default function EbayChannelPage() {
                                 </div>
                               </TableCell>
                               <TableCell>
-                                <div className="relative">
-                                  {mapping.ebayBrowseCategoryName ? (
-                                    <div className="flex items-center gap-2">
-                                      <Badge variant="secondary" className="text-xs max-w-[300px] truncate">
-                                        {mapping.ebayBrowseCategoryName}
-                                      </Badge>
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-6 px-2 text-xs"
-                                        onClick={() => {
-                                          updateMapping(pt.slug, {
-                                            ebayBrowseCategoryId: null,
-                                            ebayBrowseCategoryName: null,
-                                          });
-                                        }}
-                                      >
-                                        <XCircle className="h-3 w-3" />
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <div className="space-y-1">
-                                      <div className="relative">
-                                        <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                                        <Input
-                                          placeholder="Search eBay categories..."
-                                          className="pl-8 h-8 text-xs"
-                                          value={searchQuery}
-                                          onChange={(e) => {
-                                            setBrowseCategorySearch((prev) => ({
-                                              ...prev,
-                                              [pt.slug]: e.target.value,
-                                            }));
-                                            searchBrowseCategories(pt.slug, e.target.value);
-                                          }}
-                                        />
-                                        {isSearching && (
-                                          <Loader2 className="absolute right-2 top-2.5 h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                                        )}
-                                      </div>
-                                      {results.length > 0 && (
-                                        <div className="absolute z-10 bg-popover border rounded-md shadow-lg max-h-48 overflow-y-auto w-[400px]">
-                                          {results.map((cat) => (
-                                            <button
-                                              key={cat.id}
-                                              className="w-full text-left px-3 py-2 text-xs hover:bg-accent transition-colors"
-                                              onClick={() => {
-                                                updateMapping(pt.slug, {
-                                                  ebayBrowseCategoryId: cat.id,
-                                                  ebayBrowseCategoryName: cat.path || cat.name,
-                                                });
-                                                setBrowseCategorySearch((prev) => ({
-                                                  ...prev,
-                                                  [pt.slug]: "",
-                                                }));
-                                                setBrowseCategoryResults((prev) => ({
-                                                  ...prev,
-                                                  [pt.slug]: [],
-                                                }));
-                                              }}
-                                            >
-                                              <div className="font-medium">{cat.name}</div>
-                                              {cat.path && cat.path !== cat.name && (
-                                                <div className="text-muted-foreground truncate">{cat.path}</div>
-                                              )}
-                                            </button>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
+                                <EbayCategoryPicker
+                                  currentCategoryId={mapping.ebayBrowseCategoryId || null}
+                                  currentCategoryName={mapping.ebayBrowseCategoryName || null}
+                                  onSelect={(categoryId, categoryName) => {
+                                    updateMapping(pt.slug, {
+                                      ebayBrowseCategoryId: categoryId,
+                                      ebayBrowseCategoryName: categoryName,
+                                    });
+                                  }}
+                                />
                               </TableCell>
                               <TableCell>
                                 <Select
