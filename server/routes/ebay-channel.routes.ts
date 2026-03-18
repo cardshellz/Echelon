@@ -342,14 +342,14 @@ ${categoriesXml}
             (SELECT COUNT(*) FROM product_assets pa WHERE pa.product_id = p.id) AS image_count,
             cl.id AS listing_id,
             cl.sync_status AS listing_status,
-            cl.external_listing_id,
+            cl.external_product_id,
             p.ebay_listing_excluded,
             COALESCE(ecm.listing_enabled, true) AS type_listing_enabled
           FROM products p
           LEFT JOIN product_types pt ON pt.slug = p.product_type
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
           LEFT JOIN LATERAL (
-            SELECT cl2.id, cl2.sync_status, cl2.external_listing_id
+            SELECT cl2.id, cl2.sync_status, cl2.external_product_id
             FROM channel_listings cl2
             JOIN product_variants pv2 ON pv2.id = cl2.product_variant_id
             WHERE pv2.product_id = p.id AND cl2.channel_id = $1
@@ -393,7 +393,7 @@ ${categoriesXml}
             missingItems,
             isListed,
             isExcluded,
-            externalListingId: row.external_listing_id,
+            externalListingId: row.external_product_id,
             variantCount: parseInt(row.variant_count) || 0,
             imageCount: parseInt(row.image_count) || 0,
           };
