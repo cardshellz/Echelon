@@ -83,7 +83,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
   }
 
   return {
-    externalOrderNumber: ebayOrder.salesRecordReference || ebayOrder.orderId,
+    externalOrderNumber: ebayOrder.orderId,
     status,
     financialStatus,
     fulfillmentStatus,
