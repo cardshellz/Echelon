@@ -465,6 +465,11 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
     console.log("Checked ShipStation columns on oms_orders");
 
+    // 6. eBay listing control columns
+    await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
+    console.log("Checked eBay listing control columns (listing_enabled, ebay_listing_excluded)");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

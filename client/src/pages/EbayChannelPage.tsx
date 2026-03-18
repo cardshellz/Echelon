@@ -153,9 +153,10 @@ interface FeedItem {
   productTypeName: string;
   ebayBrowseCategoryName: string | null;
   ebayStoreCategoryName: string | null;
-  status: "ready" | "missing_config" | "listed";
+  status: "ready" | "missing_config" | "listed" | "excluded" | "type_disabled";
   missingItems: string[];
   isListed: boolean;
+  isExcluded: boolean;
   externalListingId: string | null;
   variantCount: number;
   imageCount: number;
@@ -217,7 +218,7 @@ export default function EbayChannelPage() {
   const [searchingCategory, setSearchingCategory] = useState<string | null>(null);
 
   // Feed filters
-  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "listed">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "listed" | "excluded">("all");
   const [feedSearch, setFeedSearch] = useState("");
 
   // Location form
@@ -310,8 +311,9 @@ export default function EbayChannelPage() {
 
   const saveMappingsMutation = useMutation({
     mutationFn: async () => {
+      // Include any mapping that has category data OR has listing_enabled explicitly set
       const mappingsArray = Array.from(localMappings.values()).filter(
-        (m) => m.ebayBrowseCategoryId || m.ebayStoreCategoryId
+        (m) => m.ebayBrowseCategoryId || m.ebayStoreCategoryId || m.listingEnabled !== undefined
       );
       const resp = await apiRequest("PUT", "/api/ebay/category-mapping", { mappings: mappingsArray });
       return resp.json();
@@ -320,6 +322,19 @@ export default function EbayChannelPage() {
       toast({ title: "Mappings Saved", description: data.message });
       setMappingsDirty(false);
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const toggleExclusionMutation = useMutation({
+    mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
+      return resp.json();
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
     },
     onError: (err: Error) => {
@@ -373,9 +388,14 @@ export default function EbayChannelPage() {
 
   const filteredFeed = useMemo(() => {
     if (!feedData?.feed) return [];
-    let items = feedData.feed;
-    if (feedFilter !== "all") {
+    // Filter out type_disabled products entirely — they're controlled by the category mapping toggle
+    let items = feedData.feed.filter((i) => i.status !== "type_disabled");
+    if (feedFilter === "excluded") {
+      items = items.filter((i) => i.status === "excluded");
+    } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
+    } else {
+      // "all" shows everything except type_disabled (already filtered above)
     }
     if (feedSearch) {
       const q = feedSearch.toLowerCase();
@@ -389,13 +409,15 @@ export default function EbayChannelPage() {
   }, [feedData, feedFilter, feedSearch]);
 
   const feedCounts = useMemo(() => {
-    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, listed: 0 };
-    const feed = feedData.feed;
+    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, listed: 0, excluded: 0 };
+    // Exclude type_disabled from all counts
+    const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
     return {
       all: feed.length,
       ready: feed.filter((f) => f.status === "ready").length,
       missing_config: feed.filter((f) => f.status === "missing_config").length,
       listed: feed.filter((f) => f.status === "listed").length,
+      excluded: feed.filter((f) => f.status === "excluded").length,
     };
   }, [feedData]);
 
@@ -1007,9 +1029,9 @@ export default function EbayChannelPage() {
           ) : (
             <>
               {/* Filters */}
-              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 mb-4">
-                <div className="flex gap-1">
-                  {(["all", "ready", "missing_config", "listed"] as const).map((f) => (
+              <div className="flex flex-col gap-3 mb-4">
+                <div className="flex flex-wrap gap-1">
+                  {(["all", "ready", "missing_config", "listed", "excluded"] as const).map((f) => (
                     <Button
                       key={f}
                       variant={feedFilter === f ? "default" : "outline"}
@@ -1021,10 +1043,11 @@ export default function EbayChannelPage() {
                       {f === "ready" && `Ready (${feedCounts.ready})`}
                       {f === "missing_config" && `Missing (${feedCounts.missing_config})`}
                       {f === "listed" && `Listed (${feedCounts.listed})`}
+                      {f === "excluded" && `Excluded (${feedCounts.excluded})`}
                     </Button>
                   ))}
                 </div>
-                <div className="relative flex-1 max-w-xs">
+                <div className="relative w-full sm:max-w-xs">
                   <Search className="absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
                   <Input
                     placeholder="Search by name or SKU..."
@@ -1035,72 +1058,133 @@ export default function EbayChannelPage() {
                 </div>
               </div>
 
-              {/* Feed Table */}
+              {/* Feed Table — Mobile-first: card layout on mobile, table on sm+ */}
               <div className="border rounded-lg overflow-hidden">
+                {/* Desktop table header — hidden on mobile */}
                 <Table>
-                  <TableHeader>
+                  <TableHeader className="hidden sm:table-header-group">
                     <TableRow>
+                      <TableHead className="w-[40px]"></TableHead>
                       <TableHead>Product</TableHead>
                       <TableHead className="w-[100px]">SKU</TableHead>
-                      <TableHead className="w-[150px]">Product Type</TableHead>
-                      <TableHead className="w-[200px]">eBay Category</TableHead>
+                      <TableHead className="w-[130px]">Type</TableHead>
+                      <TableHead className="w-[180px]">eBay Category</TableHead>
                       <TableHead className="w-[120px] text-center">Status</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredFeed.map((item) => (
-                      <TableRow key={item.id}>
-                        <TableCell>
-                          <span className="font-medium text-sm">{item.name}</span>
-                          <div className="flex gap-1.5 mt-0.5">
-                            <span className="text-xs text-muted-foreground">
-                              {item.variantCount} variant{item.variantCount !== 1 ? "s" : ""}
+                    {filteredFeed.map((item) => {
+                      const isExcluded = item.status === "excluded";
+                      return (
+                        <TableRow
+                          key={item.id}
+                          className={`sm:table-row flex flex-col p-3 sm:p-0 gap-2 sm:gap-0 ${isExcluded ? "opacity-50" : ""}`}
+                        >
+                          {/* Exclude toggle */}
+                          <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-2">
+                            <div className="flex items-center gap-2 sm:gap-0">
+                              <Switch
+                                checked={!isExcluded}
+                                onCheckedChange={(checked) =>
+                                  toggleExclusionMutation.mutate({ productId: item.id, excluded: !checked })
+                                }
+                                className="scale-75"
+                                title={isExcluded ? "Include in eBay listings" : "Exclude from eBay listings"}
+                              />
+                              <span className="text-xs text-muted-foreground sm:hidden">
+                                {isExcluded ? "Excluded" : "Included"}
+                              </span>
+                            </div>
+                          </TableCell>
+                          {/* Product name */}
+                          <TableCell className="sm:table-cell block py-0 sm:py-2">
+                            <span className={`font-medium text-sm ${isExcluded ? "line-through text-muted-foreground" : ""}`}>
+                              {item.name}
                             </span>
-                            <span className="text-xs text-muted-foreground">·</span>
-                            <span className="text-xs text-muted-foreground">
-                              {item.imageCount} image{item.imageCount !== 1 ? "s" : ""}
-                            </span>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <code className="text-xs bg-muted px-1 py-0.5 rounded">
-                            {item.sku || "—"}
-                          </code>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="text-xs">
-                            {item.productTypeName || item.productType}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          {item.ebayBrowseCategoryName ? (
-                            <span className="text-xs text-muted-foreground truncate block max-w-[180px]">
-                              {item.ebayBrowseCategoryName}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground italic">Not mapped</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          {item.status === "ready" && (
-                            <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
-                          )}
-                          {item.status === "missing_config" && (
-                            <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
-                              Missing: {item.missingItems.join(", ")}
+                            <div className="flex flex-wrap gap-1.5 mt-0.5">
+                              <span className="text-xs text-muted-foreground">
+                                {item.variantCount} variant{item.variantCount !== 1 ? "s" : ""}
+                              </span>
+                              <span className="text-xs text-muted-foreground">·</span>
+                              <span className="text-xs text-muted-foreground">
+                                {item.imageCount} image{item.imageCount !== 1 ? "s" : ""}
+                              </span>
+                              {/* Show SKU inline on mobile */}
+                              {item.sku && (
+                                <>
+                                  <span className="text-xs text-muted-foreground sm:hidden">·</span>
+                                  <code className="text-xs bg-muted px-1 py-0.5 rounded sm:hidden">
+                                    {item.sku}
+                                  </code>
+                                </>
+                              )}
+                            </div>
+                            {/* Mobile-only: type + status row */}
+                            <div className="flex items-center gap-2 mt-1.5 sm:hidden">
+                              <Badge variant="outline" className="text-xs">
+                                {item.productTypeName || item.productType}
+                              </Badge>
+                              {item.status === "ready" && (
+                                <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                              )}
+                              {item.status === "missing_config" && (
+                                <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
+                                  Missing: {item.missingItems.join(", ")}
+                                </Badge>
+                              )}
+                              {item.status === "listed" && (
+                                <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                              )}
+                              {item.status === "excluded" && (
+                                <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          {/* SKU — desktop only */}
+                          <TableCell className="hidden sm:table-cell">
+                            <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                              {item.sku || "—"}
+                            </code>
+                          </TableCell>
+                          {/* Product Type — desktop only */}
+                          <TableCell className="hidden sm:table-cell">
+                            <Badge variant="outline" className="text-xs">
+                              {item.productTypeName || item.productType}
                             </Badge>
-                          )}
-                          {item.status === "listed" && (
-                            <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">
-                              Listed
-                            </Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                          </TableCell>
+                          {/* eBay Category — desktop only */}
+                          <TableCell className="hidden sm:table-cell">
+                            {item.ebayBrowseCategoryName ? (
+                              <span className="text-xs text-muted-foreground truncate block max-w-[160px]">
+                                {item.ebayBrowseCategoryName}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-muted-foreground italic">Not mapped</span>
+                            )}
+                          </TableCell>
+                          {/* Status — desktop only */}
+                          <TableCell className="hidden sm:table-cell text-center">
+                            {item.status === "ready" && (
+                              <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                            )}
+                            {item.status === "missing_config" && (
+                              <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
+                                Missing: {item.missingItems.join(", ")}
+                              </Badge>
+                            )}
+                            {item.status === "listed" && (
+                              <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                            )}
+                            {item.status === "excluded" && (
+                              <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                     {filteredFeed.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
+                        <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-8">
                           {feedData?.total === 0
                             ? "No products have product types assigned. Use \"Manage Product Types\" to assign them."
                             : "No products match your filter."}
@@ -1113,7 +1197,7 @@ export default function EbayChannelPage() {
 
               {filteredFeed.length > 0 && (
                 <p className="text-xs text-muted-foreground mt-2">
-                  Showing {filteredFeed.length} of {feedData?.total || 0} products
+                  Showing {filteredFeed.length} of {feedCounts.all} products
                 </p>
               )}
             </>
