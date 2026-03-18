@@ -92,6 +92,7 @@ export const ebayCategoryMappings = pgTable("ebay_category_mappings", {
   fulfillmentPolicyOverride: varchar("fulfillment_policy_override", { length: 20 }),
   returnPolicyOverride: varchar("return_policy_override", { length: 20 }),
   paymentPolicyOverride: varchar("payment_policy_override", { length: 20 }),
+  listingEnabled: boolean("listing_enabled").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
