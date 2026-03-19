@@ -348,15 +348,17 @@ export default function EbayChannelPage() {
           description: `${summary.succeeded} variant${summary.succeeded !== 1 ? "s" : ""} listed on eBay.`,
         });
       } else if (summary.succeeded > 0 && summary.failed > 0) {
+        const firstError = data.results?.find((r: any) => !r.success)?.error || "Unknown error";
         toast({
           title: "Partial Success",
-          description: `${summary.succeeded} succeeded, ${summary.failed} failed. Check listing feed for details.`,
+          description: `${summary.succeeded} succeeded, ${summary.failed} failed. Error: ${firstError}`,
           variant: "destructive",
         });
       } else {
+        const firstError = data.results?.find((r: any) => !r.success)?.error || "Unknown error";
         toast({
           title: "Push Failed",
-          description: `All ${summary.failed} variant${summary.failed !== 1 ? "s" : ""} failed. Check logs for details.`,
+          description: `${summary.failed} variant${summary.failed !== 1 ? "s" : ""} failed. Error: ${firstError}`,
           variant: "destructive",
         });
       }
