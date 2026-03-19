@@ -8,20 +8,15 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
+
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Pencil, Search, Loader2, XCircle, X } from "lucide-react";
+import { Pencil, Search, Loader2, XCircle } from "lucide-react";
 
 // ============================================================================
 // Types
@@ -37,22 +32,6 @@ interface EbayCategoryPickerProps {
   currentCategoryId: string | null;
   currentCategoryName: string | null;
   onSelect: (categoryId: string | null, categoryName: string | null) => void;
-}
-
-// ============================================================================
-// Hook: useMediaQuery
-// ============================================================================
-
-function useIsMobile(): boolean {
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 639px)");
-    setIsMobile(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
-  return isMobile;
 }
 
 // ============================================================================
@@ -105,7 +84,7 @@ export function EbayCategoryPicker({
   };
 
   const handleSelect = (cat: CategorySuggestion) => {
-    onSelect(cat.categoryId, cat.breadcrumb);
+    onSelect(cat.categoryId, cat.categoryName);
     setOpen(false);
     setQuery("");
     setResults([]);
@@ -146,7 +125,7 @@ export function EbayCategoryPicker({
         )}
       </div>
 
-      <ScrollArea className="flex-1 mt-2" style={{ maxHeight: isMobile ? "60vh" : "280px" }}>
+      <ScrollArea className="flex-1 mt-2" style={{ maxHeight: "280px" }}>
         {currentCategoryId && (
           <button
             className="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors flex items-center gap-2 text-destructive"
@@ -185,24 +164,17 @@ export function EbayCategoryPicker({
     </div>
   );
 
-  // Trigger button
-  const trigger = currentCategoryName ? (
-    <div className="flex items-center gap-1.5 min-w-0">
-      <Badge variant="secondary" className="text-xs max-w-[260px] truncate shrink">
-        {currentCategoryName}
-      </Badge>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-6 w-6 p-0 shrink-0"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-        }}
-      >
-        <Pencil className="h-3 w-3" />
-      </Button>
-    </div>
+  // Shared trigger button
+  const triggerButton = currentCategoryName ? (
+    <Button
+      variant="outline"
+      size="sm"
+      className="h-auto min-h-[32px] text-xs gap-1.5 max-w-full text-left justify-start py-1"
+      onClick={() => setOpen(true)}
+    >
+      <Pencil className="h-3 w-3 shrink-0" />
+      <span className="truncate">{currentCategoryName}</span>
+    </Button>
   ) : (
     <Button
       variant="outline"
@@ -215,32 +187,17 @@ export function EbayCategoryPicker({
     </Button>
   );
 
-  // Mobile: use Dialog
-  if (isMobile) {
-    return (
-      <>
-        {trigger}
-        <Dialog open={open} onOpenChange={handleOpenChange}>
-          <DialogContent className="sm:max-w-full h-[85vh] flex flex-col p-4">
-            <DialogHeader>
-              <DialogTitle className="text-base">Select eBay Category</DialogTitle>
-            </DialogHeader>
-            {searchContent}
-          </DialogContent>
-        </Dialog>
-      </>
-    );
-  }
-
-  // Desktop: use Popover
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverTrigger asChild>
-        <div>{trigger}</div>
-      </PopoverTrigger>
-      <PopoverContent className="w-[420px] p-3" align="start">
-        {searchContent}
-      </PopoverContent>
-    </Popover>
+    <>
+      {triggerButton}
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent className="sm:max-w-[480px] h-[85vh] sm:h-auto sm:max-h-[500px] flex flex-col p-4">
+          <DialogHeader>
+            <DialogTitle className="text-base">Select eBay Category</DialogTitle>
+          </DialogHeader>
+          {searchContent}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
