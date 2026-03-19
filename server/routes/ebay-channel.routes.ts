@@ -971,7 +971,6 @@ ${categoriesXml}
                     Authorization: `Bearer ${accessToken}`,
                     "Content-Type": "application/json",
                     Accept: "application/json",
-                    "Content-Language": "en-US",
                   },
                   body: JSON.stringify(inventoryItemBody),
                 }
@@ -1032,7 +1031,6 @@ ${categoriesXml}
                   Authorization: `Bearer ${accessToken}`,
                   "Content-Type": "application/json",
                   Accept: "application/json",
-                  "Content-Language": "en-US",
                 },
                 body: JSON.stringify(offerBody),
               });
@@ -1073,7 +1071,6 @@ ${categoriesXml}
                             Authorization: `Bearer ${accessToken}`,
                             "Content-Type": "application/json",
                             Accept: "application/json",
-                            "Content-Language": "en-US",
                           },
                           body: JSON.stringify(offerBody),
                         }
