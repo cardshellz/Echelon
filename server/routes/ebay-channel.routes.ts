@@ -124,6 +124,7 @@ export function registerEbayChannelRoutes(app: Express): void {
             : "https://api.ebay.com";
           const userResp = await fetch(`${baseUrl}/commerce/identity/v1/user/`, {
             headers: { Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US", Accept: "application/json" },
           });
           if (userResp.ok) {
@@ -612,6 +613,7 @@ ${categoriesXml}
       const resp = await fetch(url, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
           Accept: "application/json",
         },
@@ -680,6 +682,7 @@ ${categoriesXml}
       const resp = await fetch(url, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
           Accept: "application/json",
         },
@@ -752,6 +755,7 @@ ${categoriesXml}
       const resp = await fetch(url, {
         headers: {
           Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
           Accept: "application/json",
         },
@@ -973,6 +977,7 @@ ${categoriesXml}
                   method: "PUT",
                   headers: {
                     Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
                     "Content-Type": "application/json",
                     Accept: "application/json",
@@ -1034,6 +1039,7 @@ ${categoriesXml}
                 method: "POST",
                 headers: {
                   Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
                   "Content-Type": "application/json",
                   Accept: "application/json",
@@ -1058,6 +1064,7 @@ ${categoriesXml}
                     {
                       headers: {
                         Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
                         Accept: "application/json",
                       },
@@ -1076,6 +1083,7 @@ ${categoriesXml}
                           method: "PUT",
                           headers: {
                             Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
                             "Content-Type": "application/json",
                             Accept: "application/json",
@@ -1116,6 +1124,7 @@ ${categoriesXml}
                   method: "POST",
                   headers: {
                     Authorization: `Bearer ${accessToken}`,
+                    "Content-Language": "en-US",
                     "Accept-Language": "en-US",
                     "Content-Type": "application/json",
                     Accept: "application/json",
