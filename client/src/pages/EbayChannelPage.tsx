@@ -665,7 +665,7 @@ export default function EbayChannelPage() {
   }
 
   return (
-    <div className="p-4 md:p-6 space-y-6 max-w-6xl mx-auto">
+    <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto">
       {/* Page Header */}
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon" onClick={() => navigate("/channels")}>
@@ -686,14 +686,14 @@ export default function EbayChannelPage() {
       {/* SECTION 1: Store Setup                                             */}
       {/* ================================================================== */}
       <Card>
-        <CardHeader>
+        <CardHeader className="px-3 sm:px-6">
           <CardTitle className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5" />
             Store Setup
           </CardTitle>
           <CardDescription>Connection, location, and default business policies</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent className="space-y-6 px-3 sm:px-6">
           {/* Connection Status */}
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Connection</Label>
@@ -770,7 +770,7 @@ export default function EbayChannelPage() {
               </div>
             ) : (
               <div className="mt-2 space-y-3">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <div>
                     <Label className="text-xs">Name</Label>
                     <Input
@@ -913,8 +913,8 @@ export default function EbayChannelPage() {
       {/* SECTION 2: Category Mapping                                        */}
       {/* ================================================================== */}
       <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
+        <CardHeader className="px-3 sm:px-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="flex items-center gap-2">
                 <Layers className="h-5 w-5" />
@@ -922,10 +922,11 @@ export default function EbayChannelPage() {
               </CardTitle>
               <CardDescription>Map your product types to eBay categories</CardDescription>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
               <Button
                 variant="outline"
                 size="sm"
+                className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
                 onClick={() => setProductTypeManagerOpen(true)}
               >
                 <Tag className="h-4 w-4 mr-2" />
@@ -934,6 +935,7 @@ export default function EbayChannelPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
                 onClick={() => {
                   const names = (config?.productTypes || [])
                     .filter((pt) => pt.product_count > 0)
@@ -956,14 +958,15 @@ export default function EbayChannelPage() {
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-3 sm:px-6">
           {!config?.connected ? (
             <p className="text-sm text-muted-foreground">Connect to eBay first.</p>
           ) : (
             <>
-              <div className="border rounded-lg overflow-hidden">
+              {/* Desktop table view */}
+              <div className="hidden sm:block border rounded-lg overflow-hidden">
                 <Table>
-                  <TableHeader className="hidden sm:table-header-group">
+                  <TableHeader>
                     <TableRow>
                       <TableHead className="w-[200px]">Product Type</TableHead>
                       <TableHead>eBay Browse Category</TableHead>
@@ -978,28 +981,24 @@ export default function EbayChannelPage() {
                       const isOverrideExpanded = expandedOverrides.has(pt.slug);
                       const isSpecificsExpanded = expandedSpecifics.has(pt.slug);
                       const hasBrowseCategory = !!mapping.ebayBrowseCategoryId;
-
-                      // Aspect readiness from server config (not from localMappings which is client-side)
                       const serverMapping = config?.categoryMappings?.find((m) => m.productTypeSlug === pt.slug);
                       const aspectsReady = serverMapping?.aspectsReady ?? null;
                       const missingRequiredCount = serverMapping?.missingRequiredCount ?? null;
 
                       return (
                         <React.Fragment key={pt.slug}>
-                            <TableRow className="group sm:table-row flex flex-col sm:flex-row gap-2 sm:gap-0 p-3 sm:p-0 border-b">
-                              <TableCell className="sm:table-cell block pb-1 sm:pb-0">
+                            <TableRow className="group">
+                              <TableCell>
                                 <div className="flex items-center gap-2">
                                   <Switch
                                     checked={mapping.listingEnabled !== false}
                                     onCheckedChange={(checked) => {
-                                      // Optimistic local update
                                       setLocalMappings((prev) => {
                                         const next = new Map(prev);
                                         const existing = next.get(pt.slug) || { productTypeSlug: pt.slug } as CategoryMapping;
                                         next.set(pt.slug, { ...existing, listingEnabled: checked });
                                         return next;
                                       });
-                                      // Immediately persist to server
                                       toggleTypeListingMutation.mutate({ productTypeSlug: pt.slug, listingEnabled: checked });
                                     }}
                                     className="scale-75"
@@ -1047,8 +1046,7 @@ export default function EbayChannelPage() {
                                   </SelectContent>
                                 </Select>
                               </TableCell>
-                              {/* Specifics status badge */}
-                              <TableCell className="sm:table-cell block sm:text-center pt-1 sm:pt-0">
+                              <TableCell className="text-center">
                                 {hasBrowseCategory ? (
                                   <button
                                     onClick={() => toggleSpecifics(pt.slug)}
@@ -1075,7 +1073,7 @@ export default function EbayChannelPage() {
                                   <span className="text-xs text-muted-foreground">—</span>
                                 )}
                               </TableCell>
-                              <TableCell className="sm:table-cell block sm:text-center pt-1 sm:pt-0">
+                              <TableCell className="text-center">
                                 <Button
                                   variant="ghost"
                                   size="sm"
@@ -1083,7 +1081,6 @@ export default function EbayChannelPage() {
                                   onClick={() => toggleOverride(pt.slug)}
                                 >
                                   <Settings2 className="h-3.5 w-3.5" />
-                                  <span className="sm:hidden">Policy Overrides</span>
                                   {isOverrideExpanded ? (
                                     <ChevronDown className="h-3.5 w-3.5" />
                                   ) : (
@@ -1092,7 +1089,6 @@ export default function EbayChannelPage() {
                                 </Button>
                               </TableCell>
                             </TableRow>
-                            {/* Specifics expansion row */}
                             {isSpecificsExpanded && hasBrowseCategory && (
                               <TableRow className="bg-amber-50/50 dark:bg-amber-950/10">
                                 <TableCell colSpan={5}>
@@ -1115,7 +1111,7 @@ export default function EbayChannelPage() {
                                       <p className="text-xs text-muted-foreground mb-2 font-medium">
                                         Policy overrides for {pt.name} (leave blank to use store defaults)
                                       </p>
-                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                      <div className="grid grid-cols-3 gap-3">
                                         <div>
                                           <Label className="text-xs">Shipping Override</Label>
                                           <Select
@@ -1192,6 +1188,212 @@ export default function EbayChannelPage() {
                   </TableBody>
                 </Table>
               </div>
+
+              {/* Mobile card view */}
+              <div className="sm:hidden space-y-3">
+                {(config?.productTypes || []).map((pt) => {
+                  const mapping = localMappings.get(pt.slug) || {} as Partial<CategoryMapping>;
+                  const isOverrideExpanded = expandedOverrides.has(pt.slug);
+                  const isSpecificsExpanded = expandedSpecifics.has(pt.slug);
+                  const hasBrowseCategory = !!mapping.ebayBrowseCategoryId;
+                  const serverMapping = config?.categoryMappings?.find((m) => m.productTypeSlug === pt.slug);
+                  const aspectsReady = serverMapping?.aspectsReady ?? null;
+                  const missingRequiredCount = serverMapping?.missingRequiredCount ?? null;
+
+                  return (
+                    <div key={pt.slug} className="border rounded-lg p-3 space-y-3">
+                      {/* Row 1: Toggle + Name + Count */}
+                      <div className="flex items-center gap-2 min-h-[44px]">
+                        <Switch
+                          checked={mapping.listingEnabled !== false}
+                          onCheckedChange={(checked) => {
+                            setLocalMappings((prev) => {
+                              const next = new Map(prev);
+                              const existing = next.get(pt.slug) || { productTypeSlug: pt.slug } as CategoryMapping;
+                              next.set(pt.slug, { ...existing, listingEnabled: checked });
+                              return next;
+                            });
+                            toggleTypeListingMutation.mutate({ productTypeSlug: pt.slug, listingEnabled: checked });
+                          }}
+                        />
+                        <span className={`font-medium text-sm flex-1 ${mapping.listingEnabled === false ? 'text-muted-foreground line-through' : ''}`}>
+                          {pt.name}
+                        </span>
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {pt.product_count} product{pt.product_count !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+
+                      {/* Row 2: Browse category picker */}
+                      <div>
+                        <Label className="text-xs text-muted-foreground mb-1 block">Browse Category</Label>
+                        <EbayCategoryPicker
+                          currentCategoryId={mapping.ebayBrowseCategoryId || null}
+                          currentCategoryName={mapping.ebayBrowseCategoryName || null}
+                          onSelect={(categoryId, categoryName) => {
+                            updateMapping(pt.slug, {
+                              ebayBrowseCategoryId: categoryId,
+                              ebayBrowseCategoryName: categoryName,
+                            });
+                          }}
+                        />
+                      </div>
+
+                      {/* Row 3: Store category dropdown */}
+                      <div>
+                        <Label className="text-xs text-muted-foreground mb-1 block">Store Category</Label>
+                        <Select
+                          value={mapping.ebayStoreCategoryId || ""}
+                          onValueChange={(v) => {
+                            const cat = storeCats.find((c) => c.id === v);
+                            updateMapping(pt.slug, {
+                              ebayStoreCategoryId: v || null,
+                              ebayStoreCategoryName: cat?.name || null,
+                            });
+                          }}
+                        >
+                          <SelectTrigger className="w-full min-h-[44px] text-sm">
+                            <SelectValue placeholder="Select store category..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {storeCats.map((cat) => (
+                              <SelectItem key={cat.id} value={cat.id} className="text-sm">
+                                {cat.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {/* Row 4: Specifics badge + Policy Overrides button */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {hasBrowseCategory ? (
+                          <button
+                            onClick={() => toggleSpecifics(pt.slug)}
+                            className="inline-flex items-center min-h-[44px]"
+                          >
+                            {aspectsReady === true ? (
+                              <Badge className="bg-green-600 hover:bg-green-700 text-xs gap-1 cursor-pointer py-1.5 px-3">
+                                <CheckCircle2 className="h-3 w-3" />
+                                Specifics ✓
+                              </Badge>
+                            ) : aspectsReady === false && missingRequiredCount != null ? (
+                              <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer py-1.5 px-3">
+                                <AlertCircle className="h-3 w-3" />
+                                {missingRequiredCount} required
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-muted-foreground text-xs gap-1 cursor-pointer py-1.5 px-3">
+                                <Sparkles className="h-3 w-3" />
+                                Set specifics
+                              </Badge>
+                            )}
+                          </button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">No category set</span>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="min-h-[44px] px-3 text-xs gap-1 ml-auto"
+                          onClick={() => toggleOverride(pt.slug)}
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                          Policy Overrides
+                          {isOverrideExpanded ? (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      </div>
+
+                      {/* Specifics expansion */}
+                      {isSpecificsExpanded && hasBrowseCategory && (
+                        <div className="border-t pt-3 bg-amber-50/50 dark:bg-amber-950/10 -mx-3 px-3 pb-3">
+                          <AspectEditor
+                            categoryId={mapping.ebayBrowseCategoryId!}
+                            mode="type"
+                            productTypeSlug={pt.slug}
+                            compact
+                          />
+                        </div>
+                      )}
+
+                      {/* Policy overrides expansion */}
+                      {isOverrideExpanded && (
+                        <div className="border-t pt-3 space-y-3">
+                          <p className="text-xs text-muted-foreground font-medium">
+                            Policy overrides (leave blank for store defaults)
+                          </p>
+                          <div>
+                            <Label className="text-xs">Shipping Override</Label>
+                            <Select
+                              value={mapping.fulfillmentPolicyOverride || "__default__"}
+                              onValueChange={(v) =>
+                                updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
+                              }
+                            >
+                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
+                                <SelectValue placeholder="Use default" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__default__">Use default</SelectItem>
+                                {(policies?.fulfillmentPolicies || []).map((p) => (
+                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <Label className="text-xs">Returns Override</Label>
+                            <Select
+                              value={mapping.returnPolicyOverride || "__default__"}
+                              onValueChange={(v) =>
+                                updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
+                              }
+                            >
+                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
+                                <SelectValue placeholder="Use default" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__default__">Use default</SelectItem>
+                                {(policies?.returnPolicies || []).map((p) => (
+                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div>
+                            <Label className="text-xs">Payment Override</Label>
+                            <Select
+                              value={mapping.paymentPolicyOverride || "__default__"}
+                              onValueChange={(v) =>
+                                updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
+                              }
+                            >
+                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
+                                <SelectValue placeholder="Use default" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__default__">Use default</SelectItem>
+                                {(policies?.paymentPolicies || []).map((p) => (
+                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {(!config?.productTypes || config.productTypes.length === 0) && (
+                  <p className="text-center text-sm text-muted-foreground py-8">
+                    No product types defined. Use "Manage Product Types" to create and assign them.
+                  </p>
+                )}
+              </div>
               {mappingsDirty && (
                 <div className="flex items-center gap-3 mt-4">
                   <Button
@@ -1216,8 +1418,8 @@ export default function EbayChannelPage() {
       {/* SECTION 3: Listing Feed                                            */}
       {/* ================================================================== */}
       <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
+        <CardHeader className="px-3 sm:px-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="flex items-center gap-2">
                 <Package className="h-5 w-5" />
@@ -1228,6 +1430,7 @@ export default function EbayChannelPage() {
             <Button
               variant="outline"
               size="sm"
+              className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
               disabled={feedCounts.ready === 0 || pushToEbayMutation.isPending}
               onClick={handlePushAll}
             >
@@ -1240,7 +1443,7 @@ export default function EbayChannelPage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-3 sm:px-6">
           {!config?.connected ? (
             <p className="text-sm text-muted-foreground">Connect to eBay first.</p>
           ) : feedLoading ? (
@@ -1252,13 +1455,13 @@ export default function EbayChannelPage() {
             <>
               {/* Filters */}
               <div className="flex flex-col gap-3 mb-4">
-                <div className="flex flex-wrap gap-1">
+                <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-1.5 sm:gap-1">
                   {(["all", "ready", "missing_config", "missing_specifics", "listed", "excluded"] as const).map((f) => (
                     <Button
                       key={f}
                       variant={feedFilter === f ? "default" : "outline"}
                       size="sm"
-                      className="text-xs h-7"
+                      className="text-xs min-h-[44px] sm:min-h-0 sm:h-7 px-2"
                       onClick={() => setFeedFilter(f)}
                     >
                       {f === "all" && `All (${feedCounts.all})`}
@@ -1271,10 +1474,10 @@ export default function EbayChannelPage() {
                   ))}
                 </div>
                 <div className="relative w-full sm:max-w-xs">
-                  <Search className="absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
+                  <Search className="absolute left-3 top-3 sm:top-2 h-4 w-4 text-muted-foreground" />
                   <Input
                     placeholder="Search by name or SKU..."
-                    className="pl-8 h-8 text-sm"
+                    className="pl-9 min-h-[44px] sm:h-8 text-sm"
                     value={feedSearch}
                     onChange={(e) => setFeedSearch(e.target.value)}
                   />
@@ -1282,7 +1485,7 @@ export default function EbayChannelPage() {
               </div>
 
               {/* Feed Table — Mobile-first: card layout on mobile, table on sm+ */}
-              <div className="border rounded-lg overflow-hidden">
+              <div className="border rounded-lg overflow-x-hidden">
                 {/* Desktop table header — hidden on mobile */}
                 <Table>
                   <TableHeader className="hidden sm:table-header-group">
@@ -1311,9 +1514,9 @@ export default function EbayChannelPage() {
                         >
                           {/* Expand chevron + Exclude toggle */}
                           <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-2">
-                            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-2 min-h-[44px] sm:min-h-0" onClick={(e) => e.stopPropagation()}>
                               <button
-                                className="p-0.5 hover:bg-muted rounded"
+                                className="p-1 hover:bg-muted rounded min-w-[28px] min-h-[28px] flex items-center justify-center"
                                 onClick={() => hasVariants && toggleProductExpanded(item.id)}
                               >
                                 {hasVariants ? (
@@ -1331,7 +1534,6 @@ export default function EbayChannelPage() {
                                 onCheckedChange={(checked) =>
                                   toggleExclusionMutation.mutate({ productId: item.id, excluded: !checked })
                                 }
-                                className="scale-75"
                                 title={isExcluded ? "Include in eBay listings" : "Exclude from eBay listings"}
                               />
                               <span className="text-xs text-muted-foreground sm:hidden">
@@ -1379,18 +1581,21 @@ export default function EbayChannelPage() {
                               </Badge>
                               {item.status === "ready" && (
                                 <>
-                                  <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                                  <Badge className="bg-green-600 hover:bg-green-600 text-xs py-1 px-2">Ready</Badge>
                                   <Button
                                     variant="outline"
                                     size="sm"
-                                    className="h-6 px-2 text-xs"
+                                    className="min-h-[44px] min-w-[44px] px-3 text-xs"
                                     disabled={pushingProductIds.has(item.id)}
                                     onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                   >
                                     {pushingProductIds.has(item.id) ? (
-                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                      <Loader2 className="h-4 w-4 animate-spin" />
                                     ) : (
-                                      <Zap className="h-3 w-3" />
+                                      <>
+                                        <Zap className="h-4 w-4 mr-1" />
+                                        Push
+                                      </>
                                     )}
                                   </Button>
                                 </>
@@ -1610,8 +1815,8 @@ export default function EbayChannelPage() {
       {/* ================================================================== */}
       {config?.connected && (
         <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
+          <CardHeader className="px-3 sm:px-6">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <CardTitle className="flex items-center gap-2">
                   <Tag className="h-5 w-5" />
@@ -1622,16 +1827,17 @@ export default function EbayChannelPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
                 onClick={() => setShowPricingForm(!showPricingForm)}
               >
                 {showPricingForm ? "Cancel" : "Add Rule"}
               </Button>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="px-3 sm:px-6">
             {/* Add/edit form */}
             {showPricingForm && (
-              <div className="border rounded-lg p-4 mb-4 bg-muted/30 space-y-3">
+              <div className="border rounded-lg p-3 sm:p-4 mb-4 bg-muted/30 space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   {/* Scope */}
                   <div>
@@ -1640,7 +1846,7 @@ export default function EbayChannelPage() {
                       value={pricingRuleForm.scope}
                       onValueChange={(v: any) => setPricingRuleForm((f) => ({ ...f, scope: v, scopeId: "" }))}
                     >
-                      <SelectTrigger className="h-8 text-xs">
+                      <SelectTrigger className="min-h-[44px] sm:h-8 text-sm sm:text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1664,7 +1870,7 @@ export default function EbayChannelPage() {
                           value={pricingRuleForm.scopeId}
                           onValueChange={(v) => setPricingRuleForm((f) => ({ ...f, scopeId: v }))}
                         >
-                          <SelectTrigger className="h-8 text-xs">
+                          <SelectTrigger className="min-h-[44px] sm:h-8 text-sm sm:text-xs">
                             <SelectValue placeholder="Select type..." />
                           </SelectTrigger>
                           <SelectContent>
@@ -1677,7 +1883,7 @@ export default function EbayChannelPage() {
                         <div className="space-y-1">
                           <Input
                             placeholder={`Search ${pricingRuleForm.scope}...`}
-                            className="h-8 text-xs"
+                            className="min-h-[44px] sm:h-8 text-sm sm:text-xs"
                             value={pricingScopeSearch}
                             onChange={(e) => setPricingScopeSearch(e.target.value)}
                           />
@@ -1731,7 +1937,7 @@ export default function EbayChannelPage() {
                       value={pricingRuleForm.ruleType}
                       onValueChange={(v: any) => setPricingRuleForm((f) => ({ ...f, ruleType: v }))}
                     >
-                      <SelectTrigger className="h-8 text-xs">
+                      <SelectTrigger className="min-h-[44px] sm:h-8 text-sm sm:text-xs">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -1753,13 +1959,13 @@ export default function EbayChannelPage() {
                         type="number"
                         step={pricingRuleForm.ruleType === "percentage" ? "0.1" : "0.01"}
                         placeholder={pricingRuleForm.ruleType === "percentage" ? "15" : "2.00"}
-                        className="h-8 text-xs"
+                        className="min-h-[44px] sm:h-8 text-sm sm:text-xs"
                         value={pricingRuleForm.value}
                         onChange={(e) => setPricingRuleForm((f) => ({ ...f, value: e.target.value }))}
                       />
                       <Button
                         size="sm"
-                        className="h-8"
+                        className="min-h-[44px] sm:h-8 px-4"
                         disabled={
                           !pricingRuleForm.value ||
                           (pricingRuleForm.scope !== "channel" && !pricingRuleForm.scopeId) ||
@@ -1796,7 +2002,44 @@ export default function EbayChannelPage() {
                 No pricing rules configured. All products will use base prices.
               </p>
             ) : (
-              <div className="border rounded-lg overflow-hidden">
+              <>
+              {/* Mobile: card layout */}
+              <div className="sm:hidden space-y-2">
+                {pricingRulesData?.rules?.map((rule) => (
+                  <div key={rule.id} className="border rounded-lg p-3 flex items-center gap-3">
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className="text-xs capitalize">{rule.scope}</Badge>
+                        <Badge variant="secondary" className="text-xs">
+                          {rule.rule_type === "percentage" ? "%" :
+                           rule.rule_type === "fixed" ? "+$" : "=$"}
+                        </Badge>
+                        <span className="text-sm font-mono font-medium">
+                          {rule.rule_type === "percentage"
+                            ? `+${parseFloat(rule.value)}%`
+                            : rule.rule_type === "fixed"
+                            ? `+$${parseFloat(rule.value).toFixed(2)}`
+                            : `$${parseFloat(rule.value).toFixed(2)}`}
+                        </span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {rule.scope === "channel" ? "All products" : (rule.scope_label || rule.scope_id || "—")}
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="min-h-[44px] min-w-[44px] p-0 text-destructive hover:text-destructive shrink-0"
+                      onClick={() => deletePricingRuleMutation.mutate(rule.id)}
+                      disabled={deletePricingRuleMutation.isPending}
+                    >
+                      <XCircle className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              {/* Desktop: table layout */}
+              <div className="hidden sm:block border rounded-lg overflow-hidden">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -1845,6 +2088,7 @@ export default function EbayChannelPage() {
                   </TableBody>
                 </Table>
               </div>
+              </>
             )}
           </CardContent>
         </Card>
