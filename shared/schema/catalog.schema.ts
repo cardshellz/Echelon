@@ -104,6 +104,7 @@ export const productVariants = pgTable("product_variants", {
   gtin: varchar("gtin", { length: 14 }), // UPC/EAN/ISBN — required by eBay/Amazon
   mpn: varchar("mpn", { length: 100 }), // Manufacturer Part Number
   conditionNote: text("condition_note"), // Per-variant condition details
+  ebayListingExcluded: boolean("ebay_listing_excluded").notNull().default(false), // Per-variant eBay exclusion
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

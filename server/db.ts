@@ -470,6 +470,10 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
     console.log("Checked eBay listing control columns (listing_enabled, ebay_listing_excluded)");
 
+    // 6b. Per-variant eBay listing exclusion
+    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
+    console.log("Checked per-variant eBay listing exclusion column");
+
     // 7. Per-product eBay browse category override columns
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_id VARCHAR(20)`);
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_name VARCHAR(200)`);

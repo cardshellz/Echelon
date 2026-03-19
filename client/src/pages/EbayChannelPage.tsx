@@ -140,6 +140,15 @@ interface StoreCategory {
   name: string;
 }
 
+interface FeedVariant {
+  id: number;
+  sku: string;
+  name: string;
+  priceCents: number | null;
+  ebayListingExcluded: boolean;
+  inventoryQuantity: number;
+}
+
 interface FeedItem {
   id: number;
   name: string;
@@ -157,7 +166,9 @@ interface FeedItem {
   isExcluded: boolean;
   externalListingId: string | null;
   variantCount: number;
+  includedVariantCount: number;
   imageCount: number;
+  variants: FeedVariant[];
 }
 
 // ============================================================================
@@ -215,6 +226,7 @@ export default function EbayChannelPage() {
   // Feed filters
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "listed" | "excluded">("all");
   const [feedSearch, setFeedSearch] = useState("");
+  const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
 
   // Location form
   const [locationForm, setLocationForm] = useState({
@@ -383,6 +395,19 @@ export default function EbayChannelPage() {
     },
   });
 
+  const toggleVariantExclusionMutation = useMutation({
+    mutationFn: async ({ variantId, excluded }: { variantId: number; excluded: boolean }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/variant-exclusion/${variantId}`, { excluded });
+      return resp.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const setProductCategoryMutation = useMutation({
     mutationFn: async ({ productId, ebayBrowseCategoryId, ebayBrowseCategoryName }: { productId: number; ebayBrowseCategoryId: string | null; ebayBrowseCategoryName: string | null }) => {
       const resp = await apiRequest("PUT", `/api/ebay/product-category/${productId}`, { ebayBrowseCategoryId, ebayBrowseCategoryName });
@@ -411,6 +436,20 @@ export default function EbayChannelPage() {
   });
 
   // ---- Helpers ----
+
+  const toggleProductExpanded = (productId: number) => {
+    setExpandedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(productId)) next.delete(productId);
+      else next.add(productId);
+      return next;
+    });
+  };
+
+  const formatPrice = (cents: number | null) => {
+    if (cents == null) return "—";
+    return `$${(cents / 100).toFixed(2)}`;
+  };
 
   const updateMapping = (slug: string, updates: Partial<CategoryMapping>) => {
     setLocalMappings((prev) => {
@@ -1081,14 +1120,34 @@ export default function EbayChannelPage() {
                   <TableBody>
                     {filteredFeed.map((item) => {
                       const isExcluded = item.status === "excluded";
+                      const isExpanded = expandedProducts.has(item.id);
+                      const hasVariants = item.variants && item.variants.length > 0;
+                      const allIncluded = item.includedVariantCount === item.variantCount;
+                      const someExcluded = item.includedVariantCount < item.variantCount && item.includedVariantCount > 0;
+
                       return (
+                        <React.Fragment key={item.id}>
                         <TableRow
-                          key={item.id}
-                          className={`sm:table-row flex flex-col p-3 sm:p-0 gap-2 sm:gap-0 ${isExcluded ? "opacity-50" : ""}`}
+                          className={`sm:table-row flex flex-col p-3 sm:p-0 gap-2 sm:gap-0 ${isExcluded ? "opacity-50" : ""} cursor-pointer hover:bg-muted/50`}
+                          onClick={() => hasVariants && toggleProductExpanded(item.id)}
                         >
-                          {/* Exclude toggle */}
+                          {/* Expand chevron + Exclude toggle */}
                           <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-2">
-                            <div className="flex items-center gap-2 sm:gap-0">
+                            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                className="p-0.5 hover:bg-muted rounded"
+                                onClick={() => hasVariants && toggleProductExpanded(item.id)}
+                              >
+                                {hasVariants ? (
+                                  isExpanded ? (
+                                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                  )
+                                ) : (
+                                  <span className="inline-block w-4" />
+                                )}
+                              </button>
                               <Switch
                                 checked={!isExcluded}
                                 onCheckedChange={(checked) =>
@@ -1108,14 +1167,24 @@ export default function EbayChannelPage() {
                               {item.name}
                             </span>
                             <div className="flex flex-wrap gap-1.5 mt-0.5">
-                              <span className="text-xs text-muted-foreground">
-                                {item.variantCount} variant{item.variantCount !== 1 ? "s" : ""}
-                              </span>
+                              {/* Variant count with inclusion info */}
+                              {allIncluded ? (
+                                <span className="text-xs text-muted-foreground">
+                                  {item.variantCount} variant{item.variantCount !== 1 ? "s" : ""}
+                                </span>
+                              ) : someExcluded ? (
+                                <span className="text-xs text-amber-600 font-medium">
+                                  {item.includedVariantCount} of {item.variantCount} variants
+                                </span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">
+                                  {item.variantCount} variant{item.variantCount !== 1 ? "s" : ""}
+                                </span>
+                              )}
                               <span className="text-xs text-muted-foreground">·</span>
                               <span className="text-xs text-muted-foreground">
                                 {item.imageCount} image{item.imageCount !== 1 ? "s" : ""}
                               </span>
-                              {/* Show SKU inline on mobile */}
                               {item.sku && (
                                 <>
                                   <span className="text-xs text-muted-foreground sm:hidden">·</span>
@@ -1138,7 +1207,7 @@ export default function EbayChannelPage() {
                                     size="sm"
                                     className="h-6 px-2 text-xs"
                                     disabled={pushingProductIds.has(item.id)}
-                                    onClick={() => handlePushSingle(item.id)}
+                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                   >
                                     {pushingProductIds.has(item.id) ? (
                                       <Loader2 className="h-3 w-3 animate-spin" />
@@ -1174,7 +1243,7 @@ export default function EbayChannelPage() {
                             </Badge>
                           </TableCell>
                           {/* eBay Category — desktop only */}
-                          <TableCell className="hidden sm:table-cell">
+                          <TableCell className="hidden sm:table-cell" onClick={(e) => e.stopPropagation()}>
                             <EbayCategoryPicker
                               currentCategoryId={item.ebayBrowseCategoryId || null}
                               currentCategoryName={item.ebayBrowseCategoryName || null}
@@ -1201,7 +1270,7 @@ export default function EbayChannelPage() {
                                     size="sm"
                                     className="h-6 w-6 p-0"
                                     disabled={pushingProductIds.has(item.id)}
-                                    onClick={() => handlePushSingle(item.id)}
+                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                     title="Push to eBay"
                                   >
                                     {pushingProductIds.has(item.id) ? (
@@ -1227,6 +1296,7 @@ export default function EbayChannelPage() {
                                       rel="noopener noreferrer"
                                       className="text-blue-500 hover:text-blue-700"
                                       title="View on eBay"
+                                      onClick={(e) => e.stopPropagation()}
                                     >
                                       <ExternalLink className="h-3.5 w-3.5" />
                                     </a>
@@ -1239,6 +1309,53 @@ export default function EbayChannelPage() {
                             </div>
                           </TableCell>
                         </TableRow>
+                        {/* Expanded variant rows */}
+                        {isExpanded && hasVariants && item.variants.map((variant) => (
+                          <TableRow
+                            key={`v-${variant.id}`}
+                            className={`bg-muted/20 sm:table-row flex flex-col p-3 sm:p-0 gap-1 sm:gap-0 ${variant.ebayListingExcluded ? "opacity-50" : ""}`}
+                          >
+                            <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-1.5 pl-8 sm:pl-10">
+                              <Switch
+                                checked={!variant.ebayListingExcluded}
+                                onCheckedChange={(checked) =>
+                                  toggleVariantExclusionMutation.mutate({ variantId: variant.id, excluded: !checked })
+                                }
+                                className="scale-[0.65]"
+                                title={variant.ebayListingExcluded ? "Include variant" : "Exclude variant"}
+                              />
+                            </TableCell>
+                            <TableCell className="sm:table-cell block py-0 sm:py-1.5" colSpan={2}>
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
+                                <span className={`text-xs font-medium ${variant.ebayListingExcluded ? "line-through text-muted-foreground" : ""}`}>
+                                  {variant.name}
+                                </span>
+                                <code className="text-[11px] bg-muted px-1 py-0.5 rounded text-muted-foreground">
+                                  {variant.sku}
+                                </code>
+                              </div>
+                            </TableCell>
+                            {/* Price — desktop */}
+                            <TableCell className="hidden sm:table-cell py-1.5">
+                              <span className="text-xs">{formatPrice(variant.priceCents)}</span>
+                            </TableCell>
+                            {/* Qty — desktop */}
+                            <TableCell className="hidden sm:table-cell py-1.5">
+                              <span className="text-xs">{variant.inventoryQuantity} qty</span>
+                            </TableCell>
+                            {/* Status placeholder — desktop */}
+                            <TableCell className="hidden sm:table-cell py-1.5"></TableCell>
+                            {/* Mobile: price + qty inline */}
+                            <TableCell className="sm:hidden block py-0">
+                              <div className="flex items-center gap-3 text-xs text-muted-foreground pl-1">
+                                <span>{formatPrice(variant.priceCents)}</span>
+                                <span>·</span>
+                                <span>{variant.inventoryQuantity} qty</span>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                        </React.Fragment>
                       );
                     })}
                     {filteredFeed.length === 0 && (

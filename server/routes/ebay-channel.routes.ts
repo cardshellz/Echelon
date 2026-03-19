@@ -377,6 +377,37 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // PUT /api/ebay/variant-exclusion/:variantId — Toggle per-variant eBay exclusion
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/variant-exclusion/:variantId", async (req: Request, res: Response) => {
+    try {
+      const variantId = parseInt(req.params.variantId);
+      if (isNaN(variantId)) {
+        res.status(400).json({ error: "Invalid variant ID" });
+        return;
+      }
+      const { excluded } = req.body as { excluded: boolean };
+      if (typeof excluded !== "boolean") {
+        res.status(400).json({ error: "excluded (boolean) is required" });
+        return;
+      }
+      const client = await pool.connect();
+      try {
+        await client.query(
+          "UPDATE product_variants SET ebay_listing_excluded = $1 WHERE id = $2",
+          [excluded, variantId]
+        );
+        res.json({ success: true, variantId, excluded });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Variant Exclusion] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
   app.get("/api/ebay/listing-feed", async (req: Request, res: Response) => {
@@ -419,6 +450,42 @@ ${categoriesXml}
           ORDER BY pt.sort_order ASC, p.name ASC
         `, [EBAY_CHANNEL_ID]);
 
+        // Fetch variants for all products in the feed
+        const productIds = result.rows.map((r: any) => r.id);
+        let variantsByProduct: Map<number, any[]> = new Map();
+        if (productIds.length > 0) {
+          const varResult = await client.query(`
+            SELECT
+              pv.id,
+              pv.product_id,
+              pv.sku,
+              pv.name,
+              pv.price_cents,
+              pv.ebay_listing_excluded,
+              COALESCE(
+                (SELECT SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty)::int
+                 FROM inventory_levels il WHERE il.product_variant_id = pv.id),
+                0
+              ) AS inventory_quantity
+            FROM product_variants pv
+            WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL
+            ORDER BY pv.product_id, pv.position ASC, pv.id ASC
+          `, [productIds]);
+
+          for (const v of varResult.rows) {
+            const pid = v.product_id;
+            if (!variantsByProduct.has(pid)) variantsByProduct.set(pid, []);
+            variantsByProduct.get(pid)!.push({
+              id: v.id,
+              sku: v.sku,
+              name: v.name,
+              priceCents: v.price_cents,
+              ebayListingExcluded: v.ebay_listing_excluded === true,
+              inventoryQuantity: Math.max(0, parseInt(v.inventory_quantity) || 0),
+            });
+          }
+        }
+
         // Determine readiness for each product
         const feed = result.rows.map((row: any) => {
           // Effective category: product override wins, then type mapping
@@ -445,6 +512,9 @@ ${categoriesXml}
           if (!hasVariants) missingItems.push("variants");
           if (!hasImages) missingItems.push("images");
 
+          const variants = variantsByProduct.get(row.id) || [];
+          const includedVariantCount = variants.filter((v: any) => !v.ebayListingExcluded).length;
+
           return {
             id: row.id,
             name: row.name,
@@ -462,7 +532,9 @@ ${categoriesXml}
             isExcluded,
             externalListingId: row.external_product_id,
             variantCount: parseInt(row.variant_count) || 0,
+            includedVariantCount,
             imageCount: parseInt(row.image_count) || 0,
+            variants,
           };
         });
 
@@ -770,16 +842,17 @@ ${categoriesXml}
           }
           const product = prodResult.rows[0];
 
-          // 2. Fetch variants
+          // 2. Fetch variants (skip excluded)
           const varResult = await client.query(
             `SELECT id, sku, name, option1_value, price_cents, compare_at_price_cents,
                     weight_grams, barcode, units_per_variant, hierarchy_level
              FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL
+               AND ebay_listing_excluded = false
              ORDER BY id ASC`,
             [productId]
           );
           if (varResult.rows.length === 0) {
-            results.push({ productId, variantSku: product.sku || "", success: false, error: "No variants found" });
+            results.push({ productId, variantSku: product.sku || "", success: false, error: "No eligible variants (all excluded or none found)" });
             continue;
           }
 
