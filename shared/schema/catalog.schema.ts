@@ -51,6 +51,8 @@ export const products = pgTable("products", {
   harmonizedCode: varchar("harmonized_code", { length: 20 }), // HS tariff code
   itemSpecifics: jsonb("item_specifics"), // Structured marketplace attributes (eBay item specifics, etc.)
   productType: varchar("product_type", { length: 50 }), // References product_types.slug
+  ebayBrowseCategoryId: varchar("ebay_browse_category_id", { length: 20 }), // Per-product eBay browse category override
+  ebayBrowseCategoryName: varchar("ebay_browse_category_name", { length: 200 }), // Per-product eBay browse category name override
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

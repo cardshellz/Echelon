@@ -319,6 +319,36 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // PUT /api/ebay/product-category/:productId — Set per-product category override
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/product-category/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const { ebayBrowseCategoryId, ebayBrowseCategoryName } = req.body as {
+        ebayBrowseCategoryId: string | null;
+        ebayBrowseCategoryName: string | null;
+      };
+      const client = await pool.connect();
+      try {
+        await client.query(
+          "UPDATE products SET ebay_browse_category_id = $1, ebay_browse_category_name = $2 WHERE id = $3",
+          [ebayBrowseCategoryId || null, ebayBrowseCategoryName || null, productId]
+        );
+        res.json({ success: true, productId, ebayBrowseCategoryId: ebayBrowseCategoryId || null, ebayBrowseCategoryName: ebayBrowseCategoryName || null });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Category Override] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
   app.get("/api/ebay/listing-feed", async (req: Request, res: Response) => {
@@ -334,6 +364,8 @@ ${categoriesXml}
             p.product_type,
             p.is_active,
             pt.name AS product_type_name,
+            p.ebay_browse_category_id AS product_ebay_browse_category_id,
+            p.ebay_browse_category_name AS product_ebay_browse_category_name,
             ecm.ebay_browse_category_id,
             ecm.ebay_browse_category_name,
             ecm.ebay_store_category_id,
@@ -361,7 +393,11 @@ ${categoriesXml}
 
         // Determine readiness for each product
         const feed = result.rows.map((row: any) => {
-          const hasCategoryMapping = !!row.ebay_browse_category_id;
+          // Effective category: product override wins, then type mapping
+          const effectiveCategoryId = row.product_ebay_browse_category_id || row.ebay_browse_category_id || null;
+          const effectiveCategoryName = row.product_ebay_browse_category_name || row.ebay_browse_category_name || null;
+
+          const hasCategoryMapping = !!effectiveCategoryId;
           const hasVariants = (row.variant_count || 0) > 0;
           const hasImages = (row.image_count || 0) > 0;
           const isListed = !!row.listing_id && row.listing_status === "synced";
@@ -387,7 +423,10 @@ ${categoriesXml}
             sku: row.sku,
             productType: row.product_type,
             productTypeName: row.product_type_name,
-            ebayBrowseCategoryName: row.ebay_browse_category_name,
+            ebayBrowseCategoryId: effectiveCategoryId,
+            ebayBrowseCategoryName: effectiveCategoryName,
+            ebayBrowseCategoryOverrideId: row.product_ebay_browse_category_id || null,
+            ebayBrowseCategoryOverrideName: row.product_ebay_browse_category_name || null,
             ebayStoreCategoryName: row.ebay_store_category_name,
             status,
             missingItems,

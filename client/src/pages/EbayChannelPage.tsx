@@ -146,7 +146,10 @@ interface FeedItem {
   sku: string | null;
   productType: string;
   productTypeName: string;
+  ebayBrowseCategoryId: string | null;
   ebayBrowseCategoryName: string | null;
+  ebayBrowseCategoryOverrideId: string | null;
+  ebayBrowseCategoryOverrideName: string | null;
   ebayStoreCategoryName: string | null;
   status: "ready" | "missing_config" | "listed" | "excluded" | "type_disabled";
   missingItems: string[];
@@ -320,6 +323,19 @@ export default function EbayChannelPage() {
   const toggleExclusionMutation = useMutation({
     mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
       const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
+      return resp.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const setProductCategoryMutation = useMutation({
+    mutationFn: async ({ productId, ebayBrowseCategoryId, ebayBrowseCategoryName }: { productId: number; ebayBrowseCategoryId: string | null; ebayBrowseCategoryName: string | null }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/product-category/${productId}`, { ebayBrowseCategoryId, ebayBrowseCategoryName });
       return resp.json();
     },
     onSuccess: () => {
@@ -1085,12 +1101,19 @@ export default function EbayChannelPage() {
                           </TableCell>
                           {/* eBay Category — desktop only */}
                           <TableCell className="hidden sm:table-cell">
-                            {item.ebayBrowseCategoryName ? (
-                              <span className="text-xs text-muted-foreground truncate block max-w-[160px]">
-                                {item.ebayBrowseCategoryName}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-muted-foreground italic">Not mapped</span>
+                            <EbayCategoryPicker
+                              currentCategoryId={item.ebayBrowseCategoryId || null}
+                              currentCategoryName={item.ebayBrowseCategoryName || null}
+                              onSelect={(categoryId, categoryName) => {
+                                setProductCategoryMutation.mutate({
+                                  productId: item.id,
+                                  ebayBrowseCategoryId: categoryId,
+                                  ebayBrowseCategoryName: categoryName,
+                                });
+                              }}
+                            />
+                            {item.ebayBrowseCategoryOverrideId && (
+                              <span className="text-[10px] text-blue-500 mt-0.5 block">Override</span>
                             )}
                           </TableCell>
                           {/* Status — desktop only */}
