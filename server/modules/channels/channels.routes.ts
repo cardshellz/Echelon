@@ -1909,6 +1909,16 @@ export function registerChannelRoutes(app: Express) {
       };
 
       const [created] = await db.insert(channelAllocationRules).values(data).returning();
+
+      // Trigger immediate sync for the affected product
+      if (created.productId) {
+        const { echelonOrchestrator } = req.app.locals.services;
+        if (echelonOrchestrator) {
+          echelonOrchestrator.syncInventoryForProduct(created.productId, { dryRun: false }, "allocation_rule_created")
+            .catch((err: any) => console.warn(`[AllocationRule] Post-create sync failed: ${err.message}`));
+        }
+      }
+
       res.status(201).json(created);
     } catch (error: any) {
       if (error.code === "23505") {
@@ -1955,6 +1965,16 @@ export function registerChannelRoutes(app: Express) {
         .returning();
 
       if (!updated) return res.status(404).json({ error: "Rule not found" });
+
+      // Trigger immediate sync for the affected product
+      if (updated.productId) {
+        const { echelonOrchestrator } = req.app.locals.services;
+        if (echelonOrchestrator) {
+          echelonOrchestrator.syncInventoryForProduct(updated.productId, { dryRun: false }, "allocation_rule_updated")
+            .catch((err: any) => console.warn(`[AllocationRule] Post-update sync failed: ${err.message}`));
+        }
+      }
+
       res.json(updated);
     } catch (error: any) {
       console.error("Error updating allocation rule:", error);

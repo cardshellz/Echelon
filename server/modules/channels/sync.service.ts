@@ -86,10 +86,29 @@ class ChannelSyncService {
   /** Cached kill switch — loaded once, refreshed on demand */
   private _syncEnabled: boolean | null = null;
 
+  /**
+   * Optional reference to the Echelon sync orchestrator.
+   * When set, event-driven syncs (queueSyncAfterInventoryChange) will
+   * delegate to the orchestrator which respects channel_allocation_rules.
+   * Set via setOrchestrator() after construction to break circular deps.
+   */
+  private orchestrator: any | null = null;
+
   constructor(
     private readonly db: DrizzleDb,
     private readonly atpService: InventoryAtpService,
   ) {}
+
+  /**
+   * Wire the Echelon sync orchestrator into this service.
+   * Must be called after the orchestrator is created (breaks circular dependency).
+   * Once set, all event-driven syncs route through the orchestrator which
+   * uses the Allocation Engine (channel_allocation_rules).
+   */
+  setOrchestrator(orchestrator: any): void {
+    this.orchestrator = orchestrator;
+    console.log("[ChannelSync] Orchestrator wired — event-driven syncs will use Allocation Engine");
+  }
 
   /** Check if channel sync is enabled (cached, lazy-loaded) */
   private async isSyncEnabled(): Promise<boolean> {
@@ -121,6 +140,42 @@ class ChannelSyncService {
     // Master kill switch — skip all pushes when disabled
     if (!(await this.isSyncEnabled())) {
       return { productId, synced: 0, errors: [], variants: [] };
+    }
+
+    // ── Orchestrator delegation ──────────────────────────────────────────
+    // When the Echelon orchestrator is wired, delegate to it so that
+    // channel_allocation_rules (fixed/share/mirror) are respected.
+    // The old allocation logic below is kept as fallback only.
+    if (this.orchestrator) {
+      try {
+        const orchResults = await this.orchestrator.syncInventoryForProduct(
+          productId,
+          { dryRun: false },
+          triggeredBy ?? "channel_sync",
+        );
+
+        // Convert orchestrator results to legacy SyncResult format
+        const result: SyncResult = { productId, synced: 0, errors: [], variants: [] };
+        for (const r of orchResults) {
+          result.synced += r.variantsPushed;
+          for (const d of r.details) {
+            if (d.status === "error" && d.error) {
+              result.errors.push(`${d.sku}: ${d.error}`);
+            }
+            result.variants.push({
+              productVariantId: d.variantId,
+              channelVariantId: "",
+              pushedQty: d.allocatedQty,
+              atpBase: 0,
+              status: d.status,
+            });
+          }
+        }
+        return result;
+      } catch (err: any) {
+        console.error(`[ChannelSync] Orchestrator delegation failed for product ${productId}, falling back to legacy: ${err.message}`);
+        // Fall through to legacy path
+      }
     }
 
     const result: SyncResult = {

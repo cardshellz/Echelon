@@ -38,11 +38,30 @@ type DrizzleDb = {
  * - Tenant-ready: methods can accept a `tenantId` in the future
  *   without structural changes.
  */
+export type InventoryChangeCallback = (productVariantId: number, triggeredBy: string) => void;
+
 export class InventoryCoreService {
+  private onChangeCallbacks: InventoryChangeCallback[] = [];
+
   constructor(
     private readonly db: DrizzleDb,
     private readonly lotService: InventoryLotService | null = null,
   ) {}
+
+  /** Register a callback to be invoked after any inventory quantity change */
+  onInventoryChange(cb: InventoryChangeCallback): void {
+    this.onChangeCallbacks.push(cb);
+  }
+
+  private notifyChange(productVariantId: number, triggeredBy: string): void {
+    for (const cb of this.onChangeCallbacks) {
+      try {
+        cb(productVariantId, triggeredBy);
+      } catch (err: any) {
+        console.warn(`[InventoryCore] onChange callback error: ${err.message}`);
+      }
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // READ helpers
@@ -251,6 +270,8 @@ export class InventoryCoreService {
         inventoryLotId: lotId ?? null,
       });
     });
+
+    this.notifyChange(params.productVariantId, "receive");
   }
 
   // ---------------------------------------------------------------------------
@@ -345,6 +366,8 @@ export class InventoryCoreService {
 
       return true;
     });
+
+    this.notifyChange(params.productVariantId, "pick");
   }
 
   // ---------------------------------------------------------------------------
@@ -442,6 +465,8 @@ export class InventoryCoreService {
           : null,
       });
     });
+
+    this.notifyChange(params.productVariantId, "shipment");
   }
 
   // ---------------------------------------------------------------------------
@@ -554,6 +579,8 @@ export class InventoryCoreService {
         }
       }
     });
+
+    this.notifyChange(params.productVariantId, "adjustment");
   }
 
   // ---------------------------------------------------------------------------

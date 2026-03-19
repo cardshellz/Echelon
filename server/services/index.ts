@@ -149,6 +149,47 @@ export function createServices(db: any) {
     db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush,
   );
 
+  // Wire orchestrator into legacy channelSync so event-driven syncs
+  // respect channel_allocation_rules (fixed/share/mirror modes).
+  // This breaks the chicken-and-egg dependency between channelSync and orchestrator.
+  channelSync.setOrchestrator(echelonOrchestrator);
+
+  // Wire inventory change → immediate channel sync
+  // Every inventory mutation (receive, pick, ship, adjust) triggers allocation + push
+  const { productVariants: pvTable } = require("@shared/schema");
+  const { eq: eqOp } = require("drizzle-orm");
+  const pendingSyncs = new Set<number>(); // debounce by productId
+  inventoryCore.onInventoryChange(async (productVariantId: number, triggeredBy: string) => {
+    try {
+      const [variant] = await db
+        .select({ productId: pvTable.productId })
+        .from(pvTable)
+        .where(eqOp(pvTable.id, productVariantId))
+        .limit(1);
+      if (!variant) return;
+
+      const productId = variant.productId;
+      if (pendingSyncs.has(productId)) return; // already queued
+      pendingSyncs.add(productId);
+
+      // Small delay to batch rapid changes (e.g., multi-line receive)
+      setTimeout(async () => {
+        pendingSyncs.delete(productId);
+        try {
+          await echelonOrchestrator.syncInventoryForProduct(
+            productId,
+            { dryRun: false },
+            `inventory_change:${triggeredBy}`,
+          );
+        } catch (err: any) {
+          console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
+        }
+      }, 2000); // 2s debounce
+    } catch (err: any) {
+      console.warn(`[InventorySync] Failed to resolve variant ${productVariantId}: ${err.message}`);
+    }
+  });
+
   // Bin assignment (depends on catalog + warehouse storage)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
