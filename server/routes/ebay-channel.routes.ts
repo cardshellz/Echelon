@@ -213,6 +213,40 @@ export function registerEbayChannelRoutes(app: Express): void {
           ORDER BY pt.sort_order ASC
         `);
 
+        // Build per-type aspect readiness: for each type that has a browse category,
+        // check if all required aspects have corresponding type defaults
+        const aspectReadiness: Record<string, { aspectsReady: boolean; missingRequiredCount: number }> = {};
+        for (const m of mappings) {
+          const slug = m.productTypeSlug || m.product_type_slug;
+          const catId = m.ebayBrowseCategoryId || m.ebay_browse_category_id;
+          if (!catId) continue;
+
+          // Get required aspects for this category
+          const reqResult = await client.query(
+            `SELECT aspect_name FROM ebay_category_aspects
+             WHERE category_id = $1 AND aspect_required = true`,
+            [catId],
+          );
+          if (reqResult.rows.length === 0) {
+            aspectReadiness[slug] = { aspectsReady: true, missingRequiredCount: 0 };
+            continue;
+          }
+
+          // Get filled type defaults for this slug
+          const tdResult = await client.query(
+            `SELECT aspect_name FROM ebay_type_aspect_defaults
+             WHERE product_type_slug = $1`,
+            [slug],
+          );
+          const filledSet = new Set(tdResult.rows.map((r: any) => r.aspect_name));
+
+          let missing = 0;
+          for (const r of reqResult.rows) {
+            if (!filledSet.has(r.aspect_name)) missing++;
+          }
+          aspectReadiness[slug] = { aspectsReady: missing === 0, missingRequiredCount: missing };
+        }
+
         res.json({
           connected: !!tokenRow?.accessToken,
           channel: channel || null,
@@ -230,18 +264,24 @@ export function registerEbayChannelRoutes(app: Express): void {
             paymentPolicyId: metadata.paymentPolicyId || null,
             merchantLocation: metadata.merchantLocation || null,
           },
-          categoryMappings: mappings.map((m: any) => ({
-            id: m.id,
-            productTypeSlug: m.productTypeSlug || m.product_type_slug,
-            ebayBrowseCategoryId: m.ebayBrowseCategoryId || m.ebay_browse_category_id,
-            ebayBrowseCategoryName: m.ebayBrowseCategoryName || m.ebay_browse_category_name,
-            ebayStoreCategoryId: m.ebayStoreCategoryId || m.ebay_store_category_id,
-            ebayStoreCategoryName: m.ebayStoreCategoryName || m.ebay_store_category_name,
-            fulfillmentPolicyOverride: m.fulfillmentPolicyOverride || m.fulfillment_policy_override,
-            returnPolicyOverride: m.returnPolicyOverride || m.return_policy_override,
-            paymentPolicyOverride: m.paymentPolicyOverride || m.payment_policy_override,
-            listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
-          })),
+          categoryMappings: mappings.map((m: any) => {
+            const slug = m.productTypeSlug || m.product_type_slug;
+            const readiness = aspectReadiness[slug];
+            return {
+              id: m.id,
+              productTypeSlug: slug,
+              ebayBrowseCategoryId: m.ebayBrowseCategoryId || m.ebay_browse_category_id,
+              ebayBrowseCategoryName: m.ebayBrowseCategoryName || m.ebay_browse_category_name,
+              ebayStoreCategoryId: m.ebayStoreCategoryId || m.ebay_store_category_id,
+              ebayStoreCategoryName: m.ebayStoreCategoryName || m.ebay_store_category_name,
+              fulfillmentPolicyOverride: m.fulfillmentPolicyOverride || m.fulfillment_policy_override,
+              returnPolicyOverride: m.returnPolicyOverride || m.return_policy_override,
+              paymentPolicyOverride: m.paymentPolicyOverride || m.payment_policy_override,
+              listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
+              aspectsReady: readiness?.aspectsReady ?? null,
+              missingRequiredCount: readiness?.missingRequiredCount ?? null,
+            };
+          }),
           productTypes: typesResult.rows,
           lastSyncAt: conn?.lastSyncAt || conn?.last_sync_at || null,
           syncStatus: conn?.syncStatus || conn?.sync_status || "never",

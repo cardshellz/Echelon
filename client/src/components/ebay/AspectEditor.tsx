@@ -150,6 +150,7 @@ export function AspectEditor({
       setIsDirty(false);
       queryClient.invalidateQueries({ queryKey: savedQueryKey });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
     },
     onError: (err: Error) => {
       toast({

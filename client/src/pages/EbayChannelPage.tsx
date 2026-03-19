@@ -63,6 +63,7 @@ import {
   Settings2,
   Save,
   Zap,
+  Sparkles,
 } from "lucide-react";
 import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
@@ -114,6 +115,8 @@ interface CategoryMapping {
   returnPolicyOverride: string | null;
   paymentPolicyOverride: string | null;
   listingEnabled: boolean;
+  aspectsReady: boolean | null;
+  missingRequiredCount: number | null;
 }
 
 interface ProductTypeWithCount {
@@ -222,6 +225,7 @@ export default function EbayChannelPage() {
   const [localMappings, setLocalMappings] = useState<Map<string, CategoryMapping>>(new Map());
   const [mappingsDirty, setMappingsDirty] = useState(false);
   const [expandedOverrides, setExpandedOverrides] = useState<Set<string>>(new Set());
+  const [expandedSpecifics, setExpandedSpecifics] = useState<Set<string>>(new Set());
 
   // Browse category search (legacy state — now handled by EbayCategoryPicker)
 
@@ -467,6 +471,15 @@ export default function EbayChannelPage() {
 
   const toggleOverride = (slug: string) => {
     setExpandedOverrides((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  };
+
+  const toggleSpecifics = (slug: string) => {
+    setExpandedSpecifics((prev) => {
       const next = new Set(prev);
       if (next.has(slug)) next.delete(slug);
       else next.add(slug);
@@ -849,6 +862,7 @@ export default function EbayChannelPage() {
                       <TableHead className="w-[200px]">Product Type</TableHead>
                       <TableHead>eBay Browse Category</TableHead>
                       <TableHead className="w-[200px]">eBay Store Category</TableHead>
+                      <TableHead className="w-[120px] text-center">Specifics</TableHead>
                       <TableHead className="w-[80px] text-center">Policies</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -856,6 +870,13 @@ export default function EbayChannelPage() {
                     {(config?.productTypes || []).map((pt) => {
                       const mapping = localMappings.get(pt.slug) || {} as Partial<CategoryMapping>;
                       const isOverrideExpanded = expandedOverrides.has(pt.slug);
+                      const isSpecificsExpanded = expandedSpecifics.has(pt.slug);
+                      const hasBrowseCategory = !!mapping.ebayBrowseCategoryId;
+
+                      // Aspect readiness from server config (not from localMappings which is client-side)
+                      const serverMapping = config?.categoryMappings?.find((m) => m.productTypeSlug === pt.slug);
+                      const aspectsReady = serverMapping?.aspectsReady ?? null;
+                      const missingRequiredCount = serverMapping?.missingRequiredCount ?? null;
 
                       return (
                         <React.Fragment key={pt.slug}>
@@ -920,6 +941,34 @@ export default function EbayChannelPage() {
                                   </SelectContent>
                                 </Select>
                               </TableCell>
+                              {/* Specifics status badge */}
+                              <TableCell className="sm:table-cell block sm:text-center pt-1 sm:pt-0">
+                                {hasBrowseCategory ? (
+                                  <button
+                                    onClick={() => toggleSpecifics(pt.slug)}
+                                    className="inline-flex items-center"
+                                  >
+                                    {aspectsReady === true ? (
+                                      <Badge className="bg-green-600 hover:bg-green-700 text-xs gap-1 cursor-pointer">
+                                        <CheckCircle2 className="h-3 w-3" />
+                                        Specifics ✓
+                                      </Badge>
+                                    ) : aspectsReady === false && missingRequiredCount != null ? (
+                                      <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer">
+                                        <AlertCircle className="h-3 w-3" />
+                                        {missingRequiredCount} required
+                                      </Badge>
+                                    ) : (
+                                      <Badge variant="outline" className="text-muted-foreground text-xs gap-1 cursor-pointer">
+                                        <Sparkles className="h-3 w-3" />
+                                        Set specifics
+                                      </Badge>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
                               <TableCell className="sm:table-cell block sm:text-center pt-1 sm:pt-0">
                                 <Button
                                   variant="ghost"
@@ -937,9 +986,24 @@ export default function EbayChannelPage() {
                                 </Button>
                               </TableCell>
                             </TableRow>
+                            {/* Specifics expansion row */}
+                            {isSpecificsExpanded && hasBrowseCategory && (
+                              <TableRow className="bg-amber-50/50 dark:bg-amber-950/10">
+                                <TableCell colSpan={5}>
+                                  <div className="py-3 px-4">
+                                    <AspectEditor
+                                      categoryId={mapping.ebayBrowseCategoryId!}
+                                      mode="type"
+                                      productTypeSlug={pt.slug}
+                                      compact
+                                    />
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            )}
                             {isOverrideExpanded && (
                               <TableRow className="bg-muted/30">
-                                <TableCell colSpan={4}>
+                                <TableCell colSpan={5}>
                                   <div className="py-2 px-4 space-y-4">
                                     <div>
                                       <p className="text-xs text-muted-foreground mb-2 font-medium">
@@ -1005,17 +1069,6 @@ export default function EbayChannelPage() {
                                         </div>
                                       </div>
                                     </div>
-                                    {/* Item Specifics editor — only shows if category is set */}
-                                    {mapping.ebayBrowseCategoryId && (
-                                      <div className="border-t pt-3">
-                                        <AspectEditor
-                                          categoryId={mapping.ebayBrowseCategoryId}
-                                          mode="type"
-                                          productTypeSlug={pt.slug}
-                                          compact
-                                        />
-                                      </div>
-                                    )}
                                   </div>
                                 </TableCell>
                               </TableRow>
@@ -1025,7 +1078,7 @@ export default function EbayChannelPage() {
                     })}
                     {(!config?.productTypes || config.productTypes.length === 0) && (
                       <TableRow>
-                        <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-8">
+                        <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
                           No product types defined. Use "Manage Product Types" to create and assign them.
                         </TableCell>
                       </TableRow>
