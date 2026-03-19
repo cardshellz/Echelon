@@ -49,7 +49,6 @@ export function EbayCategoryPicker({
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isMobile = useIsMobile();
 
   const search = useCallback(async (q: string) => {
     if (q.length < 2) {
