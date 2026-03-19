@@ -13,6 +13,7 @@
 
 import type { Express, Request, Response } from "express";
 import { eq, and, sql, asc, isNotNull } from "drizzle-orm";
+import https from "https";
 import { db, pool } from "../db";
 import {
   channels,
@@ -80,6 +81,66 @@ async function getChannelConnection() {
     .where(eq(channelConnections.channelId, EBAY_CHANNEL_ID))
     .limit(1);
   return conn || null;
+}
+
+// ---------------------------------------------------------------------------
+// eBay REST API helper (uses https module, not fetch)
+// ---------------------------------------------------------------------------
+
+function ebayApiRequest(
+  method: string,
+  path: string,
+  accessToken: string,
+  body?: unknown,
+): Promise<any> {
+  const environment = process.env.EBAY_ENVIRONMENT || "production";
+  const hostname =
+    environment === "sandbox" ? "api.sandbox.ebay.com" : "api.ebay.com";
+
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : undefined;
+    const options: https.RequestOptions = {
+      hostname,
+      path,
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Language": "en-US",
+        "Accept-Language": "en-US",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode === 204) {
+          resolve(undefined);
+          return;
+        }
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          try {
+            resolve(data ? JSON.parse(data) : undefined);
+          } catch {
+            resolve(data);
+          }
+          return;
+        }
+        reject(
+          new Error(
+            `eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`,
+          ),
+        );
+      });
+    });
+
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +549,65 @@ ${categoriesXml}
           }
         }
 
+        // Fetch required aspects per category and type defaults + product overrides
+        // Build lookup maps for aspect checking
+        const categoryIds = new Set<string>();
+        const productTypeSlugs = new Set<string>();
+        const feedProductIds = result.rows.map((r: any) => r.id);
+
+        for (const row of result.rows) {
+          const catId = row.product_ebay_browse_category_id || row.ebay_browse_category_id;
+          if (catId) categoryIds.add(catId);
+          if (row.product_type) productTypeSlugs.add(row.product_type);
+        }
+
+        // Required aspects per category
+        const requiredAspectsByCategory: Map<string, string[]> = new Map();
+        if (categoryIds.size > 0) {
+          const catIdsArr = Array.from(categoryIds);
+          const reqResult = await client.query(
+            `SELECT category_id, aspect_name FROM ebay_category_aspects
+             WHERE category_id = ANY($1) AND aspect_required = true`,
+            [catIdsArr],
+          );
+          for (const r of reqResult.rows) {
+            const existing = requiredAspectsByCategory.get(r.category_id) || [];
+            existing.push(r.aspect_name);
+            requiredAspectsByCategory.set(r.category_id, existing);
+          }
+        }
+
+        // Type defaults per slug
+        const typeDefaultsBySlug: Map<string, Set<string>> = new Map();
+        if (productTypeSlugs.size > 0) {
+          const slugsArr = Array.from(productTypeSlugs);
+          const tdResult = await client.query(
+            `SELECT product_type_slug, aspect_name FROM ebay_type_aspect_defaults
+             WHERE product_type_slug = ANY($1)`,
+            [slugsArr],
+          );
+          for (const r of tdResult.rows) {
+            if (!typeDefaultsBySlug.has(r.product_type_slug))
+              typeDefaultsBySlug.set(r.product_type_slug, new Set());
+            typeDefaultsBySlug.get(r.product_type_slug)!.add(r.aspect_name);
+          }
+        }
+
+        // Product overrides per product
+        const overridesByProduct: Map<number, Set<string>> = new Map();
+        if (feedProductIds.length > 0) {
+          const poResult = await client.query(
+            `SELECT product_id, aspect_name FROM ebay_product_aspect_overrides
+             WHERE product_id = ANY($1)`,
+            [feedProductIds],
+          );
+          for (const r of poResult.rows) {
+            if (!overridesByProduct.has(r.product_id))
+              overridesByProduct.set(r.product_id, new Set());
+            overridesByProduct.get(r.product_id)!.add(r.aspect_name);
+          }
+        }
+
         // Determine readiness for each product
         const feed = result.rows.map((row: any) => {
           // Effective category: product override wins, then type mapping
@@ -502,12 +622,30 @@ ${categoriesXml}
           const isExcluded = row.ebay_listing_excluded === true;
           const isTypeDisabled = row.type_listing_enabled === false;
 
+          // Check for missing required aspects
+          const missingAspects: string[] = [];
+          if (effectiveCategoryId) {
+            const requiredAspects = requiredAspectsByCategory.get(effectiveCategoryId) || [];
+            const filledTypeDefaults = typeDefaultsBySlug.get(row.product_type) || new Set();
+            const filledOverrides = overridesByProduct.get(row.id) || new Set();
+            // Auto-mapped: Brand (if product has brand)
+            const autoMapped = new Set<string>();
+            // We can't check product.brand here efficiently, but Brand is usually
+            // set as a type default. We'll just check type + product overrides.
+            for (const reqAspect of requiredAspects) {
+              if (!filledTypeDefaults.has(reqAspect) && !filledOverrides.has(reqAspect) && !autoMapped.has(reqAspect)) {
+                missingAspects.push(reqAspect);
+              }
+            }
+          }
+
           let status: string;
           if (isExcluded) status = "excluded";
           else if (isTypeDisabled) status = "type_disabled";
           else if (isListed) status = "listed";
-          else if (hasCategoryMapping && hasVariants && hasImages) status = "ready";
-          else status = "missing_config";
+          else if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
+          else if (missingAspects.length > 0) status = "missing_specifics";
+          else status = "ready";
 
           const missingItems: string[] = [];
           if (!hasCategoryMapping) missingItems.push("eBay category");
@@ -530,6 +668,7 @@ ${categoriesXml}
             ebayStoreCategoryName: row.ebay_store_category_name,
             status,
             missingItems,
+            missingAspects,
             isListed,
             isExcluded,
             externalListingId: row.external_product_id,
@@ -794,6 +933,313 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // GET /api/ebay/category-aspects/:categoryId — Cached eBay aspect definitions
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/category-aspects/:categoryId", async (req: Request, res: Response) => {
+    try {
+      const { categoryId } = req.params;
+      if (!categoryId) {
+        res.status(400).json({ error: "categoryId is required" });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        // Check cache freshness (24 hours)
+        const cacheCheck = await client.query(
+          `SELECT fetched_at FROM ebay_category_aspects
+           WHERE category_id = $1 LIMIT 1`,
+          [categoryId],
+        );
+
+        const isFresh =
+          cacheCheck.rows.length > 0 &&
+          Date.now() - new Date(cacheCheck.rows[0].fetched_at).getTime() <
+            24 * 60 * 60 * 1000;
+
+        if (!isFresh) {
+          // Fetch from eBay Taxonomy API
+          const authService = getAuthService();
+          if (!authService) {
+            res.status(500).json({ error: "eBay OAuth not configured" });
+            return;
+          }
+          const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+
+          const apiPath = `/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category?category_id=${encodeURIComponent(categoryId)}`;
+          const data = await ebayApiRequest("GET", apiPath, accessToken);
+
+          // Parse and upsert aspects
+          const aspects: Array<{
+            name: string;
+            required: boolean;
+            mode: string;
+            usage: string;
+            values: string[] | null;
+            order: number;
+          }> = [];
+
+          if (data && data.aspects) {
+            for (let i = 0; i < data.aspects.length; i++) {
+              const a = data.aspects[i];
+              const constraint = a.aspectConstraint || {};
+              const name = a.localizedAspectName || "";
+              if (!name) continue;
+
+              const required =
+                constraint.aspectRequired === true ||
+                constraint.aspectUsage === "REQUIRED";
+              const mode = constraint.aspectMode || "FREE_TEXT";
+              const usage = constraint.aspectUsage || "RECOMMENDED";
+
+              // Extract allowed values
+              let values: string[] | null = null;
+              if (a.aspectValues && Array.isArray(a.aspectValues)) {
+                values = a.aspectValues
+                  .map((v: any) => v.localizedValue)
+                  .filter(Boolean);
+              }
+
+              aspects.push({
+                name,
+                required,
+                mode,
+                usage,
+                values,
+                order: i,
+              });
+            }
+          }
+
+          // Delete old + insert fresh (transactional)
+          await client.query("BEGIN");
+          await client.query(
+            "DELETE FROM ebay_category_aspects WHERE category_id = $1",
+            [categoryId],
+          );
+          for (const a of aspects) {
+            await client.query(
+              `INSERT INTO ebay_category_aspects
+                 (category_id, aspect_name, aspect_required, aspect_mode, aspect_usage, aspect_values, aspect_order, fetched_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+              [
+                categoryId,
+                a.name,
+                a.required,
+                a.mode,
+                a.usage,
+                a.values ? JSON.stringify(a.values) : null,
+                a.order,
+              ],
+            );
+          }
+          await client.query("COMMIT");
+        }
+
+        // Return cached aspects
+        const result = await client.query(
+          `SELECT aspect_name, aspect_required, aspect_mode, aspect_usage, aspect_values, aspect_order
+           FROM ebay_category_aspects
+           WHERE category_id = $1
+           ORDER BY aspect_required DESC, aspect_order ASC`,
+          [categoryId],
+        );
+
+        const aspects = result.rows.map((r: any) => ({
+          name: r.aspect_name,
+          required: r.aspect_required,
+          mode: r.aspect_mode,
+          usage: r.aspect_usage,
+          values: r.aspect_values || null,
+          order: r.aspect_order,
+        }));
+
+        res.json({ aspects, categoryId });
+      } catch (err: any) {
+        // Rollback if we were in a transaction
+        try {
+          await client.query("ROLLBACK");
+        } catch {}
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Category Aspects] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/type-aspect-defaults/:productTypeSlug
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/type-aspect-defaults/:productTypeSlug", async (req: Request, res: Response) => {
+    try {
+      const { productTypeSlug } = req.params;
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          `SELECT aspect_name, aspect_value FROM ebay_type_aspect_defaults
+           WHERE product_type_slug = $1`,
+          [productTypeSlug],
+        );
+        const defaults: Record<string, string> = {};
+        for (const r of result.rows) {
+          defaults[r.aspect_name] = r.aspect_value;
+        }
+        res.json({ defaults });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Type Aspect Defaults] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /api/ebay/type-aspect-defaults/:productTypeSlug
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/type-aspect-defaults/:productTypeSlug", async (req: Request, res: Response) => {
+    try {
+      const { productTypeSlug } = req.params;
+      const { defaults } = req.body as { defaults: Record<string, string> };
+      if (!defaults || typeof defaults !== "object") {
+        res.status(400).json({ error: "defaults object is required" });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Delete all existing for this slug
+        await client.query(
+          "DELETE FROM ebay_type_aspect_defaults WHERE product_type_slug = $1",
+          [productTypeSlug],
+        );
+
+        // Insert new
+        const entries = Object.entries(defaults).filter(
+          ([, v]) => v !== undefined && v !== null && v !== "",
+        );
+        for (const [name, value] of entries) {
+          await client.query(
+            `INSERT INTO ebay_type_aspect_defaults (product_type_slug, aspect_name, aspect_value, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())`,
+            [productTypeSlug, name, value],
+          );
+        }
+
+        await client.query("COMMIT");
+
+        // Return updated defaults
+        const result: Record<string, string> = {};
+        for (const [name, value] of entries) {
+          result[name] = value;
+        }
+        res.json({ defaults: result });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Type Aspect Defaults Save] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/product-aspects/:productId
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/product-aspects/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          `SELECT aspect_name, aspect_value FROM ebay_product_aspect_overrides
+           WHERE product_id = $1`,
+          [productId],
+        );
+        const overrides: Record<string, string> = {};
+        for (const r of result.rows) {
+          overrides[r.aspect_name] = r.aspect_value;
+        }
+        res.json({ overrides });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Aspects] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /api/ebay/product-aspects/:productId
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/product-aspects/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const { overrides } = req.body as { overrides: Record<string, string> };
+      if (!overrides || typeof overrides !== "object") {
+        res.status(400).json({ error: "overrides object is required" });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Delete all existing for this product
+        await client.query(
+          "DELETE FROM ebay_product_aspect_overrides WHERE product_id = $1",
+          [productId],
+        );
+
+        // Insert new
+        const entries = Object.entries(overrides).filter(
+          ([, v]) => v !== undefined && v !== null && v !== "",
+        );
+        for (const [name, value] of entries) {
+          await client.query(
+            `INSERT INTO ebay_product_aspect_overrides (product_id, aspect_name, aspect_value, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())`,
+            [productId, name, value],
+          );
+        }
+
+        await client.query("COMMIT");
+
+        const result: Record<string, string> = {};
+        for (const [name, value] of entries) {
+          result[name] = value;
+        }
+        res.json({ overrides: result });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Aspects Save] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // POST /api/ebay/listings/push — Push products to eBay (create listings)
   // -----------------------------------------------------------------------
   app.post("/api/ebay/listings/push", async (req: Request, res: Response) => {
@@ -960,30 +1406,34 @@ ${categoriesXml}
                 },
               };
 
-              // Build aspects (item specifics)
+              // Build aspects from DB: product override > type default > auto-mapped
               const aspects: Record<string, string[]> = {};
-              if (product.brand) aspects["Brand"] = [product.brand];
 
-              // Map product types to eBay required "Type" aspect
-              const typeAspectMap: Record<string, string> = {
-                "toploaders": "Toploader",
-                "easy-glide-sleeves": "Card Sleeve",
-                "magnetic-holders": "Card Holder",
-                "semi-rigids": "Card Holder",
-                "armalopes": "Mailer",
-                "hero-cases": "Card Holder",
-                "binders": "Album/Binder",
-                "storage-boxes": "Storage Box",
-                "glove-fit-toploader": "Card Sleeve",
-                "glove-fit-mag": "Card Sleeve",
-                "glove-fit-graded": "Card Sleeve",
-                "glove-fit-semi": "Card Sleeve",
-                "sleeves-bags": "Card Sleeve",
-                "accessories": "Display Stand",
-                "wax": "Box",
-              };
-              const typeValue = typeAspectMap[product.product_type] || "Card Holder";
-              aspects["Type"] = [typeValue];
+              // Auto-mapped values
+              if (product.brand) aspects["Brand"] = [product.brand];
+              if (variant.barcode) aspects["UPC"] = [variant.barcode];
+
+              // Type-level defaults from DB
+              if (product.product_type) {
+                const typeDefaults = await client.query(
+                  `SELECT aspect_name, aspect_value FROM ebay_type_aspect_defaults
+                   WHERE product_type_slug = $1`,
+                  [product.product_type],
+                );
+                for (const td of typeDefaults.rows) {
+                  aspects[td.aspect_name] = [td.aspect_value];
+                }
+              }
+
+              // Product-level overrides from DB (highest priority)
+              const prodOverrides = await client.query(
+                `SELECT aspect_name, aspect_value FROM ebay_product_aspect_overrides
+                 WHERE product_id = $1`,
+                [productId],
+              );
+              for (const po of prodOverrides.rows) {
+                aspects[po.aspect_name] = [po.aspect_value];
+              }
 
               inventoryItemBody.product.aspects = aspects;
 

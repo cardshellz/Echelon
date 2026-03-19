@@ -66,6 +66,7 @@ import {
 } from "lucide-react";
 import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
+import { AspectEditor } from "@/components/ebay/AspectEditor";
 
 // ============================================================================
 // Types
@@ -160,8 +161,9 @@ interface FeedItem {
   ebayBrowseCategoryOverrideId: string | null;
   ebayBrowseCategoryOverrideName: string | null;
   ebayStoreCategoryName: string | null;
-  status: "ready" | "missing_config" | "listed" | "excluded" | "type_disabled";
+  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled";
   missingItems: string[];
+  missingAspects: string[];
   isListed: boolean;
   isExcluded: boolean;
   externalListingId: string | null;
@@ -224,7 +226,7 @@ export default function EbayChannelPage() {
   // Browse category search (legacy state — now handled by EbayCategoryPicker)
 
   // Feed filters
-  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "listed" | "excluded">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded">("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
 
@@ -487,10 +489,10 @@ export default function EbayChannelPage() {
     let items = feedData.feed.filter((i) => i.status !== "type_disabled");
     if (feedFilter === "excluded") {
       items = items.filter((i) => i.status === "excluded");
+    } else if (feedFilter === "missing_specifics") {
+      items = items.filter((i) => i.status === "missing_specifics");
     } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
-    } else {
-      // "all" shows everything except type_disabled (already filtered above)
     }
     if (feedSearch) {
       const q = feedSearch.toLowerCase();
@@ -504,13 +506,14 @@ export default function EbayChannelPage() {
   }, [feedData, feedFilter, feedSearch]);
 
   const feedCounts = useMemo(() => {
-    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, listed: 0, excluded: 0 };
+    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0 };
     // Exclude type_disabled from all counts
     const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
     return {
       all: feed.length,
       ready: feed.filter((f) => f.status === "ready").length,
       missing_config: feed.filter((f) => f.status === "missing_config").length,
+      missing_specifics: feed.filter((f) => f.status === "missing_specifics").length,
       listed: feed.filter((f) => f.status === "listed").length,
       excluded: feed.filter((f) => f.status === "excluded").length,
     };
@@ -937,69 +940,82 @@ export default function EbayChannelPage() {
                             {isOverrideExpanded && (
                               <TableRow className="bg-muted/30">
                                 <TableCell colSpan={4}>
-                                  <div className="py-2 px-4">
-                                    <p className="text-xs text-muted-foreground mb-2 font-medium">
-                                      Policy overrides for {pt.name} (leave blank to use store defaults)
-                                    </p>
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                      <div>
-                                        <Label className="text-xs">Shipping Override</Label>
-                                        <Select
-                                          value={mapping.fulfillmentPolicyOverride || "__default__"}
-                                          onValueChange={(v) =>
-                                            updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
-                                          }
-                                        >
-                                          <SelectTrigger className="mt-1 h-8 text-xs">
-                                            <SelectValue placeholder="Use default" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                            {(policies?.fulfillmentPolicies || []).map((p) => (
-                                              <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
-                                      </div>
-                                      <div>
-                                        <Label className="text-xs">Returns Override</Label>
-                                        <Select
-                                          value={mapping.returnPolicyOverride || "__default__"}
-                                          onValueChange={(v) =>
-                                            updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
-                                          }
-                                        >
-                                          <SelectTrigger className="mt-1 h-8 text-xs">
-                                            <SelectValue placeholder="Use default" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                            {(policies?.returnPolicies || []).map((p) => (
-                                              <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
-                                      </div>
-                                      <div>
-                                        <Label className="text-xs">Payment Override</Label>
-                                        <Select
-                                          value={mapping.paymentPolicyOverride || "__default__"}
-                                          onValueChange={(v) =>
-                                            updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
-                                          }
-                                        >
-                                          <SelectTrigger className="mt-1 h-8 text-xs">
-                                            <SelectValue placeholder="Use default" />
-                                          </SelectTrigger>
-                                          <SelectContent>
-                                            <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                            {(policies?.paymentPolicies || []).map((p) => (
-                                              <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                            ))}
-                                          </SelectContent>
-                                        </Select>
+                                  <div className="py-2 px-4 space-y-4">
+                                    <div>
+                                      <p className="text-xs text-muted-foreground mb-2 font-medium">
+                                        Policy overrides for {pt.name} (leave blank to use store defaults)
+                                      </p>
+                                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                        <div>
+                                          <Label className="text-xs">Shipping Override</Label>
+                                          <Select
+                                            value={mapping.fulfillmentPolicyOverride || "__default__"}
+                                            onValueChange={(v) =>
+                                              updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
+                                            }
+                                          >
+                                            <SelectTrigger className="mt-1 h-8 text-xs">
+                                              <SelectValue placeholder="Use default" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
+                                              {(policies?.fulfillmentPolicies || []).map((p) => (
+                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
+                                              ))}
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
+                                        <div>
+                                          <Label className="text-xs">Returns Override</Label>
+                                          <Select
+                                            value={mapping.returnPolicyOverride || "__default__"}
+                                            onValueChange={(v) =>
+                                              updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
+                                            }
+                                          >
+                                            <SelectTrigger className="mt-1 h-8 text-xs">
+                                              <SelectValue placeholder="Use default" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
+                                              {(policies?.returnPolicies || []).map((p) => (
+                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
+                                              ))}
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
+                                        <div>
+                                          <Label className="text-xs">Payment Override</Label>
+                                          <Select
+                                            value={mapping.paymentPolicyOverride || "__default__"}
+                                            onValueChange={(v) =>
+                                              updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
+                                            }
+                                          >
+                                            <SelectTrigger className="mt-1 h-8 text-xs">
+                                              <SelectValue placeholder="Use default" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
+                                              {(policies?.paymentPolicies || []).map((p) => (
+                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
+                                              ))}
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
                                       </div>
                                     </div>
+                                    {/* Item Specifics editor — only shows if category is set */}
+                                    {mapping.ebayBrowseCategoryId && (
+                                      <div className="border-t pt-3">
+                                        <AspectEditor
+                                          categoryId={mapping.ebayBrowseCategoryId}
+                                          mode="type"
+                                          productTypeSlug={pt.slug}
+                                          compact
+                                        />
+                                      </div>
+                                    )}
                                   </div>
                                 </TableCell>
                               </TableRow>
@@ -1078,7 +1094,7 @@ export default function EbayChannelPage() {
               {/* Filters */}
               <div className="flex flex-col gap-3 mb-4">
                 <div className="flex flex-wrap gap-1">
-                  {(["all", "ready", "missing_config", "listed", "excluded"] as const).map((f) => (
+                  {(["all", "ready", "missing_config", "missing_specifics", "listed", "excluded"] as const).map((f) => (
                     <Button
                       key={f}
                       variant={feedFilter === f ? "default" : "outline"}
@@ -1089,6 +1105,7 @@ export default function EbayChannelPage() {
                       {f === "all" && `All (${feedCounts.all})`}
                       {f === "ready" && `Ready (${feedCounts.ready})`}
                       {f === "missing_config" && `Missing (${feedCounts.missing_config})`}
+                      {f === "missing_specifics" && `Specifics (${feedCounts.missing_specifics})`}
                       {f === "listed" && `Listed (${feedCounts.listed})`}
                       {f === "excluded" && `Excluded (${feedCounts.excluded})`}
                     </Button>
@@ -1197,7 +1214,7 @@ export default function EbayChannelPage() {
                               )}
                             </div>
                             {/* Mobile-only: type + status row */}
-                            <div className="flex items-center gap-2 mt-1.5 sm:hidden">
+                            <div className="flex items-center gap-2 mt-1.5 sm:hidden flex-wrap">
                               <Badge variant="outline" className="text-xs">
                                 {item.productTypeName || item.productType}
                               </Badge>
@@ -1222,6 +1239,11 @@ export default function EbayChannelPage() {
                               {item.status === "missing_config" && (
                                 <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
                                   Missing: {item.missingItems.join(", ")}
+                                </Badge>
+                              )}
+                              {item.status === "missing_specifics" && (
+                                <Badge variant="outline" className="text-orange-600 border-orange-300 text-xs">
+                                  Specifics: {item.missingAspects?.slice(0, 3).join(", ")}{item.missingAspects?.length > 3 ? ` +${item.missingAspects.length - 3}` : ""}
                                 </Badge>
                               )}
                               {item.status === "listed" && (
@@ -1263,7 +1285,7 @@ export default function EbayChannelPage() {
                           </TableCell>
                           {/* Status — desktop only */}
                           <TableCell className="hidden sm:table-cell text-center">
-                            <div className="flex items-center justify-center gap-1.5">
+                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
                               {item.status === "ready" && (
                                 <>
                                   <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
@@ -1286,6 +1308,11 @@ export default function EbayChannelPage() {
                               {item.status === "missing_config" && (
                                 <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
                                   Missing: {item.missingItems.join(", ")}
+                                </Badge>
+                              )}
+                              {item.status === "missing_specifics" && (
+                                <Badge variant="outline" className="text-orange-600 border-orange-300 text-xs" title={item.missingAspects?.join(", ")}>
+                                  Specifics: {item.missingAspects?.slice(0, 2).join(", ")}{item.missingAspects?.length > 2 ? ` +${item.missingAspects.length - 2}` : ""}
                                 </Badge>
                               )}
                               {item.status === "listed" && (
@@ -1357,6 +1384,19 @@ export default function EbayChannelPage() {
                             </TableCell>
                           </TableRow>
                         ))}
+                        {/* Expanded: Item Specifics per-product overrides */}
+                        {isExpanded && item.ebayBrowseCategoryId && (
+                          <TableRow className="bg-muted/10" onClick={(e) => e.stopPropagation()}>
+                            <TableCell colSpan={6} className="px-4 sm:px-8 py-3">
+                              <AspectEditor
+                                categoryId={item.ebayBrowseCategoryId}
+                                mode="product"
+                                productId={item.id}
+                                compact
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )}
                         </React.Fragment>
                       );
                     })}

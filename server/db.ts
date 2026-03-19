@@ -479,6 +479,50 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_name VARCHAR(200)`);
     console.log("Checked per-product eBay browse category override columns");
 
+    // 8. eBay Item Specifics (Aspects) management tables
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ebay_category_aspects (
+        id SERIAL PRIMARY KEY,
+        category_id VARCHAR(20) NOT NULL,
+        aspect_name VARCHAR(200) NOT NULL,
+        aspect_required BOOLEAN NOT NULL DEFAULT false,
+        aspect_mode VARCHAR(20) NOT NULL DEFAULT 'FREE_TEXT',
+        aspect_usage VARCHAR(20) NOT NULL DEFAULT 'RECOMMENDED',
+        aspect_values JSONB,
+        aspect_order INT NOT NULL DEFAULT 0,
+        fetched_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(category_id, aspect_name)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_cat_aspects_cat ON ebay_category_aspects(category_id)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ebay_type_aspect_defaults (
+        id SERIAL PRIMARY KEY,
+        product_type_slug VARCHAR(100) NOT NULL,
+        aspect_name VARCHAR(200) NOT NULL,
+        aspect_value VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(product_type_slug, aspect_name)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_type_aspects_slug ON ebay_type_aspect_defaults(product_type_slug)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ebay_product_aspect_overrides (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER NOT NULL REFERENCES products(id),
+        aspect_name VARCHAR(200) NOT NULL,
+        aspect_value VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(product_id, aspect_name)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_prod_aspects_pid ON ebay_product_aspect_overrides(product_id)`);
+    console.log("Checked eBay Item Specifics (aspects) tables");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {
