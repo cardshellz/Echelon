@@ -7,6 +7,8 @@
  * PUT  /api/ebay/category-mapping        — Save category mappings (batch)
  * POST /api/ebay/sync-store-categories   — Create eBay store categories from product types
  * GET  /api/ebay/listing-feed            — Products with type assignments for feed view
+ * GET  /api/ebay/category-tree           — Root-level eBay categories (Taxonomy API)
+ * GET  /api/ebay/category-tree/:id/children — Children of a category (Taxonomy API)
  */
 
 import type { Express, Request, Response } from "express";
@@ -31,6 +33,32 @@ import {
 // ---------------------------------------------------------------------------
 
 const EBAY_CHANNEL_ID = 67;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// ---------------------------------------------------------------------------
+// Category tree cache (module-level, 1-hour TTL)
+// ---------------------------------------------------------------------------
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const categoryTreeCache: Map<string, CacheEntry<any>> = new Map();
+
+function getCached<T>(key: string): T | null {
+  const entry = categoryTreeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    categoryTreeCache.delete(key);
+    return null;
+  }
+  return entry.data as T;
+}
+
+function setCache<T>(key: string, data: T): void {
+  categoryTreeCache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -480,6 +508,144 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Toggle Type Listing] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/category-tree — Root-level eBay categories (Taxonomy API)
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/category-tree", async (_req: Request, res: Response) => {
+    try {
+      const cached = getCached<any>("root");
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const environment = process.env.EBAY_ENVIRONMENT || "production";
+      const baseUrl = environment === "sandbox"
+        ? "https://api.sandbox.ebay.com"
+        : "https://api.ebay.com";
+
+      const url = `${baseUrl}/commerce/taxonomy/v1/category_tree/0`;
+      const resp = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error("[eBay Category Tree] API error:", resp.status, errText);
+        res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
+        return;
+      }
+
+      const data = await resp.json();
+      const rootNode = data.rootCategoryNode;
+      if (!rootNode || !rootNode.childCategoryTreeNodes) {
+        res.json({ categories: [] });
+        return;
+      }
+
+      const categories = rootNode.childCategoryTreeNodes.map((node: any) => ({
+        categoryId: node.category?.categoryId,
+        categoryName: node.category?.categoryName,
+        hasChildren: !!(node.childCategoryTreeNodes && node.childCategoryTreeNodes.length > 0),
+      }));
+
+      const result = { categories };
+      setCache("root", result);
+      res.json(result);
+    } catch (err: any) {
+      console.error("[eBay Category Tree] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/category-tree/:categoryId/children — Children of a category
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/category-tree/:categoryId/children", async (req: Request, res: Response) => {
+    try {
+      const { categoryId } = req.params;
+      if (!categoryId) {
+        res.status(400).json({ error: "categoryId is required" });
+        return;
+      }
+
+      const cacheKey = `children:${categoryId}`;
+      const cached = getCached<any>(cacheKey);
+      if (cached) {
+        res.json(cached);
+        return;
+      }
+
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const environment = process.env.EBAY_ENVIRONMENT || "production";
+      const baseUrl = environment === "sandbox"
+        ? "https://api.sandbox.ebay.com"
+        : "https://api.ebay.com";
+
+      const url = `${baseUrl}/commerce/taxonomy/v1/category_tree/0/get_category_subtree?category_id=${encodeURIComponent(categoryId)}`;
+      const resp = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error("[eBay Category Children] API error:", resp.status, errText);
+        res.status(resp.status).json({ error: `eBay API error: ${resp.status}` });
+        return;
+      }
+
+      const data = await resp.json();
+      const rootNode = data.categorySubtreeNode;
+      if (!rootNode) {
+        res.json({ categories: [], breadcrumb: "" });
+        return;
+      }
+
+      // Build breadcrumb from ancestors
+      const ancestors = data.categoryTreeNodeAncestors || [];
+      const ancestorNames = ancestors
+        .sort((a: any, b: any) => (b.categoryTreeNodeLevel || 0) - (a.categoryTreeNodeLevel || 0))
+        .map((a: any) => a.categoryName);
+      const breadcrumb = [...ancestorNames, rootNode.category?.categoryName].join(" > ");
+
+      // Extract DIRECT children only
+      const childNodes = rootNode.childCategoryTreeNodes || [];
+      const categories = childNodes.map((node: any) => ({
+        categoryId: node.category?.categoryId,
+        categoryName: node.category?.categoryName,
+        parentId: categoryId,
+        hasChildren: !!(node.childCategoryTreeNodes && node.childCategoryTreeNodes.length > 0),
+        breadcrumb,
+      }));
+
+      const result = { categories, breadcrumb };
+      setCache(cacheKey, result);
+      res.json(result);
+    } catch (err: any) {
+      console.error("[eBay Category Children] Error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });
