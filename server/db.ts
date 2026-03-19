@@ -523,6 +523,31 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_prod_aspects_pid ON ebay_product_aspect_overrides(product_id)`);
     console.log("Checked eBay Item Specifics (aspects) tables");
 
+    // Migration: channel_pricing_rules table for hierarchical pricing
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS channel_pricing_rules (
+        id SERIAL PRIMARY KEY,
+        channel_id INTEGER NOT NULL,
+        scope VARCHAR(20) NOT NULL,
+        scope_id VARCHAR(100),
+        rule_type VARCHAR(20) NOT NULL,
+        value NUMERIC(10,2) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    // Unique constraint for non-null scope_id
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cpr_channel_scope_scopeid
+      ON channel_pricing_rules(channel_id, scope, scope_id) WHERE scope_id IS NOT NULL
+    `);
+    // Unique constraint for null scope_id (channel-level rules)
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_cpr_channel_scope_null
+      ON channel_pricing_rules(channel_id, scope) WHERE scope_id IS NULL
+    `);
+    console.log("Checked channel_pricing_rules table");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

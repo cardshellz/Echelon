@@ -176,6 +176,22 @@ interface FeedItem {
   variants: FeedVariant[];
 }
 
+interface PricingRule {
+  id: number;
+  channel_id: number;
+  scope: "channel" | "category" | "product" | "variant";
+  scope_id: string | null;
+  rule_type: "percentage" | "fixed" | "override";
+  value: string;
+  scope_label: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface EffectivePrices {
+  [variantId: number]: { basePriceCents: number; effectivePriceCents: number };
+}
+
 // ============================================================================
 // Helper: Product Aspect Editor with Type Defaults
 // ============================================================================
@@ -238,6 +254,18 @@ export default function EbayChannelPage() {
   // ---- Listing feed ----
   const { data: feedData, isLoading: feedLoading } = useQuery<{ feed: FeedItem[]; total: number }>({
     queryKey: ["/api/ebay/listing-feed"],
+    enabled: !!config?.connected,
+  });
+
+  // ---- Pricing rules ----
+  const { data: pricingRulesData, isLoading: pricingRulesLoading } = useQuery<{ rules: PricingRule[] }>({
+    queryKey: ["/api/ebay/pricing-rules"],
+    enabled: !!config?.connected,
+  });
+
+  // ---- Effective prices (bulk) ----
+  const { data: effectivePricesData } = useQuery<{ prices: EffectivePrices }>({
+    queryKey: ["/api/ebay/effective-prices"],
     enabled: !!config?.connected,
   });
 
@@ -376,24 +404,31 @@ export default function EbayChannelPage() {
       return resp.json();
     },
     onSuccess: (data: any) => {
-      const { summary } = data;
+      const { summary, results } = data;
       if (summary.succeeded > 0 && summary.failed === 0) {
+        // Build descriptive message: "HERO Diamond Shell: 3 variants listed"
+        const descriptions = (results || [])
+          .filter((r: any) => r.success)
+          .map((r: any) => r.variantCount > 1
+            ? `${r.productName}: ${r.variantCount} variants listed`
+            : `${r.productName}: listed`)
+          .join(", ");
         toast({
           title: "Push Successful",
-          description: `${summary.succeeded} variant${summary.succeeded !== 1 ? "s" : ""} listed on eBay.`,
+          description: descriptions || `${summary.succeeded} product${summary.succeeded !== 1 ? "s" : ""} listed on eBay.`,
         });
       } else if (summary.succeeded > 0 && summary.failed > 0) {
-        const firstError = data.results?.find((r: any) => !r.success)?.error || "Unknown error";
+        const firstError = results?.find((r: any) => !r.success)?.error || "Unknown error";
         toast({
           title: "Partial Success",
-          description: `${summary.succeeded} succeeded, ${summary.failed} failed. Error: ${firstError}`,
+          description: `${summary.succeeded} product${summary.succeeded !== 1 ? "s" : ""} succeeded, ${summary.failed} failed. ${firstError}`,
           variant: "destructive",
         });
       } else {
-        const firstError = data.results?.find((r: any) => !r.success)?.error || "Unknown error";
+        const firstError = results?.find((r: any) => !r.success)?.error || "Unknown error";
         toast({
           title: "Push Failed",
-          description: `${summary.failed} variant${summary.failed !== 1 ? "s" : ""} failed. Error: ${firstError}`,
+          description: `${summary.failed} product${summary.failed !== 1 ? "s" : ""} failed. ${firstError}`,
           variant: "destructive",
         });
       }
@@ -466,6 +501,48 @@ export default function EbayChannelPage() {
     onSuccess: (data: any) => {
       toast({ title: "Store Categories Synced", description: data.message });
       refetchStoreCats();
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // ---- Pricing rules state ----
+  const [pricingRuleForm, setPricingRuleForm] = useState<{
+    scope: "channel" | "category" | "product" | "variant";
+    scopeId: string;
+    ruleType: "percentage" | "fixed" | "override";
+    value: string;
+  }>({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
+  const [showPricingForm, setShowPricingForm] = useState(false);
+  const [pricingScopeSearch, setPricingScopeSearch] = useState("");
+
+  const upsertPricingRuleMutation = useMutation({
+    mutationFn: async (rule: { scope: string; scopeId: string | null; ruleType: string; value: number }) => {
+      const resp = await apiRequest("PUT", "/api/ebay/pricing-rules", rule);
+      return resp.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Pricing Rule Saved" });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+      setShowPricingForm(false);
+      setPricingRuleForm({ scope: "channel", scopeId: "", ruleType: "percentage", value: "" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deletePricingRuleMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const resp = await apiRequest("DELETE", `/api/ebay/pricing-rules/${id}`);
+      return resp.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Pricing Rule Deleted" });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/pricing-rules"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1446,9 +1523,22 @@ export default function EbayChannelPage() {
                                 </code>
                               </div>
                             </TableCell>
-                            {/* Price — desktop */}
+                            {/* Price — desktop (base → eBay) */}
                             <TableCell className="hidden sm:table-cell py-1.5">
-                              <span className="text-xs">{formatPrice(variant.priceCents)}</span>
+                              {(() => {
+                                const ep = effectivePricesData?.prices?.[variant.id];
+                                if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
+                                  const pctDiff = ((ep.effectivePriceCents - ep.basePriceCents) / ep.basePriceCents * 100).toFixed(0);
+                                  return (
+                                    <span className="text-xs">
+                                      <span className="text-muted-foreground line-through mr-1">{formatPrice(ep.basePriceCents)}</span>
+                                      <span className="font-medium text-blue-600">{formatPrice(ep.effectivePriceCents)}</span>
+                                      <span className="text-muted-foreground ml-1">(+{pctDiff}%)</span>
+                                    </span>
+                                  );
+                                }
+                                return <span className="text-xs">{formatPrice(variant.priceCents)}</span>;
+                              })()}
                             </TableCell>
                             {/* Qty — desktop */}
                             <TableCell className="hidden sm:table-cell py-1.5">
@@ -1459,7 +1549,18 @@ export default function EbayChannelPage() {
                             {/* Mobile: price + qty inline */}
                             <TableCell className="sm:hidden block py-0">
                               <div className="flex items-center gap-3 text-xs text-muted-foreground pl-1">
-                                <span>{formatPrice(variant.priceCents)}</span>
+                                {(() => {
+                                  const ep = effectivePricesData?.prices?.[variant.id];
+                                  if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
+                                    return (
+                                      <>
+                                        <span className="line-through">{formatPrice(ep.basePriceCents)}</span>
+                                        <span className="text-blue-600 font-medium">{formatPrice(ep.effectivePriceCents)}</span>
+                                      </>
+                                    );
+                                  }
+                                  return <span>{formatPrice(variant.priceCents)}</span>;
+                                })()}
                                 <span>·</span>
                                 <span>{variant.inventoryQuantity} qty</span>
                               </div>
@@ -1503,6 +1604,251 @@ export default function EbayChannelPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* ================================================================== */}
+      {/* SECTION 4: Pricing Rules                                          */}
+      {/* ================================================================== */}
+      {config?.connected && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center gap-2">
+                  <Tag className="h-5 w-5" />
+                  Pricing Rules
+                </CardTitle>
+                <CardDescription>Set markup rules for eBay listings. Most specific rule wins (variant &gt; product &gt; category &gt; channel).</CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowPricingForm(!showPricingForm)}
+              >
+                {showPricingForm ? "Cancel" : "Add Rule"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {/* Add/edit form */}
+            {showPricingForm && (
+              <div className="border rounded-lg p-4 mb-4 bg-muted/30 space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  {/* Scope */}
+                  <div>
+                    <Label className="text-xs mb-1 block">Scope</Label>
+                    <Select
+                      value={pricingRuleForm.scope}
+                      onValueChange={(v: any) => setPricingRuleForm((f) => ({ ...f, scope: v, scopeId: "" }))}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="channel">Channel (all products)</SelectItem>
+                        <SelectItem value="category">Category (product type)</SelectItem>
+                        <SelectItem value="product">Product</SelectItem>
+                        <SelectItem value="variant">Variant</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Scope ID (target) */}
+                  {pricingRuleForm.scope !== "channel" && (
+                    <div>
+                      <Label className="text-xs mb-1 block">
+                        {pricingRuleForm.scope === "category" ? "Product Type" :
+                         pricingRuleForm.scope === "product" ? "Product" : "Variant"}
+                      </Label>
+                      {pricingRuleForm.scope === "category" ? (
+                        <Select
+                          value={pricingRuleForm.scopeId}
+                          onValueChange={(v) => setPricingRuleForm((f) => ({ ...f, scopeId: v }))}
+                        >
+                          <SelectTrigger className="h-8 text-xs">
+                            <SelectValue placeholder="Select type..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {config?.productTypes?.map((pt) => (
+                              <SelectItem key={pt.slug} value={pt.slug}>{pt.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <div className="space-y-1">
+                          <Input
+                            placeholder={`Search ${pricingRuleForm.scope}...`}
+                            className="h-8 text-xs"
+                            value={pricingScopeSearch}
+                            onChange={(e) => setPricingScopeSearch(e.target.value)}
+                          />
+                          {pricingScopeSearch.length >= 2 && (
+                            <div className="max-h-32 overflow-y-auto border rounded bg-background text-xs">
+                              {pricingRuleForm.scope === "product" && feedData?.feed
+                                ?.filter((f) => f.name.toLowerCase().includes(pricingScopeSearch.toLowerCase()) || f.sku?.toLowerCase().includes(pricingScopeSearch.toLowerCase()))
+                                .slice(0, 8)
+                                .map((f) => (
+                                  <button
+                                    key={f.id}
+                                    className="w-full text-left px-2 py-1 hover:bg-muted block"
+                                    onClick={() => {
+                                      setPricingRuleForm((prev) => ({ ...prev, scopeId: String(f.id) }));
+                                      setPricingScopeSearch(f.name);
+                                    }}
+                                  >
+                                    {f.name} <code className="text-muted-foreground">{f.sku}</code>
+                                  </button>
+                                ))}
+                              {pricingRuleForm.scope === "variant" && feedData?.feed
+                                ?.flatMap((f) => f.variants.map((v) => ({ ...v, productName: f.name })))
+                                .filter((v) => v.name?.toLowerCase().includes(pricingScopeSearch.toLowerCase()) || v.sku?.toLowerCase().includes(pricingScopeSearch.toLowerCase()))
+                                .slice(0, 8)
+                                .map((v) => (
+                                  <button
+                                    key={v.id}
+                                    className="w-full text-left px-2 py-1 hover:bg-muted block"
+                                    onClick={() => {
+                                      setPricingRuleForm((prev) => ({ ...prev, scopeId: String(v.id) }));
+                                      setPricingScopeSearch(`${v.productName} - ${v.name}`);
+                                    }}
+                                  >
+                                    {v.productName} — {v.name} <code className="text-muted-foreground">{v.sku}</code>
+                                  </button>
+                                ))}
+                            </div>
+                          )}
+                          {pricingRuleForm.scopeId && (
+                            <Badge variant="outline" className="text-xs">ID: {pricingRuleForm.scopeId}</Badge>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Rule type */}
+                  <div>
+                    <Label className="text-xs mb-1 block">Rule Type</Label>
+                    <Select
+                      value={pricingRuleForm.ruleType}
+                      onValueChange={(v: any) => setPricingRuleForm((f) => ({ ...f, ruleType: v }))}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="percentage">Percentage (+X%)</SelectItem>
+                        <SelectItem value="fixed">Fixed (+$X.XX)</SelectItem>
+                        <SelectItem value="override">Override ($X.XX)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Value */}
+                  <div>
+                    <Label className="text-xs mb-1 block">
+                      {pricingRuleForm.ruleType === "percentage" ? "Percentage" :
+                       pricingRuleForm.ruleType === "fixed" ? "Amount ($)" : "Price ($)"}
+                    </Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        step={pricingRuleForm.ruleType === "percentage" ? "0.1" : "0.01"}
+                        placeholder={pricingRuleForm.ruleType === "percentage" ? "15" : "2.00"}
+                        className="h-8 text-xs"
+                        value={pricingRuleForm.value}
+                        onChange={(e) => setPricingRuleForm((f) => ({ ...f, value: e.target.value }))}
+                      />
+                      <Button
+                        size="sm"
+                        className="h-8"
+                        disabled={
+                          !pricingRuleForm.value ||
+                          (pricingRuleForm.scope !== "channel" && !pricingRuleForm.scopeId) ||
+                          upsertPricingRuleMutation.isPending
+                        }
+                        onClick={() => {
+                          upsertPricingRuleMutation.mutate({
+                            scope: pricingRuleForm.scope,
+                            scopeId: pricingRuleForm.scope === "channel" ? null : pricingRuleForm.scopeId,
+                            ruleType: pricingRuleForm.ruleType,
+                            value: parseFloat(pricingRuleForm.value),
+                          });
+                        }}
+                      >
+                        {upsertPricingRuleMutation.isPending ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Save className="h-3 w-3" />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Rules table */}
+            {pricingRulesLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading rules...
+              </div>
+            ) : (pricingRulesData?.rules?.length || 0) === 0 ? (
+              <p className="text-sm text-muted-foreground py-4">
+                No pricing rules configured. All products will use base prices.
+              </p>
+            ) : (
+              <div className="border rounded-lg overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Scope</TableHead>
+                      <TableHead>Target</TableHead>
+                      <TableHead>Rule</TableHead>
+                      <TableHead>Value</TableHead>
+                      <TableHead className="w-[60px]"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pricingRulesData?.rules?.map((rule) => (
+                      <TableRow key={rule.id}>
+                        <TableCell>
+                          <Badge variant="outline" className="text-xs capitalize">{rule.scope}</Badge>
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {rule.scope === "channel" ? "All products" : (rule.scope_label || rule.scope_id || "—")}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="text-xs">
+                            {rule.rule_type === "percentage" ? "%" :
+                             rule.rule_type === "fixed" ? "+$" : "=$"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm font-mono">
+                          {rule.rule_type === "percentage"
+                            ? `+${parseFloat(rule.value)}%`
+                            : rule.rule_type === "fixed"
+                            ? `+$${parseFloat(rule.value).toFixed(2)}`
+                            : `$${parseFloat(rule.value).toFixed(2)}`}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+                            onClick={() => deletePricingRuleMutation.mutate(rule.id)}
+                            disabled={deletePricingRuleMutation.isPending}
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Setup Checklist */}
       {config?.connected && (!hasLocation || !hasPolicies) && (
