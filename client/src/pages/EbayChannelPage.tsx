@@ -177,6 +177,35 @@ interface FeedItem {
 }
 
 // ============================================================================
+// Helper: Product Aspect Editor with Type Defaults
+// ============================================================================
+
+function ProductAspectEditorWithDefaults({
+  categoryId,
+  productId,
+  productType,
+}: {
+  categoryId: string;
+  productId: number;
+  productType: string;
+}) {
+  const { data: typeDefaultsData } = useQuery<{ defaults: Record<string, string> }>({
+    queryKey: ["/api/ebay/type-aspect-defaults", productType],
+    enabled: !!productType,
+  });
+
+  return (
+    <AspectEditor
+      categoryId={categoryId}
+      mode="product"
+      productId={productId}
+      typeDefaults={typeDefaultsData?.defaults}
+      compact
+    />
+  );
+}
+
+// ============================================================================
 // Component
 // ============================================================================
 
@@ -1441,11 +1470,10 @@ export default function EbayChannelPage() {
                         {isExpanded && item.ebayBrowseCategoryId && (
                           <TableRow className="bg-muted/10" onClick={(e) => e.stopPropagation()}>
                             <TableCell colSpan={6} className="px-4 sm:px-8 py-3">
-                              <AspectEditor
+                              <ProductAspectEditorWithDefaults
                                 categoryId={item.ebayBrowseCategoryId}
-                                mode="product"
                                 productId={item.id}
-                                compact
+                                productType={item.productType}
                               />
                             </TableCell>
                           </TableRow>
