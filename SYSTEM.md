@@ -318,8 +318,8 @@ Shopify webhook → shopify_orders → shopify-bridge.ts (LISTEN/NOTIFY)
 
 ## Known Bugs & Issues
 
-1. **Allocation engine ignores `channel_variant_overrides.is_listed`** — unlisted variants still get inventory pushed to channels
-2. **`completeAllLines()` overrides received qty** — sets `receivedQty = expectedQty` instead of honoring user input
+1. ~~Allocation engine ignores `channel_variant_overrides.is_listed`~~ — **FIXED** (commit `c6ff769`). Now checks both variant and product overrides.
+2. ~~`completeAllLines()` overrides received qty~~ — **FIXED** (commit `54cef28`). Now honors user-entered qty.
 3. **WMS pick-queue-sync floods logs** — full JSON payloads every ~15s
 4. **Heroku release phase SSL error** — drizzle-kit push fails (`pg_hba.conf`), non-blocking
 5. **`channel_variant_overrides` table has 0 rows** — override save may not be working from UI

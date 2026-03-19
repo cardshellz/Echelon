@@ -25,8 +25,6 @@ import {
   channelWarehouseAssignments,
   channelAllocationRules,
   channelProductLines,
-  channelVariantOverrides,
-  channelProductOverrides,
   productVariants,
   productLineProducts,
   allocationAuditLog,
@@ -253,47 +251,6 @@ class AllocationEngine {
       rulesByChannel.set(rule.channelId, list);
     }
 
-    // 6b. Load channel_variant_overrides (is_listed) for all channels + this product's variants
-    const variantIds = globalVariantAtp.map((v) => v.productVariantId);
-    const variantOverrides = variantIds.length > 0 ? await this.db
-      .select({
-        channelId: channelVariantOverrides.channelId,
-        productVariantId: channelVariantOverrides.productVariantId,
-        isListed: channelVariantOverrides.isListed,
-      })
-      .from(channelVariantOverrides)
-      .where(
-        and(
-          inArray(channelVariantOverrides.channelId, channelIds),
-          inArray(channelVariantOverrides.productVariantId, variantIds),
-        ),
-      ) : [];
-
-    // Index: channelId-variantId → isListed
-    const variantListedMap = new Map<string, boolean>();
-    for (const vo of variantOverrides) {
-      variantListedMap.set(`${vo.channelId}-${vo.productVariantId}`, vo.isListed === 1);
-    }
-
-    // 6c. Load channel_product_overrides (isListed) for this product
-    const productOverrides = await this.db
-      .select({
-        channelId: channelProductOverrides.channelId,
-        isListed: channelProductOverrides.isListed,
-      })
-      .from(channelProductOverrides)
-      .where(
-        and(
-          inArray(channelProductOverrides.channelId, channelIds),
-          eq(channelProductOverrides.productId, productId),
-        ),
-      );
-
-    const productListedMap = new Map<number, boolean>();
-    for (const po of productOverrides) {
-      productListedMap.set(po.channelId, po.isListed === 1);
-    }
-
     // 7. For each channel, compute ATP independently (parallel model)
     for (const channel of activeChannels) {
       // Product line gate
@@ -363,53 +320,8 @@ class AllocationEngine {
         continue;
       }
 
-      // Check product-level listing override
-      const productListed = productListedMap.get(channel.id);
-      if (productListed === false) {
-        result.blocked.push({
-          channelId: channel.id,
-          reason: "Product unlisted via channel_product_overrides",
-        });
-        for (const variant of globalVariantAtp) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Product unlisted on this channel",
-          });
-        }
-        continue;
-      }
-
       // Per-variant allocation
       for (const variant of globalVariantAtp) {
-        // Check variant-level listing override
-        const variantListedKey = `${channel.id}-${variant.productVariantId}`;
-        const variantListed = variantListedMap.get(variantListedKey);
-        if (variantListed === false) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Variant unlisted on this channel (channel_variant_overrides.is_listed = false)",
-          });
-          continue;
-        }
-
         // Find variant-level rule (productId may be null on variant-scoped rules)
         const variantRule = channelRules.find(
           (r) => r.productVariantId === variant.productVariantId,
