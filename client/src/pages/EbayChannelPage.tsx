@@ -320,6 +320,56 @@ export default function EbayChannelPage() {
     },
   });
 
+  // ---- Push to eBay ----
+  const [pushingProductIds, setPushingProductIds] = useState<Set<number>>(new Set());
+
+  const pushToEbayMutation = useMutation({
+    mutationFn: async (productIds: number[]) => {
+      const resp = await apiRequest("POST", "/api/ebay/listings/push", { productIds });
+      return resp.json();
+    },
+    onSuccess: (data: any) => {
+      const { summary } = data;
+      if (summary.succeeded > 0 && summary.failed === 0) {
+        toast({
+          title: "Push Successful",
+          description: `${summary.succeeded} variant${summary.succeeded !== 1 ? "s" : ""} listed on eBay.`,
+        });
+      } else if (summary.succeeded > 0 && summary.failed > 0) {
+        toast({
+          title: "Partial Success",
+          description: `${summary.succeeded} succeeded, ${summary.failed} failed. Check listing feed for details.`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Push Failed",
+          description: `All ${summary.failed} variant${summary.failed !== 1 ? "s" : ""} failed. Check logs for details.`,
+          variant: "destructive",
+        });
+      }
+      setPushingProductIds(new Set());
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Push Error", description: err.message, variant: "destructive" });
+      setPushingProductIds(new Set());
+    },
+  });
+
+  const handlePushAll = () => {
+    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready") || [];
+    if (readyProducts.length === 0) return;
+    const ids = readyProducts.map((f) => f.id);
+    setPushingProductIds(new Set(ids));
+    pushToEbayMutation.mutate(ids);
+  };
+
+  const handlePushSingle = (productId: number) => {
+    setPushingProductIds((prev) => new Set([...prev, productId]));
+    pushToEbayMutation.mutate([productId]);
+  };
+
   const toggleExclusionMutation = useMutation({
     mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
       const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
@@ -959,9 +1009,18 @@ export default function EbayChannelPage() {
               </CardTitle>
               <CardDescription>Products that will be listed on eBay</CardDescription>
             </div>
-            <Button variant="outline" size="sm" disabled>
-              <Zap className="h-4 w-4 mr-2" />
-              Push to eBay
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={feedCounts.ready === 0 || pushToEbayMutation.isPending}
+              onClick={handlePushAll}
+            >
+              {pushToEbayMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Zap className="h-4 w-4 mr-2" />
+              )}
+              Push to eBay ({feedCounts.ready})
             </Button>
           </div>
         </CardHeader>
@@ -1072,7 +1131,22 @@ export default function EbayChannelPage() {
                                 {item.productTypeName || item.productType}
                               </Badge>
                               {item.status === "ready" && (
-                                <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                                <>
+                                  <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-6 px-2 text-xs"
+                                    disabled={pushingProductIds.has(item.id)}
+                                    onClick={() => handlePushSingle(item.id)}
+                                  >
+                                    {pushingProductIds.has(item.id) ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      <Zap className="h-3 w-3" />
+                                    )}
+                                  </Button>
+                                </>
                               )}
                               {item.status === "missing_config" && (
                                 <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
@@ -1118,20 +1192,51 @@ export default function EbayChannelPage() {
                           </TableCell>
                           {/* Status — desktop only */}
                           <TableCell className="hidden sm:table-cell text-center">
-                            {item.status === "ready" && (
-                              <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
-                            )}
-                            {item.status === "missing_config" && (
-                              <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
-                                Missing: {item.missingItems.join(", ")}
-                              </Badge>
-                            )}
-                            {item.status === "listed" && (
-                              <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
-                            )}
-                            {item.status === "excluded" && (
-                              <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
-                            )}
+                            <div className="flex items-center justify-center gap-1.5">
+                              {item.status === "ready" && (
+                                <>
+                                  <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                    disabled={pushingProductIds.has(item.id)}
+                                    onClick={() => handlePushSingle(item.id)}
+                                    title="Push to eBay"
+                                  >
+                                    {pushingProductIds.has(item.id) ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <Zap className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
+                                </>
+                              )}
+                              {item.status === "missing_config" && (
+                                <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
+                                  Missing: {item.missingItems.join(", ")}
+                                </Badge>
+                              )}
+                              {item.status === "listed" && (
+                                <>
+                                  <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                  {item.externalListingId && (
+                                    <a
+                                      href={`https://www.ebay.com/itm/${item.externalListingId}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-blue-500 hover:text-blue-700"
+                                      title="View on eBay"
+                                    >
+                                      <ExternalLink className="h-3.5 w-3.5" />
+                                    </a>
+                                  )}
+                                </>
+                              )}
+                              {item.status === "excluded" && (
+                                <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                              )}
+                            </div>
                           </TableCell>
                         </TableRow>
                       );

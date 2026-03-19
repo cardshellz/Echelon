@@ -714,6 +714,411 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // POST /api/ebay/listings/push — Push products to eBay (create listings)
+  // -----------------------------------------------------------------------
+  app.post("/api/ebay/listings/push", async (req: Request, res: Response) => {
+    try {
+      const { productIds } = req.body as { productIds: number[] };
+      if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
+        res.status(400).json({ error: "productIds array is required" });
+        return;
+      }
+
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const environment = process.env.EBAY_ENVIRONMENT || "production";
+      const baseUrl = environment === "sandbox"
+        ? "https://api.sandbox.ebay.com"
+        : "https://api.ebay.com";
+
+      // Get connection metadata (default policies)
+      const conn = await getChannelConnection();
+      const metadata = (conn?.metadata as Record<string, any>) || {};
+      const defaultPolicies = {
+        fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
+        returnPolicyId: metadata.returnPolicyId || null,
+        paymentPolicyId: metadata.paymentPolicyId || null,
+      };
+      const merchantLocationKey = metadata.merchantLocationKey || "card-shellz-hq";
+
+      const client = await pool.connect();
+      const results: Array<{
+        productId: number;
+        variantSku: string;
+        success: boolean;
+        listingId?: string;
+        offerId?: string;
+        error?: string;
+      }> = [];
+
+      try {
+        for (const productId of productIds) {
+          // 1. Fetch product
+          const prodResult = await client.query(
+            `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id
+             FROM products WHERE id = $1 AND is_active = true`,
+            [productId]
+          );
+          if (prodResult.rows.length === 0) {
+            results.push({ productId, variantSku: "", success: false, error: "Product not found or inactive" });
+            continue;
+          }
+          const product = prodResult.rows[0];
+
+          // 2. Fetch variants
+          const varResult = await client.query(
+            `SELECT id, sku, name, option1_value, price_cents, compare_at_price_cents,
+                    weight_grams, barcode, units_per_variant, hierarchy_level
+             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL
+             ORDER BY id ASC`,
+            [productId]
+          );
+          if (varResult.rows.length === 0) {
+            results.push({ productId, variantSku: product.sku || "", success: false, error: "No variants found" });
+            continue;
+          }
+
+          // 3. Fetch images
+          const imgResult = await client.query(
+            `SELECT url, alt_text, position FROM product_assets
+             WHERE product_id = $1 ORDER BY position ASC`,
+            [productId]
+          );
+          const imageUrls = imgResult.rows
+            .map((r: any) => r.url)
+            .filter((url: string) => url && url.startsWith("https://"));
+
+          // 4. Fetch effective eBay category
+          let ebayBrowseCategoryId = product.ebay_browse_category_id;
+          if (!ebayBrowseCategoryId && product.product_type) {
+            const catResult = await client.query(
+              `SELECT ebay_browse_category_id, ebay_store_category_name,
+                      fulfillment_policy_override, return_policy_override, payment_policy_override
+               FROM ebay_category_mappings
+               WHERE channel_id = $1 AND product_type_slug = $2`,
+              [EBAY_CHANNEL_ID, product.product_type]
+            );
+            if (catResult.rows.length > 0) {
+              ebayBrowseCategoryId = catResult.rows[0].ebay_browse_category_id;
+            }
+          }
+
+          if (!ebayBrowseCategoryId) {
+            results.push({ productId, variantSku: product.sku || "", success: false, error: "No eBay browse category configured" });
+            continue;
+          }
+
+          // 5. Fetch effective policies (type override → default)
+          let effectivePolicies = { ...defaultPolicies };
+          if (product.product_type) {
+            const policyResult = await client.query(
+              `SELECT fulfillment_policy_override, return_policy_override, payment_policy_override
+               FROM ebay_category_mappings
+               WHERE channel_id = $1 AND product_type_slug = $2`,
+              [EBAY_CHANNEL_ID, product.product_type]
+            );
+            if (policyResult.rows.length > 0) {
+              const overrides = policyResult.rows[0];
+              if (overrides.fulfillment_policy_override) effectivePolicies.fulfillmentPolicyId = overrides.fulfillment_policy_override;
+              if (overrides.return_policy_override) effectivePolicies.returnPolicyId = overrides.return_policy_override;
+              if (overrides.payment_policy_override) effectivePolicies.paymentPolicyId = overrides.payment_policy_override;
+            }
+          }
+
+          // Fetch store category name for the type
+          let storeCategoryNames: string[] = [];
+          if (product.product_type) {
+            const storeCatResult = await client.query(
+              `SELECT ebay_store_category_name FROM ebay_category_mappings
+               WHERE channel_id = $1 AND product_type_slug = $2 AND ebay_store_category_name IS NOT NULL`,
+              [EBAY_CHANNEL_ID, product.product_type]
+            );
+            if (storeCatResult.rows.length > 0 && storeCatResult.rows[0].ebay_store_category_name) {
+              storeCategoryNames = [storeCatResult.rows[0].ebay_store_category_name];
+            }
+          }
+
+          // 6. Process each variant
+          for (const variant of varResult.rows) {
+            const variantSku = variant.sku;
+            try {
+              // Fetch inventory quantity
+              const invResult = await client.query(
+                `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
+                 FROM inventory_levels il
+                 WHERE il.product_variant_id = $1`,
+                [variant.id]
+              );
+              const availableQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
+
+              // Build title: product name + variant option if multi-variant
+              const title = varResult.rows.length > 1
+                ? `${product.name} - ${variant.name || variant.option1_value || variantSku}`
+                : product.name;
+
+              // Truncate title to 80 chars (eBay limit)
+              const ebayTitle = title.length > 80 ? title.substring(0, 77) + "..." : title;
+
+              // Step A: Create/Update Inventory Item
+              const inventoryItemBody: Record<string, any> = {
+                condition: "NEW",
+                product: {
+                  title: ebayTitle,
+                  description: product.description || `<p>${product.name}</p>`,
+                  imageUrls: imageUrls.length > 0 ? imageUrls.slice(0, 12) : undefined, // eBay max 12 images
+                },
+                availability: {
+                  shipToLocationAvailability: {
+                    quantity: availableQty,
+                  },
+                },
+              };
+
+              // Add brand if available
+              if (product.brand) {
+                inventoryItemBody.product.aspects = { Brand: [product.brand] };
+              }
+
+              // Add UPC if available
+              if (variant.barcode) {
+                inventoryItemBody.product.upc = [variant.barcode];
+              }
+
+              console.log(`[eBay Push] Creating inventory item for SKU: ${variantSku}`);
+              const invItemResp = await fetch(
+                `${baseUrl}/sell/inventory/v1/inventory_item/${encodeURIComponent(variantSku)}`,
+                {
+                  method: "PUT",
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    "Content-Language": "en-US",
+                  },
+                  body: JSON.stringify(inventoryItemBody),
+                }
+              );
+
+              if (!invItemResp.ok && invItemResp.status !== 204) {
+                const errBody = await invItemResp.text();
+                console.error(`[eBay Push] Inventory item creation failed for ${variantSku}:`, invItemResp.status, errBody);
+                results.push({
+                  productId,
+                  variantSku,
+                  success: false,
+                  error: `Inventory item creation failed (${invItemResp.status}): ${errBody.substring(0, 500)}`,
+                });
+
+                // Record error in channel_listings
+                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                  syncStatus: "error",
+                  syncError: `Inventory item creation failed: ${errBody.substring(0, 1000)}`,
+                  lastSyncedPrice: variant.price_cents,
+                  lastSyncedQty: availableQty,
+                });
+                continue;
+              }
+              console.log(`[eBay Push] Inventory item created/updated for SKU: ${variantSku}`);
+
+              // Step B: Create Offer
+              const priceInDollars = (variant.price_cents / 100).toFixed(2);
+              const offerBody: Record<string, any> = {
+                sku: variantSku,
+                marketplaceId: "EBAY_US",
+                format: "FIXED_PRICE",
+                categoryId: ebayBrowseCategoryId,
+                listingPolicies: {
+                  fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
+                  returnPolicyId: effectivePolicies.returnPolicyId,
+                  paymentPolicyId: effectivePolicies.paymentPolicyId,
+                },
+                pricingSummary: {
+                  price: {
+                    value: priceInDollars,
+                    currency: "USD",
+                  },
+                },
+                merchantLocationKey: merchantLocationKey,
+                availableQuantity: availableQty,
+              };
+
+              if (storeCategoryNames.length > 0) {
+                offerBody.storeCategoryNames = storeCategoryNames;
+              }
+
+              console.log(`[eBay Push] Creating offer for SKU: ${variantSku}`);
+              let offerId: string | null = null;
+              const offerResp = await fetch(`${baseUrl}/sell/inventory/v1/offer`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  "Content-Type": "application/json",
+                  Accept: "application/json",
+                  "Content-Language": "en-US",
+                },
+                body: JSON.stringify(offerBody),
+              });
+
+              if (offerResp.ok) {
+                const offerData = await offerResp.json();
+                offerId = offerData.offerId;
+                console.log(`[eBay Push] Offer created for ${variantSku}: offerId=${offerId}`);
+              } else {
+                const errBody = await offerResp.text();
+                console.error(`[eBay Push] Offer creation failed for ${variantSku}:`, offerResp.status, errBody);
+
+                // If duplicate offer exists, try to find and use existing offerId
+                if (offerResp.status === 409 || errBody.includes("25002")) {
+                  // Try to get existing offers for this SKU
+                  console.log(`[eBay Push] Attempting to find existing offer for SKU: ${variantSku}`);
+                  const existingResp = await fetch(
+                    `${baseUrl}/sell/inventory/v1/offer?sku=${encodeURIComponent(variantSku)}&marketplace_id=EBAY_US`,
+                    {
+                      headers: {
+                        Authorization: `Bearer ${accessToken}`,
+                        Accept: "application/json",
+                      },
+                    }
+                  );
+                  if (existingResp.ok) {
+                    const existingData = await existingResp.json();
+                    if (existingData.offers && existingData.offers.length > 0) {
+                      offerId = existingData.offers[0].offerId;
+                      console.log(`[eBay Push] Found existing offer for ${variantSku}: offerId=${offerId}`);
+
+                      // Update existing offer
+                      const updateResp = await fetch(
+                        `${baseUrl}/sell/inventory/v1/offer/${offerId}`,
+                        {
+                          method: "PUT",
+                          headers: {
+                            Authorization: `Bearer ${accessToken}`,
+                            "Content-Type": "application/json",
+                            Accept: "application/json",
+                            "Content-Language": "en-US",
+                          },
+                          body: JSON.stringify(offerBody),
+                        }
+                      );
+                      if (!updateResp.ok) {
+                        const updateErr = await updateResp.text();
+                        console.error(`[eBay Push] Offer update failed for ${variantSku}:`, updateResp.status, updateErr);
+                      }
+                    }
+                  }
+                }
+
+                if (!offerId) {
+                  results.push({
+                    productId,
+                    variantSku,
+                    success: false,
+                    error: `Offer creation failed (${offerResp.status}): ${errBody.substring(0, 500)}`,
+                  });
+                  await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                    syncStatus: "error",
+                    syncError: `Offer creation failed: ${errBody.substring(0, 1000)}`,
+                    lastSyncedPrice: variant.price_cents,
+                    lastSyncedQty: availableQty,
+                  });
+                  continue;
+                }
+              }
+
+              // Step C: Publish Offer
+              console.log(`[eBay Push] Publishing offer ${offerId} for SKU: ${variantSku}`);
+              const publishResp = await fetch(
+                `${baseUrl}/sell/inventory/v1/offer/${offerId}/publish`,
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                  },
+                }
+              );
+
+              let listingId: string | null = null;
+              if (publishResp.ok) {
+                const publishData = await publishResp.json();
+                listingId = publishData.listingId;
+                console.log(`[eBay Push] Published ${variantSku}: listingId=${listingId}`);
+              } else {
+                const errBody = await publishResp.text();
+                console.error(`[eBay Push] Publish failed for ${variantSku}:`, publishResp.status, errBody);
+
+                // Save offerId even if publish fails (for retry)
+                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                  externalVariantId: offerId,
+                  syncStatus: "error",
+                  syncError: `Publish failed: ${errBody.substring(0, 1000)}`,
+                  lastSyncedPrice: variant.price_cents,
+                  lastSyncedQty: availableQty,
+                });
+
+                results.push({
+                  productId,
+                  variantSku,
+                  success: false,
+                  offerId: offerId || undefined,
+                  error: `Publish failed (${publishResp.status}): ${errBody.substring(0, 500)}`,
+                });
+                continue;
+              }
+
+              // Success — save listing
+              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                externalProductId: listingId,
+                externalVariantId: offerId,
+                externalSku: variantSku,
+                externalUrl: listingId ? `https://www.ebay.com/itm/${listingId}` : null,
+                syncStatus: "synced",
+                syncError: null,
+                lastSyncedPrice: variant.price_cents,
+                lastSyncedQty: availableQty,
+              });
+
+              results.push({
+                productId,
+                variantSku,
+                success: true,
+                listingId: listingId || undefined,
+                offerId: offerId || undefined,
+              });
+
+            } catch (variantErr: any) {
+              console.error(`[eBay Push] Error processing variant ${variantSku}:`, variantErr.message);
+              results.push({
+                productId,
+                variantSku,
+                success: false,
+                error: `Unexpected error: ${variantErr.message}`,
+              });
+            }
+          }
+        }
+
+        const succeeded = results.filter((r) => r.success).length;
+        const failed = results.filter((r) => !r.success).length;
+        console.log(`[eBay Push] Complete: ${succeeded} succeeded, ${failed} failed`);
+
+        res.json({ results, summary: { succeeded, failed, total: results.length } });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Push] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // PUT /api/ebay/product-exclusion/:productId — Toggle individual product exclusion
   // -----------------------------------------------------------------------
   app.put("/api/ebay/product-exclusion/:productId", async (req: Request, res: Response) => {
@@ -739,6 +1144,57 @@ ${categoriesXml}
       res.status(500).json({ error: err.message });
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async function upsertChannelListing(
+  client: any,
+  channelId: number,
+  productVariantId: number,
+  data: {
+    externalProductId?: string | null;
+    externalVariantId?: string | null;
+    externalSku?: string | null;
+    externalUrl?: string | null;
+    syncStatus?: string;
+    syncError?: string | null;
+    lastSyncedPrice?: number | null;
+    lastSyncedQty?: number | null;
+  }
+): Promise<void> {
+  await client.query(`
+    INSERT INTO channel_listings (
+      channel_id, product_variant_id, external_product_id, external_variant_id,
+      external_sku, external_url, sync_status, sync_error,
+      last_synced_price, last_synced_qty, last_synced_at, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW())
+    ON CONFLICT (channel_id, product_variant_id)
+    DO UPDATE SET
+      external_product_id = COALESCE(EXCLUDED.external_product_id, channel_listings.external_product_id),
+      external_variant_id = COALESCE(EXCLUDED.external_variant_id, channel_listings.external_variant_id),
+      external_sku = COALESCE(EXCLUDED.external_sku, channel_listings.external_sku),
+      external_url = COALESCE(EXCLUDED.external_url, channel_listings.external_url),
+      sync_status = EXCLUDED.sync_status,
+      sync_error = EXCLUDED.sync_error,
+      last_synced_price = EXCLUDED.last_synced_price,
+      last_synced_qty = EXCLUDED.last_synced_qty,
+      last_synced_at = NOW(),
+      updated_at = NOW()
+  `, [
+    channelId,
+    productVariantId,
+    data.externalProductId || null,
+    data.externalVariantId || null,
+    data.externalSku || null,
+    data.externalUrl || null,
+    data.syncStatus || "pending",
+    data.syncError || null,
+    data.lastSyncedPrice || null,
+    data.lastSyncedQty || null,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
