@@ -960,10 +960,32 @@ ${categoriesXml}
                 },
               };
 
-              // Add brand if available
-              if (product.brand) {
-                inventoryItemBody.product.aspects = { Brand: [product.brand] };
-              }
+              // Build aspects (item specifics)
+              const aspects: Record<string, string[]> = {};
+              if (product.brand) aspects["Brand"] = [product.brand];
+
+              // Map product types to eBay required "Type" aspect
+              const typeAspectMap: Record<string, string> = {
+                "toploaders": "Toploader",
+                "easy-glide-sleeves": "Card Sleeve",
+                "magnetic-holders": "Card Holder",
+                "semi-rigids": "Card Holder",
+                "armalopes": "Mailer",
+                "hero-cases": "Card Holder",
+                "binders": "Album/Binder",
+                "storage-boxes": "Storage Box",
+                "glove-fit-toploader": "Card Sleeve",
+                "glove-fit-mag": "Card Sleeve",
+                "glove-fit-graded": "Card Sleeve",
+                "glove-fit-semi": "Card Sleeve",
+                "sleeves-bags": "Card Sleeve",
+                "accessories": "Display Stand",
+                "wax": "Box",
+              };
+              const typeValue = typeAspectMap[product.product_type] || "Card Holder";
+              aspects["Type"] = [typeValue];
+
+              inventoryItemBody.product.aspects = aspects;
 
               // Add UPC if available
               if (variant.barcode) {
