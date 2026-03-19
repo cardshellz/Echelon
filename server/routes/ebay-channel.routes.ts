@@ -1451,9 +1451,6 @@ ${categoriesXml}
 
               // Auto-mapped values
               if (product.brand) aspects["Brand"] = [product.brand];
-              // Only include UPC if it's a valid length (12 for UPC-A, 13 for EAN, 8 for UPC-E)
-              const validUpc = variant.barcode && /^\d{12,13}$/.test(variant.barcode);
-              if (validUpc) aspects["UPC"] = [variant.barcode];
 
               // Type-level defaults from DB
               if (product.product_type) {
@@ -1478,11 +1475,6 @@ ${categoriesXml}
               }
 
               inventoryItemBody.product.aspects = aspects;
-
-              // Add UPC if available
-              if (validUpc) {
-                inventoryItemBody.product.upc = [variant.barcode];
-              }
 
               console.log(`[eBay Push] Creating inventory item for SKU: ${variantSku}`);
               const invItemResp = await fetch(
