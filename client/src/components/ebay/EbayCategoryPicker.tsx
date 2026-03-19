@@ -286,7 +286,7 @@ export function EbayCategoryPicker({
     <>
       {triggerButton}
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className="sm:max-w-[520px] h-[85vh] sm:h-auto sm:max-h-[560px] flex flex-col p-4">
+        <DialogContent className="sm:max-w-[520px] h-[85vh] sm:h-[70vh] sm:max-h-[600px] flex flex-col p-4 overflow-hidden">
           <DialogHeader>
             <DialogTitle className="text-base">
               Select eBay Category
@@ -362,7 +362,7 @@ export function EbayCategoryPicker({
           </div>
 
           {/* Scrollable content */}
-          <ScrollArea className="flex-1" style={{ maxHeight: "360px" }}>
+          <ScrollArea className="flex-1 min-h-0">
             {/* Clear category button */}
             {currentCategoryId && (
               <button
