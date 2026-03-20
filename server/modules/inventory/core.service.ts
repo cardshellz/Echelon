@@ -659,6 +659,8 @@ export class InventoryCoreService {
 
       return true;
     });
+
+    this.notifyChange(params.productVariantId, "reserve");
   }
 
   /**
@@ -730,6 +732,8 @@ export class InventoryCoreService {
         userId: params.userId ?? null,
       });
     });
+
+    this.notifyChange(params.productVariantId, "unreserve");
   }
 
   // ---------------------------------------------------------------------------
@@ -879,6 +883,8 @@ export class InventoryCoreService {
         userId: params.userId ?? null,
       });
     });
+
+    this.notifyChange(params.productVariantId, "transfer");
   }
 
   /**
@@ -1011,6 +1017,11 @@ export class InventoryCoreService {
         }
       }
     });
+
+    this.notifyChange(params.sourceVariantId, "sku_correction_transfer");
+    if (params.targetVariantId !== params.sourceVariantId) {
+      this.notifyChange(params.targetVariantId, "sku_correction_transfer");
+    }
   }
 
   // ---------------------------------------------------------------------------
