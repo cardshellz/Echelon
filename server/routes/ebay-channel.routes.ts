@@ -685,7 +685,12 @@ ${categoriesXml}
           if (isExcluded) status = "excluded";
           else if (isTypeDisabled) status = "type_disabled";
           else if (isListed) status = "listed";
-          else if (isEnded) status = listingSyncStatus; // "ended" or "deleted"
+          else if (isEnded) {
+            // Ended/deleted listings are re-pushable — treat as ready if they meet all requirements
+            if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
+            else if (missingAspects.length > 0) status = "missing_specifics";
+            else status = "ready"; // Can be re-listed
+          }
           else if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
           else if (missingAspects.length > 0) status = "missing_specifics";
           else status = "ready";
