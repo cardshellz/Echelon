@@ -151,6 +151,9 @@ interface FeedVariant {
   priceCents: number | null;
   ebayListingExcluded: boolean;
   inventoryQuantity: number;
+  fulfillmentPolicyOverride: string | null;
+  returnPolicyOverride: string | null;
+  paymentPolicyOverride: string | null;
 }
 
 interface FeedItem {
@@ -174,6 +177,9 @@ interface FeedItem {
   includedVariantCount: number;
   imageCount: number;
   variants: FeedVariant[];
+  fulfillmentPolicyOverride: string | null;
+  returnPolicyOverride: string | null;
+  paymentPolicyOverride: string | null;
 }
 
 interface PricingRule {
@@ -218,6 +224,114 @@ function ProductAspectEditorWithDefaults({
       typeDefaults={typeDefaultsData?.defaults}
       compact
     />
+  );
+}
+
+// ============================================================================
+// Helper: Policy Override Dropdowns (product or variant level)
+// ============================================================================
+
+function PolicyOverrideRow({
+  label,
+  fulfillmentPolicyId,
+  returnPolicyId,
+  paymentPolicyId,
+  policies,
+  onSave,
+  isPending,
+}: {
+  label: string;
+  fulfillmentPolicyId: string | null;
+  returnPolicyId: string | null;
+  paymentPolicyId: string | null;
+  policies: PoliciesResponse | undefined;
+  onSave: (fp: string | null, rp: string | null, pp: string | null) => void;
+  isPending: boolean;
+}) {
+  const [fp, setFp] = useState(fulfillmentPolicyId || "__default__");
+  const [rp, setRp] = useState(returnPolicyId || "__default__");
+  const [pp, setPp] = useState(paymentPolicyId || "__default__");
+  const [dirty, setDirty] = useState(false);
+
+  // Sync from props
+  useEffect(() => {
+    setFp(fulfillmentPolicyId || "__default__");
+    setRp(returnPolicyId || "__default__");
+    setPp(paymentPolicyId || "__default__");
+    setDirty(false);
+  }, [fulfillmentPolicyId, returnPolicyId, paymentPolicyId]);
+
+  const handleChange = (setter: (v: string) => void) => (val: string) => {
+    setter(val);
+    setDirty(true);
+  };
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Fulfillment</Label>
+          <Select value={fp} onValueChange={handleChange(setFp)}>
+            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">Use default</SelectItem>
+              {(policies?.fulfillmentPolicies || []).map((p) => (
+                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Return</Label>
+          <Select value={rp} onValueChange={handleChange(setRp)}>
+            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">Use default</SelectItem>
+              {(policies?.returnPolicies || []).map((p) => (
+                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label className="text-[11px] text-muted-foreground">Payment</Label>
+          <Select value={pp} onValueChange={handleChange(setPp)}>
+            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__default__">Use default</SelectItem>
+              {(policies?.paymentPolicies || []).map((p) => (
+                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      {dirty && (
+        <Button
+          size="sm"
+          className="min-h-[44px] sm:h-7 text-xs"
+          disabled={isPending}
+          onClick={() => {
+            onSave(
+              fp === "__default__" ? null : fp,
+              rp === "__default__" ? null : rp,
+              pp === "__default__" ? null : pp,
+            );
+            setDirty(false);
+          }}
+        >
+          {isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Save className="h-3 w-3 mr-1" />}
+          Save Policies
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -285,6 +399,17 @@ export default function EbayChannelPage() {
   const [expandedSpecifics, setExpandedSpecifics] = useState<Set<string>>(new Set());
 
   // Browse category search (legacy state — now handled by EbayCategoryPicker)
+
+  // Variant policy expansion
+  const [expandedVariantPolicies, setExpandedVariantPolicies] = useState<Set<number>>(new Set());
+  const toggleVariantPolicies = (variantId: number) => {
+    setExpandedVariantPolicies((prev) => {
+      const next = new Set(prev);
+      if (next.has(variantId)) next.delete(variantId);
+      else next.add(variantId);
+      return next;
+    });
+  };
 
   // Feed filters
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended">("all");
@@ -494,6 +619,38 @@ export default function EbayChannelPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const saveProductPoliciesMutation = useMutation({
+    mutationFn: async ({ productId, fulfillmentPolicyId, returnPolicyId, paymentPolicyId }: {
+      productId: number; fulfillmentPolicyId: string | null; returnPolicyId: string | null; paymentPolicyId: string | null;
+    }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/product-policies/${productId}`, { fulfillmentPolicyId, returnPolicyId, paymentPolicyId });
+      return resp.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      toast({ title: "Product Policies Updated" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const saveVariantPoliciesMutation = useMutation({
+    mutationFn: async ({ variantId, fulfillmentPolicyId, returnPolicyId, paymentPolicyId }: {
+      variantId: number; fulfillmentPolicyId: string | null; returnPolicyId: string | null; paymentPolicyId: string | null;
+    }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/variant-policies/${variantId}`, { fulfillmentPolicyId, returnPolicyId, paymentPolicyId });
+      return resp.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      toast({ title: "Variant Policies Updated" });
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -1754,8 +1911,8 @@ export default function EbayChannelPage() {
                         </TableRow>
                         {/* Expanded variant rows */}
                         {isExpanded && hasVariants && item.variants.map((variant) => (
+                          <React.Fragment key={`v-${variant.id}`}>
                           <TableRow
-                            key={`v-${variant.id}`}
                             className={`bg-muted/20 sm:table-row flex flex-col p-3 sm:p-0 gap-1 sm:gap-0 ${variant.ebayListingExcluded ? "opacity-50" : ""}`}
                           >
                             <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-1.5 pl-8 sm:pl-10">
@@ -1799,9 +1956,20 @@ export default function EbayChannelPage() {
                             <TableCell className="hidden sm:table-cell py-1.5">
                               <span className="text-xs">{variant.inventoryQuantity} qty</span>
                             </TableCell>
-                            {/* Status placeholder — desktop */}
-                            <TableCell className="hidden sm:table-cell py-1.5"></TableCell>
-                            {/* Mobile: price + qty inline */}
+                            {/* Policy toggle — desktop */}
+                            <TableCell className="hidden sm:table-cell py-1.5">
+                              <button
+                                className={`p-1 rounded hover:bg-muted min-w-[28px] min-h-[28px] flex items-center justify-center ${
+                                  (variant.fulfillmentPolicyOverride || variant.returnPolicyOverride || variant.paymentPolicyOverride)
+                                    ? "text-blue-500" : "text-muted-foreground"
+                                }`}
+                                onClick={(e) => { e.stopPropagation(); toggleVariantPolicies(variant.id); }}
+                                title="Policy overrides"
+                              >
+                                <Settings2 className="h-3.5 w-3.5" />
+                              </button>
+                            </TableCell>
+                            {/* Mobile: price + qty + policy toggle inline */}
                             <TableCell className="sm:hidden block py-0">
                               <div className="flex items-center gap-3 text-xs text-muted-foreground pl-1">
                                 {(() => {
@@ -1818,9 +1986,41 @@ export default function EbayChannelPage() {
                                 })()}
                                 <span>·</span>
                                 <span>{variant.inventoryQuantity} qty</span>
+                                <button
+                                  className={`p-1 rounded hover:bg-muted min-w-[44px] min-h-[44px] flex items-center justify-center ${
+                                    (variant.fulfillmentPolicyOverride || variant.returnPolicyOverride || variant.paymentPolicyOverride)
+                                      ? "text-blue-500" : "text-muted-foreground"
+                                  }`}
+                                  onClick={(e) => { e.stopPropagation(); toggleVariantPolicies(variant.id); }}
+                                  title="Policy overrides"
+                                >
+                                  <Settings2 className="h-3.5 w-3.5" />
+                                </button>
                               </div>
                             </TableCell>
                           </TableRow>
+                          {/* Variant policy overrides (expanded) */}
+                          {expandedVariantPolicies.has(variant.id) && (
+                            <TableRow className="bg-muted/5" onClick={(e) => e.stopPropagation()}>
+                              <TableCell colSpan={6} className="px-8 sm:px-12 py-2">
+                                <PolicyOverrideRow
+                                  label={`Variant Policy Overrides — ${variant.sku}`}
+                                  fulfillmentPolicyId={variant.fulfillmentPolicyOverride}
+                                  returnPolicyId={variant.returnPolicyOverride}
+                                  paymentPolicyId={variant.paymentPolicyOverride}
+                                  policies={policies}
+                                  isPending={saveVariantPoliciesMutation.isPending}
+                                  onSave={(fp, rp, pp) => saveVariantPoliciesMutation.mutate({
+                                    variantId: variant.id,
+                                    fulfillmentPolicyId: fp,
+                                    returnPolicyId: rp,
+                                    paymentPolicyId: pp,
+                                  })}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          )}
+                          </React.Fragment>
                         ))}
                         {/* Expanded: Item Specifics per-product overrides */}
                         {isExpanded && item.ebayBrowseCategoryId && (
@@ -1830,6 +2030,27 @@ export default function EbayChannelPage() {
                                 categoryId={item.ebayBrowseCategoryId}
                                 productId={item.id}
                                 productType={item.productType}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {/* Expanded: Product-level policy overrides */}
+                        {isExpanded && (
+                          <TableRow className="bg-muted/10" onClick={(e) => e.stopPropagation()}>
+                            <TableCell colSpan={6} className="px-4 sm:px-8 py-3">
+                              <PolicyOverrideRow
+                                label="Product Policy Overrides"
+                                fulfillmentPolicyId={item.fulfillmentPolicyOverride}
+                                returnPolicyId={item.returnPolicyOverride}
+                                paymentPolicyId={item.paymentPolicyOverride}
+                                policies={policies}
+                                isPending={saveProductPoliciesMutation.isPending}
+                                onSave={(fp, rp, pp) => saveProductPoliciesMutation.mutate({
+                                  productId: item.id,
+                                  fulfillmentPolicyId: fp,
+                                  returnPolicyId: rp,
+                                  paymentPolicyId: pp,
+                                })}
                               />
                             </TableCell>
                           </TableRow>

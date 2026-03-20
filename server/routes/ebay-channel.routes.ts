@@ -538,7 +538,10 @@ ${categoriesXml}
             cl.sync_status AS listing_status,
             cl.external_product_id,
             p.ebay_listing_excluded,
-            COALESCE(ecm.listing_enabled, true) AS type_listing_enabled
+            COALESCE(ecm.listing_enabled, true) AS type_listing_enabled,
+            p.ebay_fulfillment_policy_override AS product_fulfillment_override,
+            p.ebay_return_policy_override AS product_return_override,
+            p.ebay_payment_policy_override AS product_payment_override
           FROM products p
           LEFT JOIN product_types pt ON pt.slug = p.product_type
           LEFT JOIN ebay_category_mappings ecm ON ecm.product_type_slug = p.product_type AND ecm.channel_id = $1
@@ -565,6 +568,9 @@ ${categoriesXml}
               pv.name,
               pv.price_cents,
               pv.ebay_listing_excluded,
+              pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
+              pv.ebay_return_policy_override AS variant_return_override,
+              pv.ebay_payment_policy_override AS variant_payment_override,
               COALESCE(
                 (SELECT SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty)::int
                  FROM inventory_levels il WHERE il.product_variant_id = pv.id),
@@ -585,6 +591,9 @@ ${categoriesXml}
               priceCents: v.price_cents,
               ebayListingExcluded: v.ebay_listing_excluded === true,
               inventoryQuantity: Math.max(0, parseInt(v.inventory_quantity) || 0),
+              fulfillmentPolicyOverride: v.variant_fulfillment_override || null,
+              returnPolicyOverride: v.variant_return_override || null,
+              paymentPolicyOverride: v.variant_payment_override || null,
             });
           }
         }
@@ -724,6 +733,9 @@ ${categoriesXml}
             includedVariantCount,
             imageCount: parseInt(row.image_count) || 0,
             variants,
+            fulfillmentPolicyOverride: row.product_fulfillment_override || null,
+            returnPolicyOverride: row.product_return_override || null,
+            paymentPolicyOverride: row.product_payment_override || null,
           };
         });
 
@@ -1332,9 +1344,10 @@ ${categoriesXml}
 
       try {
         for (const productId of productIds) {
-          // 1. Fetch product
+          // 1. Fetch product (include policy overrides + SKU)
           const prodResult = await client.query(
-            `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id
+            `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id,
+                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
              FROM products WHERE id = $1 AND is_active = true`,
             [productId],
           );
@@ -1344,11 +1357,12 @@ ${categoriesXml}
           }
           const product = prodResult.rows[0];
 
-          // 2. Fetch variants (skip excluded)
+          // 2. Fetch variants (skip excluded), include policy overrides
           const varResult = await client.query(
             `SELECT id, sku, name, option1_name, option1_value, option2_name, option2_value,
                     price_cents, compare_at_price_cents, weight_grams, barcode,
-                    units_per_variant, hierarchy_level
+                    units_per_variant, hierarchy_level,
+                    ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
              FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL
                AND COALESCE(ebay_listing_excluded, false) = false
              ORDER BY position ASC, id ASC`,
@@ -1374,6 +1388,8 @@ ${categoriesXml}
           let storeCategoryNames: string[] = [];
           let effectivePolicies = { ...defaultPolicies };
 
+          // Policy resolution: variant override → product override → category override → channel default
+          // Step 1: Category-level overrides
           if (product.product_type) {
             const catResult = await client.query(
               `SELECT ebay_browse_category_id, ebay_store_category_name,
@@ -1391,6 +1407,11 @@ ${categoriesXml}
               if (catRow.payment_policy_override) effectivePolicies.paymentPolicyId = catRow.payment_policy_override;
             }
           }
+
+          // Step 2: Product-level overrides (win over category)
+          if (product.ebay_fulfillment_policy_override) effectivePolicies.fulfillmentPolicyId = product.ebay_fulfillment_policy_override;
+          if (product.ebay_return_policy_override) effectivePolicies.returnPolicyId = product.ebay_return_policy_override;
+          if (product.ebay_payment_policy_override) effectivePolicies.paymentPolicyId = product.ebay_payment_policy_override;
 
           if (!ebayBrowseCategoryId) {
             results.push({ productId, productName: product.name, variantCount: 0, success: false, error: "No eBay browse category configured" });
@@ -1502,9 +1523,11 @@ ${categoriesXml}
           const successfulSkus = variantDetails.filter((v) => v.success).map((v) => v.sku);
 
           // ---- Step B: Multi-variant -> Create Inventory Item Group ----
+          // Use product SKU as the group key (eBay displays this as the listing's Custom Label/SKU)
+          const groupKey = product.sku || `PROD-${productId}`;
+
           if (isMultiVariant && successfulSkus.length > 1) {
             try {
-              const groupKey = `PROD-${productId}`;
 
               // Build variesBy specification
               const variationValues = variants
@@ -1567,16 +1590,19 @@ ${categoriesXml}
                 );
                 const availableQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
 
+                // Variant-level policy overrides win over product/category/channel
+                const variantPolicies = {
+                  fulfillmentPolicyId: variant.ebay_fulfillment_policy_override || effectivePolicies.fulfillmentPolicyId,
+                  returnPolicyId: variant.ebay_return_policy_override || effectivePolicies.returnPolicyId,
+                  paymentPolicyId: variant.ebay_payment_policy_override || effectivePolicies.paymentPolicyId,
+                };
+
                 const offerBody: Record<string, any> = {
                   sku: variant.sku,
                   marketplaceId: "EBAY_US",
                   format: "FIXED_PRICE",
                   categoryId: ebayBrowseCategoryId,
-                  listingPolicies: {
-                    fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
-                    returnPolicyId: effectivePolicies.returnPolicyId,
-                    paymentPolicyId: effectivePolicies.paymentPolicyId,
-                  },
+                  listingPolicies: variantPolicies,
                   merchantLocationKey,
                   pricingSummary: {
                     price: { value: priceInDollars, currency: "USD" },
@@ -1724,7 +1750,6 @@ ${categoriesXml}
           let listingId: string | null = null;
           try {
             if (isMultiVariant && successfulSkus.length > 1) {
-              const groupKey = `PROD-${productId}`;
               console.log(`[eBay Push] Publishing by inventory item group: ${groupKey}`);
               const publishData = await ebayApiRequest(
                 "POST",
@@ -2158,6 +2183,148 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Product Exclusion] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /api/ebay/product-policies/:productId — Set policy overrides for a product
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/product-policies/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body as {
+        fulfillmentPolicyId?: string | null;
+        returnPolicyId?: string | null;
+        paymentPolicyId?: string | null;
+      };
+      const client = await pool.connect();
+      try {
+        await client.query(
+          `UPDATE products SET
+             ebay_fulfillment_policy_override = $1,
+             ebay_return_policy_override = $2,
+             ebay_payment_policy_override = $3
+           WHERE id = $4`,
+          [fulfillmentPolicyId || null, returnPolicyId || null, paymentPolicyId || null, productId]
+        );
+        res.json({ success: true, productId });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Policies] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // PUT /api/ebay/variant-policies/:variantId — Set policy overrides for a variant
+  // -----------------------------------------------------------------------
+  app.put("/api/ebay/variant-policies/:variantId", async (req: Request, res: Response) => {
+    try {
+      const variantId = parseInt(req.params.variantId);
+      if (isNaN(variantId)) {
+        res.status(400).json({ error: "Invalid variant ID" });
+        return;
+      }
+      const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body as {
+        fulfillmentPolicyId?: string | null;
+        returnPolicyId?: string | null;
+        paymentPolicyId?: string | null;
+      };
+      const client = await pool.connect();
+      try {
+        await client.query(
+          `UPDATE product_variants SET
+             ebay_fulfillment_policy_override = $1,
+             ebay_return_policy_override = $2,
+             ebay_payment_policy_override = $3
+           WHERE id = $4`,
+          [fulfillmentPolicyId || null, returnPolicyId || null, paymentPolicyId || null, variantId]
+        );
+        res.json({ success: true, variantId });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Variant Policies] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/product-policies/:productId — Get policy overrides for a product
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/product-policies/:productId", async (req: Request, res: Response) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) {
+        res.status(400).json({ error: "Invalid product ID" });
+        return;
+      }
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
+           FROM products WHERE id = $1`,
+          [productId]
+        );
+        if (result.rows.length === 0) {
+          res.status(404).json({ error: "Product not found" });
+          return;
+        }
+        const row = result.rows[0];
+        res.json({
+          fulfillmentPolicyId: row.ebay_fulfillment_policy_override || null,
+          returnPolicyId: row.ebay_return_policy_override || null,
+          paymentPolicyId: row.ebay_payment_policy_override || null,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Product Policies GET] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/ebay/variant-policies/:variantId — Get policy overrides for a variant
+  // -----------------------------------------------------------------------
+  app.get("/api/ebay/variant-policies/:variantId", async (req: Request, res: Response) => {
+    try {
+      const variantId = parseInt(req.params.variantId);
+      if (isNaN(variantId)) {
+        res.status(400).json({ error: "Invalid variant ID" });
+        return;
+      }
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
+           FROM product_variants WHERE id = $1`,
+          [variantId]
+        );
+        if (result.rows.length === 0) {
+          res.status(404).json({ error: "Variant not found" });
+          return;
+        }
+        const row = result.rows[0];
+        res.json({
+          fulfillmentPolicyId: row.ebay_fulfillment_policy_override || null,
+          returnPolicyId: row.ebay_return_policy_override || null,
+          paymentPolicyId: row.ebay_payment_policy_override || null,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Variant Policies GET] Error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });

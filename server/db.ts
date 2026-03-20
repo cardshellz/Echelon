@@ -548,6 +548,15 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked channel_pricing_rules table");
 
+    // Migration: per-product and per-variant eBay policy overrides
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
+    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
+    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
+    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
+    console.log("Checked eBay policy override columns on products + product_variants");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {
