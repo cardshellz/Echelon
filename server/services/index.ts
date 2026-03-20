@@ -73,7 +73,7 @@ export function createServices(db: any) {
   // Depends on inventoryCore (+ channelSync for fulfillment/reservation)
   const breakAssembly = createBreakAssemblyService(db, inventoryCore);
   const fulfillment = createFulfillmentService(db, inventoryCore, channelSync);
-  const reservation = createReservationService(db, inventoryCore, channelSync);
+  const reservation = createReservationService(db, inventoryCore, channelSync, atp);
   const replenishment = createReplenishmentService(db, inventoryCore);
   const returns = createReturnsService(db, inventoryCore);
 

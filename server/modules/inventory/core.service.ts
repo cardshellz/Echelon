@@ -601,6 +601,10 @@ export class InventoryCoreService {
    * Reserve inventory for an order by incrementing `reservedQty`.
    * The reservation is a soft hold -- `variantQty` is *not* decremented
    * until the pick step. All quantities in variant units.
+   *
+   * The caller is responsible for ATP gating — this method unconditionally
+   * increments `reservedQty` by the given qty. If no `inventory_levels`
+   * row exists for the variant at the given location, one is upserted.
    */
   async reserveForOrder(params: {
     productVariantId: number;
@@ -617,26 +621,17 @@ export class InventoryCoreService {
     return this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
-      const level = await svc.getLevel(
+      // Upsert: ensure an inventory_levels row exists for this variant+location
+      const level = await svc.upsertLevel(
         params.productVariantId,
         params.warehouseLocationId,
       );
-
-      if (!level) {
-        return false;
-      }
-
-      // Available = onHand - already reserved
-      const available = level.variantQty - level.reservedQty;
-      if (available < params.qty) {
-        return false;
-      }
 
       await svc.adjustLevel(level.id, {
         reservedQty: params.qty,
       });
 
-      // Reserve from lots (FIFO)
+      // Reserve from lots (FIFO) if lot tracking is active
       if (svc.lotService) {
         const lotSvc = svc.lotService.withTx(tx);
         await lotSvc.reserveFromLots({

@@ -1,14 +1,14 @@
-import { eq, and, sql, isNull } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import {
   orders,
   orderItems,
   inventoryLevels,
   inventoryTransactions,
   productVariants,
-  warehouseLocations,
-  warehouses,
   productLocations,
 } from "@shared/schema";
+import type { VariantAtp } from "../inventory/atp.service";
+
 type DrizzleDb = {
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
@@ -19,6 +19,10 @@ type DrizzleDb = {
 
 interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+}
+
+interface AtpService {
+  getAtpPerVariant(productId: number): Promise<VariantAtp[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,6 +37,11 @@ export interface ReservationResult {
   failed: Array<{ sku: string; orderItemId: number; reason: string }>;
   /** Total base units reserved across all items */
   totalBaseUnits: number;
+}
+
+export interface ReserveForOrderResult {
+  reserved: number;
+  shortfall: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,10 +65,119 @@ class ReservationService {
     private readonly db: DrizzleDb,
     private readonly inventoryCore: any,
     private readonly channelSync: ChannelSync,
+    private readonly atpService: AtpService,
   ) {}
 
   // ---------------------------------------------------------------------------
   // RESERVE ORDER
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // ATP-GATED RESERVE FOR ORDER ITEM
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reserve inventory for a single order item, gated entirely on fungible ATP.
+   *
+   * 1. Calls `atpService.getAtpPerVariant(productId)` to get the shared ATP pool.
+   * 2. Determines how much to reserve (full, partial, or zero).
+   * 3. Increments `reserved_qty` on the variant's assigned bin (product_locations).
+   * 4. Logs to `inventory_transactions`.
+   *
+   * ATP is the ONLY gate — no bin-level stock checks, no location searching.
+   */
+  async reserveForOrder(
+    productId: number,
+    variantId: number,
+    orderQty: number,
+    orderId: number,
+    orderItemId: number,
+    userId?: string,
+  ): Promise<ReserveForOrderResult> {
+    if (orderQty <= 0) {
+      return { reserved: 0, shortfall: 0 };
+    }
+
+    // Step 1: Get fungible ATP for the ordered variant
+    const variantAtps = await this.atpService.getAtpPerVariant(productId);
+    const variantAtp = variantAtps.find((v) => v.productVariantId === variantId);
+    const atpUnits = variantAtp?.atpUnits ?? 0;
+
+    // Step 2: Determine reservation quantity
+    let toReserve: number;
+    let shortfall: number;
+
+    if (atpUnits >= orderQty) {
+      toReserve = orderQty;
+      shortfall = 0;
+    } else if (atpUnits > 0) {
+      toReserve = atpUnits;
+      shortfall = orderQty - atpUnits;
+    } else {
+      toReserve = 0;
+      shortfall = orderQty;
+    }
+
+    // Notify on shortfall
+    if (shortfall > 0) {
+      const sku = variantAtp?.sku ?? `variant#${variantId}`;
+      console.warn(
+        `[RESERVATION] Inventory shortfall: Order #${orderId} item #${orderItemId}: ` +
+          `Only ${toReserve} of ${orderQty} units of ${sku} could be reserved (ATP=${atpUnits})`,
+      );
+    }
+
+    if (toReserve === 0) {
+      return { reserved: 0, shortfall };
+    }
+
+    // Step 3: Find the variant's assigned bin from product_locations
+    const [assignment] = await this.db
+      .select({
+        warehouseLocationId: productLocations.warehouseLocationId,
+      })
+      .from(productLocations)
+      .where(
+        and(
+          eq(productLocations.productVariantId, variantId),
+          eq(productLocations.status, "active"),
+        ),
+      )
+      .orderBy(productLocations.isPrimary) // isPrimary=1 sorts first (descending would be better but 1 > 0)
+      .limit(1);
+
+    if (!assignment?.warehouseLocationId) {
+      console.warn(
+        `[RESERVATION] No assigned bin for variant ${variantId} — cannot place reservation for order #${orderId}`,
+      );
+      return { reserved: 0, shortfall: orderQty };
+    }
+
+    // Step 4: Delegate to inventoryCore (atomic: upserts level + increments reserved_qty + logs txn)
+    const success = await this.inventoryCore.reserveForOrder({
+      productVariantId: variantId,
+      warehouseLocationId: assignment.warehouseLocationId,
+      qty: toReserve,
+      orderId,
+      orderItemId,
+      userId,
+    });
+
+    if (!success) {
+      // Should not happen since core no longer checks bin-level stock,
+      // but handle defensively
+      console.error(
+        `[RESERVATION] inventoryCore.reserveForOrder returned false unexpectedly ` +
+          `for variant ${variantId} order #${orderId}`,
+      );
+      return { reserved: 0, shortfall: orderQty };
+    }
+
+    return { reserved: toReserve, shortfall };
+  }
+
+  // ---------------------------------------------------------------------------
+  // RESERVE ORDER (all line items)
   // ---------------------------------------------------------------------------
 
   /**
@@ -67,17 +185,11 @@ class ReservationService {
    *
    * For each `order_item`:
    *   1. Resolve the `product_variant` by SKU.
-   *   2. Calculate base units: `item.quantity * variant.unitsPerVariant`.
-   *   3. Find the best warehouse location (prefer forward-pick locations with
-   *      sufficient available stock, ordered by `pick_sequence`).
-   *   4. Call `inventoryCore.reserveForOrder()`.
+   *   2. Call `reserveForOrder()` with fungible ATP gating.
+   *   3. Collect results.
    *
-   * Items that cannot be reserved (variant not found, insufficient stock) are
+   * Items that cannot be reserved (variant not found, zero ATP) are
    * recorded in the `failed` array -- they never block other items.
-   *
-   * @param orderId  Internal order PK.
-   * @param userId   Optional user performing the reservation (audit trail).
-   * @returns Summary of what was reserved and what failed.
    */
   async reserveOrder(orderId: number, userId?: string): Promise<ReservationResult> {
     const result: ReservationResult = {
@@ -86,10 +198,6 @@ class ReservationService {
       failed: [],
       totalBaseUnits: 0,
     };
-
-    // Get the order to determine warehouse scope
-    const [order] = await this.db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
-    const warehouseId = order?.warehouseId ?? null;
 
     // Fetch all line items for this order
     const items = await this.db
@@ -117,109 +225,29 @@ class ReservationService {
           continue;
         }
 
-        // 2. Calculate variant units needed (order qty IS variant units)
-        const unitsNeeded = item.quantity;
-
-        // 3. Find the best location to reserve from
-        //    Prefer locations with sufficient available stock,
-        //    ordered by location hierarchy (zone/aisle/bay/level/bin).
-        //    Scoped to the order's assigned warehouse if set.
-        const locationFilters = [
-          eq(inventoryLevels.productVariantId, variant.id),
-          // Available = onHand - reserved - picked > 0
-          sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
-          // Belt-and-suspenders: only reserve against pickable locations (even if productLocations JOIN should filter)
-          eq(warehouseLocations.isPickable, 1),
-          // Skip locations frozen for cycle counting
-          isNull(warehouseLocations.cycleCountFreezeId),
-        ];
-        if (warehouseId) {
-          locationFilters.push(eq(warehouseLocations.warehouseId, warehouseId));
-        }
-        const levels = await this.db
-          .select()
-          .from(inventoryLevels)
-          .innerJoin(
-            warehouseLocations,
-            eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-          )
-          .innerJoin(
-            productLocations,
-            and(
-              eq(productLocations.productVariantId, inventoryLevels.productVariantId),
-              eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
-            ),
-          )
-          .where(and(...locationFilters))
-          .orderBy(
-            warehouseLocations.zone,
-            warehouseLocations.aisle,
-            warehouseLocations.bay,
-            warehouseLocations.level,
-            warehouseLocations.bin,
-          );
-
-        if (levels.length === 0) {
-          result.failed.push({
-            sku: item.sku,
-            orderItemId: item.id,
-            reason: `No available inventory for SKU "${item.sku}" (need ${unitsNeeded} units)`,
-          });
-          continue;
-        }
-
-        // Pick the first location that has enough stock; fall back to the
-        // first location with any stock if none has sufficient quantity.
-        let chosenLevel = levels.find((row: any) => {
-          const available =
-            row.inventory_levels.variantQty -
-            row.inventory_levels.reservedQty -
-            row.inventory_levels.pickedQty;
-          return available >= unitsNeeded;
-        });
-
-        if (!chosenLevel) {
-          // No single location has enough -- use the one with the most
-          // available stock (partial reservation is better than none).
-          chosenLevel = levels[0];
-        }
-
-        const available =
-          chosenLevel.inventory_levels.variantQty -
-          chosenLevel.inventory_levels.reservedQty -
-          chosenLevel.inventory_levels.pickedQty;
-
-        const unitsToReserve = Math.min(unitsNeeded, available);
-        const baseUnitsReserved = unitsToReserve * (variant.unitsPerVariant ?? 1);
-
-        // 4. Reserve via inventory core (now in variant units)
-        const reserved = await this.inventoryCore.reserveForOrder({
-          productVariantId: variant.id,
-          warehouseLocationId: chosenLevel.inventory_levels.warehouseLocationId,
-          qty: unitsToReserve,
+        // 2. Reserve via ATP-gated method
+        const res = await this.reserveForOrder(
+          variant.productId,
+          variant.id,
+          item.quantity,
           orderId,
-          orderItemId: item.id,
+          item.id,
           userId,
-        });
+        );
 
-        if (reserved) {
+        if (res.reserved > 0) {
           result.reserved++;
-          result.totalBaseUnits += baseUnitsReserved;
+          result.totalBaseUnits += res.reserved * (variant.unitsPerVariant ?? 1);
           syncVariantIds.add(variant.id);
+        }
 
-          // If we could not fully reserve, note the shortfall
-          if (unitsToReserve < unitsNeeded) {
-            result.failed.push({
-              sku: item.sku,
-              orderItemId: item.id,
-              reason: `Partial reservation: reserved ${unitsToReserve} of ${unitsNeeded} variant units`,
-            });
-          }
-        } else {
+        if (res.shortfall > 0) {
           result.failed.push({
             sku: item.sku,
             orderItemId: item.id,
-            reason: `Reservation rejected by inventory core (insufficient available stock)`,
+            reason: res.reserved > 0
+              ? `Partial reservation: reserved ${res.reserved} of ${item.quantity} variant units (shortfall: ${res.shortfall})`
+              : `No reservation: ATP insufficient (need ${item.quantity}, ATP=0)`,
           });
         }
       } catch (err) {
@@ -493,73 +521,26 @@ class ReservationService {
         for (const item of items) {
           if (item.sku !== variant.sku) continue;
 
-          // Try to reserve at an alternative assigned location
-          // (reserveOrder for full order would re-check all items;
-          //  here we just need the one variant at an alternative location)
-          const locationFilters = [
-            eq(inventoryLevels.productVariantId, productVariantId),
-            sql`${inventoryLevels.variantQty} - ${inventoryLevels.reservedQty} - ${inventoryLevels.pickedQty} > 0`,
-            // Exclude the location we just zeroed out
-            sql`${inventoryLevels.warehouseLocationId} != ${warehouseLocationId}`,
-            // Only pickable locations
-            eq(warehouseLocations.isPickable, 1),
-            // Skip locations frozen for cycle counting
-            isNull(warehouseLocations.cycleCountFreezeId),
-          ];
+          // Re-reserve using ATP-gated method (finds assigned bin automatically)
+          const res = await this.reserveForOrder(
+            variant.productId,
+            productVariantId,
+            item.quantity,
+            orderId,
+            item.id,
+            userId,
+          );
 
-          const altLevels = await this.db
-            .select()
-            .from(inventoryLevels)
-            .innerJoin(
-              warehouseLocations,
-              eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-            )
-            .innerJoin(
-              productLocations,
-              and(
-                eq(productLocations.productVariantId, inventoryLevels.productVariantId),
-                eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
-              ),
-            )
-            .where(and(...locationFilters))
-            .orderBy(
-              warehouseLocations.zone,
-              warehouseLocations.aisle,
-              warehouseLocations.bay,
-              warehouseLocations.level,
-              warehouseLocations.bin,
+          if (res.reserved > 0) {
+            result.reallocated++;
+            console.log(
+              `[RESERVATION] Re-allocated order ${orderId} item ${item.id} ` +
+                `(${res.reserved} units, shortfall: ${res.shortfall})`,
             );
-
-          if (altLevels.length > 0) {
-            const alt = altLevels[0];
-            const available =
-              alt.inventory_levels.variantQty -
-              alt.inventory_levels.reservedQty -
-              alt.inventory_levels.pickedQty;
-            const toReserve = Math.min(item.quantity, available);
-
-            const reserved = await this.inventoryCore.reserveForOrder({
-              productVariantId,
-              warehouseLocationId: alt.inventory_levels.warehouseLocationId,
-              qty: toReserve,
-              orderId,
-              orderItemId: item.id,
-              userId,
-            });
-
-            if (reserved) {
-              result.reallocated++;
-              console.log(
-                `[RESERVATION] Re-allocated order ${orderId} item ${item.id} → ` +
-                  `location ${alt.warehouse_locations.code} (${toReserve} units)`,
-              );
-            } else {
-              result.failed++;
-            }
           } else {
             result.failed++;
             console.warn(
-              `[RESERVATION] No alternative assigned bin with stock for variant ${productVariantId} ` +
+              `[RESERVATION] No ATP available for variant ${productVariantId} ` +
                 `(order ${orderId}) — order stays partially unreserved`,
             );
           }
@@ -767,6 +748,6 @@ class ReservationService {
  * await reservations.reserveOrder(orderId);
  * ```
  */
-export function createReservationService(db: any, inventoryCore: any, channelSync: any) {
-  return new ReservationService(db, inventoryCore, channelSync);
+export function createReservationService(db: any, inventoryCore: any, channelSync: any, atpService?: any) {
+  return new ReservationService(db, inventoryCore, channelSync, atpService);
 }
