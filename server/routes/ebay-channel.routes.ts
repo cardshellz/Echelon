@@ -1546,111 +1546,217 @@ ${categoriesXml}
             }
           }
 
-          // ---- Step C: Create/Update Offer ----
-          let offerId: string | null = null;
-          try {
-            const offerBody: Record<string, any> = {
-              marketplaceId: "EBAY_US",
-              format: "FIXED_PRICE",
-              categoryId: ebayBrowseCategoryId,
-              listingPolicies: {
-                fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
-                returnPolicyId: effectivePolicies.returnPolicyId,
-                paymentPolicyId: effectivePolicies.paymentPolicyId,
-              },
-              merchantLocationKey,
-            };
+          // ---- Step C: Create/Update Offers ----
+          // Multi-variant: one offer PER variant SKU (no inventoryItemGroupKey on offers)
+          // Single-variant: one offer with sku + price
+          const offerIds: Map<string, string> = new Map(); // sku -> offerId
+          let offerCreationFailed = false;
 
-            if (storeCategoryNames.length > 0) {
-              offerBody.storeCategoryNames = storeCategoryNames;
+          if (isMultiVariant && successfulSkus.length > 1) {
+            // --- Multi-variant: create an offer for EACH variant ---
+            for (const variant of variants) {
+              if (!successfulSkus.includes(variant.sku)) continue;
+              try {
+                const priceCents = variantPrices.get(variant.id) || variant.price_cents;
+                const priceInDollars = (priceCents / 100).toFixed(2);
+
+                const invResult = await client.query(
+                  `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
+                   FROM inventory_levels il WHERE il.product_variant_id = $1`,
+                  [variant.id],
+                );
+                const availableQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
+
+                const offerBody: Record<string, any> = {
+                  sku: variant.sku,
+                  marketplaceId: "EBAY_US",
+                  format: "FIXED_PRICE",
+                  categoryId: ebayBrowseCategoryId,
+                  listingPolicies: {
+                    fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
+                    returnPolicyId: effectivePolicies.returnPolicyId,
+                    paymentPolicyId: effectivePolicies.paymentPolicyId,
+                  },
+                  merchantLocationKey,
+                  pricingSummary: {
+                    price: { value: priceInDollars, currency: "USD" },
+                  },
+                  availableQuantity: availableQty,
+                };
+                if (storeCategoryNames.length > 0) {
+                  offerBody.storeCategoryNames = storeCategoryNames;
+                }
+
+                console.log(`[eBay Push] Creating offer for variant SKU: ${variant.sku}`);
+                let offerId: string | null = null;
+                try {
+                  const offerData = await ebayApiRequest("POST", "/sell/inventory/v1/offer", accessToken, offerBody);
+                  offerId = offerData?.offerId || null;
+                  console.log(`[eBay Push] Offer created: offerId=${offerId} for SKU=${variant.sku}`);
+                } catch (offerErr: any) {
+                  // If duplicate (25002/409), find existing offer and update
+                  if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
+                    console.log(`[eBay Push] Duplicate offer for SKU ${variant.sku}, finding existing...`);
+                    const existingOffers = await ebayApiRequest(
+                      "GET",
+                      `/sell/inventory/v1/offer?sku=${encodeURIComponent(variant.sku)}&marketplace_id=EBAY_US`,
+                      accessToken,
+                    );
+                    if (existingOffers?.offers?.length > 0) {
+                      offerId = existingOffers.offers[0].offerId;
+                      console.log(`[eBay Push] Found existing offer: ${offerId} for SKU=${variant.sku}, updating...`);
+                      await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
+                    } else {
+                      throw offerErr;
+                    }
+                  } else {
+                    throw offerErr;
+                  }
+                }
+
+                if (offerId) {
+                  offerIds.set(variant.sku, offerId);
+                }
+              } catch (err: any) {
+                console.error(`[eBay Push] Offer creation failed for SKU ${variant.sku}:`, err.message);
+                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                  syncStatus: "error",
+                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
+                });
+                // Mark variant as failed in details
+                const detailIdx = variantDetails.findIndex((d) => d.sku === variant.sku);
+                if (detailIdx >= 0) {
+                  variantDetails[detailIdx] = { sku: variant.sku, success: false, error: `Offer failed: ${err.message.substring(0, 500)}` };
+                }
+              }
             }
 
-            if (isMultiVariant && successfulSkus.length > 1) {
-              // Multi-variant: use inventoryItemGroupKey (no sku, no price on offer)
-              offerBody.inventoryItemGroupKey = `PROD-${productId}`;
-            } else {
-              // Single variant: use sku + price on the offer
+            if (offerIds.size === 0) {
+              offerCreationFailed = true;
+              results.push({
+                productId, productName: product.name, variantCount: variants.length,
+                success: false, error: "All variant offer creations failed", variantDetails,
+              });
+              continue;
+            }
+          } else {
+            // --- Single variant: one offer with sku + price ---
+            try {
               const singleSku = successfulSkus[0];
               const singleVariant = variants.find((v: any) => v.sku === singleSku);
               const priceCents = variantPrices.get(singleVariant?.id) || singleVariant?.price_cents || 0;
               const priceInDollars = (priceCents / 100).toFixed(2);
-
-              offerBody.sku = singleSku;
-              offerBody.pricingSummary = {
-                price: { value: priceInDollars, currency: "USD" },
-              };
 
               const invResult = await client.query(
                 `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
                  FROM inventory_levels il WHERE il.product_variant_id = $1`,
                 [singleVariant?.id],
               );
-              offerBody.availableQuantity = Math.max(0, invResult.rows[0]?.available_qty || 0);
-            }
 
-            console.log(`[eBay Push] Creating offer for product ${product.name}`);
-            try {
-              const offerData = await ebayApiRequest("POST", "/sell/inventory/v1/offer", accessToken, offerBody);
-              offerId = offerData?.offerId || null;
-              console.log(`[eBay Push] Offer created: offerId=${offerId}`);
-            } catch (offerErr: any) {
-              // If duplicate (25002), find existing offer and update
-              if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
-                console.log(`[eBay Push] Duplicate offer detected, finding existing...`);
-                const lookupParam = isMultiVariant && successfulSkus.length > 1
-                  ? `inventory_item_group_key=${encodeURIComponent(`PROD-${productId}`)}`
-                  : `sku=${encodeURIComponent(successfulSkus[0])}`;
+              const offerBody: Record<string, any> = {
+                sku: singleSku,
+                marketplaceId: "EBAY_US",
+                format: "FIXED_PRICE",
+                categoryId: ebayBrowseCategoryId,
+                listingPolicies: {
+                  fulfillmentPolicyId: effectivePolicies.fulfillmentPolicyId,
+                  returnPolicyId: effectivePolicies.returnPolicyId,
+                  paymentPolicyId: effectivePolicies.paymentPolicyId,
+                },
+                merchantLocationKey,
+                pricingSummary: {
+                  price: { value: priceInDollars, currency: "USD" },
+                },
+                availableQuantity: Math.max(0, invResult.rows[0]?.available_qty || 0),
+              };
+              if (storeCategoryNames.length > 0) {
+                offerBody.storeCategoryNames = storeCategoryNames;
+              }
 
-                const existingOffers = await ebayApiRequest(
-                  "GET",
-                  `/sell/inventory/v1/offer?${lookupParam}&marketplace_id=EBAY_US`,
-                  accessToken,
-                );
-                if (existingOffers?.offers?.length > 0) {
-                  offerId = existingOffers.offers[0].offerId;
-                  console.log(`[eBay Push] Found existing offer: ${offerId}, updating...`);
-                  await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
+              console.log(`[eBay Push] Creating offer for single-variant product ${product.name}`);
+              let offerId: string | null = null;
+              try {
+                const offerData = await ebayApiRequest("POST", "/sell/inventory/v1/offer", accessToken, offerBody);
+                offerId = offerData?.offerId || null;
+                console.log(`[eBay Push] Offer created: offerId=${offerId}`);
+              } catch (offerErr: any) {
+                if (offerErr.message.includes("25002") || offerErr.message.includes("409")) {
+                  console.log(`[eBay Push] Duplicate offer detected, finding existing...`);
+                  const existingOffers = await ebayApiRequest(
+                    "GET",
+                    `/sell/inventory/v1/offer?sku=${encodeURIComponent(singleSku)}&marketplace_id=EBAY_US`,
+                    accessToken,
+                  );
+                  if (existingOffers?.offers?.length > 0) {
+                    offerId = existingOffers.offers[0].offerId;
+                    console.log(`[eBay Push] Found existing offer: ${offerId}, updating...`);
+                    await ebayApiRequest("PUT", `/sell/inventory/v1/offer/${offerId}`, accessToken, offerBody);
+                  } else {
+                    throw offerErr;
+                  }
                 } else {
                   throw offerErr;
                 }
-              } else {
-                throw offerErr;
               }
-            }
-          } catch (err: any) {
-            console.error(`[eBay Push] Offer creation failed:`, err.message);
-            for (const variant of variants) {
-              await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                syncStatus: "error",
-                syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
+
+              if (offerId) {
+                offerIds.set(singleSku, offerId);
+              }
+            } catch (err: any) {
+              console.error(`[eBay Push] Offer creation failed:`, err.message);
+              for (const variant of variants) {
+                await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
+                  syncStatus: "error",
+                  syncError: `Offer creation failed: ${err.message.substring(0, 1000)}`,
+                });
+              }
+              results.push({
+                productId, productName: product.name, variantCount: variants.length,
+                success: false, error: `Offer creation failed: ${err.message.substring(0, 500)}`, variantDetails,
               });
+              continue;
             }
-            results.push({
-              productId, productName: product.name, variantCount: variants.length,
-              success: false, error: `Offer creation failed: ${err.message.substring(0, 500)}`, variantDetails,
-            });
-            continue;
           }
 
-          // ---- Step D: Publish Offer ----
+          // ---- Step D: Publish ----
+          // Multi-variant: publish via inventory item group (combines all variant offers into one listing)
+          // Single-variant: publish individual offer
           let listingId: string | null = null;
           try {
-            console.log(`[eBay Push] Publishing offer ${offerId}`);
-            const publishData = await ebayApiRequest("POST", `/sell/inventory/v1/offer/${offerId}/publish`, accessToken);
-            listingId = publishData?.listingId || null;
-            console.log(`[eBay Push] Published: listingId=${listingId}`);
+            if (isMultiVariant && successfulSkus.length > 1) {
+              const groupKey = `PROD-${productId}`;
+              console.log(`[eBay Push] Publishing by inventory item group: ${groupKey}`);
+              const publishData = await ebayApiRequest(
+                "POST",
+                "/sell/inventory/v1/offer/publish_by_inventory_item_group",
+                accessToken,
+                {
+                  inventoryItemGroupKey: groupKey,
+                  marketplaceId: "EBAY_US",
+                },
+              );
+              listingId = publishData?.listingId || null;
+              console.log(`[eBay Push] Published multi-variant listing: listingId=${listingId}`);
+            } else {
+              const singleOfferId = offerIds.values().next().value;
+              console.log(`[eBay Push] Publishing single offer ${singleOfferId}`);
+              const publishData = await ebayApiRequest("POST", `/sell/inventory/v1/offer/${singleOfferId}/publish`, accessToken);
+              listingId = publishData?.listingId || null;
+              console.log(`[eBay Push] Published: listingId=${listingId}`);
+            }
           } catch (err: any) {
             console.error(`[eBay Push] Publish failed:`, err.message);
             for (const variant of variants) {
+              const varOfferId = offerIds.get(variant.sku) || null;
               await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
-                externalVariantId: offerId,
+                externalVariantId: varOfferId,
                 syncStatus: "error",
                 syncError: `Publish failed: ${err.message.substring(0, 1000)}`,
               });
             }
             results.push({
               productId, productName: product.name, variantCount: variants.length,
-              success: false, offerId: offerId || undefined,
+              success: false,
               error: `Publish failed: ${err.message.substring(0, 500)}`, variantDetails,
             });
             continue;
@@ -1659,9 +1765,10 @@ ${categoriesXml}
           // ---- Success: Update all variant listings ----
           for (const variant of variants) {
             if (successfulSkus.includes(variant.sku)) {
+              const varOfferId = offerIds.get(variant.sku) || null;
               await upsertChannelListing(client, EBAY_CHANNEL_ID, variant.id, {
                 externalProductId: listingId,
-                externalVariantId: offerId,
+                externalVariantId: varOfferId,
                 externalSku: variant.sku,
                 externalUrl: listingId ? `https://www.ebay.com/itm/${listingId}` : null,
                 syncStatus: "synced",
@@ -1676,7 +1783,6 @@ ${categoriesXml}
             variantCount: successfulSkus.length,
             success: true,
             listingId: listingId || undefined,
-            offerId: offerId || undefined,
             variantDetails,
           });
         }
