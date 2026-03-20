@@ -579,6 +579,65 @@ export default function EbayChannelPage() {
     pushToEbayMutation.mutate([productId]);
   };
 
+  // ---- Sync All Listings ----
+  const syncAllMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await apiRequest("POST", "/api/ebay/listings/sync-all");
+      return resp.json();
+    },
+    onSuccess: (data: any) => {
+      const { synced, priceChanges, qtyChanges, policyChanges, errors } = data;
+      const changes: string[] = [];
+      if (priceChanges > 0) changes.push(`${priceChanges} price update${priceChanges !== 1 ? "s" : ""}`);
+      if (qtyChanges > 0) changes.push(`${qtyChanges} quantity update${qtyChanges !== 1 ? "s" : ""}`);
+      if (policyChanges > 0) changes.push(`${policyChanges} policy update${policyChanges !== 1 ? "s" : ""}`);
+      const changeStr = changes.length > 0 ? `: ${changes.join(", ")}` : "";
+      toast({
+        title: "Sync Complete",
+        description: `Synced ${synced} listing${synced !== 1 ? "s" : ""}${changeStr}${errors > 0 ? ` (${errors} error${errors !== 1 ? "s" : ""})` : ""}`,
+        variant: errors > 0 ? "destructive" : undefined,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Sync Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // ---- Sync Single Product ----
+  const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
+
+  const syncProductMutation = useMutation({
+    mutationFn: async (productId: number) => {
+      const resp = await apiRequest("POST", `/api/ebay/listings/sync-product/${productId}`);
+      return resp.json();
+    },
+    onSuccess: (data: any, productId: number) => {
+      setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
+      const { synced, priceChanges, qtyChanges, errors } = data;
+      const changes: string[] = [];
+      if (priceChanges > 0) changes.push(`${priceChanges} price`);
+      if (qtyChanges > 0) changes.push(`${qtyChanges} qty`);
+      const changeStr = changes.length > 0 ? `: ${changes.join(", ")} updated` : "";
+      toast({
+        title: "Product Synced",
+        description: `Synced ${synced} variant${synced !== 1 ? "s" : ""}${changeStr}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/effective-prices"] });
+    },
+    onError: (err: Error, productId: number) => {
+      setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
+      toast({ title: "Sync Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const handleSyncProduct = (productId: number) => {
+    setSyncingProductIds((prev) => new Set([...prev, productId]));
+    syncProductMutation.mutate(productId);
+  };
+
   // ---- Verify / Reconcile Listings ----
   const reconcileMutation = useMutation({
     mutationFn: async () => {
@@ -1607,7 +1666,21 @@ export default function EbayChannelPage() {
               </CardTitle>
               <CardDescription>Products that will be listed on eBay</CardDescription>
             </div>
-            <div className="flex gap-2 w-full sm:w-auto">
+            <div className="flex gap-2 w-full sm:w-auto flex-wrap">
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
+                disabled={feedCounts.listed === 0 || syncAllMutation.isPending}
+                onClick={() => syncAllMutation.mutate()}
+              >
+                {syncAllMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                )}
+                Sync All ({feedCounts.listed})
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -1808,7 +1881,23 @@ export default function EbayChannelPage() {
                                 </Badge>
                               )}
                               {item.status === "listed" && (
-                                <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                <>
+                                  <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="min-h-[44px] min-w-[44px] px-3 text-xs"
+                                    disabled={syncingProductIds.has(item.id)}
+                                    onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                    title="Sync this listing"
+                                  >
+                                    {syncingProductIds.has(item.id) ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <RefreshCw className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                </>
                               )}
                               {(item.status === "ended" || item.status === "deleted") && (
                                 <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
@@ -1884,6 +1973,20 @@ export default function EbayChannelPage() {
                               {item.status === "listed" && (
                                 <>
                                   <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 w-6 p-0"
+                                    disabled={syncingProductIds.has(item.id)}
+                                    onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                    title="Sync this listing"
+                                  >
+                                    {syncingProductIds.has(item.id) ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <RefreshCw className="h-3.5 w-3.5" />
+                                    )}
+                                  </Button>
                                   {item.externalListingId && (
                                     <a
                                       href={`https://www.ebay.com/itm/${item.externalListingId}`}
