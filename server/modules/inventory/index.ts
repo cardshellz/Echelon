@@ -39,4 +39,4 @@ export type { InventoryLotService } from "./lots.service";
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary } from "./atp.service";
 export type { BreakResult, AssembleResult, ConversionPreview } from "./break-assembly.service";
 export type { SyncResult as InventorySourceSyncResult } from "./source.service";
-export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "./cycle-count.service";
+export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "./cycle-count.service";

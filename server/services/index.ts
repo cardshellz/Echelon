@@ -274,7 +274,7 @@ export type { SyncResult as InventorySourceSyncResult } from "../modules/invento
 export type { SLAAlert, SLASummary } from "../modules/orders/sla-monitor.service";
 export type { PickingService, PickItemResult, PickInventoryContext, CaseBreakResult, BinCountResult } from "../modules/orders/picking.service";
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/combining.service";
-export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult } from "../modules/inventory/cycle-count.service";
+export type { CycleCountService, CycleCountError, ApproveResult, BulkApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory/cycle-count.service";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/operations-dashboard.service";
 export type { ReceivingService, ReceivingError } from "../modules/procurement/receiving.service";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
