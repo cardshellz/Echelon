@@ -368,7 +368,7 @@ export class InventoryCoreService {
     });
 
     if (result) {
-      this.notifyChange(params.productVariantId, "pick");
+      // pick does not change ATP — reserved_qty already accounted for it
     }
     return result;
   }
@@ -479,7 +479,7 @@ export class InventoryCoreService {
       });
     });
 
-    this.notifyChange(params.productVariantId, "shipment");
+    // shipment does not change ATP — reserved_qty already accounted for it
   }
 
   // ---------------------------------------------------------------------------
@@ -888,7 +888,7 @@ export class InventoryCoreService {
       });
     });
 
-    this.notifyChange(params.productVariantId, "transfer");
+    // transfer does not change ATP — same fungible pool
   }
 
   /**
@@ -1022,10 +1022,7 @@ export class InventoryCoreService {
       }
     });
 
-    this.notifyChange(params.sourceVariantId, "sku_correction_transfer");
-    if (params.targetVariantId !== params.sourceVariantId) {
-      this.notifyChange(params.targetVariantId, "sku_correction_transfer");
-    }
+    // sku correction transfer does not change ATP — same fungible pool
   }
 
   // ---------------------------------------------------------------------------

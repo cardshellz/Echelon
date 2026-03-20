@@ -230,8 +230,7 @@ class BreakAssemblyService {
     });
 
     // Notify channel sync — both source and target variant ATP changed
-    this.notifyChange(sourceVariantId, "break");
-    this.notifyChange(targetVariantId, "break");
+    // break does not change ATP — same fungible pool
 
     return { sourceQtyRemoved: sourceQty, targetQtyAdded: targetQty, baseUnitsConverted: baseUnits, batchId };
   }
@@ -360,8 +359,7 @@ class BreakAssemblyService {
     });
 
     // Notify channel sync — both source and target variant ATP changed
-    this.notifyChange(sourceVariantId, "assemble");
-    this.notifyChange(targetVariantId, "assemble");
+    // assemble does not change ATP — same fungible pool
 
     return {
       sourceQtyRemoved: sourceQtyNeeded,

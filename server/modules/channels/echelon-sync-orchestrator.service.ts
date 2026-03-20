@@ -600,10 +600,16 @@ class EchelonSyncOrchestrator {
         });
       }
 
-      // Push to channel (unless dry run)
-      if (!config.dryRun && pushItems.length > 0) {
+      // Filter out items where ATP hasn't changed since last sync
+      const changedItems = pushItems.filter((item) => {
+        const detail = result.details.find((d) => d.variantId === item.variantId);
+        return detail?.previousQty == null || detail.previousQty !== item.allocatedQty;
+      });
+
+      // Push to channel (unless dry run or nothing changed)
+      if (!config.dryRun && changedItems.length > 0) {
         try {
-          const pushResults = await adapter.pushInventory(channelId, pushItems);
+          const pushResults = await adapter.pushInventory(channelId, changedItems);
 
           for (const pr of pushResults) {
             const detail = result.details.find(
