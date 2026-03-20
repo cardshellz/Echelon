@@ -1803,9 +1803,10 @@ class ReplenishmentService {
     }
 
     // --- 2. Fallback: general search (FIFO) ---
-    // For pick locations, require the variant to be assigned there via product_locations.
-    // Reserve/bulk locations have no assignment constraint.
-    const isPick = sourceLocationType === "pick" || sourceLocationType === "forward_pick";
+    // Source lookup: if inventory_levels shows stock at a location of the right type, it's valid.
+    // product_locations assignment is for slotting (where SKU lives permanently), not for
+    // sourcing (where stock physically IS right now). Stock can end up at unassigned locations
+    // via transfers, receives, etc. — if it's there and pickable, it's a valid source.
     const query = this.db
       .select({
         level: inventoryLevels,
@@ -1816,16 +1817,6 @@ class ReplenishmentService {
         warehouseLocations,
         eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
       );
-
-    if (isPick) {
-      (query as any).innerJoin(
-        productLocations,
-        and(
-          eq(productLocations.warehouseLocationId, inventoryLevels.warehouseLocationId),
-          eq(productLocations.productVariantId, inventoryLevels.productVariantId),
-        ),
-      );
-    }
 
     const levelsWithStock = await query
       .where(
