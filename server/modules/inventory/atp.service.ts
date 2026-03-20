@@ -175,6 +175,75 @@ class InventoryAtpService {
     return onHand - reserved - picked - packed;
   }
 
+  // --------------------------------------------------------------------------
+  // 2c. getDirectVariantAtpByWarehouse
+  // --------------------------------------------------------------------------
+
+  /**
+   * Per-variant ATP calculated directly from inventory_levels at a warehouse.
+   *
+   * Unlike getAtpPerVariantByWarehouse (which uses the shared base-unit pool),
+   * this method computes ATP per-variant by summing across ALL inventory_levels
+   * rows at the warehouse for each variant independently.
+   *
+   * Formula per variant:
+   *   ATP = SUM(GREATEST(variant_qty - reserved_qty - picked_qty - packed_qty, 0))
+   *   across all inventory_levels WHERE warehouse_location_id belongs to this warehouse.
+   *
+   * GREATEST(..., 0) is applied per-row so a negative bin doesn't drag down
+   * positive bins.
+   *
+   * Used by the warehouse-aware sync orchestrator for per-location Shopify pushes.
+   *
+   * @param variantIds - The variant IDs to compute ATP for
+   * @param warehouseId - The warehouse to scope to
+   * @returns Map of variantId → ATP units (only includes variants with inventory)
+   */
+  async getDirectVariantAtpByWarehouse(
+    variantIds: number[],
+    warehouseId: number,
+  ): Promise<Map<number, number>> {
+    if (variantIds.length === 0) return new Map();
+
+    const rows = await this.db
+      .select({
+        productVariantId: inventoryLevels.productVariantId,
+        atp: sql<number>`SUM(GREATEST(
+          ${inventoryLevels.variantQty}
+          - ${inventoryLevels.reservedQty}
+          - ${inventoryLevels.pickedQty}
+          - COALESCE(${inventoryLevels.packedQty}, 0),
+          0
+        ))`,
+      })
+      .from(inventoryLevels)
+      .innerJoin(
+        warehouseLocations,
+        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+      )
+      .where(
+        and(
+          eq(warehouseLocations.warehouseId, warehouseId),
+          inArray(inventoryLevels.productVariantId, variantIds),
+        ),
+      )
+      .groupBy(inventoryLevels.productVariantId);
+
+    const result = new Map<number, number>();
+    for (const row of rows) {
+      result.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
+    }
+
+    // Variants with product_locations but no inventory_levels rows get 0
+    for (const vid of variantIds) {
+      if (!result.has(vid)) {
+        result.set(vid, 0);
+      }
+    }
+
+    return result;
+  }
+
   /**
    * Per-variant ATP scoped to a single warehouse. Returns sellable
    * variant units for each active variant based on that warehouse's

@@ -25,9 +25,11 @@ import {
   channelSyncLog,
   channelConnections,
   channelWarehouseAssignments,
+  channelAllocationRules,
   warehouses,
   warehouseLocations,
   productLocations,
+  inventoryLevels,
   type Product,
   type ProductVariant,
   type Channel,
@@ -84,6 +86,7 @@ type AtpService = {
     atpBase: number;
   }>>;
   getAtpBaseByWarehouse(productId: number, warehouseId: number): Promise<number>;
+  getDirectVariantAtpByWarehouse(variantIds: number[], warehouseId: number): Promise<Map<number, number>>;
 };
 
 export interface SyncOrchestratorConfig {
@@ -344,6 +347,26 @@ class EchelonSyncOrchestrator {
       return result;
     }
 
+    // Load allocation rules for this channel (for applying to per-warehouse ATP)
+    const allRules = await this.db
+      .select()
+      .from(channelAllocationRules)
+      .where(eq(channelAllocationRules.channelId, channelId));
+
+    // Index rules: channel default, product-level, variant-level
+    const channelDefaultRule = allRules.find(
+      (r: any) => r.productId === null && r.productVariantId === null,
+    );
+    const productRule = allRules.find(
+      (r: any) => r.productId === productId && r.productVariantId === null,
+    );
+    const variantRules = new Map<number, any>();
+    for (const r of allRules) {
+      if (r.productVariantId != null) {
+        variantRules.set(r.productVariantId, r);
+      }
+    }
+
     // For each warehouse, determine which variants exist there and push only those
     for (const wh of assignedWarehouses) {
       if (!wh.shopifyLocationId) {
@@ -372,7 +395,7 @@ class EchelonSyncOrchestrator {
           ),
         );
 
-      const existingVariantIds = new Set(variantIdsAtWarehouse.map((r: any) => Number(r.variantId)));
+      const existingVariantIds = new Set<number>(variantIdsAtWarehouse.map((r: any) => Number(r.variantId)));
 
       if (existingVariantIds.size === 0) {
         console.log(
@@ -389,16 +412,53 @@ class EchelonSyncOrchestrator {
 
       if (warehouseAllocations.length === 0) continue;
 
-      // Get per-warehouse ATP if the atpService is available
-      let warehouseAtpMap: Map<number, number> | null = null;
-      if (this.atpService) {
-        const warehouseVariantAtp = await this.atpService.getAtpPerVariantByWarehouse(
-          productId,
+      // Get per-variant ATP from ALL inventory_levels at this warehouse
+      // This includes pick bins, reserve bins, receiving areas — everything
+      const variantIds: number[] = Array.from(existingVariantIds);
+      let warehouseAtpMap: Map<number, number>;
+
+      if (this.atpService?.getDirectVariantAtpByWarehouse) {
+        warehouseAtpMap = await this.atpService.getDirectVariantAtpByWarehouse(
+          variantIds,
           wh.warehouseId,
         );
-        warehouseAtpMap = new Map(
-          warehouseVariantAtp.map((v) => [v.productVariantId, v.atpUnits]),
-        );
+      } else {
+        // Fallback: direct SQL query (same logic as getDirectVariantAtpByWarehouse)
+        const atpRows = await this.db
+          .select({
+            productVariantId: sql<number>`${inventoryLevels.productVariantId}`,
+            atp: sql<number>`SUM(GREATEST(
+              ${inventoryLevels.variantQty}
+              - ${inventoryLevels.reservedQty}
+              - ${inventoryLevels.pickedQty}
+              - COALESCE(${inventoryLevels.packedQty}, 0),
+              0
+            ))`,
+          })
+          .from(inventoryLevels)
+          .innerJoin(
+            warehouseLocations,
+            eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+          )
+          .where(
+            and(
+              eq(warehouseLocations.warehouseId, wh.warehouseId),
+              inArray(inventoryLevels.productVariantId, variantIds),
+            ),
+          )
+          .groupBy(inventoryLevels.productVariantId);
+
+        warehouseAtpMap = new Map<number, number>();
+        for (const row of atpRows) {
+          warehouseAtpMap.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
+        }
+      }
+
+      // Ensure all gated variants have an entry (0 if no inventory_levels rows)
+      for (const vid of variantIds) {
+        if (!warehouseAtpMap.has(vid)) {
+          warehouseAtpMap.set(vid, 0);
+        }
       }
 
       // Build push items for this warehouse
@@ -463,8 +523,38 @@ class EchelonSyncOrchestrator {
           continue;
         }
 
-        // Use per-warehouse ATP if available, otherwise fall back to allocation qty
-        const pushQty = warehouseAtpMap?.get(a.productVariantId) ?? a.allocatedUnits;
+        // Get raw warehouse ATP for this variant (from inventory_levels)
+        const rawAtp = warehouseAtpMap.get(a.productVariantId) ?? 0;
+
+        // Apply allocation rules to per-warehouse ATP
+        // Rule resolution: variant > product > channel default
+        const rule = variantRules.get(a.productVariantId) ?? productRule ?? channelDefaultRule;
+        const mode: string = rule?.mode ?? "mirror";
+        const eligible: boolean = rule?.eligible ?? true;
+
+        let pushQty: number;
+        if (!eligible) {
+          pushQty = 0;
+        } else if (rule?.floorAtp && rawAtp < rule.floorAtp) {
+          pushQty = 0;
+        } else if (mode === "fixed") {
+          pushQty = Math.min(rule?.fixedQty ?? 0, rawAtp);
+        } else if (mode === "share") {
+          const pct = rule?.sharePct ?? 100;
+          pushQty = Math.floor(rawAtp * pct / 100);
+        } else {
+          // mirror (default): push full warehouse ATP
+          pushQty = rawAtp;
+        }
+
+        // Apply ceiling
+        if (rule?.ceilingQty != null && pushQty > rule.ceilingQty) {
+          pushQty = rule.ceilingQty;
+        }
+
+        // Ensure non-negative
+        pushQty = Math.max(0, pushQty);
+
         const previousQty = feed?.lastSyncedQty ?? null;
 
         // Build with warehouseBreakdown for the adapter
@@ -486,7 +576,7 @@ class EchelonSyncOrchestrator {
           `variant=${a.sku} channel=${channel.name} ` +
           `warehouse=${wh.warehouseName}(${wh.warehouseId}) ` +
           `location=${wh.shopifyLocationId} ` +
-          `qty=${pushQty} previous=${previousQty ?? "unknown"} ` +
+          `rawAtp=${rawAtp} pushQty=${pushQty} previous=${previousQty ?? "unknown"} ` +
           `method=${a.method}`,
         );
 
