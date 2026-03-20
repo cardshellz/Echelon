@@ -169,6 +169,18 @@ export function registerSettingsRoutes(app: Express) {
     }
   });
 
+  // Reconciliation preview — shows real-time variance, transfer suggestions, stale warnings
+  app.get("/api/cycle-counts/:id/reconciliation-preview", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cycleCount: ccService } = req.app.locals.services;
+      res.json(await ccService.getReconciliationPreview(parseInt(req.params.id)));
+    } catch (error: any) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      console.error("Error generating reconciliation preview:", error);
+      res.status(500).json({ error: "Failed to generate reconciliation preview" });
+    }
+  });
+
   app.post("/api/cycle-counts", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cycleCount: ccService } = req.app.locals.services;

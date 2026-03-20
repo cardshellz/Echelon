@@ -415,7 +415,17 @@ export class InventoryCoreService {
 
       // Determine how much comes from picked vs on-hand
       const fromPicked = Math.min(level.pickedQty, params.qty);
-      const fromOnHand = params.qty - fromPicked;
+      let fromOnHand = params.qty - fromPicked;
+
+      // CLAMP: never take more from on-hand than available — prevents negative inventory
+      if (fromOnHand > 0 && fromOnHand > level.variantQty) {
+        console.warn(
+          `[InventoryCore] recordShipment CLAMP: variant=${params.productVariantId} loc=${params.warehouseLocationId} ` +
+          `order=${params.orderId} — requested ${fromOnHand} from on-hand but only ${level.variantQty} available. ` +
+          `Clamping to ${level.variantQty} to prevent negative inventory.`
+        );
+        fromOnHand = Math.max(0, level.variantQty);
+      }
 
       if (fromPicked > 0) {
         await svc.adjustLevel(level.id, {

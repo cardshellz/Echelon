@@ -36,9 +36,9 @@ type InventoryCore = {
     warehouseLocationId: number;
     qtyDelta: number;
     reason: string;
-    cycleCountId: number;
+    cycleCountId?: number;
     userId: string | undefined;
-    allowNegative: boolean;
+    allowNegative?: boolean;
   }): Promise<any>;
   transfer(params: {
     productVariantId: number;
@@ -48,6 +48,7 @@ type InventoryCore = {
     userId?: string;
     notes?: string;
   }): Promise<void>;
+  getLevel(productVariantId: number, warehouseLocationId: number): Promise<{ variantQty: number; reservedQty: number } | null>;
 };
 
 type ChannelSync = {
@@ -131,7 +132,50 @@ export interface BulkApproveResult {
   approved: number;
   skipped: number;
   adjustmentsMade: number;
+  transfersMade: number;
   errors?: string[];
+  negativeGuarded?: string[];
+}
+
+// --- Reconciliation preview types ---
+
+export interface TransferSuggestion {
+  productVariantId: number;
+  sku: string;
+  fromLocationId: number;
+  fromLocationCode: string;
+  toLocationId: number;
+  toLocationCode: string;
+  qty: number;
+}
+
+export interface ReconciliationItem {
+  itemId: number;
+  warehouseLocationId: number;
+  locationCode: string;
+  productVariantId: number | null;
+  sku: string | null;
+  countedQty: number;
+  systemQtyCurrent: number;         // LIVE current qty (not stale snapshot)
+  systemQtyAtCount: number;         // original expected qty at count time
+  realTimeVariance: number;         // countedQty - systemQtyCurrent
+  staleVariance: number;            // countedQty - systemQtyAtCount (old method)
+  isStale: boolean;                 // inventory changed since count
+  staleTransactions: { type: string; qty: number; at: string }[];
+  transferQty: number;              // portion matched to a transfer
+  transferPartner: string | null;   // location code of transfer partner
+  netAdjustment: number;            // realTimeVariance - transferQty effect
+  wouldGoNegative: boolean;         // applying netAdjustment would create negative
+  status: string;
+  action: "apply" | "skip" | "recount" | "transfer"; // recommended action
+}
+
+export interface ReconciliationPreview {
+  items: ReconciliationItem[];
+  transfers: TransferSuggestion[];
+  staleCount: number;
+  negativeGuardCount: number;
+  totalAdjustments: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,38 +302,83 @@ class CycleCountService {
 
   /**
    * Core approval logic for a single item. Shared by approveVariance and bulkApprove.
-   * Returns the adjustment info if inventory was changed.
+   * 
+   * CRITICAL FIX: Uses REAL-TIME inventory qty (not stale snapshot) to compute variance.
+   * NEVER uses allowNegative: true. If applying the adjustment would go negative,
+   * the item is flagged for investigation instead.
+   * 
+   * Returns the adjustment info if inventory was changed, or null if skipped/guarded.
    */
   private async approveItemCore(
     item: CycleCountItem,
     reasonCode: string,
     notes: string | undefined,
     approvedBy: string | undefined,
-  ): Promise<ApprovalAdjustment | null> {
+  ): Promise<{ adjustment: ApprovalAdjustment | null; negativeGuarded: boolean }> {
     let adjustment: ApprovalAdjustment | null = null;
+    let negativeGuarded = false;
 
-    // Apply inventory adjustment if item has a variant and non-zero variance
-    if (item.productVariantId && item.varianceQty !== null && item.varianceQty !== 0) {
-      console.log(`[CYCLE COUNT] Adjusting inventory: variant=${item.productVariantId} loc=${item.warehouseLocationId} delta=${item.varianceQty} sku=${item.expectedSku || item.countedSku}`);
-      await this.inventoryCore.adjustInventory({
-        productVariantId: item.productVariantId,
-        warehouseLocationId: item.warehouseLocationId,
-        qtyDelta: item.varianceQty,
-        reason: `Cycle count adjustment: ${item.expectedSku || item.countedSku}. ${notes || ''}`.trim(),
-        cycleCountId: item.cycleCountId,
-        userId: approvedBy,
-        allowNegative: true,
-      });
-      console.log(`[CYCLE COUNT] Adjustment applied successfully`);
-      adjustment = {
-        sku: item.expectedSku || item.countedSku,
-        type: item.mismatchType || item.varianceType,
-        qtyChange: item.varianceQty,
-        locationId: item.warehouseLocationId,
-      };
+    // Apply inventory adjustment if item has a variant and counted qty
+    if (item.productVariantId && item.countedQty !== null) {
+      // READ CURRENT (real-time) inventory — NOT the stale snapshot
+      const currentLevelResult = await this.db.execute(sql`
+        SELECT COALESCE(variant_qty, 0) as variant_qty
+        FROM inventory_levels
+        WHERE product_variant_id = ${item.productVariantId}
+          AND warehouse_location_id = ${item.warehouseLocationId}
+      `);
+      const currentQty = (currentLevelResult.rows[0] as any)?.variant_qty ?? 0;
+
+      // Compute REAL-TIME variance
+      const realTimeVariance = item.countedQty - currentQty;
+
+      if (realTimeVariance !== 0) {
+        // NEGATIVE GUARD: never allow adjustment that would result in negative inventory
+        if (realTimeVariance < 0 && currentQty + realTimeVariance < 0) {
+          console.warn(
+            `[CYCLE COUNT] NEGATIVE GUARD: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+            `current=${currentQty} delta=${realTimeVariance} would result in ${currentQty + realTimeVariance}. ` +
+            `Flagging for investigation instead of applying.`
+          );
+          negativeGuarded = true;
+          await this.storage.updateCycleCountItem(item.id, {
+            status: "investigate",
+            varianceNotes: `${item.varianceNotes || ''}\n[NEGATIVE GUARD] Adjustment of ${realTimeVariance} would result in negative inventory (current: ${currentQty}). Flagged for manual investigation.`.trim(),
+          });
+          return { adjustment: null, negativeGuarded: true };
+        }
+
+        console.log(
+          `[CYCLE COUNT] Real-time adjustment: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+          `staleExpected=${item.expectedQty} current=${currentQty} counted=${item.countedQty} ` +
+          `staleVariance=${item.varianceQty} realTimeVariance=${realTimeVariance} sku=${item.expectedSku || item.countedSku}`
+        );
+
+        await this.inventoryCore.adjustInventory({
+          productVariantId: item.productVariantId,
+          warehouseLocationId: item.warehouseLocationId,
+          qtyDelta: realTimeVariance,
+          reason: `Cycle count adjustment (real-time): ${item.expectedSku || item.countedSku}. Current=${currentQty}, counted=${item.countedQty}. ${notes || ''}`.trim(),
+          cycleCountId: item.cycleCountId,
+          userId: approvedBy,
+          // NEVER allowNegative — the guard above already prevents it
+        });
+        console.log(`[CYCLE COUNT] Real-time adjustment applied successfully`);
+        adjustment = {
+          sku: item.expectedSku || item.countedSku,
+          type: item.mismatchType || item.varianceType,
+          qtyChange: realTimeVariance,
+          locationId: item.warehouseLocationId,
+        };
+      } else {
+        console.log(
+          `[CYCLE COUNT] No adjustment needed: variant=${item.productVariantId} loc=${item.warehouseLocationId} ` +
+          `current=${currentQty} counted=${item.countedQty} (real-time variance=0)`
+        );
+      }
 
       // After negative adjustments, check for orphaned reservations and re-allocate
-      if (item.varianceQty < 0 && this.reservation) {
+      if (realTimeVariance < 0 && this.reservation) {
         try {
           const realloc = await this.reservation.reallocateOrphaned(
             item.productVariantId,
@@ -311,7 +400,7 @@ class CycleCountService {
         }
       }
     } else {
-      console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} varianceQty=${item.varianceQty} (type: ${typeof item.varianceQty}) sku=${item.expectedSku || item.countedSku}`);
+      console.warn(`[CYCLE COUNT] SKIPPED adjustment for item ${item.id}: productVariantId=${item.productVariantId} countedQty=${item.countedQty} sku=${item.expectedSku || item.countedSku}`);
     }
 
     // Mark as approved
@@ -323,7 +412,7 @@ class CycleCountService {
     });
     await this.reconcileBinAssignment(item);
 
-    return adjustment;
+    return { adjustment, negativeGuarded };
   }
 
   /**
@@ -756,32 +845,65 @@ class CycleCountService {
       const requiresApproval = absVariance > approvalThreshold;
 
       if (withinTolerance && varianceType && item.productVariantId) {
-        // Auto-approve: apply adjustment immediately
-        await this.inventoryCore.adjustInventory({
-          productVariantId: item.productVariantId,
-          warehouseLocationId: item.warehouseLocationId,
-          qtyDelta: varianceQty,
-          reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}`,
-          cycleCountId: item.cycleCountId,
-          userId,
-          allowNegative: true,
-        });
+        // Auto-approve: apply adjustment immediately using CURRENT qty
+        // Read current system qty to compute real-time variance
+        const autoResult = await this.db.execute(sql`
+          SELECT COALESCE(variant_qty, 0) as variant_qty
+          FROM inventory_levels
+          WHERE product_variant_id = ${item.productVariantId}
+            AND warehouse_location_id = ${item.warehouseLocationId}
+        `);
+        const autoCurrentQty = (autoResult.rows[0] as any)?.variant_qty ?? 0;
+        const autoRealTimeVariance = countedQty - autoCurrentQty;
+        
+        // Only apply if real-time variance won't go negative
+        if (autoRealTimeVariance < 0 && autoCurrentQty + autoRealTimeVariance < 0) {
+          console.warn(`[CYCLE COUNT] Auto-approve blocked by negative guard: current=${autoCurrentQty} variance=${autoRealTimeVariance}`);
+          // Fall through to regular variance status instead of auto-approving
+        } else if (autoRealTimeVariance !== 0) {
+          await this.inventoryCore.adjustInventory({
+            productVariantId: item.productVariantId,
+            warehouseLocationId: item.warehouseLocationId,
+            qtyDelta: autoRealTimeVariance,
+            reason: `Cycle count auto-approved (within tolerance ±${autoApproveTolerance}): ${item.expectedSku || countedSku}. Current=${autoCurrentQty}, counted=${countedQty}`,
+            cycleCountId: item.cycleCountId,
+            userId,
+            // NEVER allowNegative — guard above prevents it
+          });
 
-        await this.storage.updateCycleCountItem(itemId, {
-          countedSku: countedSku || null,
-          countedQty,
-          varianceQty,
-          varianceType,
-          varianceNotes: notes || null,
-          status: "approved",
-          varianceReason: "within_tolerance",
-          requiresApproval: 0,
-          approvedBy: userId,
-          approvedAt: new Date(),
-          countedBy: userId,
-          countedAt: new Date(),
-        });
-        await this.reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
+          await this.storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: "approved",
+            varianceReason: "within_tolerance",
+            requiresApproval: 0,
+            approvedBy: userId,
+            approvedAt: new Date(),
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+          await this.reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
+        } else {
+          // Real-time variance is 0 — auto-resolve
+          await this.storage.updateCycleCountItem(itemId, {
+            countedSku: countedSku || null,
+            countedQty,
+            varianceQty,
+            varianceType,
+            varianceNotes: notes || null,
+            status: "approved",
+            varianceReason: "within_tolerance",
+            requiresApproval: 0,
+            approvedBy: userId,
+            approvedAt: new Date(),
+            countedBy: userId,
+            countedAt: new Date(),
+          });
+          await this.reconcileBinAssignment({ ...item, varianceType, mismatchType: item.mismatchType } as CycleCountItem);
+        }
       } else {
         await this.storage.updateCycleCountItem(itemId, {
           countedSku: countedSku || null,
@@ -1112,35 +1234,37 @@ class CycleCountService {
     const { reasonCode, notes, approvedBy } = params;
 
     // Approve the primary item
-    const adj = await this.approveItemCore(item, reasonCode, notes, approvedBy);
+    const { adjustment: adj, negativeGuarded: ng } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
     if (adj) adjustmentsMade.push(adj);
 
     let linkedItemsApproved = 0;
 
     // Forward link: approve related item
-    if (item.relatedItemId) {
+    if (item.relatedItemId && !ng) {
       const relatedItem = await this.storage.getCycleCountItemById(item.relatedItemId);
       if (relatedItem && relatedItem.status !== "approved") {
-        const relAdj = await this.approveItemCore(relatedItem, reasonCode, notes, approvedBy);
+        const { adjustment: relAdj } = await this.approveItemCore(relatedItem, reasonCode, notes, approvedBy);
         if (relAdj) adjustmentsMade.push(relAdj);
         linkedItemsApproved++;
       }
     }
 
     // Reverse link: approve any item pointing TO this one
-    const reverseResult = await this.db.execute(sql`
-      SELECT id FROM cycle_count_items
-      WHERE related_item_id = ${itemId}
-      AND status != 'approved'
-      LIMIT 1
-    `);
+    if (!ng) {
+      const reverseResult = await this.db.execute(sql`
+        SELECT id FROM cycle_count_items
+        WHERE related_item_id = ${itemId}
+        AND status != 'approved'
+        LIMIT 1
+      `);
 
-    if (reverseResult.rows.length > 0) {
-      const reverseItem = await this.storage.getCycleCountItemById(reverseResult.rows[0].id);
-      if (reverseItem && reverseItem.status !== "approved") {
-        const revAdj = await this.approveItemCore(reverseItem, reasonCode, notes, approvedBy);
-        if (revAdj) adjustmentsMade.push(revAdj);
-        linkedItemsApproved++;
+      if (reverseResult.rows.length > 0) {
+        const reverseItem = await this.storage.getCycleCountItemById(reverseResult.rows[0].id);
+        if (reverseItem && reverseItem.status !== "approved") {
+          const { adjustment: revAdj } = await this.approveItemCore(reverseItem, reasonCode, notes, approvedBy);
+          if (revAdj) adjustmentsMade.push(revAdj);
+          linkedItemsApproved++;
+        }
       }
     }
 
@@ -1171,10 +1295,46 @@ class CycleCountService {
     let approved = 0;
     let skipped = 0;
     let adjustmentCount = 0;
+    let transferCount = 0;
     const errors: string[] = [];
+    const negativeGuardedItems: string[] = [];
     const processedIds = new Set<number>();
     const allAdjustments: ApprovalAdjustment[] = [];
 
+    // --- Smart Transfer Detection ---
+    // Before applying individual variances, detect likely transfers
+    const allItems = await this.storage.getCycleCountItems(cycleCountId);
+    const itemsToApprove = allItems.filter(i => itemIds.includes(i.id));
+    const transferSuggestions = await this.detectTransfers(itemsToApprove);
+
+    // Apply detected transfers first
+    for (const transfer of transferSuggestions) {
+      try {
+        const fromLoc = await this.storage.getWarehouseLocationById(transfer.fromLocationId);
+        const toLoc = await this.storage.getWarehouseLocationById(transfer.toLocationId);
+        
+        // Verify source has enough qty for transfer
+        const sourceLevel = await this.inventoryCore.getLevel(transfer.productVariantId, transfer.fromLocationId);
+        if (sourceLevel && sourceLevel.variantQty >= transfer.qty) {
+          await this.inventoryCore.transfer({
+            productVariantId: transfer.productVariantId,
+            fromLocationId: transfer.fromLocationId,
+            toLocationId: transfer.toLocationId,
+            qty: transfer.qty,
+            userId: approvedBy,
+            notes: `Cycle count #${cycleCountId} auto-detected transfer: ${transfer.sku} x ${transfer.qty} from ${fromLoc?.code || transfer.fromLocationId} to ${toLoc?.code || transfer.toLocationId}`,
+          });
+          transferCount++;
+          console.log(`[CYCLE COUNT] Auto-transfer: ${transfer.sku} x ${transfer.qty} from ${fromLoc?.code} to ${toLoc?.code}`);
+        } else {
+          console.warn(`[CYCLE COUNT] Transfer skipped — insufficient qty at source: ${transfer.sku} needs ${transfer.qty}, has ${sourceLevel?.variantQty ?? 0}`);
+        }
+      } catch (e: any) {
+        console.warn(`[CYCLE COUNT] Transfer failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    // Now approve individual items with REAL-TIME variance
     for (const rawId of itemIds) {
       const itemId = parseInt(String(rawId));
       if (isNaN(itemId) || processedIds.has(itemId)) continue;
@@ -1186,33 +1346,39 @@ class CycleCountService {
         if (item.status === "approved" || item.status === "adjusted") { skipped++; continue; }
         if (!item.varianceType) { skipped++; continue; }
 
-        // Approve primary item
+        // Approve primary item (uses real-time qty)
         console.log(`[CYCLE COUNT] bulkApprove item ${itemId}: sku=${item.expectedSku || item.countedSku} varianceQty=${item.varianceQty} varianceType=${item.varianceType} pvId=${item.productVariantId}`);
-        const adj = await this.approveItemCore(item, reasonCode, notes, approvedBy);
+        const { adjustment: adj, negativeGuarded } = await this.approveItemCore(item, reasonCode, notes, approvedBy);
         if (adj) { allAdjustments.push(adj); adjustmentCount++; }
-        approved++;
-
-        // Handle linked items (mismatch pairs)
-        const linkedIds: number[] = [];
-        if (item.relatedItemId) linkedIds.push(item.relatedItemId);
-        const reverseResult = await this.db.execute(sql`
-          SELECT id FROM cycle_count_items
-          WHERE related_item_id = ${itemId} AND status != 'approved'
-        `);
-        for (const row of reverseResult.rows) {
-          linkedIds.push(row.id);
+        if (negativeGuarded) {
+          negativeGuardedItems.push(`${item.expectedSku || item.countedSku} @ loc:${item.warehouseLocationId}`);
+        } else {
+          approved++;
         }
 
-        for (const linkedId of linkedIds) {
-          if (processedIds.has(linkedId)) continue;
-          processedIds.add(linkedId);
+        // Handle linked items (mismatch pairs)
+        if (!negativeGuarded) {
+          const linkedIds: number[] = [];
+          if (item.relatedItemId) linkedIds.push(item.relatedItemId);
+          const reverseResult = await this.db.execute(sql`
+            SELECT id FROM cycle_count_items
+            WHERE related_item_id = ${itemId} AND status != 'approved'
+          `);
+          for (const row of reverseResult.rows) {
+            linkedIds.push(row.id);
+          }
 
-          const linked = await this.storage.getCycleCountItemById(linkedId);
-          if (!linked || linked.status === "approved") continue;
+          for (const linkedId of linkedIds) {
+            if (processedIds.has(linkedId)) continue;
+            processedIds.add(linkedId);
 
-          const linkAdj = await this.approveItemCore(linked, reasonCode, notes, approvedBy);
-          if (linkAdj) { allAdjustments.push(linkAdj); adjustmentCount++; }
-          approved++;
+            const linked = await this.storage.getCycleCountItemById(linkedId);
+            if (!linked || linked.status === "approved") continue;
+
+            const { adjustment: linkAdj } = await this.approveItemCore(linked, reasonCode, notes, approvedBy);
+            if (linkAdj) { allAdjustments.push(linkAdj); adjustmentCount++; }
+            approved++;
+          }
         }
       } catch (e: any) {
         errors.push(`Item ${itemId}: ${e.message}`);
@@ -1220,8 +1386,8 @@ class CycleCountService {
     }
 
     // Update cycle count approved count
-    const allItems = await this.storage.getCycleCountItems(cycleCountId);
-    const approvedCount = allItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
+    const finalItems = await this.storage.getCycleCountItems(cycleCountId);
+    const approvedCount = finalItems.filter(i => i.status === "approved" || i.status === "adjusted" || i.status === "resolved").length;
     await this.storage.updateCycleCount(cycleCountId, { approvedVariances: approvedCount });
 
     // BUG FIX: Fire channel sync + replen for ALL adjustments (was missing channelSync)
@@ -1232,7 +1398,9 @@ class CycleCountService {
       approved,
       skipped,
       adjustmentsMade: adjustmentCount,
+      transfersMade: transferCount,
       errors: errors.length > 0 ? errors : undefined,
+      negativeGuarded: negativeGuardedItems.length > 0 ? negativeGuardedItems : undefined,
     };
   }
 
@@ -1337,6 +1505,240 @@ class CycleCountService {
       variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
       alreadyExisted: false,
       siblingItemsLinked: siblings.length,
+    };
+  }
+
+  /**
+   * Detect likely transfers: same SKU lost at one location, gained at another.
+   * Groups by productVariantId, matches losses to gains (largest match first).
+   */
+  private async detectTransfers(items: CycleCountItem[]): Promise<TransferSuggestion[]> {
+    const transfers: TransferSuggestion[] = [];
+    
+    // Group by productVariantId
+    const byVariant = new Map<number, CycleCountItem[]>();
+    for (const item of items) {
+      if (!item.productVariantId || item.countedQty === null) continue;
+      const arr = byVariant.get(item.productVariantId) || [];
+      arr.push(item);
+      byVariant.set(item.productVariantId, arr);
+    }
+
+    for (const [variantId, variantItems] of byVariant) {
+      if (variantItems.length < 2) continue;
+
+      // Get current qtys for real-time variance
+      const withCurrentQty = await Promise.all(variantItems.map(async (item) => {
+        const result = await this.db.execute(sql`
+          SELECT COALESCE(variant_qty, 0) as variant_qty
+          FROM inventory_levels
+          WHERE product_variant_id = ${variantId}
+            AND warehouse_location_id = ${item.warehouseLocationId}
+        `);
+        const currentQty = (result.rows[0] as any)?.variant_qty ?? 0;
+        const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+        return {
+          item,
+          currentQty,
+          realTimeVariance: (item.countedQty ?? 0) - currentQty,
+          locationCode: loc?.code || String(item.warehouseLocationId),
+        };
+      }));
+
+      // Split into losses (negative variance) and gains (positive variance)
+      const losses = withCurrentQty.filter(w => w.realTimeVariance < 0)
+        .sort((a, b) => a.realTimeVariance - b.realTimeVariance); // most negative first
+      const gains = withCurrentQty.filter(w => w.realTimeVariance > 0)
+        .sort((a, b) => b.realTimeVariance - a.realTimeVariance); // most positive first
+
+      if (losses.length === 0 || gains.length === 0) continue;
+
+      // Match losses to gains
+      const remainingLoss = losses.map(l => ({ ...l, remaining: Math.abs(l.realTimeVariance) }));
+      const remainingGain = gains.map(g => ({ ...g, remaining: g.realTimeVariance }));
+
+      for (const loss of remainingLoss) {
+        for (const gain of remainingGain) {
+          if (loss.remaining <= 0 || gain.remaining <= 0) continue;
+          const qty = Math.min(loss.remaining, gain.remaining);
+          const sku = loss.item.expectedSku || loss.item.countedSku || "Unknown";
+          transfers.push({
+            productVariantId: variantId,
+            sku,
+            fromLocationId: loss.item.warehouseLocationId,
+            fromLocationCode: loss.locationCode,
+            toLocationId: gain.item.warehouseLocationId,
+            toLocationCode: gain.locationCode,
+            qty,
+          });
+          loss.remaining -= qty;
+          gain.remaining -= qty;
+        }
+      }
+    }
+
+    return transfers;
+  }
+
+  /**
+   * Generate a reconciliation preview for a cycle count.
+   * Shows real-time variance, stale count warnings, and transfer suggestions.
+   * Does NOT modify any data — purely read-only.
+   */
+  async getReconciliationPreview(id: number): Promise<ReconciliationPreview> {
+    const cycleCount = await this.storage.getCycleCountById(id);
+    if (!cycleCount) throw new CycleCountError("Cycle count not found", 404);
+
+    const items = await this.storage.getCycleCountItems(id);
+    const countedItems = items.filter(i => i.countedQty !== null && i.productVariantId);
+
+    // Detect transfers
+    const transfers = await this.detectTransfers(countedItems);
+    
+    // Build transfer map: how much of each item's variance is explained by transfers
+    const transferMap = new Map<string, { qty: number; partner: string }>();
+    for (const t of transfers) {
+      // Source (loss side): transfer reduces the negative variance
+      const fromKey = `${t.productVariantId}:${t.fromLocationId}`;
+      const existing = transferMap.get(fromKey);
+      transferMap.set(fromKey, {
+        qty: (existing?.qty ?? 0) + t.qty,
+        partner: t.toLocationCode,
+      });
+      // Dest (gain side): transfer explains the positive variance
+      const toKey = `${t.productVariantId}:${t.toLocationId}`;
+      const existingTo = transferMap.get(toKey);
+      transferMap.set(toKey, {
+        qty: (existingTo?.qty ?? 0) + t.qty,
+        partner: t.fromLocationCode,
+      });
+    }
+
+    const reconciliationItems: ReconciliationItem[] = [];
+    let staleCount = 0;
+    let negativeGuardCount = 0;
+
+    for (const item of items) {
+      const loc = await this.storage.getWarehouseLocationById(item.warehouseLocationId);
+      const locationCode = loc?.code || String(item.warehouseLocationId);
+
+      if (!item.productVariantId || item.countedQty === null) {
+        // No variant or not yet counted — include with current info
+        reconciliationItems.push({
+          itemId: item.id,
+          warehouseLocationId: item.warehouseLocationId,
+          locationCode,
+          productVariantId: item.productVariantId,
+          sku: item.expectedSku || item.countedSku,
+          countedQty: item.countedQty ?? 0,
+          systemQtyCurrent: item.expectedQty,
+          systemQtyAtCount: item.expectedQty,
+          realTimeVariance: 0,
+          staleVariance: item.varianceQty ?? 0,
+          isStale: false,
+          staleTransactions: [],
+          transferQty: 0,
+          transferPartner: null,
+          netAdjustment: 0,
+          wouldGoNegative: false,
+          status: item.status,
+          action: item.status === "pending" ? "skip" : "apply",
+        });
+        continue;
+      }
+
+      // Get CURRENT system qty
+      const currentResult = await this.db.execute(sql`
+        SELECT COALESCE(variant_qty, 0) as variant_qty
+        FROM inventory_levels
+        WHERE product_variant_id = ${item.productVariantId}
+          AND warehouse_location_id = ${item.warehouseLocationId}
+      `);
+      const systemQtyCurrent = (currentResult.rows[0] as any)?.variant_qty ?? 0;
+      const realTimeVariance = (item.countedQty ?? 0) - systemQtyCurrent;
+      const staleVariance = item.varianceQty ?? 0;
+
+      // Detect stale: check for transactions after count was recorded
+      const countedAt = item.countedAt || cycleCount.startedAt;
+      let staleTransactions: { type: string; qty: number; at: string }[] = [];
+      let isStale = false;
+
+      if (countedAt) {
+        const txResult = await this.db.execute(sql`
+          SELECT transaction_type, variant_qty_delta, created_at
+          FROM inventory_transactions
+          WHERE product_variant_id = ${item.productVariantId}
+            AND (from_location_id = ${item.warehouseLocationId} OR to_location_id = ${item.warehouseLocationId})
+            AND created_at > ${countedAt}
+            AND cycle_count_id IS DISTINCT FROM ${id}
+          ORDER BY created_at ASC
+          LIMIT 10
+        `);
+        staleTransactions = txResult.rows.map((r: any) => ({
+          type: r.transaction_type,
+          qty: r.variant_qty_delta,
+          at: r.created_at,
+        }));
+        isStale = staleTransactions.length > 0;
+        if (isStale) staleCount++;
+      }
+
+      // Transfer info
+      const transferKey = `${item.productVariantId}:${item.warehouseLocationId}`;
+      const transferInfo = transferMap.get(transferKey);
+      const transferQty = transferInfo?.qty ?? 0;
+      const transferPartner = transferInfo?.partner ?? null;
+
+      // Net adjustment = real-time variance adjusted for transfer
+      // If this item had a loss of -47 and transfer explains 34 of it, net = -13
+      let netAdjustment = realTimeVariance;
+      if (realTimeVariance < 0 && transferQty > 0) {
+        netAdjustment = realTimeVariance + transferQty; // e.g., -47 + 34 = -13
+      } else if (realTimeVariance > 0 && transferQty > 0) {
+        netAdjustment = realTimeVariance - transferQty; // e.g., +34 - 34 = 0
+      }
+
+      const wouldGoNegative = netAdjustment < 0 && systemQtyCurrent + netAdjustment < 0;
+      if (wouldGoNegative) negativeGuardCount++;
+
+      // Determine recommended action
+      let action: ReconciliationItem["action"] = "apply";
+      if (item.status === "approved" || item.status === "resolved") {
+        action = "skip";
+      } else if (isStale) {
+        action = "recount";
+      } else if (wouldGoNegative) {
+        action = "skip";
+      }
+
+      reconciliationItems.push({
+        itemId: item.id,
+        warehouseLocationId: item.warehouseLocationId,
+        locationCode,
+        productVariantId: item.productVariantId,
+        sku: item.expectedSku || item.countedSku,
+        countedQty: item.countedQty ?? 0,
+        systemQtyCurrent,
+        systemQtyAtCount: item.expectedQty,
+        realTimeVariance,
+        staleVariance,
+        isStale,
+        staleTransactions,
+        transferQty,
+        transferPartner,
+        netAdjustment,
+        wouldGoNegative,
+        status: item.status,
+        action,
+      });
+    }
+
+    return {
+      items: reconciliationItems,
+      transfers,
+      staleCount,
+      negativeGuardCount,
+      totalAdjustments: reconciliationItems.filter(i => i.action === "apply" && i.realTimeVariance !== 0).length,
     };
   }
 

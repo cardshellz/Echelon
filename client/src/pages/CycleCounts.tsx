@@ -23,6 +23,9 @@ import {
   Eye,
   ListChecks,
   RefreshCw,
+  ArrowLeftRight,
+  ShieldAlert,
+  Clock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -104,6 +107,45 @@ interface CycleCountItem {
 
 interface CycleCountDetail extends CycleCount {
   items: CycleCountItem[];
+}
+
+interface TransferSuggestion {
+  productVariantId: number;
+  sku: string;
+  fromLocationId: number;
+  fromLocationCode: string;
+  toLocationId: number;
+  toLocationCode: string;
+  qty: number;
+}
+
+interface ReconciliationItem {
+  itemId: number;
+  warehouseLocationId: number;
+  locationCode: string;
+  productVariantId: number | null;
+  sku: string | null;
+  countedQty: number;
+  systemQtyCurrent: number;
+  systemQtyAtCount: number;
+  realTimeVariance: number;
+  staleVariance: number;
+  isStale: boolean;
+  staleTransactions: { type: string; qty: number; at: string }[];
+  transferQty: number;
+  transferPartner: string | null;
+  netAdjustment: number;
+  wouldGoNegative: boolean;
+  status: string;
+  action: "apply" | "skip" | "recount" | "transfer";
+}
+
+interface ReconciliationPreview {
+  items: ReconciliationItem[];
+  transfers: TransferSuggestion[];
+  staleCount: number;
+  negativeGuardCount: number;
+  totalAdjustments: number;
 }
 
 interface Warehouse {
@@ -196,6 +238,18 @@ export default function CycleCounts() {
       return res.json();
     },
     enabled: !!selectedCount && !!cycleCountDetail && cycleCountDetail.varianceCount > 0,
+  });
+
+  // Reconciliation preview — shows real-time variance, transfers, stale warnings
+  const { data: reconciliationPreview, refetch: refetchReconciliation } = useQuery<ReconciliationPreview>({
+    queryKey: ["/api/cycle-counts", selectedCount, "reconciliation-preview"],
+    queryFn: async () => {
+      const res = await fetch(`/api/cycle-counts/${selectedCount}/reconciliation-preview`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to fetch reconciliation preview");
+      return res.json();
+    },
+    enabled: !!selectedCount && !!cycleCountDetail && cycleCountDetail.status === "in_progress",
+    staleTime: 10_000, // 10s — refresh on demand
   });
 
   const { data: warehouses = [] } = useQuery<Warehouse[]>({
@@ -382,7 +436,7 @@ export default function CycleCounts() {
     onSuccess: (data) => {
       toast({
         title: "Bulk approve complete",
-        description: `${data.approved} approved, ${data.adjustmentsMade} adjustments made${data.skipped ? `, ${data.skipped} skipped` : ""}`,
+        description: `${data.approved} approved, ${data.adjustmentsMade} adjustments${data.transfersMade ? `, ${data.transfersMade} transfers` : ""}${data.skipped ? `, ${data.skipped} skipped` : ""}${data.negativeGuarded?.length ? `, ${data.negativeGuarded.length} blocked (negative guard)` : ""}`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount] });
       queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts", selectedCount, "variance-summary"] });
@@ -2235,38 +2289,87 @@ export default function CycleCounts() {
                     </div>
                   )}
 
-                  {/* Item details */}
-                  <div className="rounded-md border p-3 space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">SKU</span>
-                      <span className="font-mono font-medium">{selectedItem.expectedSku || selectedItem.countedSku || "(empty)"}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Expected</span>
-                      <span className="font-mono font-bold">{selectedItem.expectedQty}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Counted</span>
-                      <span className="font-mono font-bold">{selectedItem.countedQty ?? "—"}</span>
-                    </div>
-                    {selectedItem.varianceQty !== null && selectedItem.varianceQty !== 0 && (
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">Variance</span>
-                        <span className={`font-mono font-bold ${selectedItem.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                          {selectedItem.varianceQty > 0 ? "+" : ""}{selectedItem.varianceQty}
-                        </span>
+                  {/* Item details — with real-time reconciliation data */}
+                  {(() => {
+                    const ri = reconciliationPreview?.items.find(r => r.itemId === selectedItem.id);
+                    const hasRealTimeData = !!ri;
+                    const systemQty = hasRealTimeData ? ri.systemQtyCurrent : selectedItem.expectedQty;
+                    const realTimeVar = hasRealTimeData ? ri.realTimeVariance : selectedItem.varianceQty;
+                    return (
+                      <div className="rounded-md border p-3 space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">SKU</span>
+                          <span className="font-mono font-medium">{selectedItem.expectedSku || selectedItem.countedSku || "(empty)"}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">System (current)</span>
+                          <span className="font-mono font-bold">{systemQty}</span>
+                        </div>
+                        {hasRealTimeData && ri.systemQtyCurrent !== ri.systemQtyAtCount && (
+                          <div className="flex items-center justify-between text-xs text-amber-600">
+                            <span>Was {ri.systemQtyAtCount} at count time</span>
+                            <Clock className="h-3 w-3" />
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">You counted</span>
+                          <span className="font-mono font-bold">{selectedItem.countedQty ?? "—"}</span>
+                        </div>
+                        {realTimeVar !== null && realTimeVar !== 0 && (
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="text-muted-foreground">Variance (real-time)</span>
+                            <span className={`font-mono font-bold ${realTimeVar > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                              {realTimeVar > 0 ? "+" : ""}{realTimeVar}
+                            </span>
+                          </div>
+                        )}
+                        {ri?.isStale && (
+                          <div className="bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-700 flex items-center gap-1.5">
+                            <Clock className="h-3.5 w-3.5 shrink-0" />
+                            <div>
+                              <span className="font-medium">Stale count:</span> Inventory changed at this location since the count.
+                              {ri.staleTransactions.length > 0 && (
+                                <span className="ml-1">
+                                  ({ri.staleTransactions.map(t => `${t.type} ${t.qty > 0 ? "+" : ""}${t.qty}`).join(", ")})
+                                </span>
+                              )}
+                              <span className="block mt-0.5">Recount recommended.</span>
+                            </div>
+                          </div>
+                        )}
+                        {ri && (ri.transferQty ?? 0) > 0 && (
+                          <div className="bg-blue-50 border border-blue-200 rounded p-2 text-xs text-blue-700 flex items-center gap-1.5">
+                            <ArrowLeftRight className="h-3.5 w-3.5 shrink-0" />
+                            <div>
+                              <span className="font-medium">Transfer detected:</span> {ri.transferQty} units likely moved {ri.realTimeVariance < 0 ? "to" : "from"} {ri.transferPartner}.
+                              {ri.netAdjustment === 0
+                                ? <span className="block mt-0.5 text-emerald-600 font-medium">→ Net adjustment: 0 (transfer accounts for all variance)</span>
+                                : <span className="block mt-0.5">→ Net adjustment: {ri.netAdjustment > 0 ? "+" : ""}{ri.netAdjustment}</span>
+                              }
+                            </div>
+                          </div>
+                        )}
+                        {ri?.wouldGoNegative && (
+                          <div className="bg-rose-50 border border-rose-200 rounded p-2 text-xs text-rose-700 flex items-center gap-1.5">
+                            <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                            <div>
+                              <span className="font-medium">Negative guard:</span> Applying this adjustment would result in negative inventory.
+                              <span className="block mt-0.5">System has {systemQty}, adjustment would be {realTimeVar}. Manual investigation required.</span>
+                            </div>
+                          </div>
+                        )}
+                        {selectedItem.countedBy && (
+                          <div className="flex items-center justify-between text-xs text-muted-foreground pt-1 border-t">
+                            <span>Counted by {selectedItem.countedBy}</span>
+                            {selectedItem.countedAt && <span>{format(new Date(selectedItem.countedAt), "MMM d, h:mm a")}</span>}
+                          </div>
+                        )}
+                        {selectedItem.varianceNotes && (
+                          <div className="text-xs bg-muted/50 rounded p-2 mt-1">{selectedItem.varianceNotes}</div>
+                        )}
                       </div>
-                    )}
-                    {selectedItem.countedBy && (
-                      <div className="flex items-center justify-between text-xs text-muted-foreground pt-1 border-t">
-                        <span>Counted by {selectedItem.countedBy}</span>
-                        {selectedItem.countedAt && <span>{format(new Date(selectedItem.countedAt), "MMM d, h:mm a")}</span>}
-                      </div>
-                    )}
-                    {selectedItem.varianceNotes && (
-                      <div className="text-xs bg-muted/50 rounded p-2 mt-1">{selectedItem.varianceNotes}</div>
-                    )}
-                  </div>
+                    );
+                  })()}
 
                   {/* Linked mismatch item */}
                   {linkedItem && (
@@ -2287,19 +2390,38 @@ export default function CycleCounts() {
                     </div>
                   )}
 
-                  {/* Adjustment preview */}
+                  {/* Adjustment preview — uses real-time data */}
                   <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm space-y-1">
-                    <div className="font-medium text-amber-800">Inventory Adjustment Preview</div>
-                    {selectedItem.productVariantId && selectedItem.varianceQty !== null && selectedItem.varianceQty !== 0 && (
-                      <div className="flex items-center gap-1 text-amber-700">
-                        <ArrowRight className="h-3 w-3" />
-                        <span className="font-mono">{selectedItem.expectedSku || selectedItem.countedSku}</span>
-                        <span>at {selectedItem.locationCode}:</span>
-                        <span className={`font-bold ${selectedItem.varianceQty > 0 ? "text-emerald-600" : "text-rose-600"}`}>
-                          {selectedItem.varianceQty > 0 ? "+" : ""}{selectedItem.varianceQty}
-                        </span>
-                      </div>
-                    )}
+                    <div className="font-medium text-amber-800">
+                      Inventory Adjustment Preview
+                      <span className="text-xs font-normal ml-2 text-amber-600">(computed at approval time)</span>
+                    </div>
+                    {(() => {
+                      const ri = reconciliationPreview?.items.find(r => r.itemId === selectedItem.id);
+                      const variance = ri?.realTimeVariance ?? selectedItem.varianceQty;
+                      const sysQty = ri?.systemQtyCurrent ?? selectedItem.expectedQty;
+                      return (
+                        <>
+                          {selectedItem.productVariantId && variance !== null && variance !== 0 && (
+                            <div className="flex items-center gap-1 text-amber-700">
+                              <ArrowRight className="h-3 w-3" />
+                              <span className="font-mono">{selectedItem.expectedSku || selectedItem.countedSku}</span>
+                              <span>at {selectedItem.locationCode}:</span>
+                              <span className={`font-bold ${variance > 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                                {variance > 0 ? "+" : ""}{variance}
+                              </span>
+                              <span className="text-xs text-amber-500 ml-1">(sys: {sysQty} → {sysQty + variance})</span>
+                            </div>
+                          )}
+                          {selectedItem.productVariantId && variance === 0 && (
+                            <div className="flex items-center gap-1 text-emerald-600">
+                              <Check className="h-3 w-3" />
+                              No adjustment needed — system matches count
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                     {linkedItem && linkedItem.productVariantId && linkedItem.varianceQty !== null && linkedItem.varianceQty !== 0 && (
                       <div className="flex items-center gap-1 text-amber-700">
                         <ArrowRight className="h-3 w-3" />
@@ -2389,13 +2511,17 @@ export default function CycleCounts() {
           </DialogContent>
         </Dialog>
 
-        {/* Bulk Approve Dialog */}
-        <Dialog open={bulkApproveOpen} onOpenChange={setBulkApproveOpen}>
+        {/* Bulk Approve Dialog — with Real-Time Reconciliation */}
+        <Dialog open={bulkApproveOpen} onOpenChange={(open) => {
+          setBulkApproveOpen(open);
+          if (open) refetchReconciliation();
+        }}>
           <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
             <DialogHeader>
-              <DialogTitle>Bulk Approve Variances</DialogTitle>
+              <DialogTitle>Review & Approve Variances</DialogTitle>
               <DialogDescription>
-                Select items to approve. {bulkSelectedIds.size > 0 && <strong>{bulkSelectedIds.size} selected</strong>}
+                Real-time reconciliation — system quantities verified at approval time.
+                {bulkSelectedIds.size > 0 && <strong className="ml-1">{bulkSelectedIds.size} selected</strong>}
               </DialogDescription>
             </DialogHeader>
 
@@ -2407,12 +2533,12 @@ export default function CycleCounts() {
                 i.productVariantId
               );
 
-              // Group by variance type
-              const groups: Record<string, CycleCountItem[]> = {};
-              for (const item of approvableItems) {
-                const key = item.varianceType || "other";
-                if (!groups[key]) groups[key] = [];
-                groups[key].push(item);
+              // Build reconciliation lookup for real-time data
+              const reconMap = new Map<number, ReconciliationItem>();
+              if (reconciliationPreview) {
+                for (const ri of reconciliationPreview.items) {
+                  reconMap.set(ri.itemId, ri);
+                }
               }
 
               // Items without productVariantId (can't auto-approve)
@@ -2422,27 +2548,6 @@ export default function CycleCounts() {
                 !i.productVariantId
               );
 
-              const varianceTypeLabels: Record<string, string> = {
-                quantity_under: "Shortage",
-                quantity_over: "Overage",
-                stray_removed: "Stray Removed",
-                unexpected_sku: "Wrong SKU",
-                unexpected_item: "Unexpected Item",
-                other: "Other",
-              };
-
-              const toggleGroup = (items: CycleCountItem[]) => {
-                const ids = items.map(i => i.id);
-                const allSelected = ids.every(id => bulkSelectedIds.has(id));
-                const next = new Set(bulkSelectedIds);
-                if (allSelected) {
-                  ids.forEach(id => next.delete(id));
-                } else {
-                  ids.forEach(id => next.add(id));
-                }
-                setBulkSelectedIds(next);
-              };
-
               const toggleItem = (id: number) => {
                 const next = new Set(bulkSelectedIds);
                 if (next.has(id)) next.delete(id);
@@ -2451,15 +2556,82 @@ export default function CycleCounts() {
               };
 
               const selectAll = () => {
-                setBulkSelectedIds(new Set(approvableItems.map(i => i.id)));
+                // Only select safe items (not stale, not would-go-negative)
+                const safeIds = approvableItems
+                  .filter(i => {
+                    const ri = reconMap.get(i.id);
+                    return !ri?.wouldGoNegative && !ri?.isStale;
+                  })
+                  .map(i => i.id);
+                setBulkSelectedIds(new Set(safeIds));
               };
 
               const deselectAll = () => {
                 setBulkSelectedIds(new Set());
               };
 
+              // Separate items into categories
+              const transferItems = approvableItems.filter(i => {
+                const ri = reconMap.get(i.id);
+                return ri && (ri.transferQty ?? 0) > 0;
+              });
+              const staleItems = approvableItems.filter(i => {
+                const ri = reconMap.get(i.id);
+                return ri?.isStale && (ri.transferQty ?? 0) === 0;
+              });
+              const negativeItems = approvableItems.filter(i => {
+                const ri = reconMap.get(i.id);
+                return ri?.wouldGoNegative && !ri?.isStale && (ri.transferQty ?? 0) === 0;
+              });
+              const normalItems = approvableItems.filter(i => {
+                const ri = reconMap.get(i.id);
+                return !ri?.isStale && !ri?.wouldGoNegative && (!ri || (ri.transferQty ?? 0) === 0);
+              });
+
               return (
                 <>
+                  {/* Transfer suggestions banner */}
+                  {reconciliationPreview && reconciliationPreview.transfers.length > 0 && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-2">
+                      <div className="flex items-center gap-2 text-blue-800 font-medium text-sm">
+                        <ArrowLeftRight className="h-4 w-4" />
+                        {reconciliationPreview.transfers.length} transfer{reconciliationPreview.transfers.length > 1 ? "s" : ""} detected
+                      </div>
+                      <div className="space-y-1.5">
+                        {reconciliationPreview.transfers.map((t, idx) => (
+                          <div key={idx} className="flex items-center gap-2 text-xs text-blue-700 bg-blue-100/50 rounded px-2 py-1.5">
+                            <span className="font-mono font-medium">{t.sku}</span>
+                            <span>×{t.qty}</span>
+                            <span className="font-mono">{t.fromLocationCode}</span>
+                            <ArrowRight className="h-3 w-3" />
+                            <span className="font-mono">{t.toLocationCode}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-blue-600">
+                        Transfers will be applied automatically before adjustments.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Warnings */}
+                  {reconciliationPreview && (reconciliationPreview.staleCount > 0 || reconciliationPreview.negativeGuardCount > 0) && (
+                    <div className="flex flex-wrap gap-2">
+                      {reconciliationPreview.staleCount > 0 && (
+                        <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-3 py-1">
+                          <Clock className="h-3 w-3" />
+                          {reconciliationPreview.staleCount} stale — inventory changed since count
+                        </div>
+                      )}
+                      {reconciliationPreview.negativeGuardCount > 0 && (
+                        <div className="flex items-center gap-1.5 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-full px-3 py-1">
+                          <ShieldAlert className="h-3 w-3" />
+                          {reconciliationPreview.negativeGuardCount} blocked — would create negative inventory
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between border-b pb-2">
                     <span className="text-sm text-muted-foreground">
                       {approvableItems.length} approvable items
@@ -2468,70 +2640,216 @@ export default function CycleCounts() {
                       )}
                     </span>
                     <div className="flex gap-2">
-                      <Button variant="ghost" size="sm" onClick={selectAll}>Select All</Button>
+                      <Button variant="ghost" size="sm" onClick={() => refetchReconciliation()}>
+                        <RefreshCw className="h-3 w-3 mr-1" /> Refresh
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={selectAll}>Select Safe</Button>
                       <Button variant="ghost" size="sm" onClick={deselectAll}>Deselect All</Button>
                     </div>
                   </div>
 
                   <div className="flex-1 overflow-auto space-y-3 min-h-0">
-                    {Object.entries(groups).map(([type, items]) => {
-                      const groupIds = items.map(i => i.id);
-                      const allGroupSelected = groupIds.every(id => bulkSelectedIds.has(id));
-                      const someGroupSelected = groupIds.some(id => bulkSelectedIds.has(id));
+                    {/* Items with transfer matches */}
+                    {transferItems.length > 0 && (
+                      <div className="border rounded-lg border-blue-200">
+                        <div className="px-3 py-2 text-sm font-medium flex items-center gap-2 bg-blue-50/50">
+                          <ArrowLeftRight className="h-4 w-4 text-blue-600" />
+                          Transfer Matches
+                          <Badge variant="secondary" className="text-xs">{transferItems.length}</Badge>
+                        </div>
+                        <div className="border-t divide-y">
+                          {transferItems.map(item => {
+                            const ri = reconMap.get(item.id);
+                            return (
+                              <label key={item.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/20 cursor-pointer text-sm">
+                                <Checkbox
+                                  checked={bulkSelectedIds.has(item.id)}
+                                  onCheckedChange={() => toggleItem(item.id)}
+                                  disabled={ri?.wouldGoNegative}
+                                />
+                                <span className="font-mono text-xs text-blue-600 w-16 shrink-0">{item.locationCode}</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="truncate">{item.expectedSku || item.countedSku || "(empty)"}</div>
+                                  {ri && (
+                                    <div className="text-xs text-blue-600 flex items-center gap-1 mt-0.5">
+                                      <ArrowLeftRight className="h-3 w-3" />
+                                      {ri.transferQty} units {ri.realTimeVariance < 0 ? "→" : "←"} {ri.transferPartner}
+                                      {ri.netAdjustment !== 0 && (
+                                        <span className="ml-1">
+                                          Net: <span className={ri.netAdjustment > 0 ? "text-emerald-600" : "text-rose-600"}>
+                                            {ri.netAdjustment > 0 ? "+" : ""}{ri.netAdjustment}
+                                          </span>
+                                        </span>
+                                      )}
+                                      {ri.netAdjustment === 0 && (
+                                        <span className="ml-1 text-emerald-600">✓ Nets to zero</span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <div className="text-xs text-muted-foreground">
+                                    Sys: {ri?.systemQtyCurrent ?? item.expectedQty} → Ct: {item.countedQty ?? "—"}
+                                  </div>
+                                  <span className={`font-mono text-xs font-bold ${
+                                    (ri?.realTimeVariance ?? item.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"
+                                  }`}>
+                                    {(ri?.realTimeVariance ?? item.varianceQty ?? 0) > 0 ? "+" : ""}{ri?.realTimeVariance ?? item.varianceQty}
+                                  </span>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
-                      return (
-                        <div key={type} className="border rounded-lg">
-                          {/* Group header */}
-                          <button
-                            type="button"
-                            className="w-full flex items-center gap-3 px-3 py-2 hover:bg-muted/30 transition-colors"
-                            onClick={() => toggleGroup(items)}
-                          >
-                            <Checkbox
-                              checked={allGroupSelected ? true : someGroupSelected ? "indeterminate" : false}
-                              onCheckedChange={() => toggleGroup(items)}
-                            />
-                            <div className="flex items-center gap-2 flex-1">
-                              <span className="font-medium text-sm">
-                                {varianceTypeLabels[type] || type}
-                              </span>
-                              <Badge variant="secondary" className="text-xs">{items.length}</Badge>
-                            </div>
-                            <span className="text-xs text-muted-foreground">
-                              {items.reduce((s, i) => s + (i.varianceQty ?? 0), 0) > 0 ? "+" : ""}
-                              {items.reduce((s, i) => s + (i.varianceQty ?? 0), 0)} net
-                            </span>
-                          </button>
-
-                          {/* Individual items */}
-                          <div className="border-t divide-y">
-                            {items.map(item => (
-                              <label
-                                key={item.id}
-                                className="flex items-center gap-3 px-3 py-1.5 hover:bg-muted/20 cursor-pointer text-sm"
-                              >
+                    {/* Stale items */}
+                    {staleItems.length > 0 && (
+                      <div className="border rounded-lg border-amber-200">
+                        <div className="px-3 py-2 text-sm font-medium flex items-center gap-2 bg-amber-50/50">
+                          <Clock className="h-4 w-4 text-amber-600" />
+                          Stale — Recount Recommended
+                          <Badge variant="secondary" className="text-xs">{staleItems.length}</Badge>
+                        </div>
+                        <div className="border-t divide-y">
+                          {staleItems.map(item => {
+                            const ri = reconMap.get(item.id);
+                            return (
+                              <div key={item.id} className="flex items-center gap-3 px-3 py-2 text-sm bg-amber-50/30">
                                 <Checkbox
                                   checked={bulkSelectedIds.has(item.id)}
                                   onCheckedChange={() => toggleItem(item.id)}
                                 />
-                                <span className="font-mono text-xs text-blue-600 w-20 shrink-0">{item.locationCode}</span>
+                                <span className="font-mono text-xs text-blue-600 w-16 shrink-0">{item.locationCode}</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="truncate">{item.expectedSku || item.countedSku || "(empty)"}</div>
+                                  {ri && ri.staleTransactions.length > 0 && (
+                                    <div className="text-xs text-amber-600 mt-0.5">
+                                      ⚠️ {ri.staleTransactions.length} transaction{ri.staleTransactions.length > 1 ? "s" : ""} since count
+                                      ({ri.staleTransactions.map(t => `${t.type} ${t.qty > 0 ? "+" : ""}${t.qty}`).join(", ")})
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="text-right shrink-0 flex items-center gap-2">
+                                  <div>
+                                    <div className="text-xs text-muted-foreground">
+                                      Sys: {ri?.systemQtyCurrent ?? "?"} (was {ri?.systemQtyAtCount ?? item.expectedQty})
+                                    </div>
+                                    <span className={`font-mono text-xs font-bold ${
+                                      (ri?.realTimeVariance ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"
+                                    }`}>
+                                      Real-time: {(ri?.realTimeVariance ?? 0) > 0 ? "+" : ""}{ri?.realTimeVariance ?? "?"}
+                                    </span>
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 text-xs text-amber-700"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      resetMutation.mutate(item.id);
+                                    }}
+                                  >
+                                    Recount
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Negative-guarded items */}
+                    {negativeItems.length > 0 && (
+                      <div className="border rounded-lg border-rose-200">
+                        <div className="px-3 py-2 text-sm font-medium flex items-center gap-2 bg-rose-50/50">
+                          <ShieldAlert className="h-4 w-4 text-rose-600" />
+                          Blocked — Would Create Negative Inventory
+                          <Badge variant="secondary" className="text-xs">{negativeItems.length}</Badge>
+                        </div>
+                        <div className="border-t divide-y">
+                          {negativeItems.map(item => {
+                            const ri = reconMap.get(item.id);
+                            return (
+                              <div key={item.id} className="flex items-center gap-3 px-3 py-2 text-sm bg-rose-50/30">
+                                <ShieldAlert className="h-4 w-4 text-rose-400 shrink-0" />
+                                <span className="font-mono text-xs text-blue-600 w-16 shrink-0">{item.locationCode}</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="truncate">{item.expectedSku || item.countedSku || "(empty)"}</div>
+                                  <div className="text-xs text-rose-600 mt-0.5">
+                                    System: {ri?.systemQtyCurrent ?? "?"}, adjustment would be {ri?.realTimeVariance ?? "?"} → negative result. Needs investigation.
+                                  </div>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 text-xs text-yellow-700 shrink-0"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    investigateMutation.mutate({ itemId: item.id });
+                                  }}
+                                >
+                                  Investigate
+                                </Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Normal items */}
+                    {normalItems.length > 0 && (
+                      <div className="border rounded-lg">
+                        <button
+                          type="button"
+                          className="w-full flex items-center gap-3 px-3 py-2 hover:bg-muted/30 transition-colors"
+                          onClick={() => {
+                            const ids = normalItems.map(i => i.id);
+                            const allSelected = ids.every(id => bulkSelectedIds.has(id));
+                            const next = new Set(bulkSelectedIds);
+                            if (allSelected) ids.forEach(id => next.delete(id));
+                            else ids.forEach(id => next.add(id));
+                            setBulkSelectedIds(next);
+                          }}
+                        >
+                          <Checkbox
+                            checked={normalItems.every(i => bulkSelectedIds.has(i.id)) ? true : normalItems.some(i => bulkSelectedIds.has(i.id)) ? "indeterminate" : false}
+                          />
+                          <span className="font-medium text-sm flex-1">
+                            Standard Variances
+                          </span>
+                          <Badge variant="secondary" className="text-xs">{normalItems.length}</Badge>
+                        </button>
+                        <div className="border-t divide-y">
+                          {normalItems.map(item => {
+                            const ri = reconMap.get(item.id);
+                            return (
+                              <label key={item.id} className="flex items-center gap-3 px-3 py-1.5 hover:bg-muted/20 cursor-pointer text-sm">
+                                <Checkbox
+                                  checked={bulkSelectedIds.has(item.id)}
+                                  onCheckedChange={() => toggleItem(item.id)}
+                                />
+                                <span className="font-mono text-xs text-blue-600 w-16 shrink-0">{item.locationCode}</span>
                                 <span className="flex-1 truncate">
                                   {item.expectedSku || item.countedSku || "(empty)"}
                                 </span>
                                 <span className="text-xs text-muted-foreground">
-                                  {item.expectedQty} → {item.countedQty ?? "—"}
+                                  Sys: {ri?.systemQtyCurrent ?? item.expectedQty} → Ct: {item.countedQty ?? "—"}
                                 </span>
-                                <span className={`font-mono text-xs font-bold w-10 text-right ${
-                                  (item.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"
+                                <span className={`font-mono text-xs font-bold w-12 text-right ${
+                                  (ri?.realTimeVariance ?? item.varianceQty ?? 0) > 0 ? "text-emerald-600" : "text-rose-600"
                                 }`}>
-                                  {(item.varianceQty ?? 0) > 0 ? "+" : ""}{item.varianceQty}
+                                  {(ri?.realTimeVariance ?? item.varianceQty ?? 0) > 0 ? "+" : ""}{ri?.realTimeVariance ?? item.varianceQty}
                                 </span>
                               </label>
-                            ))}
-                          </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
+                      </div>
+                    )}
 
                     {unlinkableItems.length > 0 && (
                       <div className="border rounded-lg border-amber-200 bg-amber-50/50">
@@ -2542,7 +2860,7 @@ export default function CycleCounts() {
                         <div className="border-t border-amber-200 divide-y divide-amber-100">
                           {unlinkableItems.map(item => (
                             <div key={item.id} className="flex items-center gap-3 px-3 py-1.5 text-sm text-amber-800">
-                              <span className="font-mono text-xs w-20 shrink-0">{item.locationCode}</span>
+                              <span className="font-mono text-xs w-16 shrink-0">{item.locationCode}</span>
                               <span className="flex-1 truncate">{item.countedSku || "(no SKU)"}</span>
                               <span className="text-xs">Use individual approve to link first</span>
                             </div>
