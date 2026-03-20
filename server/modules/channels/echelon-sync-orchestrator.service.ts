@@ -412,18 +412,25 @@ class EchelonSyncOrchestrator {
 
       if (warehouseAllocations.length === 0) continue;
 
-      // Get per-variant ATP from ALL inventory_levels at this warehouse
-      // This includes pick bins, reserve bins, receiving areas — everything
+      // Get per-variant ATP using the FUNGIBLE model (base units shared across variants)
+      // This correctly handles case→pack conversion (e.g., 10 cases = 1000 packs)
+      // Uses ALL inventory_levels at this warehouse (pick bins, reserve, receiving)
       const variantIds: number[] = Array.from(existingVariantIds);
-      let warehouseAtpMap: Map<number, number>;
+      const warehouseAtpMap = new Map<number, number>();
 
-      if (this.atpService?.getDirectVariantAtpByWarehouse) {
-        warehouseAtpMap = await this.atpService.getDirectVariantAtpByWarehouse(
-          variantIds,
+      if (this.atpService?.getAtpPerVariantByWarehouse) {
+        const fungibleAtp = await this.atpService.getAtpPerVariantByWarehouse(
+          productId,
           wh.warehouseId,
         );
+        for (const va of fungibleAtp) {
+          if (existingVariantIds.has(va.productVariantId)) {
+            warehouseAtpMap.set(va.productVariantId, va.atpUnits);
+          }
+        }
       } else {
-        // Fallback: direct SQL query (same logic as getDirectVariantAtpByWarehouse)
+        // Fallback: direct per-variant ATP (no fungible conversion)
+        // This is less accurate for multi-UOM products but prevents total failure
         const atpRows = await this.db
           .select({
             productVariantId: sql<number>`${inventoryLevels.productVariantId}`,
@@ -448,7 +455,6 @@ class EchelonSyncOrchestrator {
           )
           .groupBy(inventoryLevels.productVariantId);
 
-        warehouseAtpMap = new Map<number, number>();
         for (const row of atpRows) {
           warehouseAtpMap.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
         }
