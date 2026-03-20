@@ -59,6 +59,8 @@ interface BreakableVariantInfo {
  * pair of inventory transactions sharing the same batchId.
  */
 class BreakAssemblyService {
+  private onChangeCallback: ((variantId: number, trigger: string) => void) | null = null;
+
   constructor(
     private db: any,
     private inventoryCore: {
@@ -68,6 +70,21 @@ class BreakAssemblyService {
       logTransaction: Function;
     }
   ) {}
+
+  /** Register a callback to fire after break/assembly changes inventory */
+  onInventoryChange(cb: (variantId: number, trigger: string) => void): void {
+    this.onChangeCallback = cb;
+  }
+
+  private notifyChange(variantId: number, trigger: string): void {
+    if (this.onChangeCallback) {
+      try {
+        this.onChangeCallback(variantId, trigger);
+      } catch (err: any) {
+        console.warn(`[BreakAssembly] onChange callback error: ${err.message}`);
+      }
+    }
+  }
 
   // --------------------------------------------------------------------------
   // Public API
@@ -212,6 +229,10 @@ class BreakAssemblyService {
       });
     });
 
+    // Notify channel sync — both source and target variant ATP changed
+    this.notifyChange(sourceVariantId, "break");
+    this.notifyChange(targetVariantId, "break");
+
     return { sourceQtyRemoved: sourceQty, targetQtyAdded: targetQty, baseUnitsConverted: baseUnits, batchId };
   }
 
@@ -337,6 +358,10 @@ class BreakAssemblyService {
         isImplicit: 0,
       });
     });
+
+    // Notify channel sync — both source and target variant ATP changed
+    this.notifyChange(sourceVariantId, "assemble");
+    this.notifyChange(targetVariantId, "assemble");
 
     return {
       sourceQtyRemoved: sourceQtyNeeded,

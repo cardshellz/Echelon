@@ -190,14 +190,22 @@ export function createServices(db: any) {
     }
   });
 
+  // Wire break/assembly inventory changes into the same sync mechanism as core
+  // This ensures case breaks from replen, UI, or any other caller trigger channel sync
+  breakAssembly.onInventoryChange((variantId: number, trigger: string) => {
+    channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
+      console.warn(`[BreakAssembly] Post-${trigger} sync failed for variant ${variantId}:`, err),
+    );
+  });
+
   // Bin assignment (depends on catalog + warehouse storage)
   const binAssignment = createBinAssignmentService(db, {
     ...catalogStorage,
     ...warehouseStorage,
   });
 
-  // OMS — Unified Order Management
-  const oms = createOmsService(db);
+  // OMS — Unified Order Management (wired to WMS reservation service for proper ATP-gated reserves)
+  const oms = createOmsService(db, reservation);
 
   // Fulfillment Push — eBay API client created lazily when polling starts
   // For now, pass null — the eBay client is created in server/index.ts when polling starts

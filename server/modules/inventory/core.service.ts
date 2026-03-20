@@ -295,7 +295,7 @@ export class InventoryCoreService {
       throw new Error("qty must be a positive integer");
     }
 
-    return this.db.transaction(async (tx: any) => {
+    const result = await this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
       // Snapshot current level for the audit log
@@ -367,7 +367,10 @@ export class InventoryCoreService {
       return true;
     });
 
-    this.notifyChange(params.productVariantId, "pick");
+    if (result) {
+      this.notifyChange(params.productVariantId, "pick");
+    }
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -618,7 +621,7 @@ export class InventoryCoreService {
       throw new Error("qty must be a positive integer");
     }
 
-    return this.db.transaction(async (tx: any) => {
+    const result = await this.db.transaction(async (tx: any) => {
       const svc = this.withTx(tx);
 
       // Upsert: ensure an inventory_levels row exists for this variant+location
@@ -661,6 +664,7 @@ export class InventoryCoreService {
     });
 
     this.notifyChange(params.productVariantId, "reserve");
+    return result;
   }
 
   /**

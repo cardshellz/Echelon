@@ -60,6 +60,7 @@ type DrizzleDb = {
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
+  execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -377,23 +378,26 @@ class EchelonSyncOrchestrator {
         continue;
       }
 
-      // Query which variant IDs from this product exist at this warehouse
-      // A variant "exists" at a warehouse if it has a product_locations row
-      // at any warehouse_location belonging to that warehouse
-      const variantIdsAtWarehouse = await this.db
-        .select({ variantId: sql<number>`DISTINCT ${productLocations.productVariantId}` })
-        .from(productLocations)
-        .innerJoin(
-          warehouseLocations,
-          eq(warehouseLocations.id, productLocations.warehouseLocationId),
-        )
-        .where(
-          and(
-            eq(warehouseLocations.warehouseId, wh.warehouseId),
-            eq(productLocations.status, "active"),
-            sql`${productLocations.productVariantId} IS NOT NULL`,
-          ),
-        );
+      // Query which variant IDs from this product exist at this warehouse.
+      // A variant "exists" if it has stock (inventory_levels row with qty > 0)
+      // OR has an active bin assignment (product_locations). This ensures
+      // variants received to unassigned bins or via 3PL sync are not skipped.
+      const variantIdsAtWarehouse = await this.db.execute(sql`
+        SELECT DISTINCT vid AS "variantId" FROM (
+          SELECT il.product_variant_id AS vid
+          FROM inventory_levels il
+          INNER JOIN warehouse_locations wl ON wl.id = il.warehouse_location_id
+          WHERE wl.warehouse_id = ${wh.warehouseId}
+            AND (il.variant_qty > 0 OR il.reserved_qty > 0)
+          UNION
+          SELECT pl.product_variant_id AS vid
+          FROM product_locations pl
+          INNER JOIN warehouse_locations wl ON wl.id = pl.warehouse_location_id
+          WHERE wl.warehouse_id = ${wh.warehouseId}
+            AND pl.status = 'active'
+            AND pl.product_variant_id IS NOT NULL
+        ) AS variant_existence
+      `).then((r: any) => r.rows);
 
       const existingVariantIds = new Set<number>(variantIdsAtWarehouse.map((r: any) => Number(r.variantId)));
 

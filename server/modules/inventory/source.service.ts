@@ -2,9 +2,6 @@ import { eq, and, sql } from "drizzle-orm";
 import {
   warehouses,
   warehouseLocations,
-  inventoryLevels,
-  inventoryTransactions,
-  productVariants,
   channelConnections,
 } from "@shared/schema";
 
@@ -311,7 +308,10 @@ class InventorySourceService {
 
   /**
    * Absolute SET of inventory level (not delta).
-   * Calculates delta from current, updates level, logs transaction.
+   * Routes through inventoryCore so that:
+   * - Audit trail (inventory_transactions) is written correctly
+   * - notifyChange fires → channel sync triggers
+   * - Lot tracking is handled
    */
   private async setInventoryLevel(
     locationId: number,
@@ -319,54 +319,22 @@ class InventorySourceService {
     newQty: number,
     warehouseId: number,
   ): Promise<void> {
-    // Upsert the inventory level
-    const [existing] = await this.db
-      .select()
-      .from(inventoryLevels)
-      .where(
-        and(
-          eq(inventoryLevels.warehouseLocationId, locationId),
-          eq(inventoryLevels.productVariantId, variantId),
-        ),
-      )
-      .limit(1);
-
-    const oldQty = existing?.variantQty ?? 0;
+    // Get current level to compute delta
+    const currentLevel = await this.inventoryCore.getLevel(variantId, locationId);
+    const oldQty = currentLevel?.variantQty ?? 0;
     const delta = newQty - oldQty;
 
     if (delta === 0) return; // No change
 
-    if (existing) {
-      await this.db
-        .update(inventoryLevels)
-        .set({ variantQty: newQty, updatedAt: new Date() })
-        .where(eq(inventoryLevels.id, existing.id));
-    } else {
-      await this.db
-        .insert(inventoryLevels)
-        .values({
-          warehouseLocationId: locationId,
-          productVariantId: variantId,
-          variantQty: newQty,
-          reservedQty: 0,
-          pickedQty: 0,
-          packedQty: 0,
-          backorderQty: 0,
-        });
-    }
-
-    try {
-      await this.db.insert(inventoryTransactions).values({
-        productVariantId: variantId,
-        warehouseLocationId: locationId,
-        transactionType: "3pl_sync",
-        qty: delta,
-        referenceId: `warehouse-${warehouseId}`,
-        notes: `Synced from external source (set to ${newQty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-      });
-    } catch (err: any) {
-      console.warn(`[InventorySource] Failed to log 3PL sync transaction for variant=${variantId}:`, err.message);
-    }
+    // Route through inventoryCore.adjustInventory — this fires notifyChange,
+    // writes proper audit trail, and handles lot tracking
+    await this.inventoryCore.adjustInventory({
+      productVariantId: variantId,
+      warehouseLocationId: locationId,
+      qtyDelta: delta,
+      reason: `3PL sync from warehouse ${warehouseId} (set to ${newQty}, delta ${delta > 0 ? "+" : ""}${delta})`,
+      allowNegative: true, // 3PL may report lower qty than we have
+    });
   }
 }
 

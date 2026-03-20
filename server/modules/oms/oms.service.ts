@@ -10,7 +10,6 @@ import {
   omsOrders, omsOrderLines, omsOrderEvents,
   type InsertOmsOrder, type InsertOmsOrderLine, type OmsOrder, type OmsOrderLine,
   productVariants,
-  inventoryLevels,
   channels,
 } from "@shared/schema";
 
@@ -68,7 +67,7 @@ export interface OmsOrderWithLines extends OmsOrder {
 // Service Factory
 // ---------------------------------------------------------------------------
 
-export function createOmsService(db: any) {
+export function createOmsService(db: any, reservationService?: any) {
   /**
    * Ingest an order from any channel — idempotent by (channel_id, external_order_id).
    * Returns existing order if already ingested.
@@ -168,7 +167,9 @@ export function createOmsService(db: any) {
 
   /**
    * Reserve inventory for an OMS order's line items.
-   * Increments reserved_qty on inventory_levels. Idempotent — checks for prior reservation event.
+   * Delegates to the WMS ReservationService which gates on fungible ATP,
+   * writes audit trail, tracks lots, and triggers channel sync.
+   * Idempotent — checks for prior reservation event.
    */
   async function reserveInventory(orderId: number): Promise<{ reserved: number; failed: string[] }> {
     // Idempotency: check if already reserved
@@ -201,19 +202,44 @@ export function createOmsService(db: any) {
         continue;
       }
 
-      // Find inventory level with stock and increment reserved_qty
-      const result = await db.execute(sql`
-        UPDATE inventory_levels
-        SET reserved_qty = reserved_qty + ${line.quantity},
-            updated_at = NOW()
-        WHERE product_variant_id = ${line.productVariantId}
-          AND variant_qty >= ${line.quantity}
-        RETURNING id
-      `);
+      if (!reservationService) {
+        // Fallback: no reservation service wired — log warning
+        console.error(`[OMS] reserveInventory called but no ReservationService wired. Order ${orderId} line ${line.sku} not reserved.`);
+        failed.push(line.sku || "UNKNOWN");
+        continue;
+      }
 
-      if (result.rows.length > 0) {
-        reserved++;
-      } else {
+      try {
+        // Look up the variant to get its productId (needed by reservation service)
+        const [variant] = await db
+          .select({ id: productVariants.id, productId: productVariants.productId })
+          .from(productVariants)
+          .where(eq(productVariants.id, line.productVariantId))
+          .limit(1);
+
+        if (!variant) {
+          failed.push(line.sku || "UNKNOWN");
+          continue;
+        }
+
+        // Delegate to WMS ReservationService — gates on fungible ATP,
+        // finds assigned bin, writes audit trail, triggers channel sync
+        const result = await reservationService.reserveForOrder(
+          variant.productId,
+          variant.id,
+          line.quantity,
+          orderId,
+          line.id,
+        );
+
+        if (result.reserved > 0) {
+          reserved++;
+        }
+        if (result.shortfall > 0) {
+          failed.push(line.sku || "UNKNOWN");
+        }
+      } catch (err: any) {
+        console.error(`[OMS] Reservation failed for order ${orderId} line ${line.sku}: ${err.message}`);
         failed.push(line.sku || "UNKNOWN");
       }
     }
@@ -443,11 +469,40 @@ export function createOmsService(db: any) {
     };
   }
 
+  /**
+   * Mark an order as shipped by its external (Shopify/eBay) order ID.
+   * Finds the matching oms_orders row and delegates to markShipped().
+   * No-op if order not found or already shipped.
+   */
+  async function markShippedByExternalId(
+    externalOrderId: string,
+    trackingNumber: string,
+    carrier: string,
+  ): Promise<OmsOrder | null> {
+    const [order] = await db
+      .select()
+      .from(omsOrders)
+      .where(eq(omsOrders.externalOrderId, externalOrderId))
+      .limit(1);
+
+    if (!order) {
+      return null; // Order not in OMS yet (possible if bridge hasn't run)
+    }
+
+    // Skip if already shipped or cancelled
+    if (order.status === "shipped" || order.status === "cancelled") {
+      return order;
+    }
+
+    return markShipped(order.id, trackingNumber, carrier);
+  }
+
   return {
     ingestOrder,
     reserveInventory,
     assignWarehouse,
     markShipped,
+    markShippedByExternalId,
     getOrderById,
     listOrders,
     getStats,

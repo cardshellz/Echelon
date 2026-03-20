@@ -757,7 +757,7 @@ export function registerShopifyRoutes(app: Express) {
         // Record shipment and release picked inventory via FulfillmentService
         // NOTE: No channel sync here — shipments are order-driven and Shopify
         // already tracks fulfillments. Syncing would double-dip.
-        const { fulfillment: fulfillmentSvc } = app.locals.services;
+        const { fulfillment: fulfillmentSvc, oms: omsSvc } = app.locals.services;
         if (fulfillmentSvc) {
           try {
             const shipment = await fulfillmentSvc.processShopifyFulfillment({
@@ -774,6 +774,21 @@ export function registerShopifyRoutes(app: Express) {
             console.log(`Fulfillment create webhook: shipment ${shipment.id} recorded for order ${shopifyOrderId}`);
           } catch (fulfillErr: any) {
             console.error(`Fulfillment create webhook: shipment recording failed for order ${shopifyOrderId}:`, fulfillErr.message);
+          }
+        }
+
+        // Update OMS order status — mark as shipped so oms_orders stays in sync
+        if (omsSvc) {
+          try {
+            await omsSvc.markShippedByExternalId(
+              shopifyOrderId,
+              payload.tracking_number || "",
+              payload.tracking_company || "unknown",
+            );
+            console.log(`Fulfillment create webhook: OMS order updated for Shopify order ${shopifyOrderId}`);
+          } catch (omsErr: any) {
+            // Non-fatal: WMS order is already processed, OMS is supplementary
+            console.warn(`Fulfillment create webhook: OMS update failed for ${shopifyOrderId}: ${omsErr.message}`);
           }
         }
       }
