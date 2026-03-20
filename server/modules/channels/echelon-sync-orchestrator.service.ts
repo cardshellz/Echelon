@@ -24,6 +24,10 @@ import {
   channelPricing,
   channelSyncLog,
   channelConnections,
+  channelWarehouseAssignments,
+  warehouses,
+  warehouseLocations,
+  productLocations,
   type Product,
   type ProductVariant,
   type Channel,
@@ -59,6 +63,27 @@ type DrizzleDb = {
 
 type ProductPushService = {
   getResolvedProductForChannel: (productId: number, channelId: number) => Promise<any>;
+};
+
+type AtpService = {
+  getAtpBase(productId: number): Promise<number>;
+  getAtpPerVariant(productId: number): Promise<Array<{
+    productVariantId: number;
+    sku: string;
+    name: string;
+    unitsPerVariant: number;
+    atpUnits: number;
+    atpBase: number;
+  }>>;
+  getAtpPerVariantByWarehouse(productId: number, warehouseId: number): Promise<Array<{
+    productVariantId: number;
+    sku: string;
+    name: string;
+    unitsPerVariant: number;
+    atpUnits: number;
+    atpBase: number;
+  }>>;
+  getAtpBaseByWarehouse(productId: number, warehouseId: number): Promise<number>;
 };
 
 export interface SyncOrchestratorConfig {
@@ -141,6 +166,7 @@ class EchelonSyncOrchestrator {
     private readonly sourceLockService: SourceLockService,
     private readonly adapterRegistry: ChannelAdapterRegistry,
     private readonly productPushService: ProductPushService,
+    private readonly atpService?: AtpService,
   ) {}
 
   // =========================================================================
@@ -148,8 +174,17 @@ class EchelonSyncOrchestrator {
   // =========================================================================
 
   /**
-   * Run allocation for a product and push allocated ATP to all active channels.
-   * This replaces the old direct inventory push in sync.service.ts.
+   * Run warehouse-aware inventory sync for a product across all active channels.
+   *
+   * For each channel:
+   *   1. Load assigned warehouses (with Shopify location IDs)
+   *   2. For each warehouse, determine which variants exist there
+   *      (via product_locations → warehouse_locations)
+   *   3. Only push variants that exist at each warehouse
+   *   4. Use per-warehouse ATP and the warehouse's Shopify location_id
+   *
+   * This eliminates 404 errors from pushing variants to locations where
+   * the inventory item doesn't exist.
    */
   async syncInventoryForProduct(
     productId: number,
@@ -158,7 +193,7 @@ class EchelonSyncOrchestrator {
   ): Promise<InventorySyncResult[]> {
     const results: InventorySyncResult[] = [];
 
-    // Run allocation engine
+    // Run allocation engine (still needed for allocation rules: mirror/share/fixed)
     const allocation = await this.allocationEngine.allocateProduct(
       productId,
       triggeredBy ?? "orchestrator",
@@ -185,12 +220,13 @@ class EchelonSyncOrchestrator {
       byChannel.get(a.channelId)!.allocations.push(a);
     }
 
-    // Push to each channel
+    // Push to each channel — warehouse-aware
     for (const [channelId, data] of byChannel) {
-      const channelResult = await this.pushInventoryToChannel(
+      const channelResult = await this.pushInventoryToChannelWarehouseAware(
         channelId,
         data.channel,
         data.allocations,
+        productId,
         config,
         triggeredBy,
       );
@@ -217,7 +253,7 @@ class EchelonSyncOrchestrator {
       .where(eq(channelFeeds.isActive, 1))
       .groupBy(productVariants.productId);
 
-    const productIds = [...new Set(feedRows.map((r: any) => r.productId))];
+    const productIds: number[] = [...new Set(feedRows.map((r: any) => r.productId as number))];
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
     for (const productId of productIds) {
@@ -248,12 +284,23 @@ class EchelonSyncOrchestrator {
   }
 
   /**
-   * Push allocated inventory for specific variants to a channel.
+   * Warehouse-aware inventory push for a channel.
+   *
+   * Instead of pushing all variants to a single location, this method:
+   * 1. Loads all warehouses assigned to the channel (with Shopify location IDs)
+   * 2. For each warehouse, queries which variants actually exist there
+   *    (via product_locations → warehouse_locations)
+   * 3. Only pushes variants that exist at each warehouse's Shopify location
+   * 4. Uses per-warehouse ATP for quantity calculation
+   *
+   * This eliminates 404 errors from Shopify when a variant's inventory item
+   * doesn't exist at a particular location.
    */
-  private async pushInventoryToChannel(
+  private async pushInventoryToChannelWarehouseAware(
     channelId: number,
     channel: { id: number; name: string; provider: string },
     allocations: ProductAllocationResult["allocations"],
+    productId: number,
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
   ): Promise<InventorySyncResult> {
@@ -276,155 +323,254 @@ class EchelonSyncOrchestrator {
       return result;
     }
 
-    // Build push items — need to look up external IDs
-    const pushItems: InventoryPushItem[] = [];
-
-    for (const a of allocations) {
-      // Get variant details and external IDs
-      const [variant] = await this.db
-        .select({
-          id: productVariants.id,
-          sku: productVariants.sku,
-          shopifyVariantId: productVariants.shopifyVariantId,
-          shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
-        })
-        .from(productVariants)
-        .where(eq(productVariants.id, a.productVariantId))
-        .limit(1);
-
-      if (!variant) {
-        result.details.push({
-          productId: 0,
-          variantId: a.productVariantId,
-          sku: a.sku,
-          allocatedQty: a.allocatedUnits,
-          previousQty: null,
-          status: "error",
-          error: "Variant not found",
-        });
-        result.variantsErrored++;
-        continue;
-      }
-
-      // Get previous synced qty and per-channel inventory item ID from channel_feeds
-      const [feed] = await this.db
-        .select({ 
-          lastSyncedQty: channelFeeds.lastSyncedQty,
-          channelInventoryItemId: channelFeeds.channelInventoryItemId,
-        })
-        .from(channelFeeds)
-        .where(
-          and(
-            eq(channelFeeds.channelId, channelId),
-            eq(channelFeeds.productVariantId, a.productVariantId),
-          ),
-        )
-        .limit(1);
-
-      // Prefer per-channel inventory item ID over global (supports multi-store)
-      const inventoryItemId = feed?.channelInventoryItemId || variant.shopifyInventoryItemId;
-
-      if (!inventoryItemId) {
-        result.details.push({
-          productId: 0,
-          variantId: a.productVariantId,
-          sku: a.sku,
-          allocatedQty: a.allocatedUnits,
-          previousQty: null,
-          status: "skipped",
-          error: "No inventoryItemId (channel or global) — run catalog backfill first",
-        });
-        result.variantsSkipped++;
-        continue;
-      }
-
-      pushItems.push({
-        variantId: a.productVariantId,
-        sku: variant.sku,
-        externalVariantId: variant.shopifyVariantId,
-        externalInventoryItemId: inventoryItemId,
-        allocatedQty: a.allocatedUnits,
-      });
-
-      const previousQty = feed?.lastSyncedQty ?? null;
-
-      console.log(
-        `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Inventory: ` +
-        `variant=${a.sku} channel=${channel.name} ` +
-        `allocated=${a.allocatedUnits} previous=${previousQty ?? "unknown"} ` +
-        `method=${a.method} reason="${a.reason}"`,
+    // Load assigned warehouses for this channel (enabled only)
+    const assignedWarehouses = await this.db
+      .select({
+        warehouseId: channelWarehouseAssignments.warehouseId,
+        shopifyLocationId: warehouses.shopifyLocationId,
+        warehouseName: warehouses.name,
+      })
+      .from(channelWarehouseAssignments)
+      .innerJoin(warehouses, eq(warehouses.id, channelWarehouseAssignments.warehouseId))
+      .where(
+        and(
+          eq(channelWarehouseAssignments.channelId, channelId),
+          eq(channelWarehouseAssignments.enabled, true),
+        ),
       );
 
-      result.details.push({
-        productId: 0,
-        variantId: a.productVariantId,
-        sku: variant.sku,
-        allocatedQty: a.allocatedUnits,
-        previousQty,
-        status: config.dryRun ? "dry_run" : "pending",
-      });
+    if (assignedWarehouses.length === 0) {
+      console.log(`[SyncOrchestrator] No enabled warehouses assigned to channel ${channel.name}`);
+      return result;
     }
 
-    // Push to channel (unless dry run)
-    if (!config.dryRun && pushItems.length > 0) {
-      try {
-        const pushResults = await adapter.pushInventory(channelId, pushItems);
-
-        // Update results and channel_feeds
-        for (const pr of pushResults) {
-          const detail = result.details.find((d) => d.variantId === pr.variantId);
-          if (detail) {
-            detail.status = pr.status;
-            if (pr.error) detail.error = pr.error;
-          }
-
-          if (pr.status === "success") {
-            result.variantsPushed++;
-
-            // Update channel_feeds sync state
-            await this.db
-              .update(channelFeeds)
-              .set({
-                lastSyncedQty: pr.pushedQty,
-                lastSyncedAt: new Date(),
-                updatedAt: new Date(),
-              })
-              .where(
-                and(
-                  eq(channelFeeds.channelId, channelId),
-                  eq(channelFeeds.productVariantId, pr.variantId),
-                ),
-              );
-
-            // Log sync
-            await this.logSync({
-              productVariantId: pr.variantId,
-              channelId,
-              pushedQty: pr.pushedQty,
-              status: "success",
-              triggeredBy: triggeredBy ?? "orchestrator",
-            });
-          } else if (pr.status === "error") {
-            result.variantsErrored++;
-            await this.logSync({
-              productVariantId: pr.variantId,
-              channelId,
-              pushedQty: 0,
-              status: "error",
-              errorMessage: pr.error,
-              triggeredBy: triggeredBy ?? "orchestrator",
-            });
-          } else {
-            result.variantsSkipped++;
-          }
-        }
-      } catch (err: any) {
-        console.error(`[SyncOrchestrator] Inventory push failed for channel ${channel.name}: ${err.message}`);
-        result.variantsErrored = pushItems.length;
+    // For each warehouse, determine which variants exist there and push only those
+    for (const wh of assignedWarehouses) {
+      if (!wh.shopifyLocationId) {
+        console.warn(
+          `[SyncOrchestrator] Warehouse ${wh.warehouseId} (${wh.warehouseName}) ` +
+          `has no shopify_location_id — skipping`,
+        );
+        continue;
       }
-    } else {
-      // Dry run — all items are "pushed" as dry_run
-      result.variantsPushed = pushItems.length;
+
+      // Query which variant IDs from this product exist at this warehouse
+      // A variant "exists" at a warehouse if it has a product_locations row
+      // at any warehouse_location belonging to that warehouse
+      const variantIdsAtWarehouse = await this.db
+        .select({ variantId: sql<number>`DISTINCT ${productLocations.productVariantId}` })
+        .from(productLocations)
+        .innerJoin(
+          warehouseLocations,
+          eq(warehouseLocations.id, productLocations.warehouseLocationId),
+        )
+        .where(
+          and(
+            eq(warehouseLocations.warehouseId, wh.warehouseId),
+            eq(productLocations.status, "active"),
+            sql`${productLocations.productVariantId} IS NOT NULL`,
+          ),
+        );
+
+      const existingVariantIds = new Set(variantIdsAtWarehouse.map((r: any) => Number(r.variantId)));
+
+      if (existingVariantIds.size === 0) {
+        console.log(
+          `[SyncOrchestrator] No variants exist at warehouse ${wh.warehouseId} ` +
+          `(${wh.warehouseName}) for product ${productId} — skipping`,
+        );
+        continue;
+      }
+
+      // Filter allocations to only variants that exist at this warehouse
+      const warehouseAllocations = allocations.filter(
+        (a) => existingVariantIds.has(a.productVariantId),
+      );
+
+      if (warehouseAllocations.length === 0) continue;
+
+      // Get per-warehouse ATP if the atpService is available
+      let warehouseAtpMap: Map<number, number> | null = null;
+      if (this.atpService) {
+        const warehouseVariantAtp = await this.atpService.getAtpPerVariantByWarehouse(
+          productId,
+          wh.warehouseId,
+        );
+        warehouseAtpMap = new Map(
+          warehouseVariantAtp.map((v) => [v.productVariantId, v.atpUnits]),
+        );
+      }
+
+      // Build push items for this warehouse
+      const pushItems: InventoryPushItem[] = [];
+
+      for (const a of warehouseAllocations) {
+        // Get variant details and external IDs
+        const [variant] = await this.db
+          .select({
+            id: productVariants.id,
+            sku: productVariants.sku,
+            shopifyVariantId: productVariants.shopifyVariantId,
+            shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
+          })
+          .from(productVariants)
+          .where(eq(productVariants.id, a.productVariantId))
+          .limit(1);
+
+        if (!variant) {
+          result.details.push({
+            productId: productId,
+            variantId: a.productVariantId,
+            sku: a.sku,
+            allocatedQty: a.allocatedUnits,
+            previousQty: null,
+            status: "error",
+            error: "Variant not found",
+          });
+          result.variantsErrored++;
+          continue;
+        }
+
+        // Get per-channel inventory item ID from channel_feeds
+        const [feed] = await this.db
+          .select({
+            lastSyncedQty: channelFeeds.lastSyncedQty,
+            channelInventoryItemId: channelFeeds.channelInventoryItemId,
+          })
+          .from(channelFeeds)
+          .where(
+            and(
+              eq(channelFeeds.channelId, channelId),
+              eq(channelFeeds.productVariantId, a.productVariantId),
+            ),
+          )
+          .limit(1);
+
+        // Prefer per-channel inventory item ID over global
+        const inventoryItemId = feed?.channelInventoryItemId || variant.shopifyInventoryItemId;
+
+        if (!inventoryItemId) {
+          result.details.push({
+            productId: productId,
+            variantId: a.productVariantId,
+            sku: a.sku,
+            allocatedQty: a.allocatedUnits,
+            previousQty: null,
+            status: "skipped",
+            error: "No inventoryItemId (channel or global) — run catalog backfill first",
+          });
+          result.variantsSkipped++;
+          continue;
+        }
+
+        // Use per-warehouse ATP if available, otherwise fall back to allocation qty
+        const pushQty = warehouseAtpMap?.get(a.productVariantId) ?? a.allocatedUnits;
+        const previousQty = feed?.lastSyncedQty ?? null;
+
+        // Build with warehouseBreakdown for the adapter
+        pushItems.push({
+          variantId: a.productVariantId,
+          sku: variant.sku,
+          externalVariantId: variant.shopifyVariantId,
+          externalInventoryItemId: inventoryItemId,
+          allocatedQty: pushQty,
+          warehouseBreakdown: [{
+            warehouseId: wh.warehouseId,
+            externalLocationId: wh.shopifyLocationId,
+            qty: pushQty,
+          }],
+        });
+
+        console.log(
+          `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Inventory: ` +
+          `variant=${a.sku} channel=${channel.name} ` +
+          `warehouse=${wh.warehouseName}(${wh.warehouseId}) ` +
+          `location=${wh.shopifyLocationId} ` +
+          `qty=${pushQty} previous=${previousQty ?? "unknown"} ` +
+          `method=${a.method}`,
+        );
+
+        result.details.push({
+          productId: productId,
+          variantId: a.productVariantId,
+          sku: variant.sku,
+          allocatedQty: pushQty,
+          previousQty,
+          status: config.dryRun ? "dry_run" : "pending",
+        });
+      }
+
+      // Push to channel (unless dry run)
+      if (!config.dryRun && pushItems.length > 0) {
+        try {
+          const pushResults = await adapter.pushInventory(channelId, pushItems);
+
+          for (const pr of pushResults) {
+            const detail = result.details.find(
+              (d) => d.variantId === pr.variantId && d.status === "pending",
+            );
+            if (detail) {
+              detail.status = pr.status;
+              if (pr.error) detail.error = pr.error;
+            }
+
+            if (pr.status === "success") {
+              result.variantsPushed++;
+
+              // Update channel_feeds sync state
+              await this.db
+                .update(channelFeeds)
+                .set({
+                  lastSyncedQty: pr.pushedQty,
+                  lastSyncedAt: new Date(),
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(channelFeeds.channelId, channelId),
+                    eq(channelFeeds.productVariantId, pr.variantId),
+                  ),
+                );
+
+              // Log sync with warehouse info
+              await this.logSync({
+                productVariantId: pr.variantId,
+                channelId,
+                pushedQty: pr.pushedQty,
+                status: "success",
+                triggeredBy: triggeredBy ?? "orchestrator",
+                warehouseId: wh.warehouseId,
+                shopifyLocationId: wh.shopifyLocationId,
+              });
+            } else if (pr.status === "error") {
+              result.variantsErrored++;
+              await this.logSync({
+                productVariantId: pr.variantId,
+                channelId,
+                pushedQty: 0,
+                status: "error",
+                errorMessage: pr.error,
+                triggeredBy: triggeredBy ?? "orchestrator",
+                warehouseId: wh.warehouseId,
+                shopifyLocationId: wh.shopifyLocationId,
+              });
+            } else {
+              result.variantsSkipped++;
+            }
+          }
+        } catch (err: any) {
+          console.error(
+            `[SyncOrchestrator] Inventory push failed for channel ${channel.name} ` +
+            `warehouse ${wh.warehouseName}: ${err.message}`,
+          );
+          result.variantsErrored += pushItems.length;
+        }
+      } else if (config.dryRun) {
+        result.variantsPushed += pushItems.length;
+      }
+
+      // Rate limiting between warehouses
+      await this.delay(100);
     }
 
     return result;
@@ -1065,7 +1211,7 @@ class EchelonSyncOrchestrator {
   }
 
   /**
-   * Log a sync event.
+   * Log a sync event with optional warehouse/location info.
    */
   private async logSync(entry: {
     productVariantId: number;
@@ -1074,6 +1220,8 @@ class EchelonSyncOrchestrator {
     status: string;
     errorMessage?: string;
     triggeredBy: string;
+    warehouseId?: number;
+    shopifyLocationId?: string;
   }): Promise<void> {
     try {
       // Get product ID
@@ -1107,6 +1255,8 @@ class EchelonSyncOrchestrator {
         errorMessage: entry.errorMessage ?? null,
         durationMs: 0,
         triggeredBy: entry.triggeredBy,
+        warehouseId: entry.warehouseId ?? null,
+        shopifyLocationId: entry.shopifyLocationId ?? null,
       });
     } catch (err: any) {
       console.warn(`[SyncOrchestrator] Failed to log sync: ${err.message}`);
@@ -1128,6 +1278,7 @@ export function createEchelonSyncOrchestrator(
   sourceLockService: SourceLockService,
   adapterRegistry: ChannelAdapterRegistry,
   productPushService: ProductPushService,
+  atpService?: any,
 ) {
   return new EchelonSyncOrchestrator(
     db,
@@ -1135,6 +1286,7 @@ export function createEchelonSyncOrchestrator(
     sourceLockService,
     adapterRegistry,
     productPushService,
+    atpService,
   );
 }
 

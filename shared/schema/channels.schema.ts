@@ -191,6 +191,8 @@ export const channelSyncLog = pgTable("channel_sync_log", {
   responseCode: integer("response_code"),
   durationMs: integer("duration_ms"),
   triggeredBy: varchar("triggered_by", { length: 30 }), // reserve, pick, receive, adjust, manual, scheduled
+  warehouseId: integer("warehouse_id"), // Which warehouse this push was for
+  shopifyLocationId: varchar("shopify_location_id", { length: 50 }), // Which Shopify location was targeted
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

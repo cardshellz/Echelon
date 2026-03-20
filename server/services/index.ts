@@ -146,7 +146,7 @@ export function createServices(db: any) {
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   const echelonOrchestrator = createEchelonSyncOrchestrator(
-    db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush,
+    db, allocationEngine, sourceLockService, adapterRegistry, channelProductPush, atp,
   );
 
   // Wire orchestrator into legacy channelSync so event-driven syncs
