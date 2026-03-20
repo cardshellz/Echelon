@@ -164,7 +164,7 @@ interface FeedItem {
   ebayBrowseCategoryOverrideId: string | null;
   ebayBrowseCategoryOverrideName: string | null;
   ebayStoreCategoryName: string | null;
-  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled";
+  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled" | "ended" | "deleted";
   missingItems: string[];
   missingAspects: string[];
   isListed: boolean;
@@ -287,7 +287,7 @@ export default function EbayChannelPage() {
   // Browse category search (legacy state — now handled by EbayCategoryPicker)
 
   // Feed filters
-  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended">("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
 
@@ -454,6 +454,26 @@ export default function EbayChannelPage() {
     pushToEbayMutation.mutate([productId]);
   };
 
+  // ---- Verify / Reconcile Listings ----
+  const reconcileMutation = useMutation({
+    mutationFn: async () => {
+      const resp = await apiRequest("POST", "/api/ebay/listings/reconcile");
+      return resp.json();
+    },
+    onSuccess: (data: any) => {
+      const { checked, active, ended, deleted, errors } = data;
+      const removed = ended + deleted;
+      toast({
+        title: "Verification Complete",
+        description: `Verified ${checked} listing${checked !== 1 ? "s" : ""}: ${active} active${removed > 0 ? `, ${removed} removed from eBay` : ""}${errors > 0 ? `, ${errors} error${errors !== 1 ? "s" : ""}` : ""}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Verification Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   const toggleExclusionMutation = useMutation({
     mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
       const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
@@ -610,6 +630,8 @@ export default function EbayChannelPage() {
       items = items.filter((i) => i.status === "excluded");
     } else if (feedFilter === "missing_specifics") {
       items = items.filter((i) => i.status === "missing_specifics");
+    } else if (feedFilter === "ended") {
+      items = items.filter((i) => i.status === "ended" || i.status === "deleted");
     } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
     }
@@ -625,7 +647,7 @@ export default function EbayChannelPage() {
   }, [feedData, feedFilter, feedSearch]);
 
   const feedCounts = useMemo(() => {
-    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0 };
+    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0, ended: 0 };
     // Exclude type_disabled from all counts
     const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
     return {
@@ -635,6 +657,7 @@ export default function EbayChannelPage() {
       missing_specifics: feed.filter((f) => f.status === "missing_specifics").length,
       listed: feed.filter((f) => f.status === "listed").length,
       excluded: feed.filter((f) => f.status === "excluded").length,
+      ended: feed.filter((f) => f.status === "ended" || f.status === "deleted").length,
     };
   }, [feedData]);
 
@@ -1427,20 +1450,36 @@ export default function EbayChannelPage() {
               </CardTitle>
               <CardDescription>Products that will be listed on eBay</CardDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full sm:w-auto min-h-[44px] sm:min-h-0"
-              disabled={feedCounts.ready === 0 || pushToEbayMutation.isPending}
-              onClick={handlePushAll}
-            >
-              {pushToEbayMutation.isPending ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Zap className="h-4 w-4 mr-2" />
-              )}
-              Push to eBay ({feedCounts.ready})
-            </Button>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
+                disabled={feedCounts.listed === 0 || reconcileMutation.isPending}
+                onClick={() => reconcileMutation.mutate()}
+              >
+                {reconcileMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-4 w-4 mr-2" />
+                )}
+                Verify ({feedCounts.listed})
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
+                disabled={feedCounts.ready === 0 || pushToEbayMutation.isPending}
+                onClick={handlePushAll}
+              >
+                {pushToEbayMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Zap className="h-4 w-4 mr-2" />
+                )}
+                Push to eBay ({feedCounts.ready})
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="px-3 sm:px-6">
@@ -1456,7 +1495,7 @@ export default function EbayChannelPage() {
               {/* Filters */}
               <div className="flex flex-col gap-3 mb-4">
                 <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-1.5 sm:gap-1">
-                  {(["all", "ready", "missing_config", "missing_specifics", "listed", "excluded"] as const).map((f) => (
+                  {(["all", "ready", "missing_config", "missing_specifics", "listed", "ended", "excluded"] as const).map((f) => (
                     <Button
                       key={f}
                       variant={feedFilter === f ? "default" : "outline"}
@@ -1469,6 +1508,7 @@ export default function EbayChannelPage() {
                       {f === "missing_config" && `Missing (${feedCounts.missing_config})`}
                       {f === "missing_specifics" && `Specifics (${feedCounts.missing_specifics})`}
                       {f === "listed" && `Listed (${feedCounts.listed})`}
+                      {f === "ended" && `Ended (${feedCounts.ended})`}
                       {f === "excluded" && `Excluded (${feedCounts.excluded})`}
                     </Button>
                   ))}
@@ -1613,6 +1653,11 @@ export default function EbayChannelPage() {
                               {item.status === "listed" && (
                                 <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
                               )}
+                              {(item.status === "ended" || item.status === "deleted") && (
+                                <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
+                                  {item.status === "deleted" ? "Deleted" : "Ended"}
+                                </Badge>
+                              )}
                               {item.status === "excluded" && (
                                 <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
                               )}
@@ -1695,6 +1740,11 @@ export default function EbayChannelPage() {
                                     </a>
                                   )}
                                 </>
+                              )}
+                              {(item.status === "ended" || item.status === "deleted") && (
+                                <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
+                                  {item.status === "deleted" ? "Deleted" : "Ended"}
+                                </Badge>
                               )}
                               {item.status === "excluded" && (
                                 <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>

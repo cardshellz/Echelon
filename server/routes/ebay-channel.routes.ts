@@ -658,6 +658,8 @@ ${categoriesXml}
           const hasVariants = (row.variant_count || 0) > 0;
           const hasImages = (row.image_count || 0) > 0;
           const isListed = !!row.listing_id && row.listing_status === "synced";
+          const isEnded = !!row.listing_id && (row.listing_status === "ended" || row.listing_status === "deleted");
+          const listingSyncStatus = row.listing_status;
 
           const isExcluded = row.ebay_listing_excluded === true;
           const isTypeDisabled = row.type_listing_enabled === false;
@@ -683,6 +685,7 @@ ${categoriesXml}
           if (isExcluded) status = "excluded";
           else if (isTypeDisabled) status = "type_disabled";
           else if (isListed) status = "listed";
+          else if (isEnded) status = listingSyncStatus; // "ended" or "deleted"
           else if (!hasCategoryMapping || !hasVariants || !hasImages) status = "missing_config";
           else if (missingAspects.length > 0) status = "missing_specifics";
           else status = "ready";
@@ -1883,6 +1886,140 @@ ${categoriesXml}
       }
     } catch (err: any) {
       console.error("[eBay Effective Prices] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /api/ebay/listings/reconcile — Verify eBay listings still exist
+  // -----------------------------------------------------------------------
+  app.post("/api/ebay/listings/reconcile", async (_req: Request, res: Response) => {
+    try {
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay auth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+
+      const client = await pool.connect();
+      try {
+        // Get all synced listings for eBay channel
+        const listingsResult = await client.query(`
+          SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
+                 cl.external_sku, cl.sync_status,
+                 pv.sku AS variant_sku, p.name AS product_name
+          FROM channel_listings cl
+          LEFT JOIN product_variants pv ON pv.id = cl.product_variant_id
+          LEFT JOIN products p ON p.id = pv.product_id
+          WHERE cl.channel_id = $1 AND cl.sync_status = 'synced'
+        `, [EBAY_CHANNEL_ID]);
+
+        const listings = listingsResult.rows;
+        if (listings.length === 0) {
+          res.json({ checked: 0, active: 0, ended: 0, deleted: 0, errors: 0 });
+          return;
+        }
+
+        let active = 0;
+        let ended = 0;
+        let deleted = 0;
+        let errors = 0;
+        const changes: Array<{ id: number; sku: string; product: string; oldStatus: string; newStatus: string }> = [];
+
+        // Check each listing against eBay
+        for (const listing of listings) {
+          const sku = listing.external_sku || listing.variant_sku;
+          if (!sku) {
+            errors++;
+            continue;
+          }
+
+          try {
+            // Step 1: Check if inventory item exists
+            let itemExists = true;
+            try {
+              await ebayApiRequest(
+                "GET",
+                `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`,
+                accessToken,
+              );
+            } catch (err: any) {
+              if (err.message?.includes("404") || err.message?.includes("25710")) {
+                itemExists = false;
+              } else {
+                throw err;
+              }
+            }
+
+            if (!itemExists) {
+              // Inventory item gone — mark as deleted
+              await client.query(
+                `UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
+                 WHERE id = $1`,
+                [listing.id],
+              );
+              deleted++;
+              changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
+              continue;
+            }
+
+            // Step 2: Check if offer is still active
+            let offerActive = false;
+            try {
+              const offersResp = await ebayApiRequest(
+                "GET",
+                `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=EBAY_US`,
+                accessToken,
+              );
+              if (offersResp?.offers?.length > 0) {
+                // Check offer status — PUBLISHED means active
+                const hasActiveOffer = offersResp.offers.some(
+                  (o: any) => o.status === "PUBLISHED" || o.status === "ACTIVE",
+                );
+                offerActive = hasActiveOffer;
+              }
+            } catch (err: any) {
+              if (err.message?.includes("404")) {
+                offerActive = false;
+              } else {
+                throw err;
+              }
+            }
+
+            if (offerActive) {
+              active++;
+            } else {
+              // Offer ended/withdrawn
+              await client.query(
+                `UPDATE channel_listings SET sync_status = 'ended', sync_error = 'Offer no longer active on eBay', updated_at = NOW()
+                 WHERE id = $1`,
+                [listing.id],
+              );
+              ended++;
+              changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
+            }
+          } catch (err: any) {
+            console.error(`[eBay Reconcile] Error checking SKU ${sku}:`, err.message);
+            errors++;
+          }
+
+          // Small delay between API calls to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+
+        if (changes.length > 0) {
+          console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
+        }
+        console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} errors=${errors}`);
+
+        res.json({ checked: listings.length, active, ended, deleted, errors, changes });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Reconcile] Error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });

@@ -289,6 +289,83 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
   }
 
+  // ---- eBay Listing Reconciliation (every 30 minutes) ----
+  // Checks synced listings against eBay to detect ended/deleted items
+  const RECONCILE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+  let reconcileRunning = false;
+
+  async function runEbayReconciliation() {
+    if (reconcileRunning) return;
+    reconcileRunning = true;
+    try {
+      const { pool: dbPool } = require("./db");
+      const client = await dbPool.connect();
+      try {
+        // Check if there are any synced eBay listings to verify
+        const countResult = await client.query(
+          `SELECT COUNT(*) AS cnt FROM channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
+        );
+        const count = parseInt(countResult.rows[0]?.cnt || "0");
+        if (count === 0) {
+          return; // Nothing to reconcile
+        }
+
+        // Call the reconcile endpoint internally via HTTP
+        const http = require("http");
+        const port = process.env.PORT || 5000;
+        const reqData = JSON.stringify({});
+        const options = {
+          hostname: "127.0.0.1",
+          port,
+          path: "/api/ebay/listings/reconcile",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(reqData),
+          },
+        };
+
+        await new Promise<void>((resolve, reject) => {
+          const req = http.request(options, (res: any) => {
+            let body = "";
+            res.on("data", (chunk: string) => (body += chunk));
+            res.on("end", () => {
+              try {
+                const data = JSON.parse(body);
+                if (data.checked > 0) {
+                  log(
+                    `[eBay Reconcile] Scheduled: checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}`,
+                    "ebay-reconcile",
+                  );
+                }
+              } catch { /* ignore parse errors */ }
+              resolve();
+            });
+          });
+          req.on("error", (err: any) => {
+            console.warn(`[eBay Reconcile] Scheduled run failed: ${err.message}`);
+            resolve(); // Don't reject — just log
+          });
+          req.write(reqData);
+          req.end();
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.warn(`[eBay Reconcile] Scheduled error: ${err.message}`);
+    } finally {
+      reconcileRunning = false;
+    }
+  }
+
+  // Start after 2 minutes (let server settle), then every 30 min
+  setTimeout(() => {
+    runEbayReconciliation();
+    setInterval(runEbayReconciliation, RECONCILE_INTERVAL_MS);
+    log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
+  }, 2 * 60 * 1000);
+
   // Register ShipStation SHIP_NOTIFY webhook (idempotent, non-blocking)
   setTimeout(async () => {
     try {
