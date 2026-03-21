@@ -432,3 +432,55 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     },
   );
 })();
+
+  // eBay order reconciliation — check for stuck orders every 4 hours
+  setInterval(async () => {
+    try {
+      const { sql } = require("drizzle-orm");
+      // Find eBay OMS orders stuck in "confirmed" for > 48 hours
+      const stuckOrders = await db.execute(sql`
+        SELECT o.id, o.external_order_id, o.order_number
+        FROM oms_orders o
+        WHERE o.channel_id = 67
+          AND o.status = 'confirmed'
+          AND o.created_at < NOW() - INTERVAL '48 hours'
+        LIMIT 50
+      `);
+      if (stuckOrders.rows.length === 0) return;
+
+      console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking ShipStation...`);
+      const ss = services.shipStation;
+      if (!ss?.isConfigured()) return;
+
+      for (const order of stuckOrders.rows) {
+        try {
+          // Check ShipStation for this order
+          const ssOrders = await ss.findOrderByNumber(`EB-${order.order_number || order.external_order_id}`);
+          if (ssOrders?.length > 0 && ssOrders[0].orderStatus === "shipped") {
+            const shipment = ssOrders[0];
+            await db.execute(sql`
+              UPDATE oms_orders SET status = 'shipped',
+                tracking_number = ${shipment.trackingNumber || null},
+                carrier = ${shipment.carrierCode || null},
+                updated_at = NOW()
+              WHERE id = ${order.id}
+            `);
+            console.log(`[eBay Reconcile] Auto-shipped OMS order ${order.id} (${order.external_order_id})`);
+
+            // Push tracking to eBay
+            try {
+              await services.fulfillmentPush.pushTracking(order.id);
+            } catch (e: any) {
+              console.warn(`[eBay Reconcile] Tracking push failed for ${order.id}: ${e.message}`);
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[eBay Reconcile] Failed to check order ${order.id}: ${e.message}`);
+        }
+        // Rate limit
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch (err: any) {
+      console.warn("[eBay Reconcile] Sweep error:", err?.message);
+    }
+  }, 4 * 60 * 60 * 1000); // Every 4 hours
