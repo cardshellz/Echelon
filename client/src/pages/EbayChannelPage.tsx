@@ -1315,6 +1315,7 @@ export default function EbayChannelPage() {
                                 <TableCell colSpan={5}>
                                   <div className="py-3 px-4">
                                     <AspectEditor
+                                      key={`aspects-${pt.slug}-${mapping.ebayBrowseCategoryId}`}
                                       categoryId={mapping.ebayBrowseCategoryId!}
                                       mode="type"
                                       productTypeSlug={pt.slug}
@@ -1538,6 +1539,7 @@ export default function EbayChannelPage() {
                       {isSpecificsExpanded && hasBrowseCategory && (
                         <div className="border-t pt-3 bg-amber-50/50 dark:bg-amber-950/10 -mx-3 px-3 pb-3">
                           <AspectEditor
+                            key={`aspects-mobile-${pt.slug}-${mapping.ebayBrowseCategoryId}`}
                             categoryId={mapping.ebayBrowseCategoryId!}
                             mode="type"
                             productTypeSlug={pt.slug}
