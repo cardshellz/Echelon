@@ -171,7 +171,10 @@ export function createProductImportService() {
             }
           }
 
-          // Also sync to product_locations for warehouse assignment
+          // TODO: Boundary cross — writes to product_locations (WMS table) directly instead of
+          // routing through a warehouse/bin assignment service. Acceptable for now since
+          // product_locations is configuration data (bin assignments), not transactional inventory.
+          // When a bin assignment service exists, route through it instead.
           if (variant.sku) {
             await storage.upsertProductLocationBySku(variant.sku, variant.title, variant.status, undefined, variant.barcode || undefined);
           }

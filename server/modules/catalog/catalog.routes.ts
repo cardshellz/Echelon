@@ -302,23 +302,20 @@ export function registerProductRoutes(app: Express) {
         console.log(`[ARCHIVE] SKU correction: transferred ${inventoryTransferred} units to variant ${targetVariant.sku} (batch: ${batchId})`);
       }
 
+      const { inventoryCore: archiveCore } = req.app.locals.services;
+      const { channelSync: archiveChannelSync } = req.app.locals.services;
+
       for (const v of variants) {
-        // Log adjustment transactions for any non-zero inventory being zeroed (only if no transfer)
+        // Zero out inventory through inventoryCore (creates audit trail, fires notifyChange → Shopify sync)
         if (!transferToVariantId) {
           const levels = await storage.getInventoryLevelsByVariantId(v.id);
           for (const level of levels) {
             if (level.variantQty !== 0) {
-              await storage.createInventoryTransaction({
+              await archiveCore.adjustInventory({
                 productVariantId: v.id,
-                fromLocationId: level.warehouseLocationId,
-                transactionType: "adjustment",
-                variantQtyDelta: -level.variantQty,
-                variantQtyBefore: level.variantQty,
-                variantQtyAfter: 0,
-                sourceState: "on_hand",
-                targetState: "on_hand",
-                referenceType: "manual",
-                notes: "Product archived — inventory zeroed",
+                warehouseLocationId: level.warehouseLocationId,
+                qtyDelta: -level.variantQty,
+                reason: "Product archived — inventory zeroed",
                 userId,
               });
             }
@@ -327,7 +324,15 @@ export function registerProductRoutes(app: Express) {
 
         inventoryCleared += await storage.deleteInventoryLevelsByVariantId(v.id);
         binAssignmentsCleared += await storage.deleteProductLocationsByVariantId(v.id);
+
+        // P2: Deactivate channel feeds — fire notifyChange so channel sync picks up the change
+        // TODO: Route through channelSync.deactivateFeed() when a dedicated API exists
         channelFeedsDeactivated += await storage.deactivateChannelFeedsByVariantId(v.id);
+        if (archiveChannelSync) {
+          archiveChannelSync.queueSyncAfterInventoryChange(v.id).catch((err: any) =>
+            console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${v.id}:`, err)
+          );
+        }
 
         // Deactivate variant
         await storage.updateProductVariant(v.id, { isActive: false });
@@ -598,6 +603,13 @@ export function registerProductRoutes(app: Express) {
       // Log audit transaction
       await storage.createMergeAuditTransaction(targetId, source.sku || '', sourceId, movedInventoryCount, movedLocationCount);
 
+      // Trigger notifyChange for both variants so channel sync picks up the merged inventory
+      const { inventoryCore: mergeCore } = req.app.locals.services;
+      if (mergeCore && movedInventoryCount > 0) {
+        mergeCore.triggerNotifyChange(sourceId, "variant_merge_source");
+        mergeCore.triggerNotifyChange(targetId, "variant_merge_target");
+      }
+
       // Deactivate source variant
       await storage.updateProductVariant(sourceId, { isActive: false } as any);
 
@@ -717,21 +729,18 @@ export function registerProductRoutes(app: Express) {
         console.log(`[ARCHIVE-VARIANT] SKU correction: transferred ${inventoryTransferred} units from ${variant.sku} to ${targetVariant.sku} (batch: ${batchId})`);
       }
 
-      // Zero remaining inventory (only if no transfer)
+      // Zero remaining inventory through inventoryCore (audit trail + notifyChange → Shopify sync)
+      const { inventoryCore: varArchiveCore } = req.app.locals.services;
+      const { channelSync: varArchiveSync } = req.app.locals.services;
+
       if (!transferToVariantId) {
         for (const level of levels) {
           if (level.variantQty !== 0) {
-            await storage.createInventoryTransaction({
+            await varArchiveCore.adjustInventory({
               productVariantId: id,
-              fromLocationId: level.warehouseLocationId,
-              transactionType: "adjustment",
-              variantQtyDelta: -level.variantQty,
-              variantQtyBefore: level.variantQty,
-              variantQtyAfter: 0,
-              sourceState: "on_hand",
-              targetState: "on_hand",
-              referenceType: "manual",
-              notes: "Variant archived — inventory zeroed",
+              warehouseLocationId: level.warehouseLocationId,
+              qtyDelta: -level.variantQty,
+              reason: "Variant archived — inventory zeroed",
               userId,
             });
           }
@@ -740,7 +749,15 @@ export function registerProductRoutes(app: Express) {
 
       inventoryCleared = await storage.deleteInventoryLevelsByVariantId(id);
       binAssignmentsCleared = await storage.deleteProductLocationsByVariantId(id);
+
+      // P2: Deactivate channel feeds — fire sync so channels pick up the change
+      // TODO: Route through channelSync.deactivateFeed() when a dedicated API exists
       channelFeedsDeactivated = await storage.deactivateChannelFeedsByVariantId(id);
+      if (varArchiveSync) {
+        varArchiveSync.queueSyncAfterInventoryChange(id).catch((err: any) =>
+          console.warn(`[ChannelSync] Post-archive feed deactivation sync failed for variant ${id}:`, err)
+        );
+      }
       await storage.updateProductVariant(id, { isActive: false });
 
       console.log(`[ARCHIVE-VARIANT] Variant ${id} (${variant.sku}) archived: ${inventoryCleared} inventory rows, ${binAssignmentsCleared} bin assignments, ${channelFeedsDeactivated} feeds`);

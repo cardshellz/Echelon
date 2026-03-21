@@ -445,6 +445,10 @@ export const productMethods: IProductStorage = {
 
   async cascadeSkuRename(variantId: number, oldSku: string, newSku: string): Promise<void> {
     const now = new Date();
+    // Cross-system write: SKU rename cascades to OMS (order_items, order_item_financials),
+    // WMS (picking_logs, product_locations), and Procurement tables. This is a data consistency
+    // correction — SKU is a reference key across systems and must remain consistent. The
+    // alternative (leaving stale SKUs) would break reporting, picks, and PO matching.
     // Tables with productVariantId FK — match by variant ID
     await db.update(purchaseOrderLines).set({ sku: newSku }).where(eq(purchaseOrderLines.productVariantId, variantId));
     await db.update(inboundShipmentLines).set({ sku: newSku, updatedAt: now }).where(eq(inboundShipmentLines.productVariantId, variantId));

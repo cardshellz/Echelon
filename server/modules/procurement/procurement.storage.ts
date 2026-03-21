@@ -872,6 +872,11 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
+    // Boundary note: reads inventory_levels directly instead of atpService.getAtpPerVariant().
+    // This is intentional — the reorder query needs bulk aggregation across ALL products in one
+    // query (N+1 atpService calls would be prohibitively slow), and it needs per-location detail
+    // (reserved vs on-hand breakdown) that the ATP service doesn't expose. This is a read-only
+    // cross-boundary query for procurement decision support.
     const rows = await db.execute(sql`
       SELECT
         p.id AS product_id,
@@ -944,6 +949,9 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]> {
+    // Boundary note: read-only reporting query that intentionally crosses OMS/WMS/Procurement
+    // boundaries by joining orders, order_items, order_item_financials, and vendor cost data.
+    // This is acceptable for financial reporting — no writes, just aggregation for visibility.
     const rows = await db.execute(sql`
       SELECT
         o.id AS order_id,
@@ -975,6 +983,8 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getProductProfitabilityReport(limit: number, offset: number): Promise<any[]> {
+    // Boundary note: read-only reporting query that intentionally crosses OMS/WMS/Procurement
+    // boundaries. Joins product_variants, order_items, order_item_financials for margin analysis.
     const rows = await db.execute(sql`
       SELECT
         pv.id AS product_variant_id,

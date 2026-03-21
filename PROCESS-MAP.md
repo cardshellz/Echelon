@@ -990,3 +990,642 @@ eBay orders exist only in `oms_orders`. The pick queue reads from `orders`. This
 ---
 
 *Last updated: 2026-03-20*
+
+---
+
+## Additional Process Audits
+
+> **Generated:** 2026-03-21 | **Auditor:** Systems Architect (read-only)
+> **Scope:** All non-WMS-core business processes — Procurement, AP/Invoicing, Catalog, Notifications, Bin Assignment, Warehouse Settings, Fulfillment Routing, Order Combining
+
+---
+
+## 11. Procurement (PO Lifecycle)
+
+### 11A. PO Creation, Lines, Status Transitions
+
+**Trigger:** User creates a PO via UI → `POST /api/purchase-orders`
+
+**Happy Path:**
+
+```
+1. purchasing.createPO(data)
+   → procurement/purchasing.service.ts:createPO (~line 130)
+   a. Validate vendor exists via storage.getVendorById()
+   b. Generate PO number via storage.generatePoNumber()
+   c. INSERT purchase_orders (status: 'draft')
+   d. recordStatusChange() → INSERT po_status_history
+
+2. purchasing.addLine(purchaseOrderId, data)
+   → procurement/purchasing.service.ts:addLine (~line 175)
+   a. Guard: PO must be in EDITABLE_STATUSES ('draft')
+   b. Validate product + variant via storage
+   c. Calculate line total
+   d. INSERT purchase_order_lines
+   e. recalculateTotals() → UPDATE purchase_orders header totals
+
+3. purchasing.submit(id)
+   → procurement/purchasing.service.ts:submit (~line 260)
+   a. Validate at least 1 active line with qty > 0
+   b. Recalculate totals
+   c. Check approval tier: storage.getMatchingApprovalTier(totalCents)
+   d. If tier matches → status = 'pending_approval'
+   e. If no tier → auto-approve (status = 'approved')
+   f. recordStatusChange()
+
+4. Status transitions: approve → send → acknowledge → (receiving) → close
+   → Each validates via assertTransition() against VALID_TRANSITIONS map
+   → Each records to po_status_history
+```
+
+**System Ownership:**
+| Step | Owner | Notes |
+|------|-------|-------|
+| All steps | Procurement | PO lifecycle is 100% Procurement-owned |
+
+**⚠️ Boundary Violations:** None.
+- Does NOT touch `inventory_levels` — ✅
+- Does NOT touch `orders` or `oms_orders` — ✅
+- Only touches Procurement-owned tables: `purchase_orders`, `purchase_order_lines`, `po_status_history`, `vendors`, `vendor_products`
+
+**Atomicity:** Individual storage calls are not wrapped in a single transaction across steps. `recalculateTotals()` iterates lines and updates each, then updates the header. If it fails mid-way, line totals could be inconsistent with header totals. Low risk — retry-safe.
+
+### 11B. PO Line Update with Variant Cascade
+
+**Trigger:** User changes the variant/SKU on an existing PO line → `PATCH /api/purchase-orders/lines/:lineId`
+
+```
+purchasing.updateLine(lineId, updates)
+  → procurement/purchasing.service.ts:updateLine (~line 215)
+
+1. Guard: PO must be in LINE_AMENDABLE_STATUSES (draft through partially_received)
+2. storage.updatePurchaseOrderLine(lineId, updates)
+3. IF updates.productVariantId or updates.sku changed:
+   a. Cascade to inbound_shipment_lines (variant, SKU, recalc cartons)
+      → Direct db.update(inboundShipmentLines) with drizzle ORM
+   b. Cascade to landed_cost_snapshots (variant)
+      → Direct db.update(landedCostSnapshots)
+   c. Cascade to vendor_invoice_lines (variant)
+      → Direct db.update(vendorInvoiceLines)
+4. recalculateTotals()
+```
+
+**System Ownership:**
+| Step | Owner | Notes |
+|------|-------|-------|
+| 1-2 | Procurement | PO line update |
+| 3a | Procurement | Inbound shipment lines are Procurement-owned ✅ |
+| 3b | Procurement | Landed cost snapshots are Procurement-owned ✅ |
+| 3c | Procurement | Vendor invoice lines are Procurement-owned ✅ |
+
+**⚠️ Boundary Violations:** None. All cascaded tables (`inbound_shipment_lines`, `landed_cost_snapshots`, `vendor_invoice_lines`) are owned by Procurement per BOUNDARIES.md.
+
+### 11C. Receiving → PO Status Update
+
+**Trigger:** ReceivingService closes a receiving order linked to a PO
+
+```
+purchasing.onReceivingOrderClosed(receivingOrderId, receivingLines)
+  → procurement/purchasing.service.ts:onReceivingOrderClosed (~line 345)
+
+1. For each receiving line with purchaseOrderLineId:
+   a. Update PO line received/damaged quantities
+   b. Auto-transition line status (open → partially_received → received)
+   c. Create po_receipt record (cost variance tracking)
+2. recalculateTotals()
+3. Auto-transition PO status:
+   - All lines received → status = 'received'
+   - Some lines received → status = 'partially_received'
+```
+
+**System Ownership:** Procurement owns all steps. This is called BY the WMS (receiving service) INTO Procurement — correct handoff direction per BOUNDARIES.md.
+
+**⚠️ Boundary Violations:** None.
+
+### 11D. Reorder → PO Generation
+
+```
+purchasing.createPOFromReorder(items)
+  → procurement/purchasing.service.ts:createPOFromReorder (~line 410)
+
+1. Group items by vendor (preferred vendor lookup)
+2. For each vendor group: createPO() + addBulkLines()
+```
+
+**Reads:** `vendor_products` (Procurement-owned), `product_variants` (Catalog-owned, read-only lookup). Read-only cross-system access is acceptable.
+
+**⚠️ Boundary Violations:** None.
+
+### 11E. Reorder Analysis (Reports Route)
+
+```
+GET /api/purchasing/reorder-analysis
+  → procurement/procurement.routes.ts (~line 688)
+
+1. storage.getReorderAnalysisData(lookbackDays)
+   → procurement/procurement.storage.ts:getReorderAnalysisData
+   → Raw SQL query JOINing:
+     - products
+     - product_variants
+     - inventory_levels (SUM of variantQty, reservedQty)
+     - order_items + orders (velocity calculation)
+     - purchase_order_lines + purchase_orders (on-order qty)
+```
+
+**⚠️ Boundary Violations:**
+- **procurement.storage.ts:getReorderAnalysisData** — Reads `inventory_levels` directly for stock-on-hand and reserved quantities. This is a **read-only cross-system access** from Procurement into WMS tables.
+- **procurement.storage.ts:getReorderAnalysisData** — Reads `order_items` + `orders` for velocity. Read-only cross-system access from Procurement into OMS/WMS tables.
+- **Verdict:** These are read-only reporting queries used for reorder analysis. They don't write to any foreign tables. **Acceptable** for reporting, but ideally would go through `atpService` for the inventory portion.
+- **P3 improvement:** Replace the direct `inventory_levels` SUM with `atpService.getAtpBase()` calls to keep the read path consistent.
+
+### 11F. Financial Reports
+
+```
+GET /api/reports/order-profitability
+GET /api/reports/product-profitability
+GET /api/reports/vendor-spend
+GET /api/reports/cost-variance
+  → procurement/procurement.storage.ts (raw SQL)
+```
+
+**⚠️ Boundary Violations:**
+- `getOrderProfitabilityReport()` — Reads `orders`, `order_items`, `order_item_costs`. Cross-reads OMS/WMS tables.
+- `getProductProfitabilityReport()` — Reads `order_items`, `product_variants`. Cross-reads.
+- **Verdict:** Read-only reporting. Acceptable. No writes.
+
+---
+
+## 12. AP/Invoicing
+
+### 12A. Vendor Invoice Lifecycle
+
+**Happy Path:**
+
+```
+1. apLedger.createInvoice(data)
+   → procurement/ap-ledger.service.ts:createInvoice (~line 95)
+   a. INSERT vendor_invoices (status: 'received')
+   b. If poIds provided: link POs + auto-import lines
+   c. Recalculate invoice total from lines
+
+2. apLedger.approveInvoice(id)
+   → Status: received → approved
+
+3. apLedger.recordPayment(data)
+   → INSERT ap_payments
+   → INSERT ap_payment_allocations (per invoice)
+   → recalculateInvoiceBalance() for each affected invoice
+     → Updates paid_amount_cents, balance_cents, auto-transitions status
+
+4. apLedger.voidInvoice(id) / apLedger.disputeInvoice(id)
+   → Status transitions with validation
+```
+
+**System Ownership:** All Procurement-owned tables: `vendor_invoices`, `vendor_invoice_po_links`, `vendor_invoice_lines`, `ap_payments`, `ap_payment_allocations`, `vendor_invoice_attachments`.
+
+**⚠️ Boundary Violations:** None.
+- Does NOT touch `inventory_levels` — ✅
+- Does NOT touch `orders` — ✅
+- Reads `purchase_orders` and `purchase_order_lines` for PO linking and 3-way match — both Procurement-owned — ✅
+- Reads `vendors` for display enrichment — Procurement-owned — ✅
+
+### 12B. 3-Way Match
+
+```
+apLedger.runInvoiceMatch(invoiceId)
+  → procurement/ap-ledger.service.ts:runInvoiceMatch (~line 335)
+
+For each invoice line with purchaseOrderLineId:
+  1. Fetch current PO line data
+  2. Compare: unit cost, qty invoiced vs ordered vs received
+  3. Set matchStatus: matched | price_discrepancy | over_billed | qty_discrepancy
+```
+
+**⚠️ Boundary Violations:** None. Only reads/writes `vendor_invoice_lines` and `purchase_order_lines` — both Procurement-owned.
+
+### 12C. Shipment Cost → AP Bridge
+
+```
+apLedger.createInvoiceFromShipmentCosts(shipmentId, data)
+  → procurement/ap-ledger.service.ts:createInvoiceFromShipmentCosts (~line 395)
+
+1. Fetch unlinked costs from shipment_costs
+2. Create a vendor_invoice with one line per cost
+3. Link shipment_costs back to the invoice (vendorInvoiceId)
+```
+
+**System Ownership:** All Procurement tables. `shipment_costs`, `inbound_shipments`, `vendor_invoices` — all Procurement-owned.
+
+**⚠️ Boundary Violations:** None.
+
+**Atomicity:** Not wrapped in a single transaction. If the invoice is created but linking fails, costs remain unlinked. Low risk — manually recoverable.
+
+---
+
+## 13. Catalog Operations
+
+### 13A. Shopify Content Sync
+
+```
+productImport.syncContentAndAssets()
+  → catalog/product-import.service.ts:syncContentAndAssets (~line 60)
+
+1. Fetch Shopify products via API
+2. For each Shopify product:
+   a. Match to Echelon product by shopifyProductId or SKU
+   b. Update product fields: title, description, brand, category, tags, status
+   c. Delete + recreate product_assets (images)
+   d. Upsert product_locations by SKU (warehouse assignment sync)
+```
+
+**System Ownership:**
+| Step | Owner | Notes |
+|------|-------|-------|
+| 1 | External (Shopify API) | |
+| 2a-c | Catalog | Product + asset updates |
+| 2d | WMS | `product_locations` is WMS-owned |
+
+**⚠️ Boundary Violations:**
+- **product-import.service.ts:~line 118** — Calls `storage.upsertProductLocationBySku()` to sync `product_locations` from Shopify data. `product_locations` is owned by WMS per BOUNDARIES.md. The Catalog service is directly writing to a WMS table.
+  - **Severity:** P2. This is a convenience sync (ensures warehouse bin assignments exist for Shopify products). It writes to `product_locations` (a WMS table) but only upserts display/assignment data, not inventory quantities.
+  - **Fix:** Move this call to the bin assignment service or expose a `binAssignment.ensureAssignment()` method that Catalog calls.
+
+**Does NOT touch:** `inventory_levels`, `orders`, `channel_feeds` — ✅
+
+### 13B. Full Product/Variant Sync (Multi-UOM)
+
+```
+productImport.syncProductsWithMultiUOM()
+  → catalog/product-import.service.ts:syncProductsWithMultiUOM (~line 145)
+
+1. Fetch Shopify products
+2. Parse SKU pattern: BASE-SKU-P50, -B200, -C700
+3. Create/update products and product_variants
+```
+
+**System Ownership:** Catalog only.
+
+**⚠️ Boundary Violations:** None. Only touches `products` and `product_variants` — Catalog-owned tables.
+
+### 13C. Product Archive (Soft Delete)
+
+```
+POST /api/products/:id/archive
+  → catalog/catalog.routes.ts:archive (~line 170)
+
+1. Pre-flight dependency check:
+   - Read inventory_levels (WMS) — read-only ✅
+   - Read shipment_items (WMS) — read-only ✅
+   - Read channel_feeds (Channel Sync) — read-only ✅
+2. If transfer requested:
+   - inventoryCore.skuCorrectionTransfer() for each level — ✅ proper delegation
+   - channelSync.queueSyncAfterInventoryChange() — ✅
+3. Cleanup:
+   - storage.deleteInventoryLevelsByVariantId() → catalog.storage.ts
+   - storage.deleteProductLocationsByVariantId()
+   - storage.deactivateChannelFeedsByVariantId()
+```
+
+**⚠️ Boundary Violations:**
+- **catalog.storage.ts:deleteInventoryLevelsByVariantId (~line 229)** — Direct `DELETE FROM inventory_levels`. This bypasses `inventoryCore` entirely. No `notifyChange()`, no audit trail, no channel sync.
+  - **Called from:** Product archive (catalog.routes.ts ~line 305) and variant archive (~line 727)
+  - **Impact:** Archived product's inventory disappears from WMS with no transaction log and no channel sync push. Shopify still shows old stock.
+  - **Severity:** P1.
+  - **Fix:** Call `inventoryCore.adjustInventory()` to zero each level (which logs transactions and fires `notifyChange`), then delete the empty rows. The current code logs manual `inventory_transactions` inserts (line ~302) but they don't go through `inventoryCore`, so `notifyChange` never fires.
+
+- **catalog.storage.ts:deactivateChannelFeedsByVariantId (~line 239)** — Direct `UPDATE channel_feeds SET is_active = 0`. This modifies a Channel Sync-owned table.
+  - **Severity:** P2. The intent is correct (deactivate feeds when archiving), but it should go through a Channel Sync interface.
+  - **Fix:** Add `channelSync.deactivateVariant(variantId)` method.
+
+- **catalog.storage.ts:reassignInventoryLevelsToVariant (~line 462)** — Direct `UPDATE inventory_levels SET product_variant_id = targetVariantId`. Bypasses `inventoryCore`. Used by variant merge.
+  - **Severity:** P1. Reassigns inventory rows without logging transactions or firing sync. After merge, channel quantities for both source and target variants are stale.
+  - **Fix:** Call `inventoryCore.skuCorrectionTransfer()` for each level (which the archive flow already does correctly), then delete empty source rows.
+
+### 13D. SKU Rename Cascade
+
+```
+PUT /api/products/:id (with sku change)
+PUT /api/product-variants/:id (with sku change)
+  → catalog/catalog.routes.ts + catalog.storage.ts:cascadeSkuRename
+
+Cascades SKU text changes to:
+  - purchase_order_lines, inbound_shipment_lines, receiving_lines
+  - product_locations, vendor_invoice_lines
+  - order_items, picking_logs, order_item_financials
+```
+
+**⚠️ Boundary Violations:**
+- **catalog.storage.ts:cascadeSkuRename (~line 440)** — Updates `order_items.sku` (OMS/WMS table), `picking_logs.sku` (WMS table), `order_item_financials.sku` (WMS table), `product_locations.sku` (WMS table). These are all cross-system writes.
+  - **Severity:** P2. This is a data integrity cascade — if the SKU changes in Catalog, cached SKU columns elsewhere must match. The writes are text-only (no quantity changes), and SKU renames are rare admin operations.
+  - **Mitigation:** Acceptable as-is given the rarity and text-only nature. Ideal fix: emit a `sku_renamed` event and let each system update its own tables.
+
+---
+
+## 14. Notifications
+
+### 14A. Notification Dispatch
+
+```
+notificationService.notify(typeKey, payload)
+  → notifications/notifications.service.ts:notify (~line 18)
+
+1. Look up notification_types by key
+2. Get all active users + their role assignments
+3. Get all notification_preferences for this type
+4. Determine recipients (user override > role default)
+5. Batch INSERT into notifications
+6. Push real-time via WebSocket (broadcastToUser)
+```
+
+**System Ownership:** Notifications owns: `notifications`, `notification_types`, `notification_preferences`.
+
+**⚠️ Boundary Violations:** None.
+- Reads `users` and `auth_user_roles` — these are Auth-owned but read-only access is standard.
+- Does NOT reach into inventory, orders, or any other system's tables to build notification content. The content is passed in via the `payload` parameter by the calling service.
+- **Clean design:** Notifications is a pure push service. Callers construct the payload, notifications just delivers it.
+
+### 14B. Notification Preferences
+
+```
+getUserNotifications() — reads from notifications + notification_types
+getPreferencesForUser() — merges user + role preferences
+setUserPreference() — upserts notification_preferences
+```
+
+**⚠️ Boundary Violations:** None. All Notifications-owned tables.
+
+---
+
+## 15. Bin Assignment Service
+
+### 15A. Assignment View
+
+```
+binAssignment.getAssignmentsView(filters)
+  → warehouse/bin-assignment.service.ts:getAssignmentsView (~line 55)
+
+Raw SQL:
+  SELECT pv.*, p.*, pl.*, wl.*, il.variant_qty
+  FROM product_variants pv
+  JOIN products p ON pv.product_id = p.id
+  LEFT JOIN product_locations pl ON pl.product_variant_id = pv.id
+  LEFT JOIN warehouse_locations wl ON pl.warehouse_location_id = wl.id
+  LEFT JOIN inventory_levels il ON il.product_variant_id = pv.id AND il.warehouse_location_id = wl.id
+```
+
+**⚠️ Boundary Violations:**
+- **bin-assignment.service.ts:~line 55** — Reads `inventory_levels.variant_qty` directly (WMS table) for the `current_qty` display column. This is a **read-only** cross-system access from the Bin Assignment service (WMS) into the inventory subsystem (also WMS).
+  - **Verdict:** Both are WMS-internal. No violation. The read is for display enrichment only.
+
+### 15B. Assign Variant to Location
+
+```
+binAssignment.assignVariantToLocation(params)
+  → warehouse/bin-assignment.service.ts:assignVariantToLocation (~line 105)
+
+1. Validate variant exists
+2. Validate location exists and is_pickable = 1
+3. Check for existing assignment
+4. Upsert product_locations row
+```
+
+**System Ownership:** WMS owns `product_locations`.
+
+**⚠️ Boundary Violations:** None.
+- Does NOT touch `inventory_levels` — ✅
+- Does NOT create/modify inventory — ✅
+- Only manages `product_locations` (bin assignments) — ✅
+
+---
+
+## 16. Warehouse Settings / Zones / Locations
+
+### 16A. Settings CRUD
+
+```
+GET/PUT /api/settings → settings.storage.ts
+  → echelon_settings table CRUD
+```
+
+**System Ownership:** Settings is its own domain. No cross-system concerns.
+
+### 16B. Warehouse CRUD
+
+```
+GET/POST/PATCH/DELETE /api/warehouses → warehouse.storage.ts
+  → warehouses table CRUD
+```
+
+**System Ownership:** WMS owns `warehouses`.
+
+### 16C. Zone CRUD
+
+```
+GET/POST/PATCH/DELETE /api/warehouse/zones → warehouse.storage.ts
+  → warehouse_zones table CRUD
+```
+
+**System Ownership:** WMS owns `warehouse_zones`.
+
+### 16D. Location CRUD
+
+```
+GET/POST/PATCH/DELETE /api/warehouse/locations → warehouse.routes.ts
+  → warehouse_locations table CRUD
+```
+
+**System Ownership:** WMS owns `warehouse_locations`.
+
+### 16E. Location Inventory View
+
+```
+GET /api/warehouse/locations/:id/inventory
+  → warehouse.storage.ts:getLocationInventoryDetail
+
+Raw SQL: SELECT from inventory_levels JOIN product_variants
+  WHERE warehouse_location_id = ?
+```
+
+**⚠️ Boundary Violations:** None. Both `inventory_levels` and `warehouse_locations` are WMS-owned. Read-only.
+
+### 16F. Bulk Location Reassignment
+
+```
+POST /api/warehouse/locations/bulk-reassign
+  → warehouse.routes.ts + storage.bulkReassignProducts()
+
+Updates product_locations to point to new warehouse_location_id.
+```
+
+**⚠️ Boundary Violations:** None. `product_locations` is WMS-owned.
+
+**Note:** This does NOT move inventory (no `inventory_levels` changes). It only moves the bin assignment. Inventory would need a separate transfer.
+
+### 16G. Location Move (Product Location)
+
+```
+POST /api/locations/:id/move
+  → warehouse/locations.routes.ts (~line 195)
+
+1. Update product_locations.warehouseLocationId
+2. Log an inventory_transaction (transfer type, variantQtyDelta: 0)
+```
+
+**⚠️ Boundary Violations:**
+- **locations.routes.ts:~line 220** — Direct `storage.createInventoryTransaction()` for audit logging. This writes to `inventory_transactions` (WMS-owned) from the locations route. Since locations routes ARE part of WMS, this is acceptable.
+- **Note:** The transaction has `variantQtyDelta: 0` — it's purely an audit note that the bin assignment moved, not an inventory mutation. No `notifyChange` needed.
+
+---
+
+## 17. Fulfillment Routing
+
+### 17A. Route Order to Warehouse
+
+```
+fulfillmentRouter.routeOrder(ctx)
+  → orders/fulfillment-router.service.ts:routeOrder (~line 55)
+
+1. Fetch active fulfillment_routing_rules (ordered by priority DESC)
+2. For each rule, check matchesRule():
+   - location_id: match Shopify fulfillment location
+   - sku_prefix: match any SKU prefix
+   - country: match shipping country
+   - tag: match order tag
+   - default: always matches
+3. First match wins → return warehouse info
+4. Fallback: default warehouse (warehouses.is_default = 1)
+```
+
+**System Ownership:**
+| Step | Owner | Notes |
+|------|-------|-------|
+| 1-3 | WMS (Fulfillment Router) | Reads `fulfillment_routing_rules`, `warehouses` |
+| 4 | WMS | Default warehouse lookup |
+
+**⚠️ Boundary Violations:** None.
+- Does NOT query `inventory_levels` for routing decisions — ✅
+- Does NOT use ATP for routing — routing is purely rule-based
+- Only reads `fulfillment_routing_rules` and `warehouses` — both WMS-owned
+
+### 17B. Assign Warehouse to Order
+
+```
+fulfillmentRouter.assignWarehouseToOrder(orderId, routing)
+  → orders/fulfillment-router.service.ts:assignWarehouseToOrder (~line 120)
+
+1. UPDATE orders SET warehouse_id = routing.warehouseId
+2. If 3PL warehouse: SET warehouse_status = 'awaiting_3pl'
+```
+
+**⚠️ Boundary Violations:** None. `orders` table is WMS-owned. The fulfillment router writes to it as part of order processing.
+
+---
+
+## 18. Order Combining
+
+### 18A. Get Combinable Groups
+
+```
+combining.getCombinableGroups()
+  → orders/combining.service.ts:getCombinableGroups (~line 120)
+
+Raw SQL:
+  SELECT o.*, count(order_items), sum(quantity)
+  FROM orders o
+  LEFT JOIN combined_order_groups cog ON cog.id = o.combined_group_id
+  LEFT JOIN shopify_orders s ON o.source_table_id = s.id
+  WHERE o.warehouse_status = 'ready' AND o.on_hold = 0
+```
+
+**System Ownership:** WMS reads from `orders`, `order_items`, `combined_order_groups`, `shopify_orders`. All are WMS/OMS-owned.
+
+**⚠️ Boundary Violations:** None. Read-only query of WMS + OMS tables.
+
+### 18B. Combine Orders
+
+```
+combining.combineOrders(orderIds, createdBy)
+  → orders/combining.service.ts:combineOrders (~line 175)
+
+1. Validate: all orders in 'ready' status, not on hold
+2. Handle add-to-group / merge existing groups / create new
+3. INSERT combined_order_groups
+4. UPDATE orders SET combined_group_id, combined_role
+```
+
+**System Ownership:** WMS owns `combined_order_groups` and `orders`.
+
+**⚠️ Boundary Violations:** None.
+- Does NOT touch `inventory_levels` — ✅
+- Does NOT touch reservations — ✅
+- Pure order grouping for shipping efficiency
+
+### 18C. Mark Group Packed/Shipped
+
+```
+combining.markGroupPacked(groupId, packedBy)
+combining.markGroupShipped(groupId, trackingNumber, carrier)
+  → orders/combining.service.ts:~line 380-410
+
+1. UPDATE combined_order_groups status
+2. UPDATE orders warehouse_status for all group members
+```
+
+**⚠️ Boundary Violations:** None. WMS-owned tables.
+
+**⚠️ Note:** `markGroupShipped()` updates `orders.warehouse_status` to 'shipped' but does NOT:
+- Call `inventoryCore.recordShipment()` to deduct inventory
+- Push tracking to channels
+- This is likely intentional — the actual shipment deduction happens when ShipStation fires the Shopify fulfillment webhook (Process 6A). The combining service just groups orders for physical packing; it doesn't own the shipment confirmation flow.
+
+---
+
+## Additional Boundary Violations Summary
+
+### 🔴 P0 — No new P0 findings in these systems
+
+All P0 violations were in the core WMS processes (already documented in the first audit).
+
+### 🟡 P1 — Fix Before Scale
+
+| # | Finding | File | Impact | Fix |
+|---|---------|------|--------|-----|
+| 16 | Product archive deletes `inventory_levels` directly, bypassing `inventoryCore` | `catalog.storage.ts:229` via `catalog.routes.ts:305` | Archived product inventory disappears with no sync push; Shopify shows stale stock | Use `inventoryCore.adjustInventory()` to zero, then delete empty rows |
+| 17 | Variant merge reassigns `inventory_levels` directly, bypassing `inventoryCore` | `catalog.storage.ts:462` via `catalog.routes.ts:592` | Merged inventory doesn't fire `notifyChange`; channel quantities go stale | Use `inventoryCore.skuCorrectionTransfer()` per level (like archive already does) |
+
+### 🟢 P2 — Tech Debt
+
+| # | Finding | File | Impact | Fix |
+|---|---------|------|--------|-----|
+| 18 | Catalog product import writes `product_locations` (WMS table) directly | `product-import.service.ts:118` | Cross-system write during Shopify sync | Move to `binAssignment.ensureAssignment()` |
+| 19 | Catalog archive deactivates `channel_feeds` directly | `catalog.storage.ts:239` | Cross-system write to Channel Sync table | Add `channelSync.deactivateVariant()` method |
+| 20 | SKU rename cascade writes to `order_items`, `picking_logs`, `order_item_financials` | `catalog.storage.ts:440-458` | Cross-system writes (text-only, rare operation) | Emit `sku_renamed` event; let each system handle |
+| 21 | Reorder analysis reads `inventory_levels` directly instead of through `atpService` | `procurement.storage.ts:getReorderAnalysisData` | Read-only, but inconsistent with ATP model | Replace with `atpService` calls |
+| 22 | Financial reports read across OMS/WMS tables | `procurement.storage.ts` (multiple report queries) | Read-only reporting, acceptable | No change needed |
+
+### ✅ Clean Systems (No Violations)
+
+| System | Status | Notes |
+|--------|--------|-------|
+| **AP/Invoicing** | ✅ Clean | Only touches Procurement-owned tables |
+| **Notifications** | ✅ Clean | Pure push service, no cross-system reads for content |
+| **Bin Assignment** | ✅ Clean | WMS-internal, proper table ownership |
+| **Warehouse Settings/Zones** | ✅ Clean | WMS config tables only |
+| **Fulfillment Routing** | ✅ Clean | Rule-based, no inventory queries |
+| **Order Combining** | ✅ Clean | WMS order grouping, no inventory mutations |
+
+---
+
+## Recommended Fix Order (Additional Findings)
+
+1. **Archive: replace direct inventory_levels DELETE with inventoryCore.adjustInventory()** — 30 min, fixes P1 #16
+2. **Merge: replace direct inventory_levels UPDATE with skuCorrectionTransfer()** — 30 min, fixes P1 #17
+3. **Product import: route product_locations write through binAssignment** — 15 min, fixes P2 #18
+4. **Archive: route channel_feeds deactivation through channelSync** — 15 min, fixes P2 #19
+5. **SKU rename: consider event-based cascade** — 1 hour, fixes P2 #20 (lower priority)
+
+**Total: ~2.5 hours for P1+P2 fixes.**
+
+---
+
+*Last updated: 2026-03-21*
