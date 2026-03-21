@@ -306,6 +306,17 @@ export function registerEbayChannelRoutes(app: Express): void {
             [catId],
           );
           if (reqResult.rows.length === 0) {
+            // No cached aspects — check if ANY aspects exist for this category
+            const anyAspects = await client.query(
+              `SELECT COUNT(*) as cnt FROM ebay_category_aspects WHERE category_id = $1`,
+              [catId],
+            );
+            if (parseInt(anyAspects.rows[0].cnt) === 0) {
+              // Aspects never fetched for this category — unknown state, not ready
+              aspectReadiness[slug] = { aspectsReady: false, missingRequiredCount: -1 };
+              continue;
+            }
+            // Aspects cached but none are required — genuinely ready
             aspectReadiness[slug] = { aspectsReady: true, missingRequiredCount: 0 };
             continue;
           }

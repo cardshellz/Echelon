@@ -1273,7 +1273,12 @@ export default function EbayChannelPage() {
                                         <CheckCircle2 className="h-3 w-3" />
                                         Specifics ✓
                                       </Badge>
-                                    ) : aspectsReady === false && missingRequiredCount != null ? (
+                                    ) : aspectsReady === false && missingRequiredCount === -1 ? (
+                                      <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer">
+                                        <AlertCircle className="h-3 w-3" />
+                                        Load specifics
+                                      </Badge>
+                                    ) : aspectsReady === false && missingRequiredCount != null && missingRequiredCount > 0 ? (
                                       <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer">
                                         <AlertCircle className="h-3 w-3" />
                                         {missingRequiredCount} required
@@ -1493,7 +1498,12 @@ export default function EbayChannelPage() {
                                 <CheckCircle2 className="h-3 w-3" />
                                 Specifics ✓
                               </Badge>
-                            ) : aspectsReady === false && missingRequiredCount != null ? (
+                            ) : aspectsReady === false && missingRequiredCount === -1 ? (
+                              <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer py-1.5 px-3">
+                                <AlertCircle className="h-3 w-3" />
+                                Load specifics
+                              </Badge>
+                            ) : aspectsReady === false && missingRequiredCount != null && missingRequiredCount > 0 ? (
                               <Badge variant="outline" className="text-amber-600 border-amber-300 hover:bg-amber-50 text-xs gap-1 cursor-pointer py-1.5 px-3">
                                 <AlertCircle className="h-3 w-3" />
                                 {missingRequiredCount} required
