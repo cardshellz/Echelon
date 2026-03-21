@@ -451,15 +451,15 @@ function RuleDialog({
   });
 
   return (
-    <DialogContent className="sm:max-w-[540px] overflow-y-auto max-h-[90vh]">
-      <DialogHeader>
+    <DialogContent className="sm:max-w-[540px] max-h-[85vh] flex flex-col p-0">
+      <DialogHeader className="px-6 pt-6 pb-0">
         <DialogTitle>{isEdit ? "Edit" : "Create"} Allocation Rule</DialogTitle>
         <p className="text-sm text-muted-foreground">
           {isEdit ? "Modify how inventory is allocated." : "Set how much inventory a channel can see for a product or variant."}
         </p>
       </DialogHeader>
 
-      <div className="space-y-5 py-1">
+      <div className="space-y-5 py-1 px-6 pb-6 overflow-y-auto flex-1 min-h-0">
         {/* ── Target: Channel + SKU ── */}
         <Card className="border-dashed">
           <CardContent className="pt-4 pb-3 space-y-3">
