@@ -422,45 +422,23 @@ class EchelonSyncOrchestrator {
       const variantIds: number[] = Array.from(existingVariantIds);
       const warehouseAtpMap = new Map<number, number>();
 
-      if (this.atpService?.getAtpPerVariantByWarehouse) {
-        const fungibleAtp = await this.atpService.getAtpPerVariantByWarehouse(
-          productId,
-          wh.warehouseId,
+      if (!this.atpService?.getAtpPerVariantByWarehouse) {
+        // atpService is a required dependency — if it's missing, that's a
+        // service wiring bug. Fail loudly rather than silently pushing wrong
+        // quantities via inline SQL that ignores the fungible model.
+        throw new Error(
+          `[SyncOrchestrator] atpService is undefined or missing getAtpPerVariantByWarehouse — ` +
+            `this is a service wiring bug. Cannot compute warehouse ATP without the fungible ATP service.`,
         );
-        for (const va of fungibleAtp) {
-          if (existingVariantIds.has(va.productVariantId)) {
-            warehouseAtpMap.set(va.productVariantId, va.atpUnits);
-          }
-        }
-      } else {
-        // Fallback: direct per-variant ATP (no fungible conversion)
-        // This is less accurate for multi-UOM products but prevents total failure
-        const atpRows = await this.db
-          .select({
-            productVariantId: sql<number>`${inventoryLevels.productVariantId}`,
-            atp: sql<number>`SUM(GREATEST(
-              ${inventoryLevels.variantQty}
-              - ${inventoryLevels.reservedQty}
-              - ${inventoryLevels.pickedQty}
-              - COALESCE(${inventoryLevels.packedQty}, 0),
-              0
-            ))`,
-          })
-          .from(inventoryLevels)
-          .innerJoin(
-            warehouseLocations,
-            eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
-          )
-          .where(
-            and(
-              eq(warehouseLocations.warehouseId, wh.warehouseId),
-              inArray(inventoryLevels.productVariantId, variantIds),
-            ),
-          )
-          .groupBy(inventoryLevels.productVariantId);
+      }
 
-        for (const row of atpRows) {
-          warehouseAtpMap.set(Number(row.productVariantId), Math.max(0, Number(row.atp)));
+      const fungibleAtp = await this.atpService.getAtpPerVariantByWarehouse(
+        productId,
+        wh.warehouseId,
+      );
+      for (const va of fungibleAtp) {
+        if (existingVariantIds.has(va.productVariantId)) {
+          warehouseAtpMap.set(va.productVariantId, va.atpUnits);
         }
       }
 

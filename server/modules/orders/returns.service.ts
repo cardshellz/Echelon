@@ -159,25 +159,32 @@ class ReturnsService {
           result.sellable++;
         } else {
           // ---- DAMAGED / DEFECTIVE: receive then immediately adjust out ----
+          // Both operations MUST be atomic — if the adjust fails after
+          // receiving, damaged stock would sit in sellable inventory.
+          await this.db.transaction(async (tx: any) => {
+            const txCore = this.inventoryCore.withTx
+              ? this.inventoryCore.withTx(tx)
+              : this.inventoryCore;
 
-          // Step 1: Receive so we have an audit record of the physical receipt
-          await this.inventoryCore.receiveInventory({
-            productVariantId: item.productVariantId,
-            warehouseLocationId: params.warehouseLocationId,
-            qty: item.qty,
-            referenceId: String(params.orderId),
-            notes: `Return (${item.condition}) for order ${params.orderId}`,
-            userId: params.userId,
-          });
+            // Step 1: Receive so we have an audit record of the physical receipt
+            await txCore.receiveInventory({
+              productVariantId: item.productVariantId,
+              warehouseLocationId: params.warehouseLocationId,
+              qty: item.qty,
+              referenceId: String(params.orderId),
+              notes: `Return (${item.condition}) for order ${params.orderId}`,
+              userId: params.userId,
+            });
 
-          // Step 2: Immediately adjust out as damaged -- this removes the
-          // units from on-hand so they are not available for picking.
-          await this.inventoryCore.adjustInventory({
-            productVariantId: item.productVariantId,
-            warehouseLocationId: params.warehouseLocationId,
-            qtyDelta: -item.qty,
-            reason: `${item.condition} return${item.reason ? `: ${item.reason}` : ""}`,
-            userId: params.userId,
+            // Step 2: Immediately adjust out as damaged -- this removes the
+            // units from on-hand so they are not available for picking.
+            await txCore.adjustInventory({
+              productVariantId: item.productVariantId,
+              warehouseLocationId: params.warehouseLocationId,
+              qtyDelta: -item.qty,
+              reason: `${item.condition} return${item.reason ? `: ${item.reason}` : ""}`,
+              userId: params.userId,
+            });
           });
 
           // Log the return-specific transaction

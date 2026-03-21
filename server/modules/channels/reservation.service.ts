@@ -146,9 +146,34 @@ class ReservationService {
       .orderBy(productLocations.isPrimary) // isPrimary=1 sorts first (descending would be better but 1 > 0)
       .limit(1);
 
-    if (!assignment?.warehouseLocationId) {
+    let reserveLocationId = assignment?.warehouseLocationId ?? null;
+
+    // Fallback: if no product_locations row, find ANY inventory_levels row
+    // for this variant. ATP already confirmed stock exists, so there must
+    // be an inventory_levels row somewhere (e.g. received but not yet slotted).
+    if (!reserveLocationId) {
+      const [fallbackLevel] = await this.db
+        .select({
+          warehouseLocationId: inventoryLevels.warehouseLocationId,
+        })
+        .from(inventoryLevels)
+        .where(eq(inventoryLevels.productVariantId, variantId))
+        .orderBy(sql`${inventoryLevels.variantQty} DESC`)
+        .limit(1);
+
+      if (fallbackLevel?.warehouseLocationId) {
+        reserveLocationId = fallbackLevel.warehouseLocationId;
+        console.warn(
+          `[RESERVATION] No assigned bin (product_locations) for variant ${variantId} — ` +
+            `falling back to inventory_levels location ${reserveLocationId} for order #${orderId}`,
+        );
+      }
+    }
+
+    if (!reserveLocationId) {
       console.warn(
-        `[RESERVATION] No assigned bin for variant ${variantId} — cannot place reservation for order #${orderId}`,
+        `[RESERVATION] No assigned bin or inventory_levels for variant ${variantId} — ` +
+          `cannot place reservation for order #${orderId}`,
       );
       return { reserved: 0, shortfall: orderQty };
     }
@@ -156,7 +181,7 @@ class ReservationService {
     // Step 4: Delegate to inventoryCore (atomic: upserts level + increments reserved_qty + logs txn)
     const success = await this.inventoryCore.reserveForOrder({
       productVariantId: variantId,
-      warehouseLocationId: assignment.warehouseLocationId,
+      warehouseLocationId: reserveLocationId,
       qty: toReserve,
       orderId,
       orderItemId,
