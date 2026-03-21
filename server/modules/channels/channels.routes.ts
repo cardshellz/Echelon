@@ -1796,6 +1796,7 @@ export function registerChannelRoutes(app: Express) {
     sharePct: z.number().int().min(1).max(100).nullable().optional(),
     fixedQty: z.number().int().min(0).nullable().optional(),
     floorAtp: z.number().int().min(0).default(0),
+    floorType: z.enum(["units", "days"]).default("units"),
     ceilingQty: z.number().int().min(0).nullable().optional(),
     eligible: z.boolean().default(true),
     notes: z.string().nullable().optional(),
@@ -1820,6 +1821,7 @@ export function registerChannelRoutes(app: Express) {
           sharePct: channelAllocationRules.sharePct,
           fixedQty: channelAllocationRules.fixedQty,
           floorAtp: channelAllocationRules.floorAtp,
+          floorType: channelAllocationRules.floorType,
           ceilingQty: channelAllocationRules.ceilingQty,
           eligible: channelAllocationRules.eligible,
           notes: channelAllocationRules.notes,
@@ -1866,6 +1868,7 @@ export function registerChannelRoutes(app: Express) {
           sharePct: channelAllocationRules.sharePct,
           fixedQty: channelAllocationRules.fixedQty,
           floorAtp: channelAllocationRules.floorAtp,
+          floorType: channelAllocationRules.floorType,
           ceilingQty: channelAllocationRules.ceilingQty,
           eligible: channelAllocationRules.eligible,
           notes: channelAllocationRules.notes,
@@ -1906,6 +1909,7 @@ export function registerChannelRoutes(app: Express) {
         sharePct: parsed.data.mode === "share" ? parsed.data.sharePct! : null,
         fixedQty: parsed.data.mode === "fixed" ? parsed.data.fixedQty! : null,
         floorAtp: parsed.data.floorAtp,
+        floorType: parsed.data.floorType ?? "units",
         ceilingQty: parsed.data.ceilingQty ?? null,
         eligible: parsed.data.eligible,
         notes: parsed.data.notes ?? null,
@@ -1943,6 +1947,7 @@ export function registerChannelRoutes(app: Express) {
         sharePct: z.number().int().min(1).max(100).nullable().optional(),
         fixedQty: z.number().int().min(0).nullable().optional(),
         floorAtp: z.number().int().min(0).optional(),
+        floorType: z.enum(["units", "days"]).optional(),
         ceilingQty: z.number().int().min(0).nullable().optional(),
         eligible: z.boolean().optional(),
         notes: z.string().nullable().optional(),
@@ -2001,6 +2006,40 @@ export function registerChannelRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error deleting allocation rule:", error);
       res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
+    }
+  });
+
+  // Get average daily usage (velocity) for a product — used by UI for days-of-cover preview
+  app.get("/api/channel-allocation/velocity/:productId", requirePermission("channels", "view"), async (req, res) => {
+    try {
+      const productId = parseInt(req.params.productId);
+      if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
+
+      const lookbackDays = 90;
+      const result: any = await db.execute(sql`
+        SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+        WHERE pv.product_id = ${productId}
+          AND o.cancelled_at IS NULL
+          AND o.warehouse_status != 'cancelled'
+          AND oi.status != 'cancelled'
+          AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${lookbackDays})
+      `);
+
+      const totalOutbound = Number(result.rows?.[0]?.total_outbound ?? result[0]?.total_outbound ?? 0);
+      const avgDailyUsage = lookbackDays > 0 ? totalOutbound / lookbackDays : 0;
+
+      res.json({
+        productId,
+        lookbackDays,
+        totalOutbound: Math.round(totalOutbound),
+        avgDailyUsage: Math.round(avgDailyUsage * 100) / 100,
+      });
+    } catch (error: any) {
+      console.error("Error fetching product velocity:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch velocity" });
     }
   });
 }

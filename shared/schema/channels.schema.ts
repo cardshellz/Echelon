@@ -433,6 +433,8 @@ export const channelAllocationRules = pgTable("channel_allocation_rules", {
   fixedQty: integer("fixed_qty"),
   /** Floor: if base ATP < this threshold, push 0. Prevents selling dregs. */
   floorAtp: integer("floor_atp").default(0),
+  /** Floor type: 'units' = floorAtp is a fixed unit count, 'days' = floorAtp is days of cover */
+  floorType: varchar("floor_type", { length: 10 }).default("units"),
   /** Ceiling: never show more than this many base units, regardless of ATP. */
   ceilingQty: integer("ceiling_qty"),
   /** Eligible flag: false = block this product/variant from this channel entirely. */

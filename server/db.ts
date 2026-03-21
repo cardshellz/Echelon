@@ -569,6 +569,10 @@ export async function runStartupMigrations(): Promise<void> {
     `);
     console.log("Checked channel_allocation_rules nullable channel_id for global rules");
 
+    // Migration 048: Add floor_type column for days-of-cover floor mode
+    await client.query(`ALTER TABLE channel_allocation_rules ADD COLUMN IF NOT EXISTS floor_type VARCHAR(10) DEFAULT 'units'`);
+    console.log("Checked channel_allocation_rules floor_type column");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

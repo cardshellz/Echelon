@@ -738,8 +738,17 @@ export default function EbayChannelPage() {
       toast({ title: "Store Categories Synced", description: data.message });
       refetchStoreCats();
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (err: any) => {
+      let description = err.message;
+      try {
+        const body = JSON.parse(err.message);
+        if (body.invalidNames) {
+          description = `Names too long (max 30 chars): ${body.invalidNames.map((n: any) => `"${n.name}" (${n.length})`).join(", ")}`;
+        } else if (body.error) {
+          description = body.error;
+        }
+      } catch {}
+      toast({ title: "Store Category Error", description, variant: "destructive" });
     },
   });
 

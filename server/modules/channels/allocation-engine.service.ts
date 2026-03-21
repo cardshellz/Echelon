@@ -34,6 +34,53 @@ import {
 } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
+// Velocity Cache — per product avg daily usage, cleared each sync cycle
+// ---------------------------------------------------------------------------
+
+const VELOCITY_LOOKBACK_DAYS = 90;
+
+/** Cache of avgDailyUsage per product ID, scoped to a single sync cycle */
+const velocityCache = new Map<number, number>();
+let velocityCacheGeneration = 0;
+
+/** Clear the velocity cache (call at start of each sync cycle) */
+export function clearVelocityCache(): void {
+  velocityCache.clear();
+  velocityCacheGeneration++;
+}
+
+/** Query avg daily usage in base units for a product (90-day window) */
+async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<number> {
+  if (velocityCache.has(productId)) {
+    return velocityCache.get(productId)!;
+  }
+
+  try {
+    const result: any = await (db as any).execute(sql`
+      SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
+      WHERE pv.product_id = ${productId}
+        AND o.cancelled_at IS NULL
+        AND o.warehouse_status != 'cancelled'
+        AND oi.status != 'cancelled'
+        AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${VELOCITY_LOOKBACK_DAYS})
+    `);
+
+    const totalOutbound = Number(result.rows?.[0]?.total_outbound ?? result[0]?.total_outbound ?? 0);
+    const avgDaily = VELOCITY_LOOKBACK_DAYS > 0 ? totalOutbound / VELOCITY_LOOKBACK_DAYS : 0;
+
+    velocityCache.set(productId, avgDaily);
+    return avgDaily;
+  } catch (err: any) {
+    console.warn(`[AllocationEngine] Failed to query velocity for product ${productId}: ${err.message}`);
+    velocityCache.set(productId, 0);
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -100,6 +147,7 @@ interface ResolvedRule {
   sharePct: number | null;
   fixedQty: number | null;
   floorAtp: number;
+  floorType: "units" | "days";
   ceilingQty: number | null;
   eligible: boolean;
   scope: "channel" | "product" | "variant";
@@ -111,6 +159,7 @@ const DEFAULT_RULE: ResolvedRule = {
   sharePct: null,
   fixedQty: null,
   floorAtp: 0,
+  floorType: "units",
   ceilingQty: null,
   eligible: true,
   scope: "channel",
@@ -305,6 +354,17 @@ class AllocationEngine {
         (r) => r.productId === productId && r.productVariantId === null,
       );
 
+      // Check if any rule for this channel uses floor_type = 'days'
+      // If so, we need to look up the product's avg daily usage
+      const allChannelAndGlobalRules = [...channelRules, ...globalRules];
+      const needsVelocity = allChannelAndGlobalRules.some(
+        (r) => (r as any).floorType === "days" && (r.floorAtp ?? 0) > 0,
+      );
+      let avgDailyUsage = 0;
+      if (needsVelocity) {
+        avgDailyUsage = await queryAvgDailyUsage(this.db, productId);
+      }
+
       // Check product-level eligibility first
       const productResolvedRule = this.resolveRule(channelDefaultRule, productRule, undefined);
       if (!productResolvedRule.eligible) {
@@ -347,6 +407,7 @@ class AllocationEngine {
           resolved,
           channel,
           assignedWarehouseIds,
+          avgDailyUsage,
         );
 
         result.allocations.push(allocation);
@@ -385,6 +446,7 @@ class AllocationEngine {
       sharePct: rule.sharePct,
       fixedQty: rule.fixedQty,
       floorAtp: rule.floorAtp ?? 0,
+      floorType: (rule as any).floorType === "days" ? "days" : "units",
       ceilingQty: rule.ceilingQty,
       eligible: rule.eligible,
       scope,
@@ -401,6 +463,7 @@ class AllocationEngine {
     rule: ResolvedRule,
     channel: Channel,
     assignedWarehouseIds: number[],
+    avgDailyUsage: number = 0,
   ): VariantChannelAllocation {
     const base = {
       channelId: channel.id,
@@ -424,14 +487,27 @@ class AllocationEngine {
     }
 
     // Step 2: Floor check — if base ATP below threshold, zero out
-    if (channelBaseAtp < rule.floorAtp) {
-      return {
-        ...base,
-        allocatedUnits: 0,
-        allocatedBase: 0,
-        method: "zero",
-        reason: `Floor triggered: ATP ${channelBaseAtp} < floor ${rule.floorAtp}`,
-      };
+    if (rule.floorAtp > 0) {
+      let effectiveFloor: number;
+      let floorReason: string;
+
+      if (rule.floorType === "days") {
+        effectiveFloor = Math.ceil(rule.floorAtp * avgDailyUsage);
+        floorReason = `Floor triggered (days-of-cover): ATP ${channelBaseAtp} < floor ${effectiveFloor} (${rule.floorAtp} days × ${Math.round(avgDailyUsage * 100) / 100}/day)`;
+      } else {
+        effectiveFloor = rule.floorAtp;
+        floorReason = `Floor triggered: ATP ${channelBaseAtp} < floor ${rule.floorAtp}`;
+      }
+
+      if (channelBaseAtp < effectiveFloor) {
+        return {
+          ...base,
+          allocatedUnits: 0,
+          allocatedBase: 0,
+          method: "zero",
+          reason: floorReason,
+        };
+      }
     }
 
     // Step 3: Apply allocation mode

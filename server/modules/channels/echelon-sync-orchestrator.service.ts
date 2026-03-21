@@ -15,6 +15,7 @@
  */
 
 import { eq, and, sql, inArray } from "drizzle-orm";
+import { clearVelocityCache } from "./allocation-engine.service";
 import {
   products,
   productVariants,
@@ -259,6 +260,9 @@ class EchelonSyncOrchestrator {
 
     const productIds: number[] = [...new Set(feedRows.map((r: any) => r.productId as number))];
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
+
+    // Clear velocity cache at start of full sync cycle — each product will query fresh
+    clearVelocityCache();
 
     for (const productId of productIds) {
       try {

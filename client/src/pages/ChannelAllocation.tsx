@@ -99,6 +99,7 @@ interface AllocationRule {
   sharePct: number | null;
   fixedQty: number | null;
   floorAtp: number;
+  floorType: "units" | "days" | null;
   ceilingQty: number | null;
   eligible: boolean;
   notes: string | null;
@@ -397,6 +398,7 @@ function RuleDialog({
   const [sharePct, setSharePct] = useState(String(rule?.sharePct ?? 100));
   const [fixedQty, setFixedQty] = useState(String(rule?.fixedQty ?? 0));
   const [floorAtp, setFloorAtp] = useState(String(rule?.floorAtp ?? 0));
+  const [floorType, setFloorType] = useState<"units" | "days">(rule?.floorType === "days" ? "days" : "units");
   const [ceilingQty, setCeilingQty] = useState(rule?.ceilingQty != null ? String(rule.ceilingQty) : "");
   const [eligible, setEligible] = useState(rule?.eligible ?? true);
   const [notes, setNotes] = useState(rule?.notes ?? "");
@@ -417,6 +419,13 @@ function RuleDialog({
     enabled: debouncedSkuSearch.length >= 2 && showSkuResults,
   });
 
+  // Fetch velocity for days-of-cover preview
+  const { data: velocityData } = useQuery<{ avgDailyUsage: number; totalOutbound: number; lookbackDays: number }>({
+    queryKey: ["/api/channel-allocation/velocity", selectedProductId],
+    queryFn: () => apiFetch(`/api/channel-allocation/velocity/${selectedProductId}`),
+    enabled: floorType === "days" && selectedProductId != null,
+  });
+
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/channel-allocation-rules"] });
   };
@@ -431,6 +440,7 @@ function RuleDialog({
         sharePct: mode === "share" ? parseInt(sharePct) : null,
         fixedQty: mode === "fixed" ? parseInt(fixedQty) : null,
         floorAtp: parseInt(floorAtp) || 0,
+        floorType,
         ceilingQty: ceilingQty ? parseInt(ceilingQty) : null,
         eligible,
         notes: notes || null,
@@ -647,19 +657,49 @@ function RuleDialog({
             {/* ── Guardrails ── */}
             <div className="space-y-2">
               <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Guardrails</Label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-sm">
-                    Floor ATP
-                    <InfoTip text="If stock drops below this, push 0. Prevents selling the last few units." />
-                  </Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm">
+                      {floorType === "days" ? "Floor (days of cover)" : "Floor (units)"}
+                      <InfoTip text={floorType === "days"
+                        ? "If a product has fewer than this many days of inventory left (based on 90-day sales velocity), push 0 to this channel."
+                        : "If stock drops below this unit count, push 0. Prevents selling the last few units."
+                      } />
+                    </Label>
+                    <Select value={floorType} onValueChange={(v) => setFloorType(v as "units" | "days")}>
+                      <SelectTrigger className="w-[140px] h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="units">Units</SelectItem>
+                        <SelectItem value="days">Days of Cover</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <Input
                     type="number"
                     min={0}
                     value={floorAtp}
                     onChange={(e) => setFloorAtp(e.target.value)}
+                    placeholder={floorType === "days" ? "e.g. 7" : "e.g. 50"}
                     autoComplete="off"
                   />
+                  {floorType === "days" && parseInt(floorAtp) > 0 && (
+                    <div className="text-xs text-muted-foreground bg-muted/50 rounded px-2.5 py-1.5">
+                      {selectedProductId && velocityData ? (
+                        velocityData.avgDailyUsage > 0 ? (
+                          <>At current velocity ({velocityData.avgDailyUsage}/day), this = <span className="font-medium text-foreground">{Math.ceil(parseInt(floorAtp) * velocityData.avgDailyUsage).toLocaleString()} units</span></>
+                        ) : (
+                          <>No recent sales data — floor will be 0 units</>
+                        )
+                      ) : selectedProductId ? (
+                        <>Loading velocity data…</>
+                      ) : (
+                        <>Select a product to preview the floor in units. As a channel default, each product's own velocity is used.</>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-sm">
@@ -810,7 +850,7 @@ function AllocationRulesSection() {
                       <>
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Floor</span>
-                          <span>{globalDefault.floorAtp || "None"}</span>
+                          <span>{globalDefault.floorAtp ? `${globalDefault.floorAtp} ${globalDefault.floorType === "days" ? "days" : "units"}` : "None"}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Ceiling</span>
@@ -906,7 +946,7 @@ function AllocationRulesSection() {
                       <>
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Floor</span>
-                          <span>{defaultRule.floorAtp || "None"}</span>
+                          <span>{defaultRule.floorAtp ? `${defaultRule.floorAtp} ${defaultRule.floorType === "days" ? "days" : "units"}` : "None"}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Ceiling</span>
@@ -1109,7 +1149,7 @@ function AllocationRulesSection() {
                         {rule.mode === "fixed" && rule.fixedQty != null && rule.fixedQty.toLocaleString()}
                         {rule.mode === "mirror" && "100%"}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums text-sm">{rule.floorAtp || "—"}</TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{rule.floorAtp ? `${rule.floorAtp}${rule.floorType === "days" ? "d" : ""}` : "—"}</TableCell>
                       <TableCell className="text-right tabular-nums text-sm">{rule.ceilingQty ?? "—"}</TableCell>
                       <TableCell>
                         {rule.eligible ? (

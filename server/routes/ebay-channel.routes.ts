@@ -399,6 +399,16 @@ export function registerEbayChannelRoutes(app: Express): void {
       const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
 
       // Build XML for SetStoreCategories
+      // Validate store category names — eBay limit is 30 characters
+      const tooLong = productTypeNames.filter((name) => name.length > 30);
+      if (tooLong.length > 0) {
+        res.status(400).json({
+          error: "Store category names must be 30 characters or less",
+          invalidNames: tooLong.map((name) => ({ name, length: name.length })),
+        });
+        return;
+      }
+
       const categoriesXml = productTypeNames
         .map((name) => `      <CustomCategory><Name>${escapeXml(name)}</Name></CustomCategory>`)
         .join("\n");
