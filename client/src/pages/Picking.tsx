@@ -156,8 +156,8 @@ type BinCountResponse = {
   replenTriggered: boolean;
   replenTaskStatus: string | null;
   replenFailReason: string | null;
-  inferredReplen: boolean;
-  inferredReplenMoved: number | null;
+  parentCycleCountTriggered: boolean;
+  parentCycleCountLocationCode: string | null;
 };
 
 async function updateOrderItem(
@@ -860,12 +860,13 @@ export default function Picking() {
       } else {
         toast({ title: "Bin count verified", description: "Count matches system" });
       }
-      if (result.inferredReplen) {
+      if (result.parentCycleCountTriggered) {
         toast({
-          title: "Unrecorded replen detected",
-          description: `System inferred a case break: ${result.inferredReplenMoved} units attributed to source. Source bin updated.`,
+          title: "Parent location flagged",
+          description: `Cycle count created for source bin ${result.parentCycleCountLocationCode} — verify case qty.`,
         });
-      } else if (result.replenTriggered && !result.replenFailReason) {
+      }
+      if (result.replenTriggered && !result.replenFailReason) {
         toast({ title: "Replen completed", description: "Inventory moved from source to pick bin" });
       } else if (result.replenFailReason) {
         const reasonLabels: Record<string, string> = {
