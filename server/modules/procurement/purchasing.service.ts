@@ -93,8 +93,8 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   draft: ["pending_approval", "approved", "cancelled"],
   pending_approval: ["draft", "approved", "cancelled"],
   approved: ["sent", "cancelled"],
-  sent: ["acknowledged", "partially_received", "cancelled"],
-  acknowledged: ["partially_received", "cancelled"],
+  sent: ["acknowledged", "partially_received", "received", "cancelled"],
+  acknowledged: ["partially_received", "received", "cancelled"],
   partially_received: ["received", "closed"],
   received: ["closed"],
 };
@@ -597,6 +597,66 @@ export function createPurchasingService(db: any, storage: Storage) {
     return await storage.getPurchaseOrderById(id);
   }
 
+  /**
+   * Combined "Send to Vendor" flow for solo mode (no approval tiers configured).
+   * Saves → auto-approves → sets status to "sent" in one operation.
+   * Returns the updated PO. Caller can then optionally open the email dialog.
+   */
+  async function sendToVendor(id: number, userId?: string) {
+    const po = await storage.getPurchaseOrderById(id);
+    if (!po) throw new PurchasingError("Purchase order not found", 404);
+
+    // Only works from draft or approved status
+    if (!["draft", "approved"].includes(po.status)) {
+      throw new PurchasingError(
+        `Cannot send-to-vendor from '${po.status}' status. Use individual steps.`,
+        400,
+      );
+    }
+
+    // Check if we're in solo mode (no approval tiers)
+    const tiers = await storage.getAllPoApprovalTiers();
+    if (tiers.length > 0) {
+      throw new PurchasingError(
+        "Approval tiers are configured. Use the individual Submit/Approve/Send steps.",
+        400,
+      );
+    }
+
+    // If draft, validate and auto-approve first
+    if (po.status === "draft") {
+      const lines = await storage.getPurchaseOrderLines(id);
+      const activeLines = lines.filter((l: any) => l.status !== "cancelled" && l.orderQty > 0);
+      if (activeLines.length === 0) {
+        throw new PurchasingError("PO must have at least one line with quantity > 0", 400);
+      }
+
+      // Recalculate totals
+      await recalculateTotals(id, userId);
+
+      // Auto-approve
+      await storage.updatePurchaseOrder(id, {
+        status: "approved",
+        approvedBy: userId,
+        approvedAt: new Date(),
+        approvalNotes: "Auto-approved (solo mode — no approval tiers)",
+        updatedBy: userId,
+      });
+      await recordStatusChange(id, "draft", "approved", userId, "Auto-approved (solo mode)");
+    }
+
+    // Now send
+    await storage.updatePurchaseOrder(id, {
+      status: "sent",
+      orderDate: new Date(),
+      sentToVendorAt: new Date(),
+      updatedBy: userId,
+    });
+    await recordStatusChange(id, "approved", "sent", userId, "Sent to vendor (solo mode)");
+
+    return await storage.getPurchaseOrderById(id);
+  }
+
   async function acknowledge(id: number, data: { vendorRefNumber?: string; confirmedDeliveryDate?: Date }, userId?: string) {
     const po = await storage.getPurchaseOrderById(id);
     if (!po) throw new PurchasingError("Purchase order not found", 404);
@@ -722,23 +782,43 @@ export function createPurchasingService(db: any, storage: Storage) {
       createdBy: userId,
     });
 
+    // Auto-assign putaway locations from product_locations if available
+    let productLocationMap = new Map<number, number>(); // productVariantId → warehouseLocationId
+    try {
+      const allProductLocations = await (storage as any).getAllProductLocations?.() ?? [];
+      for (const pl of allProductLocations) {
+        if (pl.productVariantId && pl.warehouseLocationId && pl.status === "active" && pl.isPrimary) {
+          // Only use primary active locations
+          if (!productLocationMap.has(pl.productVariantId)) {
+            productLocationMap.set(pl.productVariantId, pl.warehouseLocationId);
+          }
+        }
+      }
+    } catch {
+      // Non-critical — if product_locations lookup fails, just skip auto-assign
+    }
+
     // Create receiving lines from PO lines
-    const receivingLineData = receivableLines.map((poLine: any) => ({
-      receivingOrderId: receivingOrder.id,
-      productVariantId: poLine.productVariantId,
-      productId: poLine.productId,
-      sku: poLine.sku,
-      productName: poLine.productName,
-      expectedQty: Math.ceil(
-        (poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0)) /
-        (poLine.unitsPerUom || 1)
-      ),
-      receivedQty: 0,
-      damagedQty: 0,
-      purchaseOrderLineId: poLine.id,
-      unitCost: poLine.unitCostCents,
-      status: "pending",
-    }));
+    const receivingLineData = receivableLines.map((poLine: any) => {
+      const autoLocationId = productLocationMap.get(poLine.productVariantId) || null;
+      return {
+        receivingOrderId: receivingOrder.id,
+        productVariantId: poLine.productVariantId,
+        productId: poLine.productId,
+        sku: poLine.sku,
+        productName: poLine.productName,
+        expectedQty: Math.ceil(
+          (poLine.orderQty - (poLine.receivedQty || 0) - (poLine.cancelledQty || 0)) /
+          (poLine.unitsPerUom || 1)
+        ),
+        receivedQty: 0,
+        damagedQty: 0,
+        purchaseOrderLineId: poLine.id,
+        unitCost: poLine.unitCostCents,
+        putawayLocationId: autoLocationId,
+        status: "pending",
+      };
+    });
 
     await storage.bulkCreateReceivingLines(receivingLineData);
     return receivingOrder;
@@ -957,6 +1037,7 @@ export function createPurchasingService(db: any, storage: Storage) {
     returnToDraft,
     approve,
     send,
+    sendToVendor,
     acknowledge,
     cancel,
     close,

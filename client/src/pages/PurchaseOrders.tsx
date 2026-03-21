@@ -46,7 +46,7 @@ function formatCents(cents: number | null | undefined): string {
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-type Vendor = { id: number; name: string; code: string; defaultIncoterms?: string | null };
+type Vendor = { id: number; name: string; code: string; defaultIncoterms?: string | null; email?: string | null };
 type PurchaseOrder = {
   id: number;
   poNumber: string;
@@ -60,6 +60,36 @@ type PurchaseOrder = {
   createdAt: string;
   vendor?: Vendor;
 };
+
+type InlineLineItem = {
+  id: string; // temp client-side id
+  productId: number;
+  productVariantId: number;
+  productName: string;
+  sku: string;
+  orderQty: number;
+  totalCostDollars: string;
+  unitCostCents: number;
+  unitsPerUom: number;
+  vendorSku: string;
+  vendorProductId?: number;
+  saveToVendorCatalog: boolean;
+};
+
+/** Convert a dollar string to cents without floating-point artifacts */
+function dollarsToCents(dollars: string): number {
+  const parts = dollars.split(".");
+  const whole = parseInt(parts[0] || "0", 10) * 100;
+  if (!parts[1]) return whole;
+  const frac = parts[1].padEnd(2, "0");
+  const cents = parseInt(frac.slice(0, 2), 10);
+  return whole + cents;
+}
+
+function formatCentsShort(cents: number | null | undefined): string {
+  if (!cents) return "$0.00";
+  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
 
 export default function PurchaseOrders() {
   const { toast } = useToast();
@@ -89,6 +119,21 @@ export default function PurchaseOrders() {
     internalNotes: "",
   });
 
+  // Inline line items for PO creation
+  const [inlineLines, setInlineLines] = useState<InlineLineItem[]>([]);
+  const [inlineProductOpen, setInlineProductOpen] = useState(false);
+  const [inlineProductSearch, setInlineProductSearch] = useState("");
+  const [inlineVariantOpen, setInlineVariantOpen] = useState(false);
+  const [addingLine, setAddingLine] = useState(false);
+  const [inlineSelectedProduct, setInlineSelectedProduct] = useState<any>(null);
+  const [inlineSelectedVariant, setInlineSelectedVariant] = useState<any>(null);
+  const [inlineQty, setInlineQty] = useState("1");
+  const [inlineTotalCost, setInlineTotalCost] = useState("");
+  const [inlineVendorSku, setInlineVendorSku] = useState("");
+  const [inlineCatalogMode, setInlineCatalogMode] = useState<"catalog" | "search">("catalog");
+  const [inlineCatalogSearch, setInlineCatalogSearch] = useState("");
+  const [inlineSelectedCatalogEntry, setInlineSelectedCatalogEntry] = useState<any>(null);
+
   // Queries
   const { data: poData } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
     queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter],
@@ -108,6 +153,30 @@ export default function PurchaseOrders() {
     queryKey: ["/api/vendors"],
   });
 
+  // Products for inline line editor
+  const { data: products = [] } = useQuery<any[]>({
+    queryKey: ["/api/products"],
+    enabled: showCreateDialog,
+  });
+
+  // Vendor catalog for inline line editor
+  const { data: vendorCatalog = [] } = useQuery<any[]>({
+    queryKey: ["/api/vendor-products", newPO.vendorId],
+    queryFn: async () => {
+      if (!newPO.vendorId) return [];
+      const res = await fetch(`/api/vendor-products?vendorId=${newPO.vendorId}&isActive=1`);
+      const data = await res.json();
+      return Array.isArray(data) ? data : (data.vendorProducts ?? []);
+    },
+    enabled: showCreateDialog && !!newPO.vendorId,
+  });
+
+  // Check if solo mode (no approval tiers) for "Create & Send" button
+  const { data: approvalTiersData } = useQuery<{ tiers: any[] }>({
+    queryKey: ["/api/purchasing/approval-tiers"],
+  });
+  const isSoloMode = (approvalTiersData?.tiers?.length ?? 0) === 0;
+
   const purchaseOrders = statusFilter === "active"
     ? (poData?.purchaseOrders ?? []).filter(po => !["cancelled", "void"].includes(po.status))
     : (poData?.purchaseOrders ?? []);
@@ -122,33 +191,99 @@ export default function PurchaseOrders() {
     awaitingReceipt: purchaseOrders.filter(po => ["sent", "acknowledged"].includes(po.status)).length,
   };
 
-  // Create mutation
+  // Create mutation with inline lines + optional send-to-vendor
   const createMutation = useMutation({
-    mutationFn: async (data: typeof newPO) => {
+    mutationFn: async ({ poData, lines, sendToVendor }: { poData: typeof newPO; lines: InlineLineItem[]; sendToVendor: boolean }) => {
+      // Step 1: Create the PO
       const res = await fetch("/api/purchase-orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          vendorId: data.vendorId,
-          poType: data.poType,
-          priority: data.priority,
-          incoterms: data.incoterms || undefined,
-          expectedDeliveryDate: data.expectedDeliveryDate || undefined,
-          vendorNotes: data.vendorNotes || undefined,
-          internalNotes: data.internalNotes || undefined,
+          vendorId: poData.vendorId,
+          poType: poData.poType,
+          priority: poData.priority,
+          incoterms: poData.incoterms || undefined,
+          expectedDeliveryDate: poData.expectedDeliveryDate || undefined,
+          vendorNotes: poData.vendorNotes || undefined,
+          internalNotes: poData.internalNotes || undefined,
         }),
       });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || "Failed to create PO");
       }
-      return res.json();
+      const po = await res.json();
+
+      // Step 2: Add lines in bulk if any
+      if (lines.length > 0) {
+        const bulkRes = await fetch(`/api/purchase-orders/${po.id}/lines/bulk`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            lines: lines.map(l => ({
+              productId: l.productId,
+              productVariantId: l.productVariantId,
+              vendorProductId: l.vendorProductId,
+              orderQty: l.orderQty,
+              unitCostCents: l.unitCostCents,
+              unitsPerUom: l.unitsPerUom,
+              vendorSku: l.vendorSku || undefined,
+            })),
+          }),
+        });
+        if (!bulkRes.ok) {
+          const err = await bulkRes.json();
+          throw new Error(err.error || "Failed to add lines");
+        }
+
+        // Save to vendor catalog for each line that opted in
+        for (const line of lines) {
+          if (line.saveToVendorCatalog && poData.vendorId) {
+            try {
+              await fetch("/api/vendor-products/upsert", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  vendorId: poData.vendorId,
+                  productId: line.productId,
+                  productVariantId: line.productVariantId,
+                  vendorSku: line.vendorSku || "",
+                  unitCostCents: line.unitCostCents,
+                  packSize: line.unitsPerUom,
+                  isPreferred: false,
+                }),
+              });
+            } catch { /* non-critical */ }
+          }
+        }
+      }
+
+      // Step 3: Send to vendor if requested
+      if (sendToVendor && lines.length > 0) {
+        const sendRes = await fetch(`/api/purchase-orders/${po.id}/send-to-vendor`, { method: "POST" });
+        if (!sendRes.ok) {
+          // PO was created but send failed — navigate anyway
+          const err = await sendRes.json();
+          return { ...po, sendError: err.error };
+        }
+        const sentPo = await sendRes.json();
+        return { ...sentPo, wasSent: true };
+      }
+
+      return po;
     },
     onSuccess: (po) => {
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       setShowCreateDialog(false);
       setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
-      toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
+      setInlineLines([]);
+      if (po.sendError) {
+        toast({ title: "PO created (send failed)", description: po.sendError, variant: "destructive" });
+      } else if (po.wasSent) {
+        toast({ title: "PO created & sent", description: `${po.poNumber} sent to vendor` });
+      } else {
+        toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
+      }
       navigate(`/purchase-orders/${po.id}`);
     },
     onError: (err: Error) => {
@@ -203,6 +338,68 @@ export default function PurchaseOrders() {
   const filteredVendors = vendors.filter(v =>
     !vendorSearch || v.name.toLowerCase().includes(vendorSearch.toLowerCase()) || v.code.toLowerCase().includes(vendorSearch.toLowerCase())
   ).slice(0, 50);
+
+  // Inline line item helpers
+  const inlineLinesTotal = inlineLines.reduce((sum, l) => sum + dollarsToCents(l.totalCostDollars || "0"), 0);
+  const filteredInlineProducts = products
+    .filter((p: any) =>
+      !inlineProductSearch ||
+      p.name?.toLowerCase().includes(inlineProductSearch.toLowerCase()) ||
+      p.sku?.toLowerCase().includes(inlineProductSearch.toLowerCase())
+    )
+    .slice(0, 50);
+
+  const filteredInlineCatalog = vendorCatalog.filter((entry: any) => {
+    if (!inlineCatalogSearch) return true;
+    const s = inlineCatalogSearch.toLowerCase();
+    const product = products.find((p: any) => p.id === entry.productId);
+    const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+    return (
+      product?.name?.toLowerCase().includes(s) ||
+      entry.vendorSku?.toLowerCase().includes(s) ||
+      variant?.sku?.toLowerCase().includes(s) ||
+      product?.sku?.toLowerCase().includes(s)
+    );
+  });
+
+  function resetInlineLineForm() {
+    setInlineSelectedProduct(null);
+    setInlineSelectedVariant(null);
+    setInlineQty("1");
+    setInlineTotalCost("");
+    setInlineVendorSku("");
+    setInlineProductSearch("");
+    setInlineCatalogSearch("");
+    setInlineSelectedCatalogEntry(null);
+    setAddingLine(false);
+  }
+
+  function addInlineLine() {
+    if (!inlineSelectedVariant || !inlineTotalCost) return;
+    const qty = parseInt(inlineQty) || 1;
+    const totalCents = dollarsToCents(inlineTotalCost);
+    const unitCostCents = qty > 0 ? totalCents / qty : 0;
+    const newItem: InlineLineItem = {
+      id: `temp-${Date.now()}-${Math.random()}`,
+      productId: inlineSelectedProduct?.id || 0,
+      productVariantId: inlineSelectedVariant.id,
+      productName: inlineSelectedProduct?.name || "",
+      sku: inlineSelectedVariant.sku,
+      orderQty: qty,
+      totalCostDollars: inlineTotalCost,
+      unitCostCents,
+      unitsPerUom: inlineSelectedVariant.unitsPerVariant || 1,
+      vendorSku: inlineVendorSku,
+      vendorProductId: inlineSelectedCatalogEntry?.id,
+      saveToVendorCatalog: !inlineSelectedCatalogEntry, // save new entries to catalog
+    };
+    setInlineLines(prev => [...prev, newItem]);
+    resetInlineLineForm();
+  }
+
+  function removeInlineLine(id: string) {
+    setInlineLines(prev => prev.filter(l => l.id !== id));
+  }
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
@@ -419,14 +616,21 @@ export default function PurchaseOrders() {
         </Table>
       </Card>
 
-      {/* Create PO Dialog */}
-      <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
-        <DialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md">
-          <DialogHeader>
+      {/* Create PO Dialog — Full page style with inline line items */}
+      <Dialog open={showCreateDialog} onOpenChange={(open) => {
+        setShowCreateDialog(open);
+        if (!open) {
+          setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
+          setInlineLines([]);
+          resetInlineLineForm();
+        }
+      }}>
+        <DialogContent className="max-w-[calc(100vw-1rem)] sm:max-w-2xl max-h-[90vh] flex flex-col overflow-hidden p-0">
+          <DialogHeader className="px-4 pt-4 pb-2 sm:px-6">
             <DialogTitle>New Purchase Order</DialogTitle>
-            <DialogDescription>Create a draft PO. You can add lines after creation.</DialogDescription>
+            <DialogDescription>Select a vendor, add line items, then create.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 overflow-y-auto max-h-[calc(100vh-10rem)]">
+          <div className="space-y-4 overflow-y-auto flex-1 px-4 pb-4 sm:px-6">
             {/* Vendor typeahead */}
             <div className="space-y-2">
               <Label>Vendor *</Label>
@@ -435,7 +639,7 @@ export default function PurchaseOrders() {
                   <Button
                     variant="outline"
                     role="combobox"
-                    className="w-full justify-between h-10 font-normal min-w-0"
+                    className="w-full justify-between h-11 font-normal min-w-0"
                   >
                     <span className="truncate">{selectedVendor ? `${selectedVendor.code} — ${selectedVendor.name}` : "Select vendor..."}</span>
                     <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -459,6 +663,8 @@ export default function PurchaseOrders() {
                               setNewPO(prev => ({ ...prev, vendorId: v.id, incoterms: v.defaultIncoterms || prev.incoterms }));
                               setVendorOpen(false);
                               setVendorSearch("");
+                              setInlineLines([]); // reset lines when vendor changes
+                              resetInlineLineForm();
                             }}
                           >
                             <Check className={`mr-2 h-4 w-4 ${newPO.vendorId === v.id ? "opacity-100" : "opacity-0"}`} />
@@ -485,93 +691,314 @@ export default function PurchaseOrders() {
               </Popover>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Type</Label>
-                <Select value={newPO.poType} onValueChange={v => setNewPO(prev => ({ ...prev, poType: v }))}>
-                  <SelectTrigger className="h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="standard">Standard</SelectItem>
-                    <SelectItem value="blanket">Blanket</SelectItem>
-                    <SelectItem value="dropship">Dropship</SelectItem>
-                  </SelectContent>
-                </Select>
+            {/* Incoterms + optional fields — collapsible */}
+            <details className="group">
+              <summary className="text-sm font-medium cursor-pointer list-none flex items-center gap-2">
+                <span className="text-muted-foreground group-open:rotate-90 transition-transform">▶</span>
+                Options{newPO.incoterms ? ` (${newPO.incoterms})` : ""}
+              </summary>
+              <div className="space-y-3 mt-3 pl-4 border-l-2">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Incoterms</Label>
+                    <Select value={newPO.incoterms} onValueChange={v => setNewPO(prev => ({ ...prev, incoterms: v }))}>
+                      <SelectTrigger className="h-10">
+                        <SelectValue placeholder="Select..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="EXW">EXW</SelectItem>
+                        <SelectItem value="FCA">FCA</SelectItem>
+                        <SelectItem value="FOB">FOB</SelectItem>
+                        <SelectItem value="CFR">CFR</SelectItem>
+                        <SelectItem value="CIF">CIF</SelectItem>
+                        <SelectItem value="CPT">CPT</SelectItem>
+                        <SelectItem value="CIP">CIP</SelectItem>
+                        <SelectItem value="DAP">DAP</SelectItem>
+                        <SelectItem value="DPU">DPU</SelectItem>
+                        <SelectItem value="DDP">DDP</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Expected Delivery</Label>
+                    <Input
+                      type="date"
+                      value={newPO.expectedDeliveryDate}
+                      onChange={e => setNewPO(prev => ({ ...prev, expectedDeliveryDate: e.target.value }))}
+                      className="h-10"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Type</Label>
+                    <Select value={newPO.poType} onValueChange={v => setNewPO(prev => ({ ...prev, poType: v }))}>
+                      <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="standard">Standard</SelectItem>
+                        <SelectItem value="blanket">Blanket</SelectItem>
+                        <SelectItem value="dropship">Dropship</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Priority</Label>
+                    <Select value={newPO.priority} onValueChange={v => setNewPO(prev => ({ ...prev, priority: v }))}>
+                      <SelectTrigger className="h-10"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="normal">Normal</SelectItem>
+                        <SelectItem value="high">High</SelectItem>
+                        <SelectItem value="rush">Rush</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label>Priority</Label>
-                <Select value={newPO.priority} onValueChange={v => setNewPO(prev => ({ ...prev, priority: v }))}>
-                  <SelectTrigger className="h-10">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="normal">Normal</SelectItem>
-                    <SelectItem value="high">High</SelectItem>
-                    <SelectItem value="rush">Rush</SelectItem>
-                  </SelectContent>
-                </Select>
+            </details>
+
+            {/* ── Inline Line Items ── */}
+            {newPO.vendorId > 0 && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium">Line Items ({inlineLines.length})</Label>
+                  {inlineLinesTotal > 0 && (
+                    <span className="text-sm font-mono font-medium">{formatCentsShort(inlineLinesTotal)}</span>
+                  )}
+                </div>
+
+                {/* Existing lines */}
+                {inlineLines.length > 0 && (
+                  <div className="rounded-md border divide-y">
+                    {inlineLines.map(line => (
+                      <div key={line.id} className="flex items-center gap-2 p-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium truncate">{line.productName}</div>
+                          <div className="text-xs text-muted-foreground flex gap-2">
+                            <span className="font-mono">{line.sku}</span>
+                            <span>Qty: {line.orderQty.toLocaleString()}</span>
+                            <span className="font-mono">{formatCentsShort(dollarsToCents(line.totalCostDollars))}</span>
+                          </div>
+                        </div>
+                        <Button variant="ghost" size="sm" className="min-h-[44px] min-w-[44px] p-0 shrink-0" onClick={() => removeInlineLine(line.id)}>
+                          <Trash2 className="h-4 w-4 text-red-500" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Add line form */}
+                {!addingLine ? (
+                  <Button variant="outline" className="w-full min-h-[44px]" onClick={() => { setAddingLine(true); setInlineCatalogMode("catalog"); }}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Line Item
+                  </Button>
+                ) : (
+                  <div className="rounded-md border p-3 space-y-3 bg-muted/20">
+                    {/* Mode toggle */}
+                    <div className="flex rounded-lg border p-0.5 gap-0.5 bg-muted/30">
+                      <Button
+                        variant={inlineCatalogMode === "catalog" ? "default" : "ghost"}
+                        size="sm" className="flex-1 h-8 text-xs"
+                        onClick={() => { setInlineCatalogMode("catalog"); setInlineSelectedProduct(null); setInlineSelectedVariant(null); setInlineSelectedCatalogEntry(null); }}
+                      >
+                        Catalog{vendorCatalog.length > 0 ? ` (${vendorCatalog.length})` : ""}
+                      </Button>
+                      <Button
+                        variant={inlineCatalogMode === "search" ? "default" : "ghost"}
+                        size="sm" className="flex-1 h-8 text-xs"
+                        onClick={() => { setInlineCatalogMode("search"); setInlineSelectedCatalogEntry(null); setInlineSelectedProduct(null); setInlineSelectedVariant(null); }}
+                      >
+                        All Products
+                      </Button>
+                    </div>
+
+                    {/* Catalog mode */}
+                    {inlineCatalogMode === "catalog" && !inlineSelectedVariant && (
+                      <>
+                        <Input
+                          placeholder="Filter catalog..."
+                          value={inlineCatalogSearch}
+                          onChange={e => setInlineCatalogSearch(e.target.value)}
+                          className="h-9"
+                        />
+                        {vendorCatalog.length === 0 ? (
+                          <div className="text-center text-xs text-muted-foreground py-2">
+                            No catalog entries.{" "}
+                            <button className="text-primary underline" onClick={() => setInlineCatalogMode("search")}>Search all products</button>
+                          </div>
+                        ) : (
+                          <div className="rounded-md border divide-y max-h-36 overflow-y-auto">
+                            {filteredInlineCatalog.slice(0, 30).map((entry: any) => {
+                              const product = products.find((p: any) => p.id === entry.productId);
+                              const variant = product?.variants?.find((v: any) => v.id === entry.productVariantId);
+                              return (
+                                <button
+                                  key={entry.id}
+                                  type="button"
+                                  className="w-full text-left p-2 hover:bg-muted/50 transition-colors"
+                                  onClick={() => {
+                                    setInlineSelectedCatalogEntry(entry);
+                                    setInlineSelectedProduct(product || null);
+                                    if (variant) {
+                                      setInlineSelectedVariant(variant);
+                                      setInlineVendorSku(entry.vendorSku || "");
+                                    }
+                                  }}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="text-sm font-medium truncate">{product?.name || entry.vendorProductName || `Product #${entry.productId}`}</div>
+                                      <div className="text-xs text-muted-foreground flex gap-1.5 flex-wrap">
+                                        {variant && <span className="font-mono">{variant.sku}</span>}
+                                        {entry.vendorSku && <span>· {entry.vendorSku}</span>}
+                                      </div>
+                                    </div>
+                                    <div className="text-sm font-mono shrink-0">{formatCentsShort(entry.unitCostCents)}</div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {/* Search mode - product picker */}
+                    {inlineCatalogMode === "search" && !inlineSelectedVariant && (
+                      <>
+                        <Popover open={inlineProductOpen} onOpenChange={setInlineProductOpen}>
+                          <PopoverTrigger asChild>
+                            <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                              <span className="truncate">{inlineSelectedProduct ? inlineSelectedProduct.name : "Search product..."}</span>
+                              <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                            <Command shouldFilter={false}>
+                              <CommandInput placeholder="Search name or SKU..." value={inlineProductSearch} onValueChange={setInlineProductSearch} />
+                              <CommandList>
+                                <CommandEmpty>No products found.</CommandEmpty>
+                                <CommandGroup>
+                                  {filteredInlineProducts.map((p: any) => (
+                                    <CommandItem
+                                      key={p.id}
+                                      value={String(p.id)}
+                                      onSelect={() => {
+                                        setInlineSelectedProduct(p);
+                                        setInlineProductOpen(false);
+                                        setInlineProductSearch("");
+                                        // Auto-select if only one variant
+                                        if (p.variants?.length === 1) {
+                                          setInlineSelectedVariant(p.variants[0]);
+                                        }
+                                      }}
+                                    >
+                                      <span className="font-mono text-xs mr-2 text-muted-foreground">{p.sku}</span>
+                                      <span className="truncate">{p.name}</span>
+                                    </CommandItem>
+                                  ))}
+                                </CommandGroup>
+                              </CommandList>
+                            </Command>
+                          </PopoverContent>
+                        </Popover>
+
+                        {/* Variant picker */}
+                        {inlineSelectedProduct && inlineSelectedProduct.variants?.length > 1 && (
+                          <Popover open={inlineVariantOpen} onOpenChange={setInlineVariantOpen}>
+                            <PopoverTrigger asChild>
+                              <Button variant="outline" className="w-full justify-between h-10 font-normal overflow-hidden">
+                                <span className="truncate">{inlineSelectedVariant ? `${inlineSelectedVariant.sku} — ${inlineSelectedVariant.name}` : "Select variant..."}</span>
+                                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                              <Command>
+                                <CommandList>
+                                  <CommandEmpty>No variants.</CommandEmpty>
+                                  <CommandGroup>
+                                    {(inlineSelectedProduct.variants || []).map((v: any) => (
+                                      <CommandItem key={v.id} value={String(v.id)} onSelect={() => { setInlineSelectedVariant(v); setInlineVariantOpen(false); }}>
+                                        <span className="font-mono text-xs mr-2">{v.sku}</span>
+                                        <span className="truncate">{v.name}</span>
+                                        {(v.unitsPerVariant || 1) > 1 && <span className="ml-auto text-xs text-muted-foreground">{v.unitsPerVariant} pcs</span>}
+                                      </CommandItem>
+                                    ))}
+                                  </CommandGroup>
+                                </CommandList>
+                              </Command>
+                            </PopoverContent>
+                          </Popover>
+                        )}
+                      </>
+                    )}
+
+                    {/* Qty + Cost fields (shown when variant selected) */}
+                    {inlineSelectedVariant && (
+                      <>
+                        <div className="flex items-center gap-2 p-2 rounded bg-muted text-sm">
+                          <span className="font-mono">{inlineSelectedVariant.sku}</span>
+                          <span className="text-muted-foreground">—</span>
+                          <span className="truncate">{inlineSelectedProduct?.name}</span>
+                          <Button variant="ghost" size="sm" className="h-6 w-6 p-0 ml-auto shrink-0" onClick={() => { setInlineSelectedVariant(null); setInlineSelectedProduct(inlineCatalogMode === "catalog" ? null : inlineSelectedProduct); setInlineSelectedCatalogEntry(null); }}>
+                            <AlertCircle className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <Label className="text-xs">Qty (pieces)</Label>
+                            <Input type="number" min="1" value={inlineQty} onChange={e => setInlineQty(e.target.value)} className="h-10" />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Total Cost ($)</Label>
+                            <Input type="number" min="0" step="0.01" placeholder="0.00" value={inlineTotalCost} onChange={e => setInlineTotalCost(e.target.value)} className="h-10" />
+                          </div>
+                        </div>
+                        {inlineTotalCost && parseInt(inlineQty) > 0 && (
+                          <div className="text-xs text-muted-foreground">
+                            Unit cost: {formatCentsShort(dollarsToCents(inlineTotalCost) / parseInt(inlineQty))}/pc
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <Button variant="outline" size="sm" className="min-h-[44px] flex-1" onClick={resetInlineLineForm}>Cancel</Button>
+                          <Button size="sm" className="min-h-[44px] flex-1" onClick={addInlineLine} disabled={!inlineTotalCost || parseInt(inlineQty) < 1}>
+                            <Plus className="h-4 w-4 mr-1" /> Add
+                          </Button>
+                        </div>
+                      </>
+                    )}
+
+                    {/* Cancel adding without variant selected */}
+                    {!inlineSelectedVariant && (
+                      <Button variant="ghost" size="sm" className="w-full min-h-[44px] text-muted-foreground" onClick={resetInlineLineForm}>Cancel</Button>
+                    )}
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
-            <div className="space-y-2">
-              <Label>Incoterms *</Label>
-              <Select value={newPO.incoterms} onValueChange={v => setNewPO(prev => ({ ...prev, incoterms: v }))}>
-                <SelectTrigger className="h-10">
-                  <SelectValue placeholder="Select trade terms..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="EXW">EXW — Ex Works</SelectItem>
-                  <SelectItem value="FCA">FCA — Free Carrier</SelectItem>
-                  <SelectItem value="FOB">FOB — Free On Board</SelectItem>
-                  <SelectItem value="CFR">CFR — Cost &amp; Freight</SelectItem>
-                  <SelectItem value="CIF">CIF — Cost, Insurance &amp; Freight</SelectItem>
-                  <SelectItem value="CPT">CPT — Carriage Paid To</SelectItem>
-                  <SelectItem value="CIP">CIP — Carriage &amp; Insurance Paid</SelectItem>
-                  <SelectItem value="DAP">DAP — Delivered At Place</SelectItem>
-                  <SelectItem value="DPU">DPU — Delivered at Place Unloaded</SelectItem>
-                  <SelectItem value="DDP">DDP — Delivered Duty Paid</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Expected Delivery</Label>
-              <Input
-                type="date"
-                value={newPO.expectedDeliveryDate}
-                onChange={e => setNewPO(prev => ({ ...prev, expectedDeliveryDate: e.target.value }))}
-                className="h-10"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Vendor Notes</Label>
-              <Textarea
-                value={newPO.vendorNotes}
-                onChange={e => setNewPO(prev => ({ ...prev, vendorNotes: e.target.value }))}
-                placeholder="Notes printed on PO..."
-                rows={2}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Internal Notes</Label>
-              <Textarea
-                value={newPO.internalNotes}
-                onChange={e => setNewPO(prev => ({ ...prev, internalNotes: e.target.value }))}
-                placeholder="Warehouse-only notes..."
-                rows={2}
-              />
-            </div>
-
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
+            {/* Action buttons */}
+            <div className="flex gap-2 justify-end pt-2 border-t">
+              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
+              {isSoloMode && inlineLines.length > 0 && (
+                <Button
+                  variant="outline"
+                  className="min-h-[44px]"
+                  onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: false })}
+                  disabled={!newPO.vendorId || createMutation.isPending}
+                >
+                  {createMutation.isPending ? "Creating..." : "Save Draft"}
+                </Button>
+              )}
               <Button
-                onClick={() => createMutation.mutate(newPO)}
+                className="min-h-[44px]"
+                onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: isSoloMode && inlineLines.length > 0 })}
                 disabled={!newPO.vendorId || createMutation.isPending}
               >
-                {createMutation.isPending ? "Creating..." : "Create Draft"}
+                {createMutation.isPending ? "Creating..." : (
+                  isSoloMode && inlineLines.length > 0 ? "Create & Send" : "Create Draft"
+                )}
               </Button>
             </div>
           </div>

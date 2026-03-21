@@ -1801,6 +1801,17 @@ export function registerPurchasingRoutes(app: Express) {
     }
   });
 
+  // Combined send-to-vendor: draft → approved → sent in one click (solo mode only)
+  app.post("/api/purchase-orders/:id/send-to-vendor", requirePermission("purchasing", "create"), async (req, res) => {
+    try {
+      const po = await purchasing.sendToVendor(Number(req.params.id), req.session.user?.id);
+      res.json(po);
+    } catch (error: any) {
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post("/api/purchase-orders/:id/acknowledge", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const data = {

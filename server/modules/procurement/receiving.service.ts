@@ -305,10 +305,11 @@ export class ReceivingService {
     let updated = 0;
     for (const line of lines) {
       if (line.status !== "complete") {
-        // Only complete lines the user actually entered a quantity for
+        // For untouched lines (receivedQty is 0 or null), set to expected qty.
+        // For partially entered lines, keep what the user entered.
         const effectiveQty = (line.receivedQty != null && line.receivedQty > 0)
           ? line.receivedQty
-          : 0;
+          : (line.expectedQty || 0);
         await this.storage.updateReceivingLine(line.id, {
           receivedQty: effectiveQty,
           status: "complete",

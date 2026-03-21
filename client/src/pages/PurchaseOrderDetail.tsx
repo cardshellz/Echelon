@@ -260,6 +260,43 @@ export default function PurchaseOrderDetail() {
   const approveMutation = createTransitionMutation("approve");
   const sendMutation = createTransitionMutation("send");
   const closeMutation = createTransitionMutation("close");
+
+  // Check if solo mode (no approval tiers) for combined "Send to Vendor" button
+  const { data: approvalTiersData } = useQuery<{ tiers: any[] }>({
+    queryKey: ["/api/purchasing/approval-tiers"],
+  });
+  const isSoloMode = (approvalTiersData?.tiers?.length ?? 0) === 0;
+
+  // Check setting for vendor acknowledgment requirement
+  const { data: settingsData } = useQuery<Record<string, string | null>>({
+    queryKey: ["/api/settings"],
+    select: (data: any) => data,
+  });
+  const requireAcknowledgment = settingsData?.requireVendorAcknowledgment === "true";
+
+  const sendToVendorMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/purchase-orders/${poId}/send-to-vendor`, { method: "POST" });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to send to vendor"); }
+      return res.json();
+    },
+    onSuccess: (updatedPo) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      toast({ title: "PO sent to vendor", description: `${updatedPo.poNumber} is now marked as sent` });
+      // Open email dialog with vendor email pre-filled
+      setEmailForm(f => ({ ...f, toEmail: updatedPo.vendor?.email || po?.vendor?.email || po?.vendorContactEmail || "" }));
+      // Fetch doc HTML for the email
+      fetch(`/api/purchase-orders/${poId}/document`).then(r => r.json()).then(data => {
+        setDocHtml(data.html);
+      }).catch(() => {});
+      setShowEmailDialog(true);
+    },
+    onError: (err: Error) => {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
+  });
+
   const createReceiptMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch(`/api/purchase-orders/${poId}/create-receipt`, { method: "POST" });
@@ -271,7 +308,9 @@ export default function PurchaseOrderDetail() {
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/receipts`] });
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
-      toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created. Open Receiving to process it.` });
+      toast({ title: "Receipt created", description: `Receipt ${receipt.receiptNumber} created` });
+      // Navigate to the receiving page with this receipt
+      navigate(`/receiving?open=${receipt.id}`);
     },
     onError: (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
@@ -645,7 +684,15 @@ export default function PurchaseOrderDetail() {
 
         {/* Context-sensitive action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
-          {po.status === "draft" && (
+          {/* Solo mode: combined "Send to Vendor" button (draft → approved → sent in one click) */}
+          {po.status === "draft" && isSoloMode && (
+            <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+              <Send className="h-4 w-4 mr-2" />
+              {sendToVendorMutation.isPending ? "Sending..." : "Send to Vendor"}
+            </Button>
+          )}
+          {/* Multi-person mode: individual Submit button */}
+          {po.status === "draft" && !isSoloMode && (
             <Button onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
               Submit
@@ -669,7 +716,8 @@ export default function PurchaseOrderDetail() {
               Mark as Sent
             </Button>
           )}
-          {po.status === "sent" && (
+          {/* Acknowledge button: only shown when acknowledgment is required (multi-person mode) */}
+          {po.status === "sent" && requireAcknowledgment && (
             <Button onClick={() => setShowAckDialog(true)} className="flex-1 sm:flex-none min-h-[44px]">
               <CheckCircle className="h-4 w-4 mr-2" />
               Acknowledge

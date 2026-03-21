@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -218,6 +219,8 @@ const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outlin
 export default function Receiving() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
+  const searchStr = useSearch();
   
   const [activeTab, setActiveTab] = useState("receipts");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -450,10 +453,14 @@ DEF-456,25,,,5.00,,Location TBD`;
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       toast({
-        title: "Receipt closed",
+        title: "Receipt closed — inventory updated",
         description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
       });
       setShowReceiptDetail(false);
+      // Navigate back to the PO detail if this receipt was PO-linked
+      if (selectedReceipt?.purchaseOrderId) {
+        navigate(`/purchase-orders/${selectedReceipt.purchaseOrderId}`);
+      }
     },
     onError: (error: any) => {
       if (error.issues) {
@@ -878,6 +885,31 @@ DEF-456,25,,,5.00,,Location TBD`;
       setShowReceiptDetail(true);
     }
   };
+
+  // Auto-open receipt when navigated with ?open=<id>
+  const autoOpenHandled = useRef(false);
+  useEffect(() => {
+    if (autoOpenHandled.current) return;
+    const params = new URLSearchParams(searchStr);
+    const openId = params.get("open");
+    if (openId && receipts.length > 0) {
+      autoOpenHandled.current = true;
+      const receipt = receipts.find(r => r.id === Number(openId));
+      if (receipt) {
+        loadReceiptDetail(receipt);
+      } else {
+        // Receipt might not be in the list yet, try direct fetch
+        fetch(`/api/receiving/${openId}`).then(r => r.json()).then(data => {
+          if (data && data.id) {
+            setSelectedReceipt(data);
+            setShowReceiptDetail(true);
+          }
+        }).catch(() => {});
+      }
+      // Clean up URL
+      navigate("/receiving", { replace: true });
+    }
+  }, [receipts, searchStr]);
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
@@ -1522,7 +1554,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Complete All
+                        Mark All Received
                       </Button>
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
@@ -1531,7 +1563,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         data-testid="btn-close-receipt"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
-                        Close
+                        Receive &amp; Update Inventory
                       </Button>
                     </>
                   )}

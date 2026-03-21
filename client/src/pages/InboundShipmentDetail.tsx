@@ -862,6 +862,40 @@ export default function InboundShipmentDetail() {
             </Button>
           )}
 
+          {/* Create Receipt from shipment lines — available once delivered */}
+          {["delivered", "costing"].includes(shipment.status) && lines.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={async () => {
+                // Find linked PO IDs from shipment lines
+                const poLineIds = lines.map((sl: any) => sl.purchaseOrderLineId).filter(Boolean);
+                if (poLineIds.length === 0) {
+                  toast({ title: "No PO lines linked", description: "Shipment lines must be linked to PO lines to create a receipt.", variant: "destructive" });
+                  return;
+                }
+                // Get unique PO IDs — create receipt from the first linked PO
+                const poIds = [...new Set(lines.map((sl: any) => sl.purchaseOrderId).filter(Boolean))];
+                if (poIds.length === 0) {
+                  toast({ title: "No PO linked", description: "Link shipment lines to a PO first.", variant: "destructive" });
+                  return;
+                }
+                try {
+                  const res = await fetch(`/api/purchase-orders/${poIds[0]}/create-receipt`, { method: "POST" });
+                  if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed"); }
+                  const receipt = await res.json();
+                  toast({ title: "Receipt created", description: `${receipt.receiptNumber} created from shipment` });
+                  navigate(`/receiving?open=${receipt.id}`);
+                } catch (err: any) {
+                  toast({ title: "Error", description: err.message, variant: "destructive" });
+                }
+              }}
+              className="flex-1 sm:flex-none min-h-[44px]"
+            >
+              <Truck className="h-4 w-4 mr-2" />
+              Create Receipt
+            </Button>
+          )}
+
           {shipment.status === "delivered" && (
             <Button onClick={() => startCostingMutation.mutate({})} disabled={startCostingMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <DollarSign className="h-4 w-4 mr-2" />
