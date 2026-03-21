@@ -28,6 +28,7 @@ import {
   EbayAuthService,
   createEbayAuthConfig,
 } from "../modules/channels/adapters/ebay/ebay-auth.service";
+import { createInventoryAtpService } from "../modules/inventory/atp.service";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,6 +83,12 @@ async function getChannelConnection() {
     .limit(1);
   return conn || null;
 }
+
+// ---------------------------------------------------------------------------
+// ATP service (fungible inventory)
+// ---------------------------------------------------------------------------
+
+const atpService = createInventoryAtpService(db);
 
 // ---------------------------------------------------------------------------
 // eBay REST API helper (uses https module, not fetch)
@@ -570,16 +577,21 @@ ${categoriesXml}
               pv.ebay_listing_excluded,
               pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
               pv.ebay_return_policy_override AS variant_return_override,
-              pv.ebay_payment_policy_override AS variant_payment_override,
-              COALESCE(
-                (SELECT SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty)::int
-                 FROM inventory_levels il WHERE il.product_variant_id = pv.id),
-                0
-              ) AS inventory_quantity
+              pv.ebay_payment_policy_override AS variant_payment_override
             FROM product_variants pv
             WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
           `, [productIds]);
+
+          // Fetch fungible ATP for all products in the feed
+          const atpByVariantId: Map<number, number> = new Map();
+          const uniqueProductIds = [...new Set(varResult.rows.map((v: any) => v.product_id))];
+          for (const pid of uniqueProductIds) {
+            const variantAtps = await atpService.getAtpPerVariant(pid);
+            for (const va of variantAtps) {
+              atpByVariantId.set(va.productVariantId, va.atpUnits);
+            }
+          }
 
           for (const v of varResult.rows) {
             const pid = v.product_id;
@@ -590,7 +602,7 @@ ${categoriesXml}
               name: v.name,
               priceCents: v.price_cents,
               ebayListingExcluded: v.ebay_listing_excluded === true,
-              inventoryQuantity: Math.max(0, parseInt(v.inventory_quantity) || 0),
+              inventoryQuantity: Math.max(0, atpByVariantId.get(v.id) ?? 0),
               fulfillmentPolicyOverride: v.variant_fulfillment_override || null,
               returnPolicyOverride: v.variant_return_override || null,
               paymentPolicyOverride: v.variant_payment_override || null,
@@ -1449,17 +1461,19 @@ ${categoriesXml}
           // Determine the variation aspect name for multi-variant products
           const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
+          // ---- Fetch fungible ATP for this product (shared pool) ----
+          const variantAtps = await atpService.getAtpPerVariant(productId);
+          const atpByVariantId: Map<number, number> = new Map();
+          for (const va of variantAtps) {
+            atpByVariantId.set(va.productVariantId, va.atpUnits);
+          }
+
           // ---- Step A: Create/Update Inventory Items for each variant ----
           let allItemsCreated = true;
           for (const variant of variants) {
             const sku = variant.sku;
             try {
-              const invResult = await client.query(
-                `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
-                 FROM inventory_levels il WHERE il.product_variant_id = $1`,
-                [variant.id],
-              );
-              const availableQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
+              const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
               const priceCents = variantPrices.get(variant.id) || variant.price_cents;
               const priceInDollars = (priceCents / 100).toFixed(2);
 
@@ -1583,12 +1597,7 @@ ${categoriesXml}
                 const priceCents = variantPrices.get(variant.id) || variant.price_cents;
                 const priceInDollars = (priceCents / 100).toFixed(2);
 
-                const invResult = await client.query(
-                  `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
-                   FROM inventory_levels il WHERE il.product_variant_id = $1`,
-                  [variant.id],
-                );
-                const availableQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
+                const availableQty = Math.max(0, atpByVariantId.get(variant.id) ?? 0);
 
                 // Variant-level policy overrides win over product/category/channel
                 const variantPolicies = {
@@ -1673,11 +1682,7 @@ ${categoriesXml}
               const priceCents = variantPrices.get(singleVariant?.id) || singleVariant?.price_cents || 0;
               const priceInDollars = (priceCents / 100).toFixed(2);
 
-              const invResult = await client.query(
-                `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
-                 FROM inventory_levels il WHERE il.product_variant_id = $1`,
-                [singleVariant?.id],
-              );
+              const singleAvailableQty = Math.max(0, atpByVariantId.get(singleVariant?.id) ?? 0);
 
               const offerBody: Record<string, any> = {
                 sku: singleSku,
@@ -1693,7 +1698,7 @@ ${categoriesXml}
                 pricingSummary: {
                   price: { value: priceInDollars, currency: "USD" },
                 },
-                availableQuantity: Math.max(0, invResult.rows[0]?.available_qty || 0),
+                availableQuantity: singleAvailableQty,
               };
               if (storeCategoryNames.length > 0) {
                 offerBody.storeCategoryNames = storeCategoryNames;
@@ -2371,6 +2376,92 @@ ${categoriesXml}
       res.status(500).json({ error: err.message });
     }
   });
+
+  // -----------------------------------------------------------------------
+  // POST /api/ebay/admin/cleanup-prod60 — One-time cleanup of PROD-60 group
+  // -----------------------------------------------------------------------
+  app.post("/api/ebay/admin/cleanup-prod60", async (_req: Request, res: Response) => {
+    const log: string[] = [];
+    try {
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      log.push("Got eBay access token");
+
+      const skus = ["HERO-GRD-PSA-P1", "HERO-GRD-PSA-B5", "HERO-GRD-PSA-C50"];
+
+      // Delete offers for each SKU
+      for (const sku of skus) {
+        try {
+          const offers = await ebayApiRequest(
+            "GET",
+            `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&limit=100`,
+            accessToken,
+          );
+          if (offers?.offers && offers.offers.length > 0) {
+            for (const offer of offers.offers) {
+              try {
+                await ebayApiRequest("DELETE", `/sell/inventory/v1/offer/${offer.offerId}`, accessToken);
+                log.push(`Deleted offer ${offer.offerId} for ${sku}`);
+              } catch (err: any) {
+                log.push(`Failed to delete offer ${offer.offerId}: ${err.message}`);
+              }
+            }
+          } else {
+            log.push(`No offers found for ${sku}`);
+          }
+        } catch (err: any) {
+          log.push(`Error fetching offers for ${sku}: ${err.message}`);
+        }
+      }
+
+      // Delete the inventory item group PROD-60
+      try {
+        await ebayApiRequest("DELETE", `/sell/inventory/v1/inventory_item_group/PROD-60`, accessToken);
+        log.push("Deleted inventory item group PROD-60");
+      } catch (err: any) {
+        log.push(`Failed to delete group PROD-60: ${err.message}`);
+      }
+
+      // Delete individual inventory items
+      for (const sku of skus) {
+        try {
+          await ebayApiRequest("DELETE", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken);
+          log.push(`Deleted inventory item ${sku}`);
+        } catch (err: any) {
+          log.push(`Failed to delete inventory item ${sku}: ${err.message}`);
+        }
+      }
+
+      // Clean up channel_listings rows
+      const client = await pool.connect();
+      try {
+        const result = await client.query(
+          `DELETE FROM channel_listings
+           WHERE channel_id = $1
+             AND product_variant_id IN (
+               SELECT id FROM product_variants WHERE product_id = $2
+             )
+           RETURNING id, product_variant_id, external_sku`,
+          [EBAY_CHANNEL_ID, 60],
+        );
+        log.push(`Deleted ${result.rowCount} channel_listings rows`);
+        for (const row of result.rows) {
+          log.push(`  - listing ${row.id}: variant ${row.product_variant_id} (${row.external_sku})`);
+        }
+      } finally {
+        client.release();
+      }
+
+      res.json({ success: true, log });
+    } catch (err: any) {
+      console.error("[eBay PROD-60 Cleanup] Error:", err.message);
+      res.status(500).json({ error: err.message, log });
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2739,6 +2830,13 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
       const isMultiVariant = variants.length > 1;
       const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
+      // ---- Fetch fungible ATP for this product (shared pool) ----
+      const syncVariantAtps = await atpService.getAtpPerVariant(productId);
+      const syncAtpByVariantId: Map<number, number> = new Map();
+      for (const va of syncVariantAtps) {
+        syncAtpByVariantId.set(va.productVariantId, va.atpUnits);
+      }
+
       // ---- Process each variant ----
       for (const variant of variants) {
         const sku = variant.variant_sku;
@@ -2749,13 +2847,8 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
           );
           const priceInDollars = (newPriceCents / 100).toFixed(2);
 
-          // Recalculate available quantity
-          const invResult = await client.query(
-            `SELECT COALESCE(SUM(il.variant_qty - il.reserved_qty - il.picked_qty - il.packed_qty), 0)::int AS available_qty
-             FROM inventory_levels il WHERE il.product_variant_id = $1`,
-            [variant.variant_id],
-          );
-          const newQty = Math.max(0, invResult.rows[0]?.available_qty || 0);
+          // Recalculate available quantity (fungible ATP)
+          const newQty = Math.max(0, syncAtpByVariantId.get(variant.variant_id) ?? 0);
 
           // Detect changes
           const oldPrice = variant.last_synced_price || 0;
