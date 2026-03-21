@@ -16,7 +16,7 @@ import {
   warehouses,
   products,
   productVariants,
-  eq, and, inArray, isNull,
+  eq, and, inArray, isNull, sql,
 } from "../../storage/base";
 
 export function registerChannelRoutes(app: Express) {
@@ -1789,7 +1789,7 @@ export function registerChannelRoutes(app: Express) {
   // ============================================
 
   const allocationRuleSchema = z.object({
-    channelId: z.number().int().positive(),
+    channelId: z.number().int().positive().nullable(), // null = global "All Channels" rule
     productId: z.number().int().positive().nullable().optional(),
     productVariantId: z.number().int().positive().nullable().optional(),
     mode: z.enum(["mirror", "share", "fixed"]),
@@ -1836,7 +1836,10 @@ export function registerChannelRoutes(app: Express) {
         .leftJoin(productVariants, eq(channelAllocationRules.productVariantId, productVariants.id));
 
       if (channelId) {
-        query = query.where(eq(channelAllocationRules.channelId, channelId)) as any;
+        // Show rules for this channel PLUS global rules (channelId IS NULL)
+        query = query.where(
+          sql`(${channelAllocationRules.channelId} = ${channelId} OR ${channelAllocationRules.channelId} IS NULL)`
+        ) as any;
       }
 
       const rows = await (query as any).orderBy(channelAllocationRules.channelId, channelAllocationRules.productId, channelAllocationRules.productVariantId);
@@ -1896,7 +1899,7 @@ export function registerChannelRoutes(app: Express) {
       }
 
       const data = {
-        channelId: parsed.data.channelId,
+        channelId: parsed.data.channelId ?? null, // null = global "All Channels" rule
         productId: parsed.data.productId ?? null,
         productVariantId: parsed.data.productVariantId ?? null,
         mode: parsed.data.mode,

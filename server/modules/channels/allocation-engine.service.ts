@@ -237,18 +237,25 @@ class AllocationEngine {
       allFulfillmentWarehouseIds = fulfillmentWarehouses.map((w: any) => w.id);
     }
 
-    // 6. Load allocation rules for all channels
+    // 6. Load allocation rules for all channels + global rules (channelId IS NULL)
     const allRules: ChannelAllocationRule[] = await this.db
       .select()
       .from(channelAllocationRules)
-      .where(inArray(channelAllocationRules.channelId, channelIds));
+      .where(
+        sql`${channelAllocationRules.channelId} IN (${sql.join(channelIds.map(id => sql`${id}`), sql`, `)}) OR ${channelAllocationRules.channelId} IS NULL`
+      );
 
-    // Index rules by channel for fast lookup
+    // Separate global rules (channelId === null) from per-channel rules
+    const globalRules: ChannelAllocationRule[] = [];
     const rulesByChannel = new Map<number, ChannelAllocationRule[]>();
     for (const rule of allRules) {
-      const list = rulesByChannel.get(rule.channelId) ?? [];
-      list.push(rule);
-      rulesByChannel.set(rule.channelId, list);
+      if (rule.channelId === null) {
+        globalRules.push(rule);
+      } else {
+        const list = rulesByChannel.get(rule.channelId) ?? [];
+        list.push(rule);
+        rulesByChannel.set(rule.channelId, list);
+      }
     }
 
     // 7. For each channel, compute ATP independently (parallel model)
@@ -281,16 +288,20 @@ class AllocationEngine {
         }
       }
 
-      // Get channel's rules
+      // Get channel's rules + merge with global rules (per-channel takes priority)
       const channelRules = rulesByChannel.get(channel.id) ?? [];
 
-      // Resolve channel-level default rule
+      // Resolve channel-level default rule (per-channel > global)
       const channelDefaultRule = channelRules.find(
+        (r) => r.productId === null && r.productVariantId === null,
+      ) ?? globalRules.find(
         (r) => r.productId === null && r.productVariantId === null,
       );
 
-      // Resolve product-level rule
+      // Resolve product-level rule (per-channel > global)
       const productRule = channelRules.find(
+        (r) => r.productId === productId && r.productVariantId === null,
+      ) ?? globalRules.find(
         (r) => r.productId === productId && r.productVariantId === null,
       );
 
@@ -322,8 +333,10 @@ class AllocationEngine {
 
       // Per-variant allocation
       for (const variant of globalVariantAtp) {
-        // Find variant-level rule (productId may be null on variant-scoped rules)
+        // Find variant-level rule (per-channel > global)
         const variantRule = channelRules.find(
+          (r) => r.productVariantId === variant.productVariantId,
+        ) ?? globalRules.find(
           (r) => r.productVariantId === variant.productVariantId,
         );
 

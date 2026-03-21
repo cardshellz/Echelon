@@ -92,7 +92,7 @@ interface WarehouseAssignment {
 
 interface AllocationRule {
   id: number;
-  channelId: number;
+  channelId: number | null;
   productId: number | null;
   productVariantId: number | null;
   mode: "mirror" | "share" | "fixed";
@@ -392,7 +392,7 @@ function RuleDialog({
   const queryClient = useQueryClient();
   const isEdit = !!rule;
 
-  const [channelId, setChannelId] = useState(rule?.channelId ?? (channels[0]?.id ?? 0));
+  const [channelId, setChannelId] = useState<number | null>(rule?.channelId !== undefined ? rule.channelId : (channels[0]?.id ?? 0));
   const [mode, setMode] = useState<"mirror" | "share" | "fixed">(rule?.mode ?? "mirror");
   const [sharePct, setSharePct] = useState(String(rule?.sharePct ?? 100));
   const [fixedQty, setFixedQty] = useState(String(rule?.fixedQty ?? 0));
@@ -466,9 +466,10 @@ function RuleDialog({
             {!isEdit && (
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Channel</Label>
-                <Select value={String(channelId)} onValueChange={(v) => setChannelId(parseInt(v))}>
+                <Select value={channelId === null ? "all" : String(channelId)} onValueChange={(v) => setChannelId(v === "all" ? null : parseInt(v))}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="all">🌐 All Channels</SelectItem>
                     {channels.map((c) => (
                       <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
                     ))}
@@ -778,6 +779,103 @@ function AllocationRulesSection() {
           </p>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {/* Global "All Channels" default card */}
+          {(() => {
+            const globalDefault = channelDefaults.find((r) => r.channelId === null);
+            const m = globalDefault
+              ? modeIndicator(globalDefault.mode, globalDefault.eligible)
+              : modeIndicator("mirror", true);
+
+            return (
+              <Card className={cn(
+                "border-2 border-dashed border-blue-200 dark:border-blue-800 transition-colors",
+                globalDefault && !globalDefault.eligible && "border-red-300 dark:border-red-800"
+              )}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <p className="font-medium">🌐 All Channels</p>
+                      <p className="text-xs text-muted-foreground">Global default</p>
+                    </div>
+                    <span className="text-2xl">{m.icon}</span>
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Mode</span>
+                      <span className={cn("font-medium", m.color)}>
+                        {globalDefault ? ruleDescription(globalDefault) : "Mirror (100%) — implicit"}
+                      </span>
+                    </div>
+                    {globalDefault && (
+                      <>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Floor</span>
+                          <span>{globalDefault.floorAtp || "None"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Ceiling</span>
+                          <span>{globalDefault.ceilingQty ?? "None"}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Eligible</span>
+                          <span>{globalDefault.eligible ? "✅ Yes" : "❌ No"}</span>
+                        </div>
+                        {globalDefault.notes && (
+                          <p className="text-xs text-muted-foreground mt-1 italic">{globalDefault.notes}</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    {globalDefault ? (
+                      <>
+                        <Dialog>
+                          <DialogTrigger asChild>
+                            <Button variant="outline" size="sm" className="flex-1" onClick={() => setEditingRule(globalDefault)}>
+                              <Pencil className="h-3 w-3 mr-1" /> Edit
+                            </Button>
+                          </DialogTrigger>
+                          {editingRule?.id === globalDefault.id && (
+                            <RuleDialog
+                              rule={editingRule}
+                              channels={activeChannels}
+                              onClose={() => setEditingRule(null)}
+                            />
+                          )}
+                        </Dialog>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="text-red-500 hover:text-red-600"
+                          onClick={() => deleteMutation.mutate(globalDefault.id)}
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </>
+                    ) : (
+                      <Dialog>
+                        <DialogTrigger asChild>
+                          <Button variant="outline" size="sm" className="w-full" onClick={() => {
+                            setShowCreate(true);
+                            setEditingRule({ channelId: null, mode: "mirror", eligible: true } as any);
+                          }}>
+                            <Plus className="h-3 w-3 mr-1" /> Set Global Default
+                          </Button>
+                        </DialogTrigger>
+                        {showCreate && editingRule?.channelId === null && !editingRule?.id && (
+                          <RuleDialog
+                            channels={activeChannels}
+                            onClose={() => { setShowCreate(false); setEditingRule(null); }}
+                          />
+                        )}
+                      </Dialog>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
           {activeChannels.map((ch) => {
             const defaultRule = channelDefaults.find((r) => r.channelId === ch.id);
             const m = defaultRule
@@ -970,7 +1068,13 @@ function AllocationRulesSection() {
                   const scope = ruleScope(rule);
                   return (
                     <TableRow key={rule.id} className={cn(!rule.eligible && "bg-red-50/50 dark:bg-red-950/10")}>
-                      <TableCell className="font-medium text-sm">{rule.channelName}</TableCell>
+                      <TableCell className="font-medium text-sm">
+                        {rule.channelId === null ? (
+                          <Badge variant="outline" className="text-xs bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300">
+                            🌐 All Channels
+                          </Badge>
+                        ) : rule.channelName}
+                      </TableCell>
                       <TableCell>
                         <Badge variant={scope === "variant" ? "default" : "secondary"} className="text-xs">
                           {scope}

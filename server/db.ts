@@ -558,6 +558,17 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
     console.log("Checked eBay policy override columns on products + product_variants");
 
+    // Migration: Make channel_allocation_rules.channel_id nullable for "All Channels" global rules
+    await client.query(`ALTER TABLE channel_allocation_rules ALTER COLUMN channel_id DROP NOT NULL`);
+    // Drop the old unique index that includes channel_id as NOT NULL and recreate with COALESCE
+    // so NULL channel_id (global) rules are unique per product/variant
+    await client.query(`DROP INDEX IF EXISTS car_channel_product_variant_idx`);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS car_channel_product_variant_idx
+      ON channel_allocation_rules(COALESCE(channel_id, 0), COALESCE(product_id, 0), COALESCE(product_variant_id, 0))
+    `);
+    console.log("Checked channel_allocation_rules nullable channel_id for global rules");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

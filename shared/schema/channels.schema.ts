@@ -1,4 +1,5 @@
 import { pgTable, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants, productAssets, productLines } from "./catalog.schema";
@@ -418,7 +419,8 @@ export type AllocationMode = typeof allocationModeEnum[number];
 
 export const channelAllocationRules = pgTable("channel_allocation_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  /** NULL = global rule that applies to all channels */
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "cascade" }),
   /** NULL = channel default. Set for product-level override. */
   productId: integer("product_id").references(() => products.id, { onDelete: "cascade" }),
   /** NULL = product-level or channel default. Set for variant-level override. */
@@ -439,8 +441,12 @@ export const channelAllocationRules = pgTable("channel_allocation_rules", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  // Each scope level (channel-only, channel+product, channel+product+variant) is unique
-  uniqueIndex("car_channel_product_variant_idx").on(table.channelId, table.productId, table.productVariantId),
+  // Each scope level is unique — COALESCE handles NULLs for global rules
+  uniqueIndex("car_channel_product_variant_idx").on(
+    sql`COALESCE(${table.channelId}, 0)`,
+    sql`COALESCE(${table.productId}, 0)`,
+    sql`COALESCE(${table.productVariantId}, 0)`,
+  ),
 ]);
 
 export const insertChannelAllocationRuleSchema = createInsertSchema(channelAllocationRules).omit({
