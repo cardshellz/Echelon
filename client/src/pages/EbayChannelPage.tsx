@@ -68,6 +68,7 @@ import {
 import { ProductTypeManager } from "@/components/ebay/ProductTypeManager";
 import { EbayCategoryPicker } from "@/components/ebay/EbayCategoryPicker";
 import { AspectEditor } from "@/components/ebay/AspectEditor";
+import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 
 // ============================================================================
 // Types
@@ -167,11 +168,12 @@ interface FeedItem {
   ebayBrowseCategoryOverrideId: string | null;
   ebayBrowseCategoryOverrideName: string | null;
   ebayStoreCategoryName: string | null;
-  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled" | "ended" | "deleted";
+  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled" | "ended" | "deleted" | "error";
   missingItems: string[];
   missingAspects: string[];
   isListed: boolean;
   isExcluded: boolean;
+  syncError: string | null;
   externalListingId: string | null;
   variantCount: number;
   includedVariantCount: number;
@@ -412,7 +414,7 @@ export default function EbayChannelPage() {
   };
 
   // Feed filters
-  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended">("all");
+  const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended" | "errors">("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
 
@@ -520,63 +522,26 @@ export default function EbayChannelPage() {
     },
   });
 
-  // ---- Push to eBay ----
-  const [pushingProductIds, setPushingProductIds] = useState<Set<number>>(new Set());
-
-  const pushToEbayMutation = useMutation({
-    mutationFn: async (productIds: number[]) => {
-      const resp = await apiRequest("POST", "/api/ebay/listings/push", { productIds });
-      return resp.json();
-    },
-    onSuccess: (data: any) => {
-      const { summary, results } = data;
-      if (summary.succeeded > 0 && summary.failed === 0) {
-        // Build descriptive message: "HERO Diamond Shell: 3 variants listed"
-        const descriptions = (results || [])
-          .filter((r: any) => r.success)
-          .map((r: any) => r.variantCount > 1
-            ? `${r.productName}: ${r.variantCount} variants listed`
-            : `${r.productName}: listed`)
-          .join(", ");
-        toast({
-          title: "Push Successful",
-          description: descriptions || `${summary.succeeded} product${summary.succeeded !== 1 ? "s" : ""} listed on eBay.`,
-        });
-      } else if (summary.succeeded > 0 && summary.failed > 0) {
-        const firstError = results?.find((r: any) => !r.success)?.error || "Unknown error";
-        toast({
-          title: "Partial Success",
-          description: `${summary.succeeded} product${summary.succeeded !== 1 ? "s" : ""} succeeded, ${summary.failed} failed. ${firstError}`,
-          variant: "destructive",
-        });
-      } else {
-        const firstError = results?.find((r: any) => !r.success)?.error || "Unknown error";
-        toast({
-          title: "Push Failed",
-          description: `${summary.failed} product${summary.failed !== 1 ? "s" : ""} failed. ${firstError}`,
-          variant: "destructive",
-        });
-      }
-      setPushingProductIds(new Set());
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Push Error", description: err.message, variant: "destructive" });
-      setPushingProductIds(new Set());
-    },
-  });
+  // ---- Push to eBay (SSE-based with progress modal) ----
+  const [pushModalOpen, setPushModalOpen] = useState(false);
+  const [pushProductIds, setPushProductIds] = useState<number[]>([]);
 
   const handlePushAll = () => {
-    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready") || [];
+    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready" || f.status === "error") || [];
     if (readyProducts.length === 0) return;
     const ids = readyProducts.map((f) => f.id);
-    setPushingProductIds(new Set(ids));
-    pushToEbayMutation.mutate(ids);
+    setPushProductIds(ids);
+    setPushModalOpen(true);
   };
 
   const handlePushSingle = (productId: number) => {
-    setPushingProductIds((prev) => new Set([...prev, productId]));
-    pushToEbayMutation.mutate([productId]);
+    setPushProductIds([productId]);
+    setPushModalOpen(true);
+  };
+
+  const handleRetryFailed = (failedIds: number[]) => {
+    setPushProductIds(failedIds);
+    setPushModalOpen(true);
   };
 
   // ---- Sync All Listings ----
@@ -857,6 +822,8 @@ export default function EbayChannelPage() {
       items = items.filter((i) => i.status === "missing_specifics");
     } else if (feedFilter === "ended") {
       items = items.filter((i) => i.status === "ended" || i.status === "deleted");
+    } else if (feedFilter === "errors") {
+      items = items.filter((i) => i.status === "error");
     } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
     }
@@ -872,7 +839,7 @@ export default function EbayChannelPage() {
   }, [feedData, feedFilter, feedSearch]);
 
   const feedCounts = useMemo(() => {
-    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0, ended: 0 };
+    if (!feedData?.feed) return { all: 0, ready: 0, missing_config: 0, missing_specifics: 0, listed: 0, excluded: 0, ended: 0, errors: 0 };
     // Exclude type_disabled from all counts
     const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
     return {
@@ -883,6 +850,7 @@ export default function EbayChannelPage() {
       listed: feed.filter((f) => f.status === "listed").length,
       excluded: feed.filter((f) => f.status === "excluded").length,
       ended: feed.filter((f) => f.status === "ended" || f.status === "deleted").length,
+      errors: feed.filter((f) => f.status === "error").length,
     };
   }, [feedData]);
 
@@ -1708,15 +1676,11 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.ready === 0 || pushToEbayMutation.isPending}
+                disabled={feedCounts.ready === 0 && feedCounts.errors === 0}
                 onClick={handlePushAll}
               >
-                {pushToEbayMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Zap className="h-4 w-4 mr-2" />
-                )}
-                Push to eBay ({feedCounts.ready})
+                <Zap className="h-4 w-4 mr-2" />
+                Push to eBay ({feedCounts.ready + feedCounts.errors})
               </Button>
             </div>
           </div>
@@ -1734,12 +1698,12 @@ export default function EbayChannelPage() {
               {/* Filters */}
               <div className="flex flex-col gap-3 mb-4">
                 <div className="grid grid-cols-3 sm:flex sm:flex-wrap gap-1.5 sm:gap-1">
-                  {(["all", "ready", "missing_config", "missing_specifics", "listed", "ended", "excluded"] as const).map((f) => (
+                  {(["all", "ready", "missing_config", "missing_specifics", "listed", "errors", "ended", "excluded"] as const).map((f) => (
                     <Button
                       key={f}
                       variant={feedFilter === f ? "default" : "outline"}
                       size="sm"
-                      className="text-xs min-h-[44px] sm:min-h-0 sm:h-7 px-2"
+                      className={`text-xs min-h-[44px] sm:min-h-0 sm:h-7 px-2 ${f === "errors" && feedCounts.errors > 0 ? "border-red-300 text-red-600" : ""}`}
                       onClick={() => setFeedFilter(f)}
                     >
                       {f === "all" && `All (${feedCounts.all})`}
@@ -1747,6 +1711,7 @@ export default function EbayChannelPage() {
                       {f === "missing_config" && `Missing (${feedCounts.missing_config})`}
                       {f === "missing_specifics" && `Specifics (${feedCounts.missing_specifics})`}
                       {f === "listed" && `Listed (${feedCounts.listed})`}
+                      {f === "errors" && `Errors (${feedCounts.errors})`}
                       {f === "ended" && `Ended (${feedCounts.ended})`}
                       {f === "excluded" && `Excluded (${feedCounts.excluded})`}
                     </Button>
@@ -1865,17 +1830,24 @@ export default function EbayChannelPage() {
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
-                                    disabled={pushingProductIds.has(item.id)}
                                     onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                   >
-                                    {pushingProductIds.has(item.id) ? (
-                                      <Loader2 className="h-4 w-4 animate-spin" />
-                                    ) : (
-                                      <>
-                                        <Zap className="h-4 w-4 mr-1" />
-                                        Push
-                                      </>
-                                    )}
+                                    <Zap className="h-4 w-4 mr-1" />
+                                    Push
+                                  </Button>
+                                </>
+                              )}
+                              {item.status === "error" && (
+                                <>
+                                  <Badge variant="destructive" className="text-xs py-1 px-2">Error</Badge>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="min-h-[44px] min-w-[44px] px-3 text-xs"
+                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
+                                  >
+                                    <RefreshCw className="h-4 w-4 mr-1" />
+                                    Retry
                                   </Button>
                                 </>
                               )}
@@ -1917,6 +1889,12 @@ export default function EbayChannelPage() {
                                 <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
                               )}
                             </div>
+                            {/* Error message inline on mobile */}
+                            {item.syncError && (item.status === "error") && (
+                              <p className="text-xs text-red-600 mt-1 sm:hidden line-clamp-2" title={item.syncError}>
+                                {item.syncError}
+                              </p>
+                            )}
                           </TableCell>
                           {/* SKU — desktop only */}
                           <TableCell className="hidden sm:table-cell">
@@ -1949,74 +1927,91 @@ export default function EbayChannelPage() {
                           </TableCell>
                           {/* Status — desktop only */}
                           <TableCell className="hidden sm:table-cell text-center">
-                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                              {item.status === "ready" && (
-                                <>
-                                  <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 w-6 p-0"
-                                    disabled={pushingProductIds.has(item.id)}
-                                    onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
-                                    title="Push to eBay"
-                                  >
-                                    {pushingProductIds.has(item.id) ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <Zap className="h-3.5 w-3.5" />
-                                    )}
-                                  </Button>
-                                </>
-                              )}
-                              {item.status === "missing_config" && (
-                                <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
-                                  Missing: {item.missingItems.join(", ")}
-                                </Badge>
-                              )}
-                              {item.status === "missing_specifics" && (
-                                <Badge variant="outline" className="text-orange-600 border-orange-300 text-xs" title={item.missingAspects?.join(", ")}>
-                                  Specifics: {item.missingAspects?.slice(0, 2).join(", ")}{item.missingAspects?.length > 2 ? ` +${item.missingAspects.length - 2}` : ""}
-                                </Badge>
-                              )}
-                              {item.status === "listed" && (
-                                <>
-                                  <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 w-6 p-0"
-                                    disabled={syncingProductIds.has(item.id)}
-                                    onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
-                                    title="Sync this listing"
-                                  >
-                                    {syncingProductIds.has(item.id) ? (
-                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    ) : (
-                                      <RefreshCw className="h-3.5 w-3.5" />
-                                    )}
-                                  </Button>
-                                  {item.externalListingId && (
-                                    <a
-                                      href={`https://www.ebay.com/itm/${item.externalListingId}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-blue-500 hover:text-blue-700"
-                                      title="View on eBay"
-                                      onClick={(e) => e.stopPropagation()}
+                            <div className="flex flex-col items-center gap-1">
+                              <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                {item.status === "ready" && (
+                                  <>
+                                    <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                      onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
+                                      title="Push to eBay"
                                     >
-                                      <ExternalLink className="h-3.5 w-3.5" />
-                                    </a>
-                                  )}
-                                </>
-                              )}
-                              {(item.status === "ended" || item.status === "deleted") && (
-                                <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
-                                  {item.status === "deleted" ? "Deleted" : "Ended"}
-                                </Badge>
-                              )}
-                              {item.status === "excluded" && (
-                                <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                                      <Zap className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </>
+                                )}
+                                {item.status === "error" && (
+                                  <>
+                                    <Badge variant="destructive" className="text-xs" title={item.syncError || undefined}>Error</Badge>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                      onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
+                                      title="Retry push"
+                                    >
+                                      <RefreshCw className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </>
+                                )}
+                                {item.status === "missing_config" && (
+                                  <Badge variant="outline" className="text-amber-600 border-amber-300 text-xs">
+                                    Missing: {item.missingItems.join(", ")}
+                                  </Badge>
+                                )}
+                                {item.status === "missing_specifics" && (
+                                  <Badge variant="outline" className="text-orange-600 border-orange-300 text-xs" title={item.missingAspects?.join(", ")}>
+                                    Specifics: {item.missingAspects?.slice(0, 2).join(", ")}{item.missingAspects?.length > 2 ? ` +${item.missingAspects.length - 2}` : ""}
+                                  </Badge>
+                                )}
+                                {item.status === "listed" && (
+                                  <>
+                                    <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">Listed</Badge>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 w-6 p-0"
+                                      disabled={syncingProductIds.has(item.id)}
+                                      onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                      title="Sync this listing"
+                                    >
+                                      {syncingProductIds.has(item.id) ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      ) : (
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                      )}
+                                    </Button>
+                                    {item.externalListingId && (
+                                      <a
+                                        href={`https://www.ebay.com/itm/${item.externalListingId}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-blue-500 hover:text-blue-700"
+                                        title="View on eBay"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <ExternalLink className="h-3.5 w-3.5" />
+                                      </a>
+                                    )}
+                                  </>
+                                )}
+                                {(item.status === "ended" || item.status === "deleted") && (
+                                  <Badge variant="outline" className="text-red-600 border-red-300 text-xs">
+                                    {item.status === "deleted" ? "Deleted" : "Ended"}
+                                  </Badge>
+                                )}
+                                {item.status === "excluded" && (
+                                  <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
+                                )}
+                              </div>
+                              {/* Error message inline — desktop */}
+                              {item.syncError && item.status === "error" && (
+                                <p className="text-[10px] text-red-600 max-w-[180px] truncate" title={item.syncError}>
+                                  {item.syncError}
+                                </p>
                               )}
                             </div>
                           </TableCell>
@@ -2499,6 +2494,14 @@ export default function EbayChannelPage() {
       <ProductTypeManager
         open={productTypeManagerOpen}
         onOpenChange={setProductTypeManagerOpen}
+      />
+
+      {/* Push Progress Modal (SSE-based) */}
+      <PushProgressModal
+        open={pushModalOpen}
+        onClose={() => setPushModalOpen(false)}
+        productIds={pushProductIds}
+        onRetryFailed={handleRetryFailed}
       />
     </div>
   );
