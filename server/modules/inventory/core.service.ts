@@ -53,6 +53,15 @@ export class InventoryCoreService {
     this.onChangeCallbacks.push(cb);
   }
 
+  /**
+   * Publicly trigger change notification for a variant.
+   * Use when a multi-bucket adjustment (e.g. picked→on-hand) was done via
+   * adjustLevel() and the caller needs to fire notifyChange externally.
+   */
+  triggerNotifyChange(productVariantId: number, triggeredBy: string): void {
+    this.notifyChange(productVariantId, triggeredBy);
+  }
+
   private notifyChange(productVariantId: number, triggeredBy: string): void {
     for (const cb of this.onChangeCallbacks) {
       try {

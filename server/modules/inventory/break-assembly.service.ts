@@ -65,9 +65,11 @@ class BreakAssemblyService {
     private db: any,
     private inventoryCore: {
       adjustLevel: Function;
+      adjustInventory: Function;
       getLevel: Function;
       upsertLevel: Function;
       logTransaction: Function;
+      withTx: (tx: any) => any;
     }
   ) {}
 
@@ -161,8 +163,10 @@ class BreakAssemblyService {
     const batchId = this.generateBatchId("break");
 
     await this.db.transaction(async (tx: any) => {
+      const txCore = this.inventoryCore.withTx(tx);
+
       // Validate source stock within the transaction
-      const sourceLevel = await this.fetchLevel(tx, sourceVariantId, warehouseLocationId);
+      const sourceLevel = await txCore.getLevel(sourceVariantId, warehouseLocationId);
       if (!sourceLevel || sourceLevel.variantQty < sourceQty) {
         const available = sourceLevel?.variantQty ?? 0;
         throw new Error(
@@ -171,61 +175,24 @@ class BreakAssemblyService {
         );
       }
 
-      // Decrement source variant at source location
-      await this.adjustWithinTx(tx, sourceLevel.id, {
-        variantQty: -sourceQty,
-      });
-
-      // Increment target variant at destination (pick) location
-      const targetLevel = await this.fetchLevel(tx, targetVariantId, resolvedTargetLocationId);
-      if (targetLevel) {
-        await this.adjustWithinTx(tx, targetLevel.id, {
-          variantQty: targetQty,
-        });
-      } else {
-        await this.insertLevel(tx, {
-          productVariantId: targetVariantId,
-          warehouseLocationId: resolvedTargetLocationId,
-          variantQty: targetQty,
-          reservedQty: 0,
-          pickedQty: 0,
-          packedQty: 0,
-          backorderQty: 0,
-        });
-      }
-
       const noteText = notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`;
 
-      // Log both sides of the conversion
-      await this.logTx(tx, {
+      // Decrement source variant via inventoryCore (audit trail, lot tracking, negative guards)
+      await txCore.adjustInventory({
         productVariantId: sourceVariantId,
-        fromLocationId: warehouseLocationId,
-        transactionType: "break",
-        variantQtyDelta: -sourceQty,
-        variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: sourceLevel.variantQty - sourceQty,
-        batchId,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        notes: noteText,
-        userId,
-        isImplicit: 0,
+        warehouseLocationId,
+        qtyDelta: -sourceQty,
+        reason: noteText,
+        userId: userId ?? undefined,
       });
 
-      const targetQtyBefore = targetLevel?.variantQty ?? 0;
-      await this.logTx(tx, {
+      // Increment target variant via inventoryCore (audit trail, lot tracking)
+      await txCore.adjustInventory({
         productVariantId: targetVariantId,
-        toLocationId: resolvedTargetLocationId,
-        transactionType: "break",
-        variantQtyDelta: targetQty,
-        variantQtyBefore: targetQtyBefore,
-        variantQtyAfter: targetQtyBefore + targetQty,
-        batchId,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        notes: noteText,
-        userId,
-        isImplicit: 0,
+        warehouseLocationId: resolvedTargetLocationId,
+        qtyDelta: targetQty,
+        reason: noteText,
+        userId: userId ?? undefined,
       });
     });
 
@@ -293,7 +260,9 @@ class BreakAssemblyService {
     const batchId = this.generateBatchId("assemble");
 
     await this.db.transaction(async (tx: any) => {
-      const sourceLevel = await this.fetchLevel(tx, sourceVariantId, warehouseLocationId);
+      const txCore = this.inventoryCore.withTx(tx);
+
+      const sourceLevel = await txCore.getLevel(sourceVariantId, warehouseLocationId);
       if (!sourceLevel || sourceLevel.variantQty < sourceQtyNeeded) {
         const available = sourceLevel?.variantQty ?? 0;
         throw new Error(
@@ -302,59 +271,24 @@ class BreakAssemblyService {
         );
       }
 
-      // Decrement source
-      await this.adjustWithinTx(tx, sourceLevel.id, {
-        variantQty: -sourceQtyNeeded,
-      });
+      const noteText = notes ?? `Assemble ${targetQty} x ${targetVariant.sku ?? targetVariant.name} from ${sourceQtyNeeded} x ${sourceVariant.sku ?? sourceVariant.name}`;
 
-      // Increment target
-      const targetLevel = await this.fetchLevel(tx, targetVariantId, warehouseLocationId);
-      if (targetLevel) {
-        await this.adjustWithinTx(tx, targetLevel.id, {
-          variantQty: targetQty,
-        });
-      } else {
-        await this.insertLevel(tx, {
-          productVariantId: targetVariantId,
-          warehouseLocationId,
-          variantQty: targetQty,
-          reservedQty: 0,
-          pickedQty: 0,
-          packedQty: 0,
-          backorderQty: 0,
-        });
-      }
-
-      // Log both sides
-      await this.logTx(tx, {
+      // Decrement source variant via inventoryCore (audit trail, lot tracking, negative guards)
+      await txCore.adjustInventory({
         productVariantId: sourceVariantId,
-        fromLocationId: warehouseLocationId,
-        transactionType: "assemble",
-        variantQtyDelta: -sourceQtyNeeded,
-        variantQtyBefore: sourceLevel.variantQty,
-        variantQtyAfter: sourceLevel.variantQty - sourceQtyNeeded,
-        batchId,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        notes: notes ?? `Assemble ${targetQty} x ${targetVariant.sku ?? targetVariant.name} from ${sourceQtyNeeded} x ${sourceVariant.sku ?? sourceVariant.name}`,
-        userId,
-        isImplicit: 0,
+        warehouseLocationId,
+        qtyDelta: -sourceQtyNeeded,
+        reason: noteText,
+        userId: userId ?? undefined,
       });
 
-      const targetQtyBefore = targetLevel?.variantQty ?? 0;
-      await this.logTx(tx, {
+      // Increment target variant via inventoryCore (audit trail, lot tracking)
+      await txCore.adjustInventory({
         productVariantId: targetVariantId,
-        toLocationId: warehouseLocationId,
-        transactionType: "assemble",
-        variantQtyDelta: targetQty,
-        variantQtyBefore: targetQtyBefore,
-        variantQtyAfter: targetQtyBefore + targetQty,
-        batchId,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        notes: notes ?? `Assemble ${targetQty} x ${targetVariant.sku ?? targetVariant.name} from ${sourceQtyNeeded} x ${sourceVariant.sku ?? sourceVariant.name}`,
-        userId,
-        isImplicit: 0,
+        warehouseLocationId,
+        qtyDelta: targetQty,
+        reason: noteText,
+        userId: userId ?? undefined,
       });
     });
 

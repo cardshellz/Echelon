@@ -10,8 +10,8 @@
  * - Carrier code mapping for eBay fulfillment push
  */
 
-import { eq } from "drizzle-orm";
-import { omsOrders, omsOrderEvents, omsOrderLines, channels } from "@shared/schema";
+import { eq, and, sql } from "drizzle-orm";
+import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
 
 // ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ export function mapShipStationCarrier(shipStationCarrier: string): string {
 // Service Factory
 // ---------------------------------------------------------------------------
 
-export function createShipStationService(db: any) {
+export function createShipStationService(db: any, inventoryCore?: any) {
   const baseUrl = "https://ssapi.shipstation.com";
   const apiKey = process.env.SHIPSTATION_API_KEY;
   const apiSecret = process.env.SHIPSTATION_API_SECRET;
@@ -317,6 +317,85 @@ export function createShipStationService(db: any) {
         console.log(
           `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
         );
+
+        // Record shipment in inventory for OMS-only orders (e.g. eBay)
+        // that don't have a WMS `orders` row and thus won't get
+        // inventory deduction through the Shopify fulfillment path.
+        if (inventoryCore) {
+          try {
+            // Check if this OMS order has a corresponding WMS order
+            const wmsOrder = await db.execute(sql`
+              SELECT id FROM orders
+              WHERE source_table = 'oms_orders' AND source_table_id = ${String(omsOrderId)}
+              LIMIT 1
+            `);
+
+            const hasWmsOrder = wmsOrder.rows && wmsOrder.rows.length > 0;
+
+            if (!hasWmsOrder) {
+              // OMS-only order — deduct inventory via recordShipment
+              const lines = await db
+                .select()
+                .from(omsOrderLines)
+                .where(eq(omsOrderLines.orderId, omsOrderId));
+
+              for (const line of lines) {
+                if (!line.sku || !line.quantity) continue;
+
+                // Resolve variant by SKU
+                const [variant] = await db
+                  .select()
+                  .from(productVariants)
+                  .where(eq(sql`UPPER(${productVariants.sku})`, line.sku.toUpperCase()))
+                  .limit(1);
+
+                if (!variant) {
+                  console.warn(`[ShipStation Webhook] SKU ${line.sku} not found — skipping inventory deduction for order ${omsOrderId}`);
+                  continue;
+                }
+
+                // Find the inventory level with stock for this variant
+                // (use warehouse_id from the OMS order if set, otherwise find any level with stock)
+                const warehouseLocationId = order.warehouseId;
+                const [level] = warehouseLocationId
+                  ? await db
+                      .select()
+                      .from(inventoryLevels)
+                      .where(
+                        and(
+                          eq(inventoryLevels.productVariantId, variant.id),
+                          eq(inventoryLevels.warehouseLocationId, warehouseLocationId),
+                        ),
+                      )
+                      .limit(1)
+                  : await db
+                      .select()
+                      .from(inventoryLevels)
+                      .where(eq(inventoryLevels.productVariantId, variant.id))
+                      .limit(1);
+
+                if (!level) {
+                  console.warn(`[ShipStation Webhook] No inventory level for variant ${variant.id} (SKU ${line.sku}) — skipping for order ${omsOrderId}`);
+                  continue;
+                }
+
+                await inventoryCore.recordShipment({
+                  productVariantId: variant.id,
+                  warehouseLocationId: level.warehouseLocationId,
+                  qty: line.quantity,
+                  orderId: omsOrderId,
+                  orderItemId: line.id,
+                  shipmentId: String(shipment.shipmentId),
+                  userId: "system:shipstation",
+                });
+
+                console.log(`[ShipStation Webhook] Recorded shipment for ${line.quantity}x ${line.sku} (order ${omsOrderId})`);
+              }
+            }
+          } catch (invErr: any) {
+            console.error(`[ShipStation Webhook] Failed to record inventory shipment for order ${omsOrderId}: ${invErr.message}`);
+          }
+        }
 
         // Push tracking to the originating channel (eBay, etc.)
         try {

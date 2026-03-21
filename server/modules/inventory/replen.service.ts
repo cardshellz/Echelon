@@ -91,6 +91,16 @@ type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
   upsertLevel: (productVariantId: number, warehouseLocationId: number, initial?: Partial<InventoryLevel>) => Promise<InventoryLevel>;
   adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
+  adjustInventory: (params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qtyDelta: number;
+    reason: string;
+    reasonId?: number;
+    cycleCountId?: number;
+    userId?: string;
+    allowNegative?: boolean;
+  }) => Promise<void>;
   transfer: (params: {
     productVariantId: number;
     fromLocationId: number;
@@ -463,77 +473,28 @@ class ReplenishmentService {
           );
         }
 
-        const sourceLevel = await txCore.getLevel(
-          sourceVariant.id,
-          task.fromLocationId,
-        );
-        if (!sourceLevel) {
-          throw new Error(
-            `No inventory level at location ${task.fromLocationId} for variant ${sourceVariant.id}`,
-          );
-        }
+        const breakNotes = `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
+          (remainder > 0 ? ` (${remainder} base units remainder)` : "");
 
-        const [updated] = await tx
-          .update(inventoryLevels)
-          .set({
-            variantQty: sql`${inventoryLevels.variantQty} - ${task.qtySourceUnits}`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(inventoryLevels.id, sourceLevel.id),
-              sql`${inventoryLevels.variantQty} >= ${task.qtySourceUnits}`,
-            ),
-          )
-          .returning();
-
-        if (!updated) {
-          throw new Error(
-            `Insufficient source stock at location ${task.fromLocationId} ` +
-            `for variant ${sourceVariant.id} (concurrent claim or qty < ${task.qtySourceUnits})`,
-          );
-        }
-
-        await txCore.logTransaction({
+        // Decrement source variant via inventoryCore.adjustInventory()
+        // (routes through audit trail, lot tracking, negative guards, and notifyChange)
+        await txCore.adjustInventory({
           productVariantId: sourceVariant.id,
-          fromLocationId: task.fromLocationId,
-          transactionType: "break",
-          variantQtyDelta: -task.qtySourceUnits,
-          variantQtyBefore: sourceLevel.variantQty,
-          variantQtyAfter: updated.variantQty,
-          sourceState: "on_hand",
-          targetState: "on_hand",
-          referenceType: "replen_task",
-          referenceId: String(taskId),
-          notes: `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
-            (remainder > 0 ? ` (${remainder} base units remainder)` : ""),
-          userId: userId ?? null,
+          warehouseLocationId: task.fromLocationId,
+          qtyDelta: -task.qtySourceUnits,
+          reason: breakNotes,
+          userId: userId ?? undefined,
         });
 
-        const destLevel = await txCore.upsertLevel(
-          pickVariant.id,
-          task.toLocationId,
-        );
-
-        await txCore.adjustLevel(destLevel.id, {
-          variantQty: pickVariantUnits,
-        });
-
-        await txCore.logTransaction({
+        // Increment target variant via inventoryCore.adjustInventory()
+        // (routes through audit trail, lot tracking, and notifyChange)
+        await txCore.adjustInventory({
           productVariantId: pickVariant.id,
-          fromLocationId: task.fromLocationId,
-          toLocationId: task.toLocationId,
-          transactionType: "replenish",
-          variantQtyDelta: pickVariantUnits,
-          variantQtyBefore: destLevel.variantQty,
-          variantQtyAfter: destLevel.variantQty + pickVariantUnits,
-          sourceState: "on_hand",
-          targetState: "on_hand",
-          referenceType: "replen_task",
-          referenceId: String(taskId),
-          notes: `Replen case-break to pick location` +
+          warehouseLocationId: task.toLocationId,
+          qtyDelta: pickVariantUnits,
+          reason: `Replen case-break to pick location` +
             (remainder > 0 ? ` (${remainder} base units lost in conversion)` : ""),
-          userId: userId ?? null,
+          userId: userId ?? undefined,
         });
 
         moved = baseUnitsFromSource;

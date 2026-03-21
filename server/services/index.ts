@@ -212,7 +212,7 @@ export function createServices(db: any) {
   const fulfillmentPush = createFulfillmentPushService(db, null);
 
   // ShipStation — order push + webhook integration
-  const shipStation = createShipStationService(db);
+  const shipStation = createShipStationService(db, inventoryCore);
 
   return {
     inventoryCore,

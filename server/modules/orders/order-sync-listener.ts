@@ -533,6 +533,9 @@ async function releasePickedInventoryOnCancellation(orderId: number): Promise<vo
         userId: "system",
       });
 
+      // Trigger notifyChange so channel sync fires for the ATP increase
+      inventoryCore.triggerNotifyChange(variant.id, "cancellation_unpick");
+
       // Reset order item's picked_quantity and mark as cancelled
       await db.execute(sql`
         UPDATE order_items
