@@ -14,6 +14,8 @@ import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
 
+const EBAY_CHANNEL_ID = 67;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -318,22 +320,53 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           `[ShipStation Webhook] Order ${omsOrderId} shipped: ${carrier} ${trackingNumber}`,
         );
 
-        // Record shipment in inventory for OMS-only orders (e.g. eBay)
-        // that don't have a WMS `orders` row and thus won't get
-        // inventory deduction through the Shopify fulfillment path.
+        // Update corresponding WMS order if it exists (eBay orders now have WMS rows)
+        // Also handles inventory deduction for orders without WMS rows (legacy path)
         if (inventoryCore) {
           try {
             // Check if this OMS order has a corresponding WMS order
-            const wmsOrder = await db.execute(sql`
-              SELECT id FROM orders
-              WHERE source_table = 'oms_orders' AND source_table_id = ${String(omsOrderId)}
+            const wmsOrderResult = await db.execute<{ id: number; warehouse_status: string }>(sql`
+              SELECT id, warehouse_status FROM orders
+              WHERE source_table_id = ${String(omsOrderId)} AND source IN ('ebay')
               LIMIT 1
             `);
 
-            const hasWmsOrder = wmsOrder.rows && wmsOrder.rows.length > 0;
+            const hasWmsOrder = wmsOrderResult.rows && wmsOrderResult.rows.length > 0;
 
-            if (!hasWmsOrder) {
-              // OMS-only order — deduct inventory via recordShipment
+            if (hasWmsOrder) {
+              const wmsOrderId = wmsOrderResult.rows[0].id;
+              const wmsStatus = wmsOrderResult.rows[0].warehouse_status;
+
+              // Mark WMS order as shipped (unless already shipped/cancelled)
+              if (wmsStatus !== "shipped" && wmsStatus !== "cancelled") {
+                await db.execute(sql`
+                  UPDATE orders SET
+                    warehouse_status = 'shipped',
+                    completed_at = ${now}
+                  WHERE id = ${wmsOrderId}
+                `);
+
+                // Mark all order items as completed
+                await db.execute(sql`
+                  UPDATE order_items SET
+                    status = 'completed',
+                    picked_quantity = quantity,
+                    fulfilled_quantity = quantity
+                  WHERE order_id = ${wmsOrderId}
+                    AND status NOT IN ('completed', 'short', 'cancelled')
+                `);
+
+                console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
+              }
+
+              // Create shipment record for the WMS order
+              await db.execute(sql`
+                INSERT INTO shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+                VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
+                ON CONFLICT DO NOTHING
+              `);
+            } else {
+              // No WMS order — legacy OMS-only path, deduct inventory directly
               const lines = await db
                 .select()
                 .from(omsOrderLines)
@@ -342,7 +375,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
               for (const line of lines) {
                 if (!line.sku || !line.quantity) continue;
 
-                // Resolve variant by SKU
                 const [variant] = await db
                   .select()
                   .from(productVariants)
@@ -354,8 +386,6 @@ export function createShipStationService(db: any, inventoryCore?: any) {
                   continue;
                 }
 
-                // Find the inventory level with stock for this variant
-                // (use warehouse_id from the OMS order if set, otherwise find any level with stock)
                 const warehouseLocationId = order.warehouseId;
                 const [level] = warehouseLocationId
                   ? await db
@@ -393,7 +423,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
               }
             }
           } catch (invErr: any) {
-            console.error(`[ShipStation Webhook] Failed to record inventory shipment for order ${omsOrderId}: ${invErr.message}`);
+            console.error(`[ShipStation Webhook] Failed to process shipment for order ${omsOrderId}: ${invErr.message}`);
           }
         }
 

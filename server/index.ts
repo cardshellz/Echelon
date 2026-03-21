@@ -9,7 +9,7 @@ import { setupWebSocket } from "./websocket";
 import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
-import { startEbayOrderPolling, setShipStationService } from "./modules/oms/ebay-order-ingestion";
+import { startEbayOrderPolling, setShipStationService, setWmsServices } from "./modules/oms/ebay-order-ingestion";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { eq } from "drizzle-orm";
@@ -268,6 +268,11 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
   // Inject ShipStation service into eBay ingestion for auto-push
   setShipStationService(services.shipStation);
+  setWmsServices({
+    reservation: services.reservation,
+    fulfillmentRouter: services.fulfillmentRouter,
+    slaMonitor: services.slaMonitor,
+  });
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
