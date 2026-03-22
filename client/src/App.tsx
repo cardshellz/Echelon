@@ -6,8 +6,17 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
 import Layout from "@/components/layout/AppShell";
+import VendorLayout from "@/components/vendor/VendorLayout";
+import VendorLogin from "@/pages/vendor/VendorLogin";
+import VendorRegister from "@/pages/vendor/VendorRegister";
+import VendorDashboard from "@/pages/vendor/VendorDashboard";
+import VendorProducts from "@/pages/vendor/VendorProducts";
+import VendorOrders from "@/pages/vendor/VendorOrders";
+import VendorWallet from "@/pages/vendor/VendorWallet";
+import VendorSettings from "@/pages/vendor/VendorSettings";
 import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
@@ -78,9 +87,65 @@ function ProtectedRoute({
   return <Component />;
 }
 
+function VendorProtectedRoute({ component: Component }: { component: React.ComponentType }) {
+  const { isAuthenticated, isLoading } = useVendorAuth();
+  
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600"></div>
+      </div>
+    );
+  }
+  
+  if (!isAuthenticated) {
+    return <Redirect to="/vendor/login" />;
+  }
+  
+  return (
+    <VendorLayout>
+      <Component />
+    </VendorLayout>
+  );
+}
+
+function VendorRouter() {
+  return (
+    <VendorAuthProvider>
+      <Switch>
+        <Route path="/vendor/login" component={VendorLogin} />
+        <Route path="/vendor/register" component={VendorRegister} />
+        <Route path="/vendor/dashboard">
+          <VendorProtectedRoute component={VendorDashboard} />
+        </Route>
+        <Route path="/vendor/products">
+          <VendorProtectedRoute component={VendorProducts} />
+        </Route>
+        <Route path="/vendor/orders">
+          <VendorProtectedRoute component={VendorOrders} />
+        </Route>
+        <Route path="/vendor/wallet">
+          <VendorProtectedRoute component={VendorWallet} />
+        </Route>
+        <Route path="/vendor/settings">
+          <VendorProtectedRoute component={VendorSettings} />
+        </Route>
+        <Route path="/vendor">
+          <Redirect to="/vendor/dashboard" />
+        </Route>
+      </Switch>
+    </VendorAuthProvider>
+  );
+}
+
 function Router() {
   const [location] = useLocation();
   const { user, isLoading } = useAuth();
+
+  // Vendor portal routes — completely separate auth
+  if (location.startsWith("/vendor")) {
+    return <VendorRouter />;
+  }
 
   if (location === "/login") {
     return <Login />;
