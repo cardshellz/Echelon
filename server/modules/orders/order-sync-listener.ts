@@ -106,7 +106,7 @@ let queueProcessorRunning = false;
  * Retries item fetch up to 3 times with delays for timing races.
  * Returns true if order was created, false if skipped/already exists.
  */
-async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
+export async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
   // Check if already synced
   const alreadySynced = await db.execute<{ id: number }>(sql`
     SELECT id FROM orders WHERE source_table_id = ${shopifyOrderId} LIMIT 1

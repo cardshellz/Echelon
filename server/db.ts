@@ -573,6 +573,11 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`ALTER TABLE channel_allocation_rules ADD COLUMN IF NOT EXISTS floor_type VARCHAR(10) DEFAULT 'units'`);
     console.log("Checked channel_allocation_rules floor_type column");
 
+    // Migration 049: Add source_name to shopify_orders for reconciliation job
+    await client.query(`ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS source_name VARCHAR(100)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name)`);
+    console.log("Checked shopify_orders source_name column");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

@@ -861,6 +861,18 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
+  // Manual trigger for Shopify order reconciliation
+  app.post("/api/shopify/reconcile-orders", async (req: Request, res: Response) => {
+    try {
+      const { runReconciliationNow } = require("../modules/orders/shopify-order-reconciliation");
+      const result = await runReconciliationNow();
+      res.json(result);
+    } catch (error: any) {
+      console.error("[RECONCILE] Manual trigger failed:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Order cancelled webhook - DISABLED: Status updates sync from shopify_orders table instead
   app.post("/api/shopify/webhooks/orders/cancelled", async (req: Request, res: Response) => {
     console.log("[ORDER WEBHOOK] Received orders/cancelled webhook - DISABLED");

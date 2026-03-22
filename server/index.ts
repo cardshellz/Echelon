@@ -6,7 +6,8 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
-import { setupOrderSyncListener, initOrderSyncServices } from "./modules/orders/order-sync-listener";
+import { setupOrderSyncListener, initOrderSyncServices, syncSingleOrder } from "./modules/orders/order-sync-listener";
+import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices } from "./modules/oms/ebay-order-ingestion";
@@ -440,6 +441,10 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       
       // Start listening for new orders in shopify_orders table
       setupOrderSyncListener();
+
+      // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
+      initReconciliation(syncSingleOrder, services.oms);
+      startShopifyReconciliation();
     },
   );
 })();
