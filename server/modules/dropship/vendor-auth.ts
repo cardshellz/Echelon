@@ -50,31 +50,32 @@ export async function registerVendor(
       return { error: "email_taken", message: "Email is already registered" };
     }
 
-    // Validate Shellz Club membership if provided
+    // Validate Shellz Club membership by email match
     let tier = "standard";
-    if (shellzClubMemberId) {
-      const member = await client.query(
-        `SELECT id FROM members WHERE id = $1`,
-        [shellzClubMemberId]
-      );
-      if (member.rows.length === 0) {
-        return { error: "membership_not_found", message: `No Shellz Club membership found for ID ${shellzClubMemberId}` };
-      }
-
+    let shellzClubMemberIdResolved: string | null = null;
+    
+    const member = await client.query(
+      `SELECT id FROM members WHERE LOWER(email) = LOWER($1)`,
+      [email.trim()]
+    );
+    
+    if (member.rows.length > 0) {
+      shellzClubMemberIdResolved = member.rows[0].id;
+      
       // Check if already registered
       const existingMember = await client.query(
         `SELECT id FROM dropship_vendors WHERE shellz_club_member_id = $1`,
-        [shellzClubMemberId]
+        [shellzClubMemberIdResolved]
       );
       if (existingMember.rows.length > 0) {
         return { error: "already_registered", message: "A vendor account already exists for this membership" };
       }
 
-      // Try to derive tier from membership (check if member_current_membership exists)
+      // Derive tier from membership
       try {
         const membership = await client.query(
           `SELECT plan_name FROM member_current_membership WHERE member_id = $1 LIMIT 1`,
-          [shellzClubMemberId]
+          [shellzClubMemberIdResolved]
         );
         if (membership.rows.length > 0) {
           const plan = (membership.rows[0].plan_name || "").toLowerCase();
@@ -83,6 +84,15 @@ export async function registerVendor(
         }
       } catch {
         // Table may not exist — default to standard
+      }
+    } else if (shellzClubMemberId) {
+      // Fallback: try by member ID directly
+      const memberById = await client.query(
+        `SELECT id FROM members WHERE id = $1`,
+        [shellzClubMemberId]
+      );
+      if (memberById.rows.length > 0) {
+        shellzClubMemberIdResolved = memberById.rows[0].id;
       }
     }
 
@@ -119,7 +129,7 @@ export async function registerVendor(
       `INSERT INTO dropship_vendors (name, email, password_hash, company_name, phone, shellz_club_member_id, status, tier, stripe_customer_id)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
        RETURNING id, name, email, company_name, status, tier, wallet_balance_cents, created_at`,
-      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberId || null, tier, stripeCustomerId]
+      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberIdResolved || null, tier, stripeCustomerId]
     );
 
     const vendor = result.rows[0];

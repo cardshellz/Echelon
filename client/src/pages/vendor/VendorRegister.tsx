@@ -113,16 +113,9 @@ export default function VendorRegister() {
               />
             </div>
 
-            <div className="relative">
-              <Hash className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 h-4 w-4" />
-              <Input
-                type="text"
-                placeholder="Shellz Club Member ID (optional)"
-                className="pl-10 h-12 bg-slate-900 border-slate-800 focus-visible:ring-red-600"
-                value={shellzClubId}
-                onChange={(e) => setShellzClubId(e.target.value)}
-              />
-            </div>
+            <p className="text-xs text-slate-500 text-center">
+              Your Shellz Club membership will be detected automatically from your email address.
+            </p>
 
             <div className="relative">
               <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 h-4 w-4" />
