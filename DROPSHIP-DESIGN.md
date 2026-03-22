@@ -1101,3 +1101,411 @@ Overlord has expressed interest in USDC/crypto as a future payment rail. Here's 
 ---
 
 *End of document. Ready for review.*
+
+---
+
+## 15. Expanded Vision — Unified Commerce Platform
+
+The dropship platform evolved during architectural review into a broader play: a unified commerce platform serving four distinct customer tiers on the same Echelon infrastructure. Same catalog, same inventory, same warehouse — different frontends, different payment rails, different pricing.
+
+### 15.1 Customer Tiers
+
+**Tier 1: Retail Customer (cardshellz.io)**
+- Crypto-native storefront — USDC on Base only, no Stripe, no card payments
+- Retail pricing, open to anyone
+- Coinbase Onramp widget available for customers who need to acquire USDC with a debit card (~1.5% fee, paid by customer)
+- Zero payment processing fees for Card Shellz
+- Separate domain from cardshellz.com — Shopify stays for traditional retail
+
+**Tier 2: Shellz Club Member**
+- Wholesale pricing gated behind existing Shellz Club membership
+- Same USDC payment rail as Tier 1
+- B2B pricing on the same storefront (cardshellz.io)
+
+**Tier 3: Dropship Vendor**
+- Wholesale pricing + fulfillment fee (as defined in Sections 5–6)
+- eBay/Shopify integration — Echelon pushes listings to vendor stores
+- Orders flow back automatically into OMS
+- Wallet with auto-reload (Stripe or USDC)
+
+**Tier 4: Agent Commerce**
+- API-first — no UI required
+- Agent discovers products via agents.json, OpenAPI spec, and llms.txt
+- `POST /api/orders` with SKUs, quantities, and ship-to address
+- USDC payment via smart contract allowance (pre-approved spend limit)
+- Fully programmatic — no human interaction, no browser
+
+### 15.2 Payment Architecture (Updated)
+
+Two funding rails feed into one Echelon ledger:
+
+**Rail 1: Stripe**
+- Card and ACH payments — compliant, turnkey
+- Used for vendor wallet auto-reload (set-and-forget)
+- Automatic via Stripe Customer Balance (built-in feature)
+
+**Rail 2: USDC on Base**
+- Zero-fee transactions (~$0.01 per tx on Base L2)
+- Used for:
+  - Retail checkout on cardshellz.io (Tiers 1 & 2)
+  - Vendor wallet funding — manual deposit or auto via smart contract approval (Tier 3)
+  - Agent commerce — fully programmatic (Tier 4)
+
+**Smart Contract Design:**
+- Deployed on Base (Coinbase L2)
+- Vendor or agent calls `approve()` on the USDC contract once, authorizing the Card Shellz contract to pull up to X USDC
+- Card Shellz contract exposes a `pullFunds(address vendor, uint256 amount)` function — callable only by the Card Shellz backend
+- Echelon detects low wallet balance → triggers `pullFunds` → USDC lands in Card Shellz's Coinbase Business account
+- Transaction cost: ~$0.01 on Base
+- Contract complexity: ~20 lines of Solidity
+
+**Auto-Reload Logic:**
+- Stripe path: automatic via Stripe Customer Balance when wallet drops below threshold
+- USDC path: automatic via smart contract `transferFrom` triggered by Echelon when balance drops below threshold
+- Both paths credit the same Echelon vendor ledger — funding source is transparent to OMS/WMS
+
+**Coinbase Business Account:**
+- Single destination for all USDC payments across all tiers
+- Full reporting, audit trail, and tax documentation
+- Easy off-ramp to USD when needed
+
+### 15.3 The Storefront Split
+
+| Channel | Audience | Payment | Platform Fee |
+|---|---|---|---|
+| cardshellz.com (Shopify) | Traditional retail | Visa/MC/PayPal | Shopify + Stripe ~3.2% |
+| cardshellz.io (Own) | Crypto-native retail | USDC on Base | ~$0.01 flat |
+| Vendor dropship | eBay/Shopify resellers | Stripe wallet + USDC | Fulfillment fee |
+| Agent API | AI agents | USDC on Base | Fulfillment fee |
+
+Same catalog. Same ATP. Same warehouse. Same Echelon backend. Different frontends, different payment rails.
+
+### 15.4 Positioning
+
+- "The first trading card supplies company with an agent-native commerce API"
+- "Zero-fee crypto checkout at cardshellz.io"
+- Shopify stays for mainstream customers. cardshellz.io is the cutting edge — crypto buyers, agent commerce, B2B wholesale
+- Long-term trajectory: cardshellz.io replaces Shopify entirely as crypto adoption grows
+
+### 15.5 Technical Architecture (Updated)
+
+- **Echelon** is the single backend for all four channels
+- **cardshellz.io** is a new React frontend hitting Echelon's API directly
+- **Smart contract on Base** handles USDC payments and pre-approved allowances
+- **agents.json + OpenAPI spec** enable agent discovery and programmatic ordering
+- **Stripe** serves as traditional payment fallback and auto-reload mechanism
+- **All orders** — regardless of channel — flow through OMS → WMS → same pick/pack/ship pipeline
+
+---
+
+*Section 15 appended 2026-03-22. Unified commerce vision expanding Echelon from dropship platform to multi-tier commerce engine.*
+
+---
+
+## 16. Design Review Corrections
+
+> **Date:** 2026-03-22  
+> **Context:** Decisions made during design review that override or clarify the original document (Sections 1–15). Where these corrections conflict with earlier sections, **this section governs**.
+
+### 16.1 Shipping & Branding — NOT Blind Shipment
+
+The original doc (Section 4.4) describes a blind dropship model. **This is reversed.**
+
+- **Card Shellz branded shipping** — branded tape, branded boxes, Card Shellz branding visible on the outside of every package
+- **No packing slips** — nothing inside the box. No plain slip, no vendor-branded slip, no Card Shellz slip. Empty box + product.
+- **Card Shellz WANTS brand exposure** to the vendor's end customer. Every package is a Card Shellz brand touchpoint.
+- **Return address:** Card Shellz warehouse on all packages and all vendor listings
+- **No "packing slip options"** — the entire packing slip feature (Section 10.5, Section 7.2 branded packing slip fee) is removed from scope
+
+**What this means for the system:**
+- Remove packing slip generator from technical architecture
+- Remove `packing_slip` field from order submission API
+- Remove `$0.50/order branded packing slip` fee line item
+- WMS workflow: pick → pack in Card Shellz branded box with Card Shellz tape → ship. No slip printing step.
+- Simplifies WMS — no per-vendor packing logic
+
+### 16.2 Product Feed — Direct Push, Not CSV Export
+
+The original doc (Section 3) describes CSV exports and vendor-managed imports. **This is replaced with direct push.**
+
+- **Echelon pushes listings directly** to the vendor's eBay or Shopify store via OAuth
+- Vendor connects their eBay/Shopify account → Echelon creates and manages listings on their behalf
+- **No CSV exports** — remove Shopify CSV and eBay CSV export endpoints from the API
+- **eBay vendors first** — primary launch channel. Reuse existing Echelon eBay push infrastructure with multi-tenant vendor tokens
+- **Shopify vendors second** — Phase 2
+
+**What this means for the system:**
+- Vendor onboarding includes eBay OAuth flow (vendor grants Echelon access to their eBay account)
+- Echelon's existing `channel-sync-engine` extends to handle vendor eBay accounts (multi-tenant)
+- Product selection in vendor portal still exists — vendor picks which SKUs to list, Echelon pushes those listings
+- ATP sync pushes inventory updates directly to vendor's eBay listings (real-time, not webhook-to-vendor)
+- Orders flow back via eBay API (Echelon polls vendor's eBay orders or receives eBay notifications)
+- Remove `/api/dropship/export/shopify` and `/api/dropship/export/ebay` endpoints
+
+### 16.3 Fees — Simplified Structure
+
+The original doc (Section 7.2) lists separate fulfillment fees and branded packing slip fees. **Simplified.**
+
+| Fee | Amount | Notes |
+|-----|--------|-------|
+| **Wholesale price** | Tier-based (per Shellz Club) | All-in: covers product + handling. No separate fulfillment fee. |
+| **Shipping** | One number to the vendor | Composed of: pass-through label cost + ~10-15% markup for dunnage (box, tape, packing paper) + insurance pool allocation (~2%) + margin. Vendor sees a single "shipping" charge. |
+| **Return processing** | $3.00 per return | Per return, NOT per item. A multi-item return = $3. |
+| **Platform fee** | $0 | Included in Shellz Club membership |
+
+**Removed from the fee structure:**
+- ~~Fulfillment fee ($1.50/order + $0.25/item)~~ — baked into wholesale
+- ~~Branded packing slip ($0.50/order)~~ — no packing slips at all
+- ~~Free shipping threshold for dropship~~ — vendor ALWAYS pays shipping, no exceptions
+
+**Updated example economics:**
+
+**Product:** Premium UV Shield Toploaders 25-pack  
+**Retail price:** $12.99  
+**Wholesale (25% tier):** $9.74 (all-in: product + handling)
+
+| | Vendor | Card Shellz |
+|---|---|---|
+| Customer pays vendor | $14.99 (vendor's price) | — |
+| Wholesale (all-in) | ($9.74) | $9.74 |
+| Shipping (vendor sees this number) | ($5.25) | $5.25 (label ~$4.50 + dunnage + insurance pool + margin) |
+| **Net per order** | **$5.00 profit** | **$14.99 revenue** |
+
+### 16.4 SLA — 1 Business Day
+
+- **Dropship orders: 1 business day ship SLA** for orders received by 2:00 PM ET
+- Orders after 2:00 PM ET ship next business day
+- **Dropship orders receive priority in the pick queue** over standard Card Shellz retail orders
+- Rationale: vendor's eBay metrics depend on fast shipping. Late shipment = defects on vendor's account. Card Shellz must protect vendor accounts.
+
+### 16.5 Payment — Updated Architecture
+
+The original doc recommends Prepaid Wallet (Option C). **Updated to use Stripe Customer Balance + USDC on Base.**
+
+**One Echelon ledger, two funding rails:**
+
+| Rail | Method | Details |
+|------|--------|---------|
+| **Stripe** | Stripe Customer Balance | ACH or card. Vendor saves a payment method. Auto-reload when balance drops below threshold. |
+| **USDC on Base** | Smart contract `transferFrom` | Vendor approves Card Shellz contract once. Echelon auto-pulls USDC when wallet is low. USDC routes to Card Shellz Coinbase Business account. |
+
+**Key changes from original:**
+- **No manual wallet deposits** — auto-reload from day one (Stripe saved payment method)
+- **ACH in transit = ship on 1-day credit** if vendor is Plaid-verified (de-risks ACH float)
+- **USDC goes to Coinbase Business account** — not a self-custodied wallet
+- **Smart contract on Base** for USDC auto-pull (same design as Section 15.2)
+- Stripe Customer Balance eliminates stored-value / money transmitter regulatory concerns (Stripe holds the funds, not Card Shellz)
+
+**Auto-Reload Logic:**
+```
+Vendor wallet balance drops below threshold
+         │
+         ├── Stripe rail: Stripe charges saved payment method automatically
+         │   (built-in Stripe Customer Balance feature)
+         │
+         └── USDC rail: Echelon calls pullFunds() on Base smart contract
+             → USDC transfers to Card Shellz Coinbase Business account
+             → Echelon credits vendor wallet
+```
+
+### 16.6 Insurance Pool
+
+- **Internal allocation** from the shipping markup — not a separate line item
+- ~2% of shipping fees set aside into an internal damage/loss claims budget
+- **Not exposed to vendors** — they don't know it exists. It's an internal Card Shellz risk budget.
+- Used to self-insure instead of purchasing per-package carrier insurance
+- Claims process: vendor reports damage/loss → Card Shellz evaluates → credits wallet from insurance pool if approved
+- Pool is a P&L line item, not a vendor-facing feature
+
+### 16.7 Returns — Updated Policy
+
+The original doc (Section 8) describes three return paths. **Simplified and updated.**
+
+**Core principles:**
+- Vendor owns their customer return policy (Card Shellz does not dictate)
+- All returns ship to **Card Shellz warehouse** (Card Shellz branded return address on all vendor listings)
+- $3.00 per return processing fee (per return, not per item)
+
+**Return credit calculation:**
+
+| Scenario | Wallet Credit | Shipping Refund | Fulfillment Refund | Return Label |
+|----------|--------------|----------------|-------------------|-------------|
+| Customer changed mind / vendor's policy | Wholesale minus restocking | ❌ Not refunded | ❌ Not refunded (baked into wholesale) | Vendor (via eBay) or customer pays — Card Shellz never generates return labels |
+| Card Shellz fault (wrong item, defective, damaged) | Full wholesale credit | ❌ Not refunded | ❌ Not refunded | Card Shellz reimburses label cost via wallet credit |
+
+**Key changes from original:**
+- ~~Option 3 (vendor handles directly)~~ — removed. Returns always come to Card Shellz warehouse.
+- ~~Fulfillment fee refund exception~~ — no separate fulfillment fee exists, so nothing to refund separately
+- **Card Shellz never generates return labels** — vendor generates via eBay's return flow, or customer pays their own return shipping
+- When Card Shellz is at fault, Card Shellz reimburses the return label cost as a wallet credit (not by generating a label)
+- $3 processing fee applies to ALL returns, including Card Shellz fault returns
+
+---
+
+*Section 16 appended 2026-03-22. Design review corrections override conflicting content in Sections 1–15.*
+
+---
+
+## 17. Launch Strategy (Revised)
+
+> Replaces Section 12. This phased plan reflects the corrected design decisions from Section 16 and the unified commerce vision from Section 15.
+
+### Phase 0: Foundation (4 weeks)
+
+**Goal:** Prove the core loop — vendor connects eBay → products push to their store → customer buys → Card Shellz fulfills → tracking flows back.
+
+**What's Built:**
+- [ ] Vendor portal (basic) — account management, product selection, wallet view, order history
+- [ ] eBay OAuth flow — vendor connects their eBay account, grants Echelon listing/order permissions
+- [ ] Multi-tenant eBay push — extend existing Echelon channel sync to push listings to vendor eBay accounts using vendor OAuth tokens
+- [ ] Stripe Customer Balance integration — vendor wallet funded via Stripe (saved ACH or card)
+- [ ] Wallet ledger in Echelon — deposits, debits, credits, full audit trail
+- [ ] Dropship order ingestion — eBay orders from vendor accounts pulled into Echelon OMS as dropship orders
+- [ ] 1-day ship SLA queue priority for dropship orders
+- [ ] Card Shellz branded packing (no packing slips — just branded box + tape)
+- [ ] Tracking push back to vendor's eBay (via eBay API, auto-updates buyer's order)
+
+**Who's Onboarded:**
+- 2-3 hand-picked beta vendors — existing Shellz Club members who already sell on eBay
+- Must have active eBay store with good seller metrics
+- Personally onboarded by Overlord / Card Shellz team
+
+**What's Manual:**
+- Vendor onboarding (account creation, eBay OAuth walkthrough)
+- Wallet funding via Stripe dashboard (no auto-reload yet)
+- Product selection (Card Shellz picks initial catalog for each vendor)
+
+**What's Validated:**
+- [ ] eBay OAuth grants work and tokens persist
+- [ ] Listings push correctly to vendor's eBay store (title, images, price, ATP)
+- [ ] ATP syncs — when Card Shellz inventory changes, vendor eBay listings update
+- [ ] Customer buys on vendor's eBay → order flows into Echelon OMS
+- [ ] Wallet debit works — wholesale + shipping deducted at order acceptance
+- [ ] Pick/pack/ship with Card Shellz branded packaging (no slips)
+- [ ] Tracking number pushes back to vendor's eBay → buyer sees tracking
+- [ ] 1-day ship SLA is achievable with current warehouse operations
+
+**Risks & Blockers:**
+- **eBay API rate limits** — multi-tenant token management must respect eBay's per-app and per-user limits
+- **eBay listing policies** — ensure vendor listings created by Echelon comply with eBay's automated listing rules (no duplicate listings, proper item specifics)
+- **Warehouse capacity** — dropship orders add volume. Validate that 1-day SLA is feasible alongside existing retail order volume
+- **Token expiry** — eBay OAuth tokens expire. Must implement refresh flow before tokens lapse mid-operation
+
+### Phase 1: Self-Service (6 weeks)
+
+**Goal:** Any Shellz Club member can sign up, connect their eBay, select products, fund their wallet, and start selling — without Card Shellz hand-holding.
+
+**What's Built:**
+- [ ] Vendor self-service portal — full signup flow: create account → link Shellz Club membership → connect eBay via OAuth → browse catalog → select products → fund wallet → go live
+- [ ] Auto-reload via Stripe — vendor sets threshold (e.g., "reload $200 when balance drops below $50"), Stripe charges saved payment method automatically
+- [ ] Real-time ATP sync to vendor listings — inventory changes push to vendor's eBay listings within minutes
+- [ ] Order status dashboard — vendor sees all orders, statuses, tracking in real-time
+- [ ] Wallet management UI — balance, transaction history, reload settings, payment method management
+- [ ] Returns processing — vendor submits RMA via portal, Card Shellz inspects return, wallet credit applied
+- [ ] Plaid verification for ACH — verified vendors get 1-day credit on ACH in transit
+
+**Who's Onboarded:**
+- Open to all Shellz Club members
+- Announcement via email to existing member base + social media
+- Self-service — vendor signs up, connects, and goes live without Card Shellz involvement
+
+**What's Automated:**
+- Vendor onboarding (fully self-service)
+- Wallet top-up (Stripe auto-reload)
+- Order flow (eBay order → Echelon OMS → fulfillment → tracking → eBay update)
+- ATP sync (inventory changes → vendor listing updates)
+
+**What's Validated:**
+- [ ] Self-service onboarding works end-to-end without support tickets
+- [ ] Auto-reload prevents wallet depletion (no missed orders due to insufficient funds)
+- [ ] ATP sync keeps vendor listings accurate (no overselling)
+- [ ] Return credits process correctly (wholesale minus restocking, $3 fee)
+- [ ] Vendor retention — are beta vendors continuing to use the platform and growing volume?
+
+**Risks & Blockers:**
+- **Support volume** — self-service launch may generate support tickets. Need FAQ / knowledge base ready.
+- **eBay policy compliance at scale** — more vendors = more listings = more surface area for eBay policy violations. Need monitoring.
+- **Wallet funding friction** — if Stripe onboarding is clunky, vendors may drop off. UX must be polished.
+- **Pricing pressure** — vendors may undercut each other. Consider MAP enforcement timeline.
+
+### Phase 2: Scale (8 weeks)
+
+**Goal:** Add USDC payments, Shopify vendor support, analytics, and agent commerce API. Position Card Shellz as a platform, not just a supplier.
+
+**What's Built:**
+- [ ] USDC on Base — smart contract for auto-pull, Coinbase Business integration, vendor wallet funding via USDC
+- [ ] Shopify vendor support — OAuth for Shopify stores, push listings to vendor's Shopify, pull orders from vendor's Shopify
+- [ ] Vendor analytics dashboard — sales volume, top products, margin analysis, fulfillment speed metrics
+- [ ] Agent commerce API — `agents.json` at cardshellz.com, OpenAPI spec, `llms.txt` for agent discoverability
+- [ ] MAP enforcement tooling — automated listing price monitoring, violation alerts, escalation workflow
+- [ ] Per-vendor allocation limits (if needed based on Phase 1 data)
+- [ ] Vendor tier system — automated tier progression based on order history
+
+**Who's Onboarded:**
+- Public launch — marketing to eBay trading card sellers beyond existing Shellz Club membership
+- Shopify vendors can now join
+- Crypto-native vendors attracted by USDC option
+- First agent commerce integrations (outreach to agent platforms)
+
+**What's Validated:**
+- [ ] USDC auto-pull works — Echelon triggers smart contract, funds arrive in Coinbase Business
+- [ ] Shopify push/pull works — listings sync, orders flow, tracking updates
+- [ ] Agent API is discoverable and functional — an AI agent can find, browse, and order Card Shellz products programmatically
+- [ ] Vendor analytics drive behavior — vendors use data to optimize their product selection
+- [ ] Unit economics are healthy — shipping markup covers dunnage + insurance pool + margin
+
+**Risks & Blockers:**
+- **Smart contract security** — USDC auto-pull contract must be audited before mainnet deployment. Even at ~20 lines of Solidity, it handles real money.
+- **Shopify app review** — if building a Shopify app for vendor integration, Shopify's review process can take weeks. Plan accordingly.
+- **Agent commerce demand** — may be early. Build it, but don't over-invest until there's traction.
+- **Multi-platform complexity** — supporting eBay + Shopify multiplies edge cases (different order formats, different tracking flows, different return policies per platform)
+
+### Phase 3: Platform (12+ weeks)
+
+**Goal:** Full unified commerce platform. Card Shellz becomes the infrastructure layer for trading card supplies commerce.
+
+**What's Built:**
+- [ ] cardshellz.xyz — crypto retail storefront (USDC on Base checkout, Coinbase Onramp for fiat-to-USDC)
+- [ ] Vendor tier system with earned benefits — Trusted vendors get returns guarantee (Card Shellz absorbs return risk), priority allocation, lower shipping markup
+- [ ] International shipping — extend dropship to non-US addresses (start with Canada, then expand)
+- [ ] Multi-warehouse routing — orders route to nearest fulfillment center (Pittsburgh + future locations)
+- [ ] White-label API — partners can build their own frontends on Card Shellz's commerce infrastructure
+- [ ] Vendor referral program — existing vendors earn credit for onboarding new vendors
+
+**Who's Onboarded:**
+- International vendors / international shipping customers
+- cardshellz.xyz retail customers (crypto-native buyers)
+- Platform partners building on Card Shellz APIs
+
+**What's Validated:**
+- [ ] cardshellz.xyz generates meaningful retail revenue via USDC
+- [ ] Vendor tier system incentivizes growth and loyalty
+- [ ] International shipping is operationally sustainable (customs, duties, carrier partnerships)
+- [ ] Platform economics — does the unified commerce model generate more total revenue than direct-only?
+
+**Risks & Blockers:**
+- **International complexity** — customs documentation, duties, prohibited items by country, carrier partnerships. Significant operational lift.
+- **Crypto retail adoption** — cardshellz.xyz assumes crypto-native buyers exist in volume. May be ahead of market. Monitor conversion rates closely.
+- **Platform ambition vs. execution** — this phase is a major expansion. Must be funded by Phase 0–2 revenue, not speculative investment.
+- **Regulatory** — international sales, crypto payments, and platform economics each carry regulatory considerations. Legal review required.
+
+### Phase Summary
+
+| Phase | Duration | Key Deliverable | Success Metric |
+|-------|----------|----------------|----------------|
+| **0: Foundation** | 4 weeks | Core loop working with 2-3 beta vendors | Orders flowing, tracking pushing, wallet debiting |
+| **1: Self-Service** | 6 weeks | Any Shellz Club member can self-onboard | 10+ active vendors, zero-touch onboarding |
+| **2: Scale** | 8 weeks | USDC, Shopify, agent API, public launch | 50+ vendors, first USDC transaction, first agent order |
+| **3: Platform** | 12+ weeks | cardshellz.xyz, international, vendor tiers | Revenue from all four customer tiers (Section 15.1) |
+
+### Go/No-Go Criteria Between Phases
+
+| Gate | Criteria | Decision Maker |
+|------|----------|----------------|
+| Phase 0 → 1 | Beta vendors have completed 50+ orders. Ship SLA met >95%. No critical bugs. Vendor feedback is positive. | Overlord |
+| Phase 1 → 2 | 10+ self-service vendors onboarded. Auto-reload working. ATP sync reliable. Unit economics confirmed positive. | Overlord |
+| Phase 2 → 3 | 50+ active vendors. USDC pipeline operational. Shopify integration stable. Revenue justifies platform investment. | Overlord |
+
+---
+
+*Section 17 appended 2026-03-22. Revised launch strategy reflecting design review corrections and unified commerce vision.*

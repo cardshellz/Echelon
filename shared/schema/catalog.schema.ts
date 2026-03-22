@@ -53,6 +53,7 @@ export const products = pgTable("products", {
   productType: varchar("product_type", { length: 50 }), // References product_types.slug
   ebayBrowseCategoryId: varchar("ebay_browse_category_id", { length: 20 }), // Per-product eBay browse category override
   ebayBrowseCategoryName: varchar("ebay_browse_category_name", { length: 200 }), // Per-product eBay browse category name override
+  dropshipEligible: boolean("dropship_eligible").default(false), // Whether product is eligible for dropship vendors
   lastPushedAt: timestamp("last_pushed_at"), // Last time product data was pushed to channels
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

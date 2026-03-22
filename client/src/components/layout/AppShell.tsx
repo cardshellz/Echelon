@@ -133,6 +133,14 @@ const navStructure: NavEntry[] = [
       { label: "Dropship Network", icon: Globe, href: "/dropship" },
     ],
   },
+  {
+    label: "Vendors",
+    icon: Users,
+    roles: ["admin", "lead"],
+    children: [
+      { label: "All Vendors", icon: Users, href: "/vendors" },
+    ],
+  },
 ];
 
 // --- Sidebar content ---

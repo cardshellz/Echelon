@@ -578,6 +578,76 @@ export async function runStartupMigrations(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_shopify_orders_source_name ON shopify_orders(source_name)`);
     console.log("Checked shopify_orders source_name column");
 
+    // Migration 050: Dropship Platform — Phase 0 Foundation
+    // dropship_vendors table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dropship_vendors (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200) NOT NULL,
+        email VARCHAR(200) NOT NULL UNIQUE,
+        password_hash VARCHAR(200) NOT NULL,
+        company_name VARCHAR(200),
+        phone VARCHAR(50),
+        shellz_club_member_id INTEGER REFERENCES members(id),
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        tier VARCHAR(20) DEFAULT 'standard',
+        ebay_oauth_token TEXT,
+        ebay_refresh_token TEXT,
+        ebay_token_expires_at TIMESTAMP,
+        ebay_user_id VARCHAR(200),
+        stripe_customer_id VARCHAR(100),
+        wallet_balance_cents INTEGER NOT NULL DEFAULT 0,
+        auto_reload_enabled BOOLEAN DEFAULT false,
+        auto_reload_threshold_cents INTEGER DEFAULT 5000,
+        auto_reload_amount_cents INTEGER DEFAULT 20000,
+        usdc_wallet_address VARCHAR(100),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dv_status ON dropship_vendors(status)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_dv_member ON dropship_vendors(shellz_club_member_id) WHERE shellz_club_member_id IS NOT NULL`);
+
+    // dropship_wallet_ledger table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dropship_wallet_ledger (
+        id SERIAL PRIMARY KEY,
+        vendor_id INTEGER NOT NULL REFERENCES dropship_vendors(id),
+        type VARCHAR(30) NOT NULL,
+        amount_cents INTEGER NOT NULL,
+        balance_after_cents INTEGER NOT NULL,
+        reference_type VARCHAR(50),
+        reference_id VARCHAR(200),
+        payment_method VARCHAR(30),
+        notes TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dwl_vendor_id ON dropship_wallet_ledger(vendor_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dwl_vendor_created ON dropship_wallet_ledger(vendor_id, created_at DESC)`);
+
+    // dropship_vendor_products table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dropship_vendor_products (
+        id SERIAL PRIMARY KEY,
+        vendor_id INTEGER NOT NULL REFERENCES dropship_vendors(id),
+        product_id INTEGER NOT NULL REFERENCES products(id),
+        enabled BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(vendor_id, product_id)
+      )
+    `);
+
+    // Add dropship_eligible to products
+    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS dropship_eligible BOOLEAN DEFAULT false`);
+
+    // Add vendor_id to orders and oms_orders
+    await client.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS vendor_id INTEGER`);
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS vendor_id INTEGER`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_oms_orders_vendor ON oms_orders(vendor_id) WHERE vendor_id IS NOT NULL`);
+
+    console.log("Checked dropship platform tables (dropship_vendors, dropship_wallet_ledger, dropship_vendor_products)");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

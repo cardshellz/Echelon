@@ -46,6 +46,8 @@ import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
 import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
+import VendorList from "@/pages/VendorList";
+import VendorDetail from "@/pages/VendorDetail";
 import NotFound from "@/pages/not-found";
 
 function ProtectedRoute({ 
@@ -121,6 +123,12 @@ function Router() {
         </Route>
         <Route path="/dropship">
           <ProtectedRoute component={Dropship} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/vendors/:id">
+          <ProtectedRoute component={VendorDetail} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/vendors">
+          <ProtectedRoute component={VendorList} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/picking" component={PickingPage} />
         <Route path="/picking/logs" component={PickingPage} />

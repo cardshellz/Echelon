@@ -30,6 +30,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 
 interface ProductVariant {
   id: number;
@@ -60,6 +61,7 @@ interface Product {
   shopifyProductId: string | null;
   status: string | null;
   isActive: boolean;
+  dropshipEligible: boolean;
   createdAt: string;
   updatedAt: string;
   variants: ProductVariant[];
@@ -81,6 +83,24 @@ export default function Products() {
     category: "",
     brand: "",
     baseUnit: "piece",
+  });
+
+  const dropshipMutation = useMutation({
+    mutationFn: async ({ productId, eligible }: { productId: number; eligible: boolean }) => {
+      const res = await fetch(`/api/admin/products/${productId}/dropship-eligible`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eligible }),
+      });
+      if (!res.ok) throw new Error("Failed to update");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+    },
+    onError: () => {
+      toast({ title: "Failed to update dropship eligibility", variant: "destructive" });
+    },
   });
 
   const includeInactive = statusFilter === "all" || statusFilter === "inactive" || statusFilter === "archived";
@@ -383,6 +403,7 @@ export default function Products() {
                   <TableHead>Unit</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="hidden lg:table-cell">Dropship</TableHead>
                   <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
@@ -422,6 +443,15 @@ export default function Products() {
                       <Badge variant={product.isActive ? "default" : "secondary"}>
                         {product.isActive ? "Active" : "Inactive"}
                       </Badge>
+                    </TableCell>
+                    <TableCell className="hidden lg:table-cell">
+                      <Switch
+                        checked={!!product.dropshipEligible}
+                        onCheckedChange={(checked) => {
+                          dropshipMutation.mutate({ productId: product.id, eligible: checked });
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
                     </TableCell>
                     <TableCell>
                       <ChevronRight className="h-4 w-4 text-muted-foreground" />

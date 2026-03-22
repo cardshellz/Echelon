@@ -1,0 +1,224 @@
+import { Request, Response, NextFunction } from "express";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import { pool } from "../../db";
+
+const VENDOR_JWT_SECRET = process.env.VENDOR_JWT_SECRET || "vendor-jwt-secret-change-me";
+const VENDOR_JWT_EXPIRES_IN = process.env.VENDOR_JWT_EXPIRES_IN || "24h";
+
+export interface VendorPayload {
+  vendor_id: number;
+  email: string;
+  tier: string;
+  status: string;
+}
+
+// Extend Express Request
+declare global {
+  namespace Express {
+    interface Request {
+      vendor?: VendorPayload & { id: number; name: string; company_name: string | null };
+    }
+  }
+}
+
+function signToken(vendor: { id: number; email: string; tier: string; status: string }): string {
+  // expiresIn accepts number (seconds) or zeit/ms string like "24h"
+  return (jwt.sign as any)(
+    { vendor_id: vendor.id, email: vendor.email, tier: vendor.tier, status: vendor.status },
+    VENDOR_JWT_SECRET,
+    { expiresIn: VENDOR_JWT_EXPIRES_IN }
+  );
+}
+
+export async function registerVendor(
+  email: string,
+  password: string,
+  name: string,
+  companyName?: string,
+  phone?: string,
+  shellzClubMemberId?: number
+) {
+  const client = await pool.connect();
+  try {
+    // Validate email not taken
+    const existingEmail = await client.query(
+      `SELECT id FROM dropship_vendors WHERE email = $1`,
+      [email.toLowerCase().trim()]
+    );
+    if (existingEmail.rows.length > 0) {
+      return { error: "email_taken", message: "Email is already registered" };
+    }
+
+    // Validate Shellz Club membership if provided
+    let tier = "standard";
+    if (shellzClubMemberId) {
+      const member = await client.query(
+        `SELECT id FROM members WHERE id = $1`,
+        [shellzClubMemberId]
+      );
+      if (member.rows.length === 0) {
+        return { error: "membership_not_found", message: `No Shellz Club membership found for ID ${shellzClubMemberId}` };
+      }
+
+      // Check if already registered
+      const existingMember = await client.query(
+        `SELECT id FROM dropship_vendors WHERE shellz_club_member_id = $1`,
+        [shellzClubMemberId]
+      );
+      if (existingMember.rows.length > 0) {
+        return { error: "already_registered", message: "A vendor account already exists for this membership" };
+      }
+
+      // Try to derive tier from membership (check if member_current_membership exists)
+      try {
+        const membership = await client.query(
+          `SELECT plan_name FROM member_current_membership WHERE member_id = $1 LIMIT 1`,
+          [shellzClubMemberId]
+        );
+        if (membership.rows.length > 0) {
+          const plan = (membership.rows[0].plan_name || "").toLowerCase();
+          if (plan.includes("elite")) tier = "elite";
+          else if (plan.includes("pro")) tier = "pro";
+        }
+      } catch {
+        // Table may not exist — default to standard
+      }
+    }
+
+    // Validate password
+    if (!password || password.length < 8) {
+      return { error: "weak_password", message: "Password must be at least 8 characters" };
+    }
+    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+      return { error: "weak_password", message: "Password must contain at least 1 letter and 1 number" };
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const result = await client.query(
+      `INSERT INTO dropship_vendors (name, email, password_hash, company_name, phone, shellz_club_member_id, status, tier)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+       RETURNING id, name, email, company_name, status, tier, wallet_balance_cents, created_at`,
+      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberId || null, tier]
+    );
+
+    const vendor = result.rows[0];
+    const token = signToken(vendor);
+
+    return {
+      vendor: {
+        id: vendor.id,
+        email: vendor.email,
+        name: vendor.name,
+        company_name: vendor.company_name,
+        status: vendor.status,
+        tier: vendor.tier,
+        wallet_balance_cents: vendor.wallet_balance_cents,
+      },
+      token,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+export async function loginVendor(email: string, password: string) {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT id, name, email, password_hash, company_name, status, tier, wallet_balance_cents,
+              ebay_user_id, created_at
+       FROM dropship_vendors WHERE email = $1`,
+      [email.toLowerCase().trim()]
+    );
+
+    if (result.rows.length === 0) {
+      return { error: "invalid_credentials", message: "Invalid email or password" };
+    }
+
+    const vendor = result.rows[0];
+
+    if (vendor.status === "suspended") {
+      return { error: "account_suspended", message: "Your account has been suspended. Contact support." };
+    }
+    if (vendor.status === "closed") {
+      return { error: "account_closed", message: "This account has been closed." };
+    }
+
+    const valid = await bcrypt.compare(password, vendor.password_hash);
+    if (!valid) {
+      return { error: "invalid_credentials", message: "Invalid email or password" };
+    }
+
+    const token = signToken(vendor);
+
+    return {
+      vendor: {
+        id: vendor.id,
+        email: vendor.email,
+        name: vendor.name,
+        company_name: vendor.company_name,
+        status: vendor.status,
+        tier: vendor.tier,
+        wallet_balance_cents: vendor.wallet_balance_cents,
+        ebay_connected: !!vendor.ebay_user_id,
+      },
+      token,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+export function requireVendorAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "unauthorized", message: "Missing or invalid authorization header" });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const decoded = jwt.verify(token, VENDOR_JWT_SECRET) as VendorPayload;
+
+    if (decoded.status !== "active" && decoded.status !== "pending") {
+      return res.status(403).json({ error: "account_not_active", status: decoded.status });
+    }
+
+    // Attach vendor info to request — load fresh from DB for critical fields
+    pool.connect().then(async (client) => {
+      try {
+        const result = await client.query(
+          `SELECT id, name, email, company_name, status, tier FROM dropship_vendors WHERE id = $1`,
+          [decoded.vendor_id]
+        );
+        if (result.rows.length === 0) {
+          return res.status(401).json({ error: "unauthorized", message: "Vendor not found" });
+        }
+        const vendor = result.rows[0];
+        if (vendor.status !== "active") {
+          return res.status(403).json({ error: "account_not_active", status: vendor.status });
+        }
+        req.vendor = {
+          vendor_id: vendor.id,
+          id: vendor.id,
+          email: vendor.email,
+          name: vendor.name,
+          company_name: vendor.company_name,
+          tier: vendor.tier,
+          status: vendor.status,
+        };
+        next();
+      } finally {
+        client.release();
+      }
+    }).catch(() => {
+      return res.status(500).json({ error: "internal_error" });
+    });
+  } catch (err: any) {
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "token_expired", message: "Token has expired" });
+    }
+    return res.status(401).json({ error: "unauthorized", message: "Invalid token" });
+  }
+}
