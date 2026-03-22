@@ -11,6 +11,7 @@ import { initReconciliation, startShopifyReconciliation } from "./modules/orders
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices } from "./modules/oms/ebay-order-ingestion";
+import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { eq } from "drizzle-orm";
@@ -293,6 +294,21 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     log("eBay order polling and webhook registered", "oms");
   } catch (err: any) {
     log(`eBay order polling not started (config missing): ${err.message}`, "oms");
+  }
+
+  // Start Vendor (Dropship) Order Polling — polls each vendor's eBay for orders
+  try {
+    setDropshipOmsService(services.oms);
+    setDropshipShipStationService(services.shipStation);
+    setDropshipWmsServices({
+      reservation: services.reservation,
+      fulfillmentRouter: services.fulfillmentRouter,
+      slaMonitor: services.slaMonitor,
+    });
+    startVendorOrderPolling();
+    log("Vendor dropship order polling started", "dropship");
+  } catch (err: any) {
+    log(`Vendor order polling not started: ${err.message}`, "dropship");
   }
 
   // ---- eBay Listing Reconciliation (every 30 minutes) ----

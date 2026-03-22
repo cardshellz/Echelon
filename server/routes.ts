@@ -20,7 +20,8 @@ import { registerSyncControlRoutes } from "./modules/channels/sync-control.route
 import { registerOmsRoutes } from "./routes/oms.routes";
 import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
 import { registerVendorAuthRoutes } from "./modules/dropship/vendor-auth.routes";
-import { registerVendorPortalRoutes } from "./modules/dropship/vendor-portal.routes";
+import { registerVendorPortalRoutes, registerStripeWebhookRoute } from "./modules/dropship/vendor-portal.routes";
+import { registerVendorEbayRoutes } from "./modules/dropship/vendor-ebay.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -51,6 +52,8 @@ export async function registerRoutes(
   registerDropshipAdminRoutes(app);    // behind Echelon admin auth
   registerVendorAuthRoutes(app);       // public (login/register)
   registerVendorPortalRoutes(app);     // behind vendor JWT auth
+  registerVendorEbayRoutes(app);       // vendor eBay OAuth + listing push
+  registerStripeWebhookRoute(app);     // Stripe webhook (public, signature-verified)
 
   return httpServer;
 }

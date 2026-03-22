@@ -96,11 +96,30 @@ export async function registerVendor(
 
     const passwordHash = await bcrypt.hash(password, 12);
 
+    // Create Stripe Customer
+    let stripeCustomerId: string | null = null;
+    try {
+      const Stripe = (await import("stripe")).default;
+      const stripeKey = process.env.STRIPE_SECRET_KEY;
+      if (stripeKey) {
+        const stripe = new Stripe(stripeKey, { apiVersion: "2024-12-18.acacia" as any });
+        const customer = await stripe.customers.create({
+          email: email.toLowerCase().trim(),
+          name: companyName || name,
+          metadata: { type: "dropship_vendor" },
+        });
+        stripeCustomerId = customer.id;
+      }
+    } catch (stripeErr: any) {
+      console.error(`[VendorAuth] Stripe customer creation failed: ${stripeErr.message}`);
+      // Non-fatal — continue registration without Stripe
+    }
+
     const result = await client.query(
-      `INSERT INTO dropship_vendors (name, email, password_hash, company_name, phone, shellz_club_member_id, status, tier)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+      `INSERT INTO dropship_vendors (name, email, password_hash, company_name, phone, shellz_club_member_id, status, tier, stripe_customer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
        RETURNING id, name, email, company_name, status, tier, wallet_balance_cents, created_at`,
-      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberId || null, tier]
+      [name, email.toLowerCase().trim(), passwordHash, companyName || null, phone || null, shellzClubMemberId || null, tier, stripeCustomerId]
     );
 
     const vendor = result.rows[0];

@@ -1,6 +1,7 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { requireVendorAuth } from "./vendor-auth";
 import { pool } from "../../db";
+import { walletService } from "./wallet.service";
 
 export function registerVendorPortalRoutes(app: Express) {
   // GET /api/vendor/products — list dropship-eligible products with ATP
@@ -361,6 +362,269 @@ export function registerVendorPortalRoutes(app: Express) {
       }
     } catch (error) {
       console.error("Vendor orders error:", error);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /api/vendor/wallet/deposit — create Stripe Checkout Session
+  // -----------------------------------------------------------------------
+  app.post("/api/vendor/wallet/deposit", requireVendorAuth, async (req, res) => {
+    try {
+      const vendorId = req.vendor!.id;
+      const { amount_cents } = req.body as { amount_cents: number };
+
+      if (!amount_cents || typeof amount_cents !== "number") {
+        return res.status(400).json({ error: "invalid_body", message: "amount_cents is required" });
+      }
+      if (amount_cents < 1000) {
+        return res.status(400).json({ error: "minimum_deposit", message: "Minimum deposit is $10.00" });
+      }
+      if (amount_cents > 500000) {
+        return res.status(400).json({ error: "maximum_deposit", message: "Maximum deposit is $5,000.00" });
+      }
+
+      const client = await pool.connect();
+      try {
+        // Get vendor's Stripe customer ID
+        const vendorResult = await client.query(
+          `SELECT stripe_customer_id, status FROM dropship_vendors WHERE id = $1`,
+          [vendorId],
+        );
+        if (vendorResult.rows.length === 0) {
+          return res.status(404).json({ error: "vendor_not_found" });
+        }
+        const vendor = vendorResult.rows[0];
+        if (vendor.status !== "active") {
+          return res.status(403).json({ error: "account_not_active" });
+        }
+
+        let stripeCustomerId = vendor.stripe_customer_id;
+
+        // Create Stripe customer if not exists
+        const Stripe = (await import("stripe")).default;
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", { apiVersion: "2024-12-18.acacia" as any });
+
+        if (!stripeCustomerId) {
+          const vendorDetail = await client.query(
+            `SELECT name, email, company_name FROM dropship_vendors WHERE id = $1`,
+            [vendorId],
+          );
+          const v = vendorDetail.rows[0];
+          const customer = await stripe.customers.create({
+            email: v.email,
+            name: v.company_name || v.name,
+            metadata: { vendor_id: String(vendorId), type: "dropship_vendor" },
+          });
+          stripeCustomerId = customer.id;
+          await client.query(
+            `UPDATE dropship_vendors SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2`,
+            [stripeCustomerId, vendorId],
+          );
+        }
+
+        const VENDOR_PORTAL_URL = process.env.VENDOR_PORTAL_URL || "https://vendors.cardshellz.ai";
+
+        // Create Checkout Session
+        const session = await stripe.checkout.sessions.create({
+          mode: "payment",
+          customer: stripeCustomerId,
+          payment_method_types: ["card", "us_bank_account"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: "Dropship Wallet Deposit",
+                  description: `Wallet deposit for Card Shellz dropship platform`,
+                },
+                unit_amount: amount_cents,
+              },
+              quantity: 1,
+            },
+          ],
+          payment_intent_data: {
+            setup_future_usage: "off_session", // Save payment method for auto-reload
+          },
+          success_url: `${VENDOR_PORTAL_URL}/wallet?deposit=success`,
+          cancel_url: `${VENDOR_PORTAL_URL}/wallet?deposit=cancelled`,
+          metadata: { vendor_id: String(vendorId), type: "wallet_deposit" },
+        });
+
+        return res.json({
+          checkout_url: session.url,
+          session_id: session.id,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      console.error("Vendor deposit error:", error);
+      return res.status(500).json({ error: "internal_error", message: error.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /api/vendor/wallet/auto-reload — update auto-reload settings
+  // -----------------------------------------------------------------------
+  app.post("/api/vendor/wallet/auto-reload", requireVendorAuth, async (req, res) => {
+    try {
+      const vendorId = req.vendor!.id;
+      const { enabled, threshold_cents, amount_cents } = req.body as {
+        enabled?: boolean;
+        threshold_cents?: number;
+        amount_cents?: number;
+      };
+
+      const updates: string[] = [];
+      const params: any[] = [];
+
+      if (typeof enabled === "boolean") {
+        params.push(enabled);
+        updates.push(`auto_reload_enabled = $${params.length}`);
+      }
+      if (typeof threshold_cents === "number" && threshold_cents >= 0) {
+        params.push(threshold_cents);
+        updates.push(`auto_reload_threshold_cents = $${params.length}`);
+      }
+      if (typeof amount_cents === "number" && amount_cents >= 1000) {
+        params.push(amount_cents);
+        updates.push(`auto_reload_amount_cents = $${params.length}`);
+      }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "no_updates" });
+      }
+
+      updates.push("updated_at = NOW()");
+      params.push(vendorId);
+
+      const client = await pool.connect();
+      try {
+        await client.query(
+          `UPDATE dropship_vendors SET ${updates.join(", ")} WHERE id = $${params.length}`,
+          params,
+        );
+        return res.json({ success: true });
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      console.error("Vendor auto-reload error:", error);
+      return res.status(500).json({ error: "internal_error" });
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Stripe Webhook Handler (separate, no auth — verified via Stripe signature)
+// ---------------------------------------------------------------------------
+
+export function registerStripeWebhookRoute(app: Express): void {
+  // This must be registered BEFORE express.json() middleware for raw body access.
+  // Alternative: use express.raw() on this specific route.
+  app.post("/api/webhooks/stripe-dropship", async (req: Request, res: Response) => {
+    try {
+      const Stripe = (await import("stripe")).default;
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "", { apiVersion: "2024-12-18.acacia" as any });
+
+      const webhookSecret = process.env.STRIPE_DROPSHIP_WEBHOOK_SECRET || process.env.STRIPE_WEBHOOK_SECRET;
+
+      let event: any;
+
+      if (webhookSecret) {
+        const sig = req.headers["stripe-signature"] as string;
+        // req.body should be the raw body buffer
+        const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+        try {
+          event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+        } catch (err: any) {
+          console.error(`[Stripe Webhook] Signature verification failed: ${err.message}`);
+          return res.status(400).json({ error: "webhook_signature_failed" });
+        }
+      } else {
+        // No webhook secret configured — trust the payload (development only)
+        event = req.body;
+        console.warn(`[Stripe Webhook] No webhook secret configured — accepting unverified payload`);
+      }
+
+      const eventType = event.type;
+      console.log(`[Stripe Webhook] Received: ${eventType}`);
+
+      if (eventType === "checkout.session.completed" || eventType === "payment_intent.succeeded") {
+        let vendorId: number | null = null;
+        let amountCents: number = 0;
+        let paymentIntentId: string | null = null;
+        let paymentMethod = "stripe_card";
+        let depositType = "wallet_deposit";
+
+        if (eventType === "checkout.session.completed") {
+          const session = event.data.object;
+          vendorId = session.metadata?.vendor_id ? parseInt(session.metadata.vendor_id) : null;
+          amountCents = session.amount_total || 0;
+          paymentIntentId = session.payment_intent;
+          depositType = session.metadata?.type || "wallet_deposit";
+        } else {
+          const pi = event.data.object;
+          vendorId = pi.metadata?.vendor_id ? parseInt(pi.metadata.vendor_id) : null;
+          amountCents = pi.amount || 0;
+          paymentIntentId = pi.id;
+          depositType = pi.metadata?.type || "wallet_deposit";
+          // Detect payment method type
+          if (pi.payment_method_types?.includes("us_bank_account")) {
+            paymentMethod = "stripe_ach";
+          }
+        }
+
+        if (!vendorId || !amountCents) {
+          console.warn(`[Stripe Webhook] Missing vendor_id or amount in ${eventType}`);
+          return res.json({ received: true });
+        }
+
+        // Idempotency: check if ledger entry already exists for this payment intent
+        if (paymentIntentId) {
+          const client = await pool.connect();
+          try {
+            const existing = await client.query(
+              `SELECT id FROM dropship_wallet_ledger WHERE reference_type = 'stripe_payment' AND reference_id = $1 LIMIT 1`,
+              [paymentIntentId],
+            );
+            if (existing.rows.length > 0) {
+              console.log(`[Stripe Webhook] Already processed payment ${paymentIntentId} — skipping`);
+              return res.json({ received: true });
+            }
+          } finally {
+            client.release();
+          }
+        }
+
+        const ledgerType = depositType === "auto_reload" ? "auto_reload" : "deposit";
+
+        const result = await walletService.creditWallet(
+          vendorId,
+          amountCents,
+          "stripe_payment",
+          paymentIntentId || `stripe_${Date.now()}`,
+          paymentMethod,
+          `${ledgerType === "auto_reload" ? "Auto-reload" : "Wallet deposit"} via Stripe`,
+          ledgerType,
+        );
+
+        if (result.success) {
+          console.log(`[Stripe Webhook] Credited $${(amountCents / 100).toFixed(2)} to vendor ${vendorId}`);
+        } else {
+          console.error(`[Stripe Webhook] Credit failed for vendor ${vendorId}: ${(result as any).message}`);
+        }
+      } else if (eventType === "payment_intent.payment_failed") {
+        const pi = event.data.object;
+        const vendorId = pi.metadata?.vendor_id;
+        console.warn(`[Stripe Webhook] Payment failed for vendor ${vendorId}: ${pi.last_payment_error?.message || "unknown error"}`);
+        // TODO: notify vendor of failed payment
+      }
+
+      return res.json({ received: true });
+    } catch (error: any) {
+      console.error("Stripe webhook error:", error);
       return res.status(500).json({ error: "internal_error" });
     }
   });
