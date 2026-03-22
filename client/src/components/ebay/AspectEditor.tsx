@@ -134,6 +134,21 @@ export function AspectEditor({
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: async () => {
+      // Validate values against allowed values for each aspect
+      const invalid: string[] = [];
+      for (const [name, value] of Object.entries(localValues)) {
+        if (!value) continue;
+        const aspect = aspects.find((a) => a.name === name);
+        if (aspect?.mode === "SELECTION_ONLY" && aspect.values?.length > 0) {
+          if (!aspect.values.includes(value)) {
+            invalid.push(`"${name}" value "${value}" is not allowed for this category`);
+          }
+        }
+      }
+      if (invalid.length > 0) {
+        throw new Error(invalid.join(". "));
+      }
+
       const path =
         mode === "type"
           ? `/api/ebay/type-aspect-defaults/${encodeURIComponent(productTypeSlug!)}`
