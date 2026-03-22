@@ -21,6 +21,7 @@ import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
+import Subscriptions from "@/pages/Subscriptions";
 import PickingPage from "@/pages/PickingPage";
 import OrderHistory from "@/pages/OrderHistory";
 import WarehousePage from "@/pages/WarehousePage";
@@ -189,6 +190,9 @@ function Router() {
         </Route>
         <Route path="/dropship">
           <ProtectedRoute component={Dropship} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/subscriptions">
+          <ProtectedRoute component={Subscriptions} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/vendors/:id">
           <ProtectedRoute component={VendorDetail} allowedRoles={["admin", "lead"]} />

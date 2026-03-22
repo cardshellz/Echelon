@@ -71,15 +71,30 @@ export async function registerVendor(
         return { error: "already_registered", message: "A vendor account already exists for this membership" };
       }
 
-      // Derive tier from membership
+      // Derive tier from membership — Gold tier required for dropship access
       try {
         const membership = await client.query(
-          `SELECT plan_name FROM member_current_membership WHERE member_id = $1 LIMIT 1`,
+          `SELECT mcm.plan_name, p.includes_dropship, p.tier as plan_tier
+           FROM member_current_membership mcm
+           LEFT JOIN plans p ON p.id = mcm.plan_id
+           WHERE mcm.member_id = $1 LIMIT 1`,
           [shellzClubMemberIdResolved]
         );
         if (membership.rows.length > 0) {
           const plan = (membership.rows[0].plan_name || "").toLowerCase();
-          if (plan.includes("elite")) tier = "elite";
+          const includesDropship = membership.rows[0].includes_dropship;
+          const planTier = membership.rows[0].plan_tier;
+
+          // Check if plan includes dropship access (Gold tier)
+          if (includesDropship === false && planTier !== "gold" && !plan.includes("gold")) {
+            return {
+              error: "plan_upgrade_required",
+              message: "Your Shellz Club plan doesn't include dropship access. Upgrade to Gold to unlock the vendor portal."
+            };
+          }
+
+          if (plan.includes("gold") || planTier === "gold") tier = "gold";
+          else if (plan.includes("elite")) tier = "elite";
           else if (plan.includes("pro")) tier = "pro";
         }
       } catch {

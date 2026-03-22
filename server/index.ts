@@ -12,6 +12,7 @@ import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices } from "./modules/oms/ebay-order-ingestion";
 import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
+import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
 import { eq } from "drizzle-orm";
@@ -461,6 +462,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
       initReconciliation(syncSingleOrder, services.oms);
       startShopifyReconciliation();
+
+      // Start subscription billing scheduler (runs hourly)
+      startBillingScheduler();
     },
   );
 })();

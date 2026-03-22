@@ -22,6 +22,8 @@ import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
 import { registerVendorAuthRoutes } from "./modules/dropship/vendor-auth.routes";
 import { registerVendorPortalRoutes, registerStripeWebhookRoute } from "./modules/dropship/vendor-portal.routes";
 import { registerVendorEbayRoutes } from "./modules/dropship/vendor-ebay.routes";
+import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
+import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -30,6 +32,9 @@ export async function registerRoutes(
   await seedRBAC();
   await seedDefaultChannels();
   await seedAdjustmentReasons();
+
+  // Subscription webhooks BEFORE auth middleware (unauthenticated, HMAC-verified)
+  registerSubscriptionWebhookRoutes(app);
 
   registerAuthRoutes(app);
   registerLocationRoutes(app);
@@ -54,6 +59,7 @@ export async function registerRoutes(
   registerVendorPortalRoutes(app);     // behind vendor JWT auth
   registerVendorEbayRoutes(app);       // vendor eBay OAuth + listing push
   registerStripeWebhookRoute(app);     // Stripe webhook (public, signature-verified)
+  registerSubscriptionRoutes(app);     // Subscription admin routes (behind auth)
 
   return httpServer;
 }

@@ -37,6 +37,7 @@ import {
   CreditCard,
   DollarSign,
   Tag,
+  Crown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -132,6 +133,7 @@ const navStructure: NavEntry[] = [
       { label: "Allocation", icon: Layers, href: "/channel-allocation" },
       { label: "Sync Log", icon: History, href: "/sync-log" },
       { label: "Dropship Network", icon: Globe, href: "/dropship" },
+      { label: "Subscriptions", icon: Crown, href: "/subscriptions" },
     ],
   },
   {

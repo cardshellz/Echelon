@@ -729,6 +729,96 @@ export async function runStartupMigrations(): Promise<void> {
 
     console.log("Checked COGS engine tables (order_line_costs, cost_adjustment_log, inventory_lots COGS columns)");
 
+    // ─── Migration 052: Subscription Engine — Native Shopify billing ──────────
+    // Extend plans table
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_id BIGINT`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS shopify_selling_plan_gid VARCHAR(100)`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS billing_interval VARCHAR(20)`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS billing_interval_count INTEGER DEFAULT 1`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS price_cents INTEGER`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS includes_dropship BOOLEAN DEFAULT false`);
+    await client.query(`ALTER TABLE plans ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`);
+
+    // Extend member_subscriptions table
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_id BIGINT`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS shopify_subscription_contract_gid VARCHAR(100)`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS next_billing_date TIMESTAMP`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMP`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMP`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS billing_status VARCHAR(30) DEFAULT 'current'`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS failed_billing_attempts INTEGER DEFAULT 0`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS billing_in_progress BOOLEAN DEFAULT false`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS cancellation_reason TEXT`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS payment_method_id VARCHAR(100)`);
+    await client.query(`ALTER TABLE member_subscriptions ADD COLUMN IF NOT EXISTS revision_id VARCHAR(50)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_shopify_contract ON member_subscriptions(shopify_subscription_contract_id) WHERE shopify_subscription_contract_id IS NOT NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ms_next_billing ON member_subscriptions(next_billing_date) WHERE billing_status IN ('current', 'past_due') AND billing_in_progress = false`);
+
+    // Extend members table
+    await client.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS shopify_customer_id BIGINT`);
+    await client.query(`ALTER TABLE members ADD COLUMN IF NOT EXISTS tier VARCHAR(30) DEFAULT 'standard'`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_members_shopify_customer ON members(shopify_customer_id) WHERE shopify_customer_id IS NOT NULL`);
+
+    // subscription_billing_log
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscription_billing_log (
+        id SERIAL PRIMARY KEY,
+        member_subscription_id INTEGER NOT NULL REFERENCES member_subscriptions(id),
+        shopify_billing_attempt_id VARCHAR(100),
+        shopify_order_id BIGINT,
+        amount_cents INTEGER NOT NULL,
+        currency VARCHAR(3) DEFAULT 'USD',
+        status VARCHAR(30) NOT NULL,
+        error_code VARCHAR(100),
+        error_message TEXT,
+        idempotency_key VARCHAR(200),
+        billing_period_start TIMESTAMP,
+        billing_period_end TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sbl_subscription ON subscription_billing_log(member_subscription_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sbl_status ON subscription_billing_log(status)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sbl_idempotency ON subscription_billing_log(idempotency_key) WHERE idempotency_key IS NOT NULL`);
+
+    // subscription_events
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscription_events (
+        id SERIAL PRIMARY KEY,
+        member_subscription_id INTEGER REFERENCES member_subscriptions(id),
+        shopify_subscription_contract_id BIGINT,
+        event_type VARCHAR(50) NOT NULL,
+        event_source VARCHAR(30) NOT NULL,
+        payload JSONB,
+        notes TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_subscription ON subscription_events(member_subscription_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_contract ON subscription_events(shopify_subscription_contract_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_se_type ON subscription_events(event_type)`);
+
+    // selling_plan_map
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS selling_plan_map (
+        id SERIAL PRIMARY KEY,
+        shopify_selling_plan_gid VARCHAR(100) NOT NULL UNIQUE,
+        shopify_selling_plan_group_gid VARCHAR(100) NOT NULL,
+        plan_id INTEGER NOT NULL REFERENCES plans(id),
+        plan_name VARCHAR(100) NOT NULL,
+        billing_interval VARCHAR(20) NOT NULL,
+        price_cents INTEGER NOT NULL,
+        is_active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    console.log("Checked subscription engine tables (subscription_billing_log, subscription_events, selling_plan_map)");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {
