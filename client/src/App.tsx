@@ -45,6 +45,7 @@ import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
 import Returns from "@/pages/Returns";
 import InboundShipments from "@/pages/InboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
+import CostDashboard from "@/pages/CostDashboard";
 import APDashboard from "@/pages/APDashboard";
 import APInvoices from "@/pages/APInvoices";
 import APInvoiceDetail from "@/pages/APInvoiceDetail";
@@ -276,6 +277,9 @@ function Router() {
         </Route>
         <Route path="/shipments">
           <ProtectedRoute component={InboundShipments} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/inventory/costs">
+          <ProtectedRoute component={CostDashboard} allowedRoles={["admin"]} />
         </Route>
         <Route path="/inventory/history">
           <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />

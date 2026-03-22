@@ -1021,10 +1021,34 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
       if (!matchingLine?.landedUnitCostCents) continue;
 
+      // Update the lot with finalized landed cost
       await storage.updateInventoryLot(lot.id, {
         unitCostCents: matchingLine.landedUnitCostCents,
         costProvisional: 0,
       });
+
+      // Also update COGS columns (landed_cost_cents, total_unit_cost_cents)
+      try {
+        const poUnitCost = (lot as any).po_unit_cost_cents || (lot as any).unitCostCents || 0;
+        const landedPerPiece = matchingLine.landedUnitCostCents - Number(poUnitCost);
+        const landedCostCents = Math.max(0, landedPerPiece);
+        
+        // Use raw SQL to update COGS columns that may not be in the ORM yet
+        const { sql: sqlTag } = require("drizzle-orm");
+        await (storage as any).db?.execute?.(sqlTag`
+          UPDATE inventory_lots SET
+            landed_cost_cents = ${landedCostCents},
+            total_unit_cost_cents = ${matchingLine.landedUnitCostCents},
+            cost_source = CASE
+              WHEN cost_source = 'po' THEN 'po_landed'
+              ELSE cost_source
+            END
+          WHERE id = ${lot.id}
+        `) || await storage.updateInventoryLot(lot.id, {});
+      } catch (e: any) {
+        console.warn(`[ShipmentTracking] COGS column update for lot ${lot.id} failed (non-fatal): ${e.message}`);
+      }
+
       updated++;
     }
 

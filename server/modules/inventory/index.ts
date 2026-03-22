@@ -32,6 +32,8 @@ export { createInventorySourceService } from "./source.service";
 export { createReplenishmentService } from "./replen.service";
 export { createCycleCountService } from "./cycle-count.service";
 export { createBreakAssemblyService } from "./break-assembly.service";
+export { createCOGSService } from "./cogs.service";
+export type { COGSService } from "./cogs.service";
 
 // Service types
 export type { InventoryCoreService } from "./core.service";

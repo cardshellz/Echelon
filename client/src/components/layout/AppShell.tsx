@@ -106,6 +106,7 @@ const navStructure: NavEntry[] = [
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },
       { label: "History", icon: History, href: "/inventory/history", roles: ["admin"] },
+      { label: "Cost Dashboard", icon: DollarSign, href: "/inventory/costs", roles: ["admin"] },
     ],
   },
   {

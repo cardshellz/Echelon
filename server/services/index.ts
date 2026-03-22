@@ -28,6 +28,7 @@
 
 import { createInventoryCoreService } from "../modules/inventory/core.service";
 import { createInventoryLotService } from "../modules/inventory/lots.service";
+import { createCOGSService } from "../modules/inventory/cogs.service";
 import { createInventoryAtpService } from "../modules/inventory/atp.service";
 import { createBreakAssemblyService } from "../modules/inventory/break-assembly.service";
 import { createFulfillmentService } from "../modules/orders/fulfillment.service";
@@ -66,6 +67,7 @@ export function createServices(db: any) {
   const inventoryLots = createInventoryLotService(db);
   const inventoryCore = createInventoryCoreService(db, inventoryLots);
   const atp = createInventoryAtpService(db);
+  const cogs = createCOGSService(db);
 
   // Channel sync (depends on atp only — must precede fulfillment/reservation)
   const channelSync = createChannelSyncService(db, atp);
@@ -218,6 +220,7 @@ export function createServices(db: any) {
     inventoryCore,
     inventoryLots,
     atp,
+    cogs,
     breakAssembly,
     fulfillment,
     reservation,
@@ -297,5 +300,7 @@ export { createShipmentTrackingService } from "../modules/procurement/shipment-t
 export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/shipment-tracking.service";
 export { createInventoryLotService } from "../modules/inventory/lots.service";
 export type { InventoryLotService } from "../modules/inventory/lots.service";
+export { createCOGSService } from "../modules/inventory/cogs.service";
+export type { COGSService, CostLotConsumption, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
 export { createShipStationService } from "../modules/oms/shipstation.service";
 export type { ShipStationService } from "../modules/oms/shipstation.service";

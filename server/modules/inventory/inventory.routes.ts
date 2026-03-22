@@ -2571,4 +2571,203 @@ export function registerInventoryRoutes(app: Express) {
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
+
+  // ============================================
+  // COGS ENGINE — Cost Dashboard APIs
+  // ============================================
+
+  // Inventory valuation summary
+  app.get("/api/cogs/valuation", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const valuation = await cogs.getInventoryValuation();
+      res.json(valuation);
+    } catch (error: any) {
+      console.error("Error getting inventory valuation:", error);
+      res.status(500).json({ error: "Failed to get inventory valuation" });
+    }
+  });
+
+  // Product cost explorer — all lots with cost details
+  app.get("/api/cogs/lots", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const productId = req.query.productId ? parseInt(String(req.query.productId)) : undefined;
+      const search = req.query.search ? String(req.query.search) : undefined;
+      const onlyPending = req.query.onlyPending === "true";
+      const limit = parseInt(String(req.query.limit)) || 50;
+      const offset = parseInt(String(req.query.offset)) || 0;
+
+      const result = await cogs.getAllCostLots({ productId, search, onlyPending, limit, offset });
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error getting cost lots:", error);
+      res.status(500).json({ error: "Failed to get cost lots" });
+    }
+  });
+
+  // Product cost lots (for a specific variant)
+  app.get("/api/cogs/lots/variant/:variantId", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const variantId = parseInt(req.params.variantId);
+      const lots = await cogs.getProductCostLots(variantId);
+      res.json(lots);
+    } catch (error: any) {
+      console.error("Error getting variant cost lots:", error);
+      res.status(500).json({ error: "Failed to get variant cost lots" });
+    }
+  });
+
+  // Order COGS lookup by order number
+  app.get("/api/cogs/order", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const orderNumber = String(req.query.orderNumber || "").trim();
+      if (!orderNumber) {
+        return res.status(400).json({ error: "orderNumber query parameter required" });
+      }
+      const result = await cogs.getOrderCOGSByNumber(orderNumber);
+      if (!result) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error getting order COGS:", error);
+      res.status(500).json({ error: "Failed to get order COGS" });
+    }
+  });
+
+  // Order COGS by order ID
+  app.get("/api/cogs/order/:orderId", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const orderId = parseInt(req.params.orderId);
+      const result = await cogs.getOrderCOGS(orderId);
+      if (!result) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error getting order COGS:", error);
+      res.status(500).json({ error: "Failed to get order COGS" });
+    }
+  });
+
+  // Manual cost entry — single lot
+  app.post("/api/cogs/manual-entry", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const { productVariantId, warehouseLocationId, qty, unitCostCents, batchNumber, notes } = req.body;
+
+      if (!productVariantId || !warehouseLocationId || !qty || unitCostCents === undefined) {
+        return res.status(400).json({ error: "Missing required fields: productVariantId, warehouseLocationId, qty, unitCostCents" });
+      }
+
+      const lot = await cogs.manualCostEntry({
+        productVariantId,
+        warehouseLocationId,
+        qty: parseInt(qty),
+        unitCostCents: parseFloat(unitCostCents),
+        batchNumber,
+        notes,
+      });
+
+      res.json({ success: true, lot });
+    } catch (error: any) {
+      console.error("Error creating manual cost entry:", error);
+      res.status(500).json({ error: error.message || "Failed to create manual cost entry" });
+    }
+  });
+
+  // Bulk import (from spreadsheet paste)
+  app.post("/api/cogs/bulk-import", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const { entries } = req.body; // Array of { sku, qty, unitCostCents, batchNumber }
+
+      if (!entries || !Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({ error: "entries array required" });
+      }
+
+      const result = await cogs.bulkManualImport(entries);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error bulk importing costs:", error);
+      res.status(500).json({ error: error.message || "Failed to bulk import" });
+    }
+  });
+
+  // Get manual lots
+  app.get("/api/cogs/manual-lots", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lots = await cogs.getManualLots();
+      res.json(lots);
+    } catch (error: any) {
+      console.error("Error getting manual lots:", error);
+      res.status(500).json({ error: "Failed to get manual lots" });
+    }
+  });
+
+  // Update manual lot
+  app.patch("/api/cogs/manual-lots/:lotId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lotId = parseInt(req.params.lotId);
+      const { unitCostCents, batchNumber, notes } = req.body;
+
+      const success = await cogs.updateManualLot(lotId, { unitCostCents, batchNumber, notes });
+      if (!success) {
+        return res.status(400).json({ error: "Can only edit manual cost lots" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error updating manual lot:", error);
+      res.status(500).json({ error: "Failed to update manual lot" });
+    }
+  });
+
+  // Delete manual lot
+  app.delete("/api/cogs/manual-lots/:lotId", requirePermission("inventory", "adjust"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lotId = parseInt(req.params.lotId);
+
+      const success = await cogs.deleteManualLot(lotId);
+      if (!success) {
+        return res.status(400).json({ error: "Can only delete unconsumed manual lots" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting manual lot:", error);
+      res.status(500).json({ error: "Failed to delete manual lot" });
+    }
+  });
+
+  // Cost adjustments log
+  app.get("/api/cogs/adjustments", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const limit = parseInt(String(req.query.limit)) || 50;
+      const adjustments = await cogs.getCostAdjustments(limit);
+      res.json(adjustments);
+    } catch (error: any) {
+      console.error("Error getting cost adjustments:", error);
+      res.status(500).json({ error: "Failed to get cost adjustments" });
+    }
+  });
+
+  // Affected orders for a lot (for cost adjustment impact)
+  app.get("/api/cogs/lots/:lotId/affected-orders", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const { cogs } = req.app.locals.services;
+      const lotId = parseInt(req.params.lotId);
+      const orders = await cogs.getAffectedOrdersForLot(lotId);
+      res.json(orders);
+    } catch (error: any) {
+      console.error("Error getting affected orders:", error);
+      res.status(500).json({ error: "Failed to get affected orders" });
+    }
+  });
 }
