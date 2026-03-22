@@ -1594,10 +1594,8 @@ ${categoriesXml}
                 },
               };
 
-              // For single-variant, include description on the inventory item
-              if (!isMultiVariant) {
-                inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
-              }
+              // Always include description — eBay requires it on inventory items
+              inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
 
               console.log(`[eBay Push] Creating inventory item for SKU: ${sku}`);
               await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, inventoryItemBody);
@@ -1625,9 +1623,10 @@ ${categoriesXml}
           }
 
           if (!allItemsCreated && variantDetails.every((v) => !v.success)) {
+            const firstError = variantDetails.find((v) => v.error)?.error || "Unknown error";
             results.push({
               productId, productName: product.name, variantCount: variants.length,
-              success: false, error: "All inventory items failed to create", variantDetails,
+              success: false, error: `Inventory items failed: ${firstError}`, variantDetails,
             });
             continue;
           }
@@ -2147,9 +2146,8 @@ ${categoriesXml}
                   shipToLocationAvailability: { quantity: availableQty },
                 },
               };
-              if (!isMultiVariant) {
-                inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
-              }
+              // Always include description — eBay requires it
+              inventoryItemBody.product.description = product.description || `<p>${product.name}</p>`;
 
               await ebayApiRequestWithRateNotify(
                 "PUT",
@@ -2181,7 +2179,8 @@ ${categoriesXml}
 
           if (!allItemsCreated && variantDetails.every((v) => !v.success)) {
             failed++;
-            const errMsg = "All inventory items failed to create";
+            const firstError = variantDetails.find((v) => v.error)?.error || "Unknown error";
+            const errMsg = `Inventory items failed: ${firstError}`;
             sendEvent({ type: "progress", product: product.name, productId, status: "error", error: errMsg, variantsListed: 0, current, total, variantDetails });
             await upsertPushError(client, EBAY_CHANNEL_ID, productId, errMsg);
             continue;
@@ -3505,9 +3504,8 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
               shipToLocationAvailability: { quantity: newQty },
             },
           };
-          if (!isMultiVariant) {
-            inventoryItemBody.product.description = product.product_description || `<p>${product.product_name}</p>`;
-          }
+          // Always include description — eBay requires it
+          inventoryItemBody.product.description = product.product_description || `<p>${product.product_name}</p>`;
 
           console.log(`[eBay Sync] Updating inventory item: ${sku}`);
           await ebayApiRequest("PUT", `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`, accessToken, inventoryItemBody);
