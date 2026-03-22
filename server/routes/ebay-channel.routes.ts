@@ -631,7 +631,7 @@ ${categoriesXml}
             ecm.ebay_browse_category_name,
             ecm.ebay_store_category_id,
             ecm.ebay_store_category_name,
-            (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.sku IS NOT NULL) AS variant_count,
+            (SELECT COUNT(*) FROM product_variants pv WHERE pv.product_id = p.id AND pv.sku IS NOT NULL AND pv.is_active = true) AS variant_count,
             (SELECT COUNT(*) FROM product_assets pa WHERE pa.product_id = p.id) AS image_count,
             cl.id AS listing_id,
             cl.sync_status AS listing_status,
@@ -673,7 +673,7 @@ ${categoriesXml}
               pv.ebay_return_policy_override AS variant_return_override,
               pv.ebay_payment_policy_override AS variant_payment_override
             FROM product_variants pv
-            WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL
+            WHERE pv.product_id = ANY($1) AND pv.sku IS NOT NULL AND pv.is_active = true
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
           `, [productIds]);
 
@@ -1473,7 +1473,7 @@ ${categoriesXml}
                     price_cents, compare_at_price_cents, weight_grams, barcode,
                     units_per_variant, hierarchy_level,
                     ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL
+             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
                AND COALESCE(ebay_listing_excluded, false) = false
              ORDER BY position ASC, id ASC`,
             [productId],
@@ -2020,7 +2020,7 @@ ${categoriesXml}
                     price_cents, compare_at_price_cents, weight_grams, barcode,
                     units_per_variant, hierarchy_level,
                     ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL
+             FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true
                AND COALESCE(ebay_listing_excluded, false) = false
              ORDER BY position ASC, id ASC`,
             [productId],
@@ -3120,7 +3120,7 @@ async function upsertChannelListing(
 async function upsertPushError(client: any, channelId: number, productId: number, error: string): Promise<void> {
   // Find all variant IDs for this product
   const varResult = await client.query(
-    `SELECT id FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL LIMIT 1`,
+    `SELECT id FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true LIMIT 1`,
     [productId],
   );
   if (varResult.rows.length > 0) {
