@@ -2658,7 +2658,7 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/cogs/manual-entry", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
-      const { productVariantId, warehouseLocationId, qty, unitCostCents, batchNumber, notes } = req.body;
+      const { productVariantId, warehouseLocationId, qty, unitCostCents, landedCostCents, batchNumber, receivedAt, notes } = req.body;
 
       if (!productVariantId || !warehouseLocationId || !qty || unitCostCents === undefined) {
         return res.status(400).json({ error: "Missing required fields: productVariantId, warehouseLocationId, qty, unitCostCents" });
@@ -2669,7 +2669,9 @@ export function registerInventoryRoutes(app: Express) {
         warehouseLocationId,
         qty: parseInt(qty),
         unitCostCents: parseFloat(unitCostCents),
+        landedCostCents: landedCostCents ? parseFloat(landedCostCents) : undefined,
         batchNumber,
+        receivedAt,
         notes,
       });
 

@@ -743,7 +743,9 @@ function ManualEntrySection() {
   const [locationId, setLocationId] = useState("");
   const [qty, setQty] = useState("");
   const [unitCost, setUnitCost] = useState("");
+  const [landedCost, setLandedCost] = useState("");
   const [batchNumber, setBatchNumber] = useState("");
+  const [receivedAt, setReceivedAt] = useState("");
   const [notes, setNotes] = useState("");
 
   // Data queries
@@ -764,7 +766,9 @@ function ManualEntrySection() {
         warehouseLocationId: parseInt(locationId),
         qty: parseInt(qty),
         unitCostCents: parseFloat(unitCost),
+        landedCostCents: landedCost ? parseFloat(landedCost) : undefined,
         batchNumber: batchNumber || undefined,
+        receivedAt: receivedAt || undefined,
         notes: notes || undefined,
       });
       return res.json();
@@ -777,7 +781,9 @@ function ManualEntrySection() {
       setVariantId("");
       setQty("");
       setUnitCost("");
+      setLandedCost("");
       setBatchNumber("");
+      setReceivedAt("");
       setNotes("");
     },
     onError: (err: any) => {
@@ -875,6 +881,29 @@ function ManualEntrySection() {
                 placeholder="0.0120"
                 className="mt-1.5"
                 min={0}
+              />
+            </div>
+
+            <div>
+              <Label>Landed Cost (cents per piece, optional)</Label>
+              <Input
+                type="number"
+                step="0.0001"
+                value={landedCost}
+                onChange={(e) => setLandedCost(e.target.value)}
+                placeholder="0.0050"
+                className="mt-1.5"
+                min={0}
+              />
+            </div>
+
+            <div>
+              <Label>Received Date</Label>
+              <Input
+                type="date"
+                value={receivedAt}
+                onChange={(e) => setReceivedAt(e.target.value)}
+                className="mt-1.5"
               />
             </div>
 

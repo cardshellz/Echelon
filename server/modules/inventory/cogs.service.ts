@@ -115,6 +115,7 @@ export class COGSService {
     purchaseOrderId?: number;
     costSource?: string;
     batchNumber?: string;
+    receivedAt?: Date;
     notes?: string;
   }): Promise<InventoryLot> {
     const poUnitCost = params.poUnitCostCents ?? 0;
@@ -133,7 +134,7 @@ export class COGSService {
         qtyOnHand: params.qtyPieces,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: new Date(),
+        receivedAt: params.receivedAt ?? new Date(),
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -507,7 +508,9 @@ export class COGSService {
     warehouseLocationId: number;
     qty: number;
     unitCostCents: number;
+    landedCostCents?: number;
     batchNumber?: string;
+    receivedAt?: string | Date;
     notes?: string;
   }): Promise<InventoryLot> {
     return this.createLot({
@@ -515,9 +518,10 @@ export class COGSService {
       warehouseLocationId: params.warehouseLocationId,
       qtyPieces: params.qty,
       poUnitCostCents: params.unitCostCents,
-      landedCostCents: 0,
+      landedCostCents: params.landedCostCents ?? 0,
       costSource: 'manual',
       batchNumber: params.batchNumber,
+      receivedAt: params.receivedAt ? new Date(params.receivedAt) : undefined,
       notes: params.notes ?? 'Manual cost entry',
     });
   }
