@@ -315,14 +315,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
           return; // Nothing to reconcile
         }
 
-        // Call the reconcile endpoint internally via HTTP
+        // Call the reconcile endpoint directly (bypass auth)
         const http = require("http");
         const port = process.env.PORT || 5000;
         const reqData = JSON.stringify({});
         const options = {
           hostname: "127.0.0.1",
           port,
-          path: "/api/ebay/listings/reconcile",
+          path: "/api/ebay/listings/reconcile?_internal=1",
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -337,11 +337,22 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
             res.on("end", () => {
               try {
                 const data = JSON.parse(body);
+                const changes = (data.ended || 0) + (data.deleted || 0);
                 if (data.checked > 0) {
-                  log(
-                    `[eBay Reconcile] Scheduled: checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}`,
-                    "ebay-reconcile",
+                  console.log(
+                    `[eBay Reconcile] checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}`,
                   );
+                }
+                if (changes > 0) {
+                  console.log(`[eBay Reconcile] ⚠️ ${changes} listing(s) ended/deleted on eBay — check listing feed`);
+                  // Fire notification
+                  try {
+                    services.notifications?.notify?.("listing_status_change", {
+                      title: `eBay Listings Changed`,
+                      message: `${changes} listing(s) ended or deleted on eBay since last check`,
+                      data: { ended: data.ended, deleted: data.deleted, changes: data.changes },
+                    });
+                  } catch {}
                 }
               } catch { /* ignore parse errors */ }
               resolve();
