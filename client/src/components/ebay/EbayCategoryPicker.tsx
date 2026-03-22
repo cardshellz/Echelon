@@ -185,10 +185,16 @@ export function EbayCategoryPicker({
   // ---- Browse: drill into a category ----
   const handleDrillIn = useCallback(
     (cat: TreeCategory) => {
-      setCurrentPath((prev) => [
-        ...prev,
-        { categoryId: cat.categoryId, categoryName: cat.categoryName },
-      ]);
+      setCurrentPath((prev) => {
+        // Prevent duplicate: don't add if already the last item
+        if (prev.length > 0 && prev[prev.length - 1].categoryId === cat.categoryId) {
+          return prev;
+        }
+        return [
+          ...prev,
+          { categoryId: cat.categoryId, categoryName: cat.categoryName },
+        ];
+      });
       fetchChildren(cat.categoryId);
     },
     [fetchChildren]
