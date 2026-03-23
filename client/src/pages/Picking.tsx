@@ -2326,10 +2326,24 @@ export default function Picking() {
     // Use different data based on picking mode
     const channelMatch = (item: any) => {
       if (channelFilter === "all") return true;
-      const provider = item.channelProvider?.toLowerCase() || "";
-      const orderNum = item.orderNumber || item.orders?.[0]?.orderNumber || "";
-      if (channelFilter === "ebay") return provider === "ebay" || orderNum.match(/^\d{2}-\d{5}-\d{5}$/);
-      if (channelFilter === "shopify") return provider === "shopify" || orderNum.startsWith("#");
+      // Single mode: check item directly
+      const provider = item.channelProvider?.toLowerCase() || item.source?.toLowerCase() || "";
+      const orderNum = item.orderNumber || "";
+      if (provider === channelFilter) return true;
+      // Batch mode: check orders within the batch
+      if (item.orders?.length > 0) {
+        return item.orders.some((o: any) => {
+          const op = o.channelProvider?.toLowerCase() || o.source?.toLowerCase() || "";
+          const on = o.orderNumber || "";
+          if (op === channelFilter) return true;
+          if (channelFilter === "ebay" && on.match(/^\d{2}-\d{5}-\d{5}$/)) return true;
+          if (channelFilter === "shopify" && on.startsWith("#")) return true;
+          return false;
+        });
+      }
+      // Fallback: check order number pattern
+      if (channelFilter === "ebay") return orderNum.match(/^\d{2}-\d{5}-\d{5}$/);
+      if (channelFilter === "shopify") return orderNum.startsWith("#");
       return true;
     };
     const readyItems = (pickingMode === "batch" 

@@ -347,8 +347,75 @@ class EchelonSyncOrchestrator {
         ),
       );
 
-    if (assignedWarehouses.length === 0) {
+    if (assignedWarehouses.length === 0 && channel.provider !== "ebay") {
       console.log(`[SyncOrchestrator] No enabled warehouses assigned to channel ${channel.name}`);
+      return result;
+    }
+
+    // For non-Shopify channels (eBay), use allocation engine results directly
+    if (channel.provider !== "shopify") {
+      // Use the allocation results that were already computed by the caller
+      const pushItems: any[] = [];
+      for (const a of allocations) {
+        const feedRow = await this.db.execute(sql`
+          SELECT last_synced_qty FROM channel_feeds 
+          WHERE product_variant_id = ${a.productVariantId} AND channel_id = ${channelId}
+          LIMIT 1
+        `).then((r: any) => r.rows[0]);
+        
+        const previousQty = feedRow?.last_synced_qty ?? null;
+        
+        // Skip if unchanged
+        if (previousQty !== null && previousQty === a.allocatedUnits) {
+          result.variantsSkipped++;
+          result.details.push({
+            variantId: a.productVariantId,
+            sku: a.sku,
+            previousQty,
+            pushQty: a.allocatedUnits,
+            status: "skipped" as const,
+          });
+          continue;
+        }
+
+        pushItems.push({
+          variantId: a.productVariantId,
+          sku: a.sku,
+          allocatedQty: a.allocatedUnits,
+          previousQty,
+        });
+        result.details.push({
+          variantId: a.productVariantId,
+          sku: a.sku,
+          previousQty,
+          pushQty: a.allocatedUnits,
+          status: "pushed" as const,
+        });
+      }
+
+      if (!config.dryRun && pushItems.length > 0) {
+        try {
+          const adapter = this.adapterRegistry.get(channel.provider);
+          if (adapter) {
+            await adapter.pushInventory(channelId, pushItems);
+            result.variantsPushed = pushItems.length;
+            
+            // Update channel_feeds
+            for (const item of pushItems) {
+              await this.db.execute(sql`
+                INSERT INTO channel_feeds (product_variant_id, channel_id, last_synced_qty, last_synced_at)
+                VALUES (${item.variantId}, ${channelId}, ${item.allocatedQty}, NOW())
+                ON CONFLICT (product_variant_id, channel_id) 
+                DO UPDATE SET last_synced_qty = ${item.allocatedQty}, last_synced_at = NOW()
+              `);
+            }
+          }
+        } catch (err: any) {
+          console.error(`[SyncOrchestrator] ${channel.provider} push failed: ${err.message}`);
+          result.variantsErrored = pushItems.length;
+        }
+      }
+
       return result;
     }
 
