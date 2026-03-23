@@ -2326,8 +2326,7 @@ export default function Picking() {
     // Use different data based on picking mode
     const channelMatch = (item: any) => {
       if (channelFilter === "all") return true;
-      const src = (item.source || item.channelProvider || "").toLowerCase();
-      return src === channelFilter;
+      return String(item.channelId) === channelFilter;
     };
     const readyItems = (pickingMode === "batch" 
       ? queue.filter(b => b.status === "ready")
@@ -2435,8 +2434,8 @@ export default function Picking() {
                 className="h-8 text-xs rounded-md border bg-background px-2 min-w-[90px]"
               >
                 <option value="all">All Channels</option>
-                <option value="shopify">Shopify</option>
-                <option value="ebay">eBay</option>
+                <option value="36">Shopify</option>
+                <option value="67">eBay</option>
               </select>
             </div>
 
