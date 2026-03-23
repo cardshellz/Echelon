@@ -158,12 +158,9 @@ export const orderMethods: IOrderStorage = {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     const orderList = await db.execute(sql`
-      SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), oms.customer_name) as resolved_customer_name
+      SELECT o.*
       FROM orders o
-      LEFT JOIN oms_orders oms ON o.order_number = oms.external_order_number
-      WHERE (oms.cancelled_at IS NULL OR oms.id IS NULL)
-        AND o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
-        AND (oms.id IS NULL OR oms.fulfillment_status IS NULL OR oms.fulfillment_status != 'fulfilled')
+      WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
           -- Ready/in_progress orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress')
