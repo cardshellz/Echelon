@@ -984,7 +984,7 @@ export default function Picking() {
   };
   
   const [view, setView] = useState<"queue" | "picking" | "complete" | "exceptions">("queue");
-  const [channelFilter, setChannelFilter] = useState<string>("all");
+  const [channelFilter, setChannelFilter] = useState<string>("all"); // 'all' | 'shopify' | 'ebay'
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
@@ -2324,14 +2324,9 @@ export default function Picking() {
   // QUEUE VIEW
   if (view === "queue") {
     // Use different data based on picking mode
-    const channelMatch = (item: any) => {
+    const channelMatch = (item: any): boolean => {
       if (channelFilter === "all") return true;
-      const id = item.channelId ?? item.channel_id ?? item.channelProvider;
-      if (id != null && String(id) === channelFilter) return true;
-      // Fallback: match by source field
-      if (channelFilter === "36" && item.source === "shopify") return true;
-      if (channelFilter === "67" && item.source === "ebay") return true;
-      return false;
+      return item.source === channelFilter;
     };
     const readyItems = (pickingMode === "batch" 
       ? queue.filter(b => b.status === "ready")
@@ -2440,8 +2435,8 @@ export default function Picking() {
                 className="h-8 text-xs rounded-md border bg-background px-2"
               >
                 <option value="all">All</option>
-                <option value="36">Shopify</option>
-                <option value="67">eBay</option>
+                <option value="shopify">Shopify</option>
+                <option value="ebay">eBay</option>
               </select>
               {/* Mode Toggle - Compact */}
               <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
