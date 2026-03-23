@@ -2349,7 +2349,7 @@ export default function Picking() {
     const totalItemsToPick = readyItems.reduce((acc, item) => acc + item.items.length, 0);
 
     // Filtered and sorted queue
-    const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(item => {
+    const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(channelMatch).filter(item => {
       // By default, hide completed items unless filtering for "done"
       if (activeFilter !== "done" && item.status === "completed") return false;
       
