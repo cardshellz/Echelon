@@ -56,6 +56,10 @@ export const omsOrders = pgTable("oms_orders", {
   trackingCarrier: varchar("tracking_carrier", { length: 50 }),
   shippedAt: timestamp("shipped_at"),
 
+  // Cancellation / Refund
+  cancelledAt: timestamp("cancelled_at"),
+  refundedAt: timestamp("refunded_at"),
+
   // ShipStation integration
   shipstationOrderId: integer("shipstation_order_id"),
   shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),

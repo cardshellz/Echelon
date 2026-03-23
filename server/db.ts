@@ -819,6 +819,12 @@ export async function runStartupMigrations(): Promise<void> {
 
     console.log("Checked subscription engine tables (subscription_billing_log, subscription_events, selling_plan_map)");
 
+    // ─── Migration 053: OMS Shopify webhook columns ──────────
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
+    await client.query(`ALTER TABLE oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
+    console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
+
   } catch (error) {
     console.error("Error running startup migrations:", error);
   } finally {

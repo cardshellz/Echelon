@@ -15,6 +15,7 @@ import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationS
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
 import { backfillShopifyOrders } from "./modules/oms/shopify-bridge";
+import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { eq } from "drizzle-orm";
 import type { SafeUser } from "@shared/schema";
 
@@ -265,6 +266,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       res.status(500).json({ error: "Internal error" });
     }
   });
+
+  // --- OMS Shopify Webhooks (BEFORE auth middleware — HMAC verified) ---
+  registerOmsWebhooks(app, services.oms, {
+    reservation: services.reservation,
+    fulfillmentRouter: services.fulfillmentRouter,
+    slaMonitor: services.slaMonitor,
+  }, services.shipStation);
 
   // Wire fulfillment push into ShipStation service for tracking push on ship notify
   (db as any).__fulfillmentPush = services.fulfillmentPush;
