@@ -56,7 +56,7 @@ interface OrderWithItems extends Order {
 
 // API functions
 async function fetchPickingQueue(): Promise<OrderWithItems[]> {
-  const res = await fetch("/api/picking/queue");
+  const res = await fetch("/api/picking/queue", { credentials: "include" });
   if (!res.ok) throw new Error("Failed to fetch picking queue");
   return res.json();
 }
