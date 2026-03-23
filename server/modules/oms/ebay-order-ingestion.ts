@@ -354,8 +354,48 @@ export async function pollEbayOrders(
         const orderData = mapEbayOrderToOrderData(ebayOrder);
         const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
 
+        // Check if existing order needs status update (cancelled, refunded)
+        const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
+        if (!isNew && result.id) {
+          const existing = await omsService.getOrderById(result.id);
+          if (existing && existing.status !== orderData.status) {
+            // Status changed on eBay — update OMS
+            if (orderData.status === "cancelled" && existing.status !== "cancelled") {
+              console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
+              const { db } = require("../../db");
+              const { sql } = require("drizzle-orm");
+              await db.execute(sql`
+                UPDATE oms_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
+                WHERE id = ${result.id} AND status != 'cancelled'
+              `);
+              // Release WMS reservation
+              try {
+                const wmsOrder = await db.execute(sql`SELECT id FROM orders WHERE source_table_id = ${String(result.id)} LIMIT 1`);
+                if (wmsOrder.rows.length > 0) {
+                  await db.execute(sql`
+                    UPDATE orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
+                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('shipped', 'cancelled')
+                  `);
+                }
+              } catch (e: any) {
+                console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
+              }
+            }
+            if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded") 
+                && existing.financialStatus !== orderData.financialStatus) {
+              console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${orderData.financialStatus} on eBay — updating OMS`);
+              const { db } = require("../../db");
+              const { sql } = require("drizzle-orm");
+              await db.execute(sql`
+                UPDATE oms_orders SET financial_status = ${orderData.financialStatus}, refunded_at = NOW(), updated_at = NOW()
+                WHERE id = ${result.id}
+              `);
+            }
+          }
+        }
+
         // If this was a new order (not a duplicate), create WMS order + reserve + ShipStation push
-        if (result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000) {
+        if (isNew) {
           // Create WMS order for pick queue (this handles reservation via WMS)
           try {
             await createWmsOrderFromEbay(result.id, orderData, ebayOrder.orderId);
