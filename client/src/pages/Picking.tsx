@@ -2426,21 +2426,18 @@ export default function Picking() {
               </div>
             </div>
             
-            {/* Channel Filter */}
+            {/* Right: Actions */}
             <div className="flex items-center gap-1.5">
+              {/* Channel Filter */}
               <select
                 value={channelFilter}
                 onChange={(e) => setChannelFilter(e.target.value)}
-                className="h-8 text-xs rounded-md border bg-background px-2 min-w-[90px]"
+                className="h-8 text-xs rounded-md border bg-background px-2"
               >
-                <option value="all">All Channels</option>
+                <option value="all">All</option>
                 <option value="36">Shopify</option>
                 <option value="67">eBay</option>
               </select>
-            </div>
-
-            {/* Right: Actions */}
-            <div className="flex items-center gap-1.5">
               {/* Mode Toggle - Compact */}
               <div className="flex items-center rounded-md border bg-muted/50 p-0.5">
                 <Button
