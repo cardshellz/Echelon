@@ -14,7 +14,7 @@
  * All push operations support DRY_RUN mode.
  */
 
-import { eq, and, sql, inArray } from "drizzle-orm";
+import { eq, and, or, isNull, sql, inArray } from "drizzle-orm";
 import { clearVelocityCache } from "./allocation-engine.service";
 import {
   products,
@@ -352,11 +352,16 @@ class EchelonSyncOrchestrator {
       return result;
     }
 
-    // Load allocation rules for this channel (for applying to per-warehouse ATP)
+    // Load allocation rules for this channel + global rules (channelId IS NULL)
     const allRules = await this.db
       .select()
       .from(channelAllocationRules)
-      .where(eq(channelAllocationRules.channelId, channelId));
+      .where(
+        or(
+          eq(channelAllocationRules.channelId, channelId),
+          isNull(channelAllocationRules.channelId),
+        ),
+      );
 
     // Index rules: channel default, product-level, variant-level
     const channelDefaultRule = allRules.find(
