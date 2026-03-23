@@ -2326,7 +2326,8 @@ export default function Picking() {
     // Use different data based on picking mode
     const channelMatch = (item: any) => {
       if (channelFilter === "all") return true;
-      return String(item.channelId) === channelFilter;
+      const id = item.channelId ?? item.channel_id;
+      return id != null && String(id) === channelFilter;
     };
     const readyItems = (pickingMode === "batch" 
       ? queue.filter(b => b.status === "ready")
