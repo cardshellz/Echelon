@@ -532,34 +532,33 @@ export const channelMethods: IChannelStorage = {
     totalCents: number | null;
     discountCodes: any;
   } | null> {
+    // Primary: read from oms_orders (source of truth)
     const result = await db.execute<{
-      total_price_cents: number | null;
-      subtotal_price_cents: number | null;
-      total_tax_cents: number | null;
-      total_shipping_cents: number | null;
-      total_discounts_cents: number | null;
-      discount_codes: any;
+      subtotal_cents: number | null;
+      total_cents: number | null;
+      tax_cents: number | null;
+      shipping_cents: number | null;
+      discount_cents: number | null;
     }>(sql`
       SELECT
-        total_price_cents,
-        subtotal_price_cents,
-        total_tax_cents,
-        total_shipping_cents,
-        total_discounts_cents,
-        discount_codes
-      FROM shopify_orders
-      WHERE id = ${sourceTableId}
+        subtotal_cents,
+        total_cents,
+        tax_cents,
+        shipping_cents,
+        discount_cents
+      FROM oms_orders
+      WHERE external_order_id = ${sourceTableId}
       LIMIT 1
     `);
     if (result.rows.length === 0) return null;
     const raw = result.rows[0];
     return {
-      subtotalCents: raw.subtotal_price_cents,
-      taxCents: raw.total_tax_cents,
-      shippingCents: raw.total_shipping_cents,
-      discountCents: raw.total_discounts_cents,
-      totalCents: raw.total_price_cents,
-      discountCodes: raw.discount_codes,
+      subtotalCents: raw.subtotal_cents,
+      taxCents: raw.tax_cents,
+      shippingCents: raw.shipping_cents,
+      discountCents: raw.discount_cents,
+      totalCents: raw.total_cents,
+      discountCodes: null, // discount codes not stored on oms_orders; use raw_payload if needed
     };
   },
 

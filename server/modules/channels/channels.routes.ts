@@ -254,7 +254,7 @@ export function registerChannelRoutes(app: Express) {
       const items = await storage.getOrderItems(id);
       const channel = order.channelId ? await storage.getChannelById(order.channelId) : null;
 
-      // Pull financial summary from shopify_orders raw table if available
+      // Pull financial summary from oms_orders (source of truth)
       let financials: {
         subtotalCents: number | null;
         taxCents: number | null;
@@ -291,7 +291,7 @@ export function registerChannelRoutes(app: Express) {
             };
           }
         } catch {
-          // shopify_orders table may not have these columns — fall back silently
+          // oms_orders may not have this order yet — fall back silently
         }
       }
 

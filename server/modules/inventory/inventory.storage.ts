@@ -839,17 +839,14 @@ export const inventoryMethods: IInventoryStorage = {
   async getSyncHealthStats(): Promise<Record<string, unknown>> {
     const result = await db.execute(sql`
       SELECT
-        (SELECT MAX(created_at) FROM shopify_orders) as latest_shopify_order,
-        (SELECT MAX(created_at) FROM orders WHERE source = 'shopify') as latest_synced_order,
-        (SELECT COUNT(*) FROM shopify_orders so
-         WHERE NOT EXISTS(SELECT 1 FROM orders WHERE source_table_id = so.id)
-         AND so.created_at > NOW() - INTERVAL '24 hours'
-         AND so.cancelled_at IS NULL
-         AND EXISTS(
-           SELECT 1 FROM shopify_order_items soi
-           WHERE soi.order_id = so.id
-           AND (soi.fulfillment_status IS NULL OR soi.fulfillment_status != 'fulfilled')
-         )) as unsynced_24h
+        (SELECT MAX(ordered_at) FROM oms_orders) as latest_oms_order,
+        (SELECT MAX(created_at) FROM orders) as latest_synced_order,
+        (SELECT COUNT(*) FROM oms_orders oms
+         WHERE NOT EXISTS(SELECT 1 FROM orders WHERE order_number = oms.external_order_number)
+         AND oms.created_at > NOW() - INTERVAL '24 hours'
+         AND oms.cancelled_at IS NULL
+         AND oms.fulfillment_status IS DISTINCT FROM 'fulfilled'
+        ) as unsynced_24h
     `);
     return (result.rows[0] || {}) as Record<string, unknown>;
   },
@@ -865,8 +862,8 @@ export const inventoryMethods: IInventoryStorage = {
 
   async getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }> {
     const missing = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM shopify_orders
-      WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+      SELECT COUNT(*) as count FROM oms_orders
+      WHERE external_order_number NOT IN (SELECT order_number FROM orders WHERE order_number IS NOT NULL)
     `);
 
     const sample = await db.execute<{
@@ -874,8 +871,8 @@ export const inventoryMethods: IInventoryStorage = {
       order_number: string | null;
       created_at: Date | null;
     }>(sql`
-      SELECT id, order_number, created_at FROM shopify_orders
-      WHERE id NOT IN (SELECT source_table_id FROM orders WHERE source_table_id IS NOT NULL)
+      SELECT id::text as id, external_order_number as order_number, created_at FROM oms_orders
+      WHERE external_order_number NOT IN (SELECT order_number FROM orders WHERE order_number IS NOT NULL)
       ORDER BY created_at DESC
       LIMIT 5
     `);
@@ -888,7 +885,7 @@ export const inventoryMethods: IInventoryStorage = {
         fulfillable_quantity: number | null;
         quantity: number;
       }>(sql`
-        SELECT id, fulfillment_status, fulfillable_quantity, quantity FROM shopify_order_items WHERE order_id = ${order.id}
+        SELECT id::text as id, fulfillment_status, quantity as fulfillable_quantity, quantity FROM oms_order_lines WHERE order_id = ${order.id}::bigint
       `);
       sampleWithItems.push({
         ...order,

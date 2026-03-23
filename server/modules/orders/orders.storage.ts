@@ -158,12 +158,12 @@ export const orderMethods: IOrderStorage = {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     const orderList = await db.execute(sql`
-      SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), s.customer_name) as resolved_customer_name
+      SELECT o.*, COALESCE(NULLIF(o.customer_name, ''), oms.customer_name) as resolved_customer_name
       FROM orders o
-      LEFT JOIN shopify_orders s ON o.source_table_id = s.id
-      WHERE (s.cancelled_at IS NULL OR s.id IS NULL)
+      LEFT JOIN oms_orders oms ON o.order_number = oms.external_order_number
+      WHERE (oms.cancelled_at IS NULL OR oms.id IS NULL)
         AND o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
-        AND (s.id IS NULL OR s.fulfillment_status IS NULL OR s.fulfillment_status != 'fulfilled')
+        AND (oms.id IS NULL OR oms.fulfillment_status IS NULL OR oms.fulfillment_status != 'fulfilled')
         AND (
           -- Ready/in_progress orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress')
@@ -767,11 +767,36 @@ export const orderMethods: IOrderStorage = {
       shipping_country: string | null;
       cancelled_at: Date | null;
     }>(sql`
-      SELECT * FROM shopify_orders
-      WHERE fulfillment_status IS NULL
-         OR fulfillment_status = 'unfulfilled'
-         OR fulfillment_status = 'partial'
-      ORDER BY order_date DESC
+      SELECT
+        oms.id::text as id,
+        oms.external_order_number as order_number,
+        NULL as legacy_order_id,
+        NULL as member_id,
+        NULL as shopify_customer_id,
+        oms.ordered_at as order_date,
+        oms.financial_status,
+        oms.fulfillment_status,
+        oms.total_cents as total_price_cents,
+        oms.currency,
+        oms.notes as note,
+        oms.tags::text[] as tags,
+        NULL as discount_codes,
+        oms.created_at,
+        oms.customer_name,
+        oms.customer_email,
+        oms.ship_to_name as shipping_name,
+        oms.ship_to_address1 as shipping_address1,
+        oms.ship_to_address2 as shipping_address2,
+        oms.ship_to_city as shipping_city,
+        oms.ship_to_state as shipping_state,
+        oms.ship_to_zip as shipping_postal_code,
+        oms.ship_to_country as shipping_country,
+        oms.cancelled_at
+      FROM oms_orders oms
+      WHERE oms.fulfillment_status IS NULL
+         OR oms.fulfillment_status = 'unfulfilled'
+         OR oms.fulfillment_status = 'partial'
+      ORDER BY oms.ordered_at DESC
     `);
     return result.rows;
   },
@@ -795,51 +820,51 @@ export const orderMethods: IOrderStorage = {
   },
 
   async syncFulfilledStatusesFromShopify() {
-    // 1. Update ORDERS status to 'completed' where Shopify shows fulfilled
+    // 1. Update ORDERS status to 'completed' where OMS shows fulfilled/shipped
     await db.execute(sql`
       UPDATE orders o SET
         status = 'completed',
         completed_at = COALESCE(o.completed_at, NOW())
-      FROM shopify_orders s
-      WHERE o.source_table_id = s.id
-        AND s.fulfillment_status = 'fulfilled'
+      FROM oms_orders oms
+      WHERE o.order_number = oms.external_order_number
+        AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
         AND o.warehouse_status != 'completed'
     `);
 
-    // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where Shopify item is fulfilled
+    // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where OMS line item is fulfilled
     await db.execute(sql`
       UPDATE order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
-      FROM shopify_order_items soi
-      WHERE oi.source_item_id = soi.id
-        AND soi.fulfillment_status = 'fulfilled'
+      FROM oms_order_lines ol
+      WHERE oi.source_item_id = ol.external_line_item_id
+        AND ol.fulfillment_status = 'fulfilled'
         AND oi.status != 'completed'
     `);
 
-    // 3. Also update items where the parent ORDER is fulfilled
+    // 3. Also update items where the parent ORDER is fulfilled in OMS
     await db.execute(sql`
       UPDATE order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
       FROM orders o
-      INNER JOIN shopify_orders s ON o.source_table_id = s.id
+      INNER JOIN oms_orders oms ON o.order_number = oms.external_order_number
       WHERE oi.order_id = o.id
-        AND s.fulfillment_status = 'fulfilled'
+        AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
         AND oi.status != 'completed'
     `);
 
-    // 4. Handle partial fulfillments - update items individually
+    // 4. Handle partial fulfillments - update items individually from OMS line items
     await db.execute(sql`
       UPDATE order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
-      FROM shopify_order_items soi
-      WHERE oi.source_item_id = soi.id
-        AND soi.fulfillment_status = 'fulfilled'
+      FROM oms_order_lines ol
+      WHERE oi.source_item_id = ol.external_line_item_id
+        AND ol.fulfillment_status = 'fulfilled'
         AND oi.status = 'pending'
     `);
   },
@@ -847,21 +872,15 @@ export const orderMethods: IOrderStorage = {
   async backfillOrdersFromShopifyRaw(): Promise<{ updated: number }> {
     const result = await db.execute(sql`
       UPDATE orders o SET
-        customer_name = COALESCE(s.customer_name, s.shipping_name, o.customer_name),
-        customer_email = COALESCE(s.customer_email, o.customer_email),
-        shipping_address = COALESCE(s.shipping_address1, o.shipping_address),
-        shipping_city = COALESCE(s.shipping_city, o.shipping_city),
-        shipping_state = COALESCE(s.shipping_state, o.shipping_state),
-        shipping_postal_code = COALESCE(s.shipping_postal_code, o.shipping_postal_code),
-        shipping_country = COALESCE(s.shipping_country, o.shipping_country)
-      FROM shopify_orders s
-      WHERE o.source = 'shopify'
-        AND (
-          o.source_table_id = CAST(s.id AS TEXT)
-          OR o.shopify_order_id = s.id
-          OR o.shopify_order_id = REPLACE(s.id, 'gid://shopify/Order/', '')
-          OR CONCAT('gid://shopify/Order/', o.shopify_order_id) = s.id
-        )
+        customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
+        customer_email = COALESCE(oms.customer_email, o.customer_email),
+        shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
+        shipping_city = COALESCE(oms.ship_to_city, o.shipping_city),
+        shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
+        shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
+        shipping_country = COALESCE(oms.ship_to_country, o.shipping_country)
+      FROM oms_orders oms
+      WHERE o.order_number = oms.external_order_number
         AND (o.shipping_address IS NULL OR o.shipping_city IS NULL)
     `);
     return { updated: result.rowCount || 0 };
