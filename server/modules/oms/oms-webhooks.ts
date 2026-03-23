@@ -21,6 +21,7 @@ import { omsOrders, omsOrderLines, omsOrderEvents, productVariants } from "@shar
 import { db } from "../../db";
 import { ordersStorage } from "../orders";
 import { warehouseStorage } from "../warehouse";
+import { pushToMissionControl } from "./mc-push";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -413,6 +414,7 @@ export function registerOmsWebhooks(
       }
 
       console.log(`${LOG_PREFIX} ✅ Processed new order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
+      pushToMissionControl(omsOrder.id, "order.created");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/paid error for ${shopifyOrder.name}: ${err.message}`);
     }
@@ -574,6 +576,7 @@ export function registerOmsWebhooks(
       });
 
       console.log(`${LOG_PREFIX} ✅ Updated order ${shopifyOrder.name} (OMS id=${existing.id})`);
+      pushToMissionControl(existing.id, "order.updated");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/updated error for ${shopifyOrder.name}: ${err.message}`);
     }
@@ -664,6 +667,7 @@ export function registerOmsWebhooks(
       });
 
       console.log(`${LOG_PREFIX} ✅ Cancelled order ${shopifyOrder.name} (OMS id=${existing.id})`);
+      pushToMissionControl(existing.id, "order.cancelled");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/cancelled error for ${shopifyOrder.name}: ${err.message}`);
     }
@@ -759,6 +763,7 @@ export function registerOmsWebhooks(
       });
 
       console.log(`${LOG_PREFIX} ✅ Fulfilled order ${shopifyOrder.name} (tracking: ${trackingNumber || "none"})`);
+      pushToMissionControl(existing.id, "order.fulfilled");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} orders/fulfilled error for ${shopifyOrder.name}: ${err.message}`);
     }
@@ -879,6 +884,7 @@ export function registerOmsWebhooks(
       });
 
       console.log(`${LOG_PREFIX} ✅ Processed refund for order ${existing.externalOrderNumber} → ${financialStatus}`);
+      pushToMissionControl(existing.id, "order.refunded");
     } catch (err: any) {
       console.error(`${LOG_PREFIX} refunds/create error for order ${shopifyOrderId}: ${err.message}`);
     }
