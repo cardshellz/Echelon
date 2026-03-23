@@ -228,8 +228,7 @@ async function createWmsOrderFromEbay(
   const totalUnits = enrichedItems.reduce((sum, item) => sum + item.quantity, 0);
   const warehouseStatus = orderData.financialStatus === "paid" ? "ready" : "ready";
 
-  // Use EB- prefix for order number to distinguish from Shopify orders
-  const orderNumber = `EB-${externalOrderId}`;
+  const orderNumber = externalOrderId;
 
   const newOrder = await ordersStorage.createOrderWithItems({
     channelId: EBAY_CHANNEL_ID,
