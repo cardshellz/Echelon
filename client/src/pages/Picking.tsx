@@ -984,6 +984,7 @@ export default function Picking() {
   };
   
   const [view, setView] = useState<"queue" | "picking" | "complete" | "exceptions">("queue");
+  const [channelFilter, setChannelFilter] = useState<string>("all");
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<string | null>(null);
   const [currentItemIndex, setCurrentItemIndex] = useState(0);
@@ -2323,15 +2324,26 @@ export default function Picking() {
   // QUEUE VIEW
   if (view === "queue") {
     // Use different data based on picking mode
-    const readyItems = pickingMode === "batch" 
+    const channelMatch = (item: any) => {
+      if (channelFilter === "all") return true;
+      const provider = item.channelProvider?.toLowerCase() || "";
+      const orderNum = item.orderNumber || item.orders?.[0]?.orderNumber || "";
+      if (channelFilter === "ebay") return provider === "ebay" || orderNum.match(/^\d{2}-\d{5}-\d{5}$/);
+      if (channelFilter === "shopify") return provider === "shopify" || orderNum.startsWith("#");
+      return true;
+    };
+    const readyItems = (pickingMode === "batch" 
       ? queue.filter(b => b.status === "ready")
-      : singleQueue.filter(o => o.status === "ready" && !o.onHold);
-    const inProgressItems = pickingMode === "batch"
+      : singleQueue.filter(o => o.status === "ready" && !o.onHold)
+    ).filter(channelMatch);
+    const inProgressItems = (pickingMode === "batch"
       ? queue.filter(b => b.status === "in_progress")
-      : singleQueue.filter(o => o.status === "in_progress");
-    const completedItems = pickingMode === "batch"
+      : singleQueue.filter(o => o.status === "in_progress")
+    ).filter(channelMatch);
+    const completedItems = (pickingMode === "batch"
       ? queue.filter(b => b.status === "completed")
-      : singleQueue.filter(o => o.status === "completed");
+      : singleQueue.filter(o => o.status === "completed")
+    ).filter(channelMatch);
     const holdItems = pickingMode === "single"
       ? singleQueue.filter(o => o.onHold)
       : [];
@@ -2418,6 +2430,19 @@ export default function Picking() {
               </div>
             </div>
             
+            {/* Channel Filter */}
+            <div className="flex items-center gap-1.5">
+              <select
+                value={channelFilter}
+                onChange={(e) => setChannelFilter(e.target.value)}
+                className="h-8 text-xs rounded-md border bg-background px-2 min-w-[90px]"
+              >
+                <option value="all">All Channels</option>
+                <option value="shopify">Shopify</option>
+                <option value="ebay">eBay</option>
+              </select>
+            </div>
+
             {/* Right: Actions */}
             <div className="flex items-center gap-1.5">
               {/* Mode Toggle - Compact */}
