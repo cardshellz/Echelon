@@ -1443,9 +1443,14 @@ export default function Picking() {
     } else {
       setTimeout(() => {
         advanceToNext();
-        maintainFocus();
         }, 300);
     }
+    // Always refocus scan input after pick confirmation — even if a dialog opens briefly
+    setTimeout(() => {
+      if (manualInputRef.current && !shortPickOpen && !binCountOpen && !replenConfirmOpen) {
+        manualInputRef.current.focus();
+      }
+    }, 500);
   };
   
   // Check replen guidance before opening short pick dialog
