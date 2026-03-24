@@ -8,8 +8,6 @@ import {
   orderItems,
   orders,
   itemStatusEnum,
-  cycleCounts,
-  cycleCountItems,
 } from "@shared/schema";
 import type {
   InventoryLevel,
@@ -35,16 +33,6 @@ type InventoryCore = {
   getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
   upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
   adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
-  adjustInventory: (params: {
-    productVariantId: number;
-    warehouseLocationId: number;
-    qtyDelta: number;
-    reason: string;
-    reasonId?: number;
-    cycleCountId?: number;
-    userId?: string;
-    allowNegative?: boolean;
-  }) => Promise<void>;
   logTransaction: (txn: any) => Promise<void>;
   pickItem: (params: {
     productVariantId: number;
@@ -60,6 +48,7 @@ type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
   createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
+  inferUnrecordedReplen: (pickVariantId: number, toLocationId: number, surplusQty: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
 };
 
@@ -130,8 +119,8 @@ export type BinCountResult = {
   replenTriggered: boolean;
   replenTaskStatus: string | null;
   replenFailReason: string | null;
-  parentCycleCountTriggered: boolean; // true if a cycle count was created for the parent variant's source location
-  parentCycleCountLocationCode: string | null; // location code of the parent variant's source bin
+  inferredReplen: boolean; // true if system inferred an unrecorded case break from surplus
+  inferredReplenMoved: number | null; // units attributed to inferred replen
 };
 
 export type PickQueueOrder = any; // Pass-through type from storage
@@ -695,15 +684,28 @@ class PickingService {
     const adjustment = actualBinQty - systemQty;
 
     if (adjustment !== 0) {
-      // Route through inventoryCore.adjustInventory() for audit trail, lot tracking,
-      // negative guards, and notifyChange (triggers channel sync)
-      await this.inventoryCore.adjustInventory({
+      if (!level) {
+        const newLevel = await this.inventoryCore.upsertLevel(variant.id, warehouseLocationId);
+        if (actualBinQty > 0) {
+          await this.inventoryCore.adjustLevel(newLevel.id, { variantQty: actualBinQty });
+        }
+      } else {
+        await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
+      }
+
+      await this.inventoryCore.logTransaction({
         productVariantId: variant.id,
-        warehouseLocationId,
-        qtyDelta: adjustment,
-        reason: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
-        userId: userId || undefined,
-        allowNegative: true, // bin count is authoritative — allow corrections below zero
+        toLocationId: warehouseLocationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: adjustment,
+        variantQtyBefore: systemQty,
+        variantQtyAfter: actualBinQty,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "picker_case_break",
+        referenceId: `${sku}:${warehouseLocationId}`,
+        notes: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
+        userId: userId || null,
       });
     } else {
       // Log verification even when count matches system (audit trail)
@@ -719,7 +721,7 @@ class PickingService {
         referenceType: "picker_verification",
         referenceId: `${sku}:${warehouseLocationId}`,
         notes: `Picker verified bin count matches system: qty=${systemQty}`,
-        userId: userId || undefined,
+        userId: userId || null,
       });
     }
 
@@ -736,8 +738,8 @@ class PickingService {
       replenTriggered: !!replenTask,
       replenTaskStatus: replenTask?.status || null,
       replenFailReason: null,
-      parentCycleCountTriggered: false,
-      parentCycleCountLocationCode: null,
+      inferredReplen: false,
+      inferredReplenMoved: null,
     };
   }
 
@@ -755,16 +757,22 @@ class PickingService {
     const systemQty = level?.variantQty ?? 0;
     const adjustment = actualBinQty - systemQty;
 
-    // Correct inventory if needed — route through adjustInventory() for audit trail,
-    // lot tracking, negative guards, and notifyChange (triggers channel sync)
-    if (adjustment !== 0) {
-      await this.inventoryCore.adjustInventory({
+    // Correct inventory if needed
+    if (adjustment !== 0 && level) {
+      await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
+      await this.inventoryCore.logTransaction({
         productVariantId: variant.id,
-        warehouseLocationId,
-        qtyDelta: adjustment,
-        reason: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
-        userId: userId || undefined,
-        allowNegative: true, // bin count is authoritative
+        toLocationId: warehouseLocationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: adjustment,
+        variantQtyBefore: systemQty,
+        variantQtyAfter: actualBinQty,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: "picker_replen_skip",
+        referenceId: `${sku}:${warehouseLocationId}`,
+        notes: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
+        userId: userId || null,
       });
     }
 
@@ -779,7 +787,7 @@ class PickingService {
       }
     }
 
-    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null, replenFailReason: null, parentCycleCountTriggered: false, parentCycleCountLocationCode: null };
+    return { success: true, systemQtyBefore: systemQty, actualBinQty, adjustment, replenTriggered: false, replenTaskStatus: null, replenFailReason: null, inferredReplen: false, inferredReplenMoved: null };
   }
 
   // -------------------------------------------------------------------------
@@ -838,110 +846,75 @@ class PickingService {
     const level = await this.inventoryCore.getLevel(variant.id, locationId);
     const systemQty = level?.variantQty ?? 0;
 
-    // Step 3: Calculate adjustment — bin count is authoritative
+    // Step 3: If there's a surplus and picker didn't explicitly confirm replen,
+    // infer that an unrecorded case break / replen occurred. This keeps the
+    // source bin accurate instead of dumping everything into a blind cycle count.
+    let inferredReplen: { moved: number } | null = null;
     const surplus = binCount - systemQty;
-    const adjustment = surplus; // No inferred replen — surplus is just a count discrepancy
-
-    // Step 4: If there's a surplus and picker didn't do a replen, trigger a
-    // cycle count on the parent variant's source location. The bin count is
-    // truth — we adjust and move on, but flag the parent location for verification.
-    let parentCycleCountTriggered = false;
-    let parentCycleCountLocationCode: string | null = null;
 
     if (!didReplen && surplus > 0) {
       try {
-        // Find parent variant (higher hierarchyLevel in the same product)
-        if (variant.parentVariantId) {
-          const parentVariantRows = await this.db
-            .select()
-            .from(productVariants)
-            .where(eq(productVariants.id, variant.parentVariantId))
-            .limit(1);
-          const parentVariant = parentVariantRows[0];
-
-          if (parentVariant) {
-            // Find the parent variant's primary inventory location
-            const parentLevels = await this.storage.getInventoryLevelsByProductVariantId(parentVariant.id);
-            const parentLevel = parentLevels.find((l: any) => l.variantQty > 0) || parentLevels[0];
-
-            if (parentLevel) {
-              // Get the location details for the log message
-              const allLocations = await this.storage.getAllWarehouseLocations();
-              const parentLocation = allLocations.find((l: WarehouseLocation) => l.id === parentLevel.warehouseLocationId);
-              const parentLocationCode = parentLocation?.code || `LOC-${parentLevel.warehouseLocationId}`;
-
-              // Create a cycle count for the parent variant's source location
-              const ccRows = await this.db.insert(cycleCounts).values({
-                name: `Picker surplus verify: ${parentVariant.sku || parentVariant.name} @ ${parentLocationCode}`,
-                description: `Auto-created: picker counted ${binCount} units at pick bin (system expected ${systemQty}, surplus of ${surplus}). Parent location needs verification.`,
-                status: "in_progress",
-                totalBins: 1,
-                countedBins: 0,
-                varianceCount: 0,
-                approvedVariances: 0,
-                createdBy: userId || "system",
-                startedAt: new Date(),
-              }).returning();
-              const cc = ccRows[0];
-
-              // Create the cycle count item for the parent variant's bin
-              const parentSystemQty = parentLevel.variantQty ?? 0;
-              await this.db.insert(cycleCountItems).values({
-                cycleCountId: cc.id,
-                warehouseLocationId: parentLevel.warehouseLocationId,
-                productVariantId: parentVariant.id,
-                productId: parentVariant.productId,
-                expectedSku: parentVariant.sku,
-                expectedQty: parentSystemQty,
-                status: "pending",
-              });
-
-              parentCycleCountTriggered = true;
-              parentCycleCountLocationCode = parentLocationCode;
-              console.log(`[BinCount] surplus detected (${surplus} units), created cycle count #${cc.id} for parent ${parentVariant.sku} @ ${parentLocationCode}`);
-            }
-          }
+        inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
+        if (inferredReplen) {
+          console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
+          // Re-read system qty after the inferred replen credited the destination
+          // (executeTask already adjusted the level)
         } else {
-          console.log(`[BinCount] surplus of ${surplus} detected but no parent variant — simple count discrepancy, adjusting`);
+          console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
         }
       } catch (err: any) {
-        console.warn(`[BinCount] failed to create parent cycle count:`, err?.message);
+        console.warn(`[BinCount] inferred replen failed:`, err?.message);
       }
     }
 
-    if (adjustment !== 0) {
-      // Adjust bin to match actual count — bin count is authoritative
-      const notes = didReplen
-        ? `Bin count after replen: system=${systemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
-        : `Bin count: system=${systemQty}, actual=${binCount}, adjustment=${adjustment}${parentCycleCountTriggered ? `, parent cycle count triggered @ ${parentCycleCountLocationCode}` : ''}`;
-      await this.inventoryCore.adjustInventory({
+    // Step 4: Re-read system qty again (reflects: pick deduction + explicit replen + inferred replen)
+    const postLevel = await this.inventoryCore.getLevel(variant.id, locationId);
+    const postSystemQty = postLevel?.variantQty ?? systemQty;
+    const adjustment = binCount - postSystemQty;
+
+    if (adjustment !== 0 && postLevel) {
+      // Remaining gap = unexplained variance (cycle count)
+      await this.inventoryCore.adjustLevel(postLevel.id, { variantQty: adjustment });
+      await this.inventoryCore.logTransaction({
         productVariantId: variant.id,
-        warehouseLocationId: locationId,
-        qtyDelta: adjustment,
-        reason: notes,
-        userId: userId || undefined,
-        allowNegative: true, // bin count is authoritative
+        toLocationId: locationId,
+        transactionType: "cycle_count",
+        variantQtyDelta: adjustment,
+        variantQtyBefore: postSystemQty,
+        variantQtyAfter: binCount,
+        sourceState: "on_hand",
+        targetState: "on_hand",
+        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
+        referenceId: `${sku}:${locationId}`,
+        notes: didReplen
+          ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
+          : inferredReplen
+            ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
+            : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`,
+        userId: userId || null,
       });
     } else {
-      // No adjustment needed — log for audit trail
+      // No remaining adjustment — log for audit trail
       await this.inventoryCore.logTransaction({
         productVariantId: variant.id,
         toLocationId: locationId,
         transactionType: "cycle_count",
         variantQtyDelta: 0,
-        variantQtyBefore: systemQty,
+        variantQtyBefore: postSystemQty,
         variantQtyAfter: binCount,
         sourceState: "on_hand",
         targetState: "on_hand",
-        referenceType: didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
+        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
         referenceId: `${sku}:${locationId}`,
-        notes: `Bin count verified: system=${systemQty}, actual=${binCount} (match)${didReplen ? `, replen moved=${replenResult?.moved ?? 'failed'}` : ''}`,
-        userId: userId || undefined,
+        notes: inferredReplen
+          ? `Bin count verified after inferred replen: system=${postSystemQty}, actual=${binCount} (match). Inferred replen moved ${inferredReplen.moved} units from source.`
+          : `Bin count verified: system=${postSystemQty}, actual=${binCount} (match)${didReplen ? `, replen moved=${replenResult?.moved ?? 'failed'}` : ''}`,
+        userId: userId || null,
       });
     }
 
-    // Step 5: If picker said NO replen, cancel orphaned pending tasks
-    if (!didReplen) {
+    // Step 5: If picker said NO replen (and no inferred replen), cancel orphaned pending tasks
+    if (!didReplen && !inferredReplen) {
       const existingTasks = await this.storage.getPendingReplenTasksForLocation(locationId);
       for (const task of existingTasks) {
         if (task.pickProductVariantId === variant.id && (task.status === "pending" || task.status === "blocked")) {
@@ -958,11 +931,11 @@ class PickingService {
       systemQtyBefore: systemQty,
       actualBinQty: binCount,
       adjustment,
-      replenTriggered: !!replenResult,
-      replenTaskStatus: replenResult ? "completed" : null,
+      replenTriggered: !!replenResult || !!inferredReplen,
+      replenTaskStatus: replenResult ? "completed" : inferredReplen ? "completed" : null,
       replenFailReason: didReplen && !replenResult ? replenFailReason : null,
-      parentCycleCountTriggered,
-      parentCycleCountLocationCode,
+      inferredReplen: !!inferredReplen,
+      inferredReplenMoved: inferredReplen?.moved ?? null,
     };
   }
 
