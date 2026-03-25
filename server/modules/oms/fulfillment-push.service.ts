@@ -41,6 +41,16 @@ export function createFulfillmentPushService(
   db: any,
   ebayApiClient: EbayApiClient | null,
 ) {
+  // Mutable reference to allow injecting the eBay client after service creation
+  let _ebayApiClient = ebayApiClient;
+
+  /**
+   * Set the eBay API client (called after service initialization when client is ready).
+   */
+  function setEbayClient(client: EbayApiClient): void {
+    _ebayApiClient = client;
+  }
+
   /**
    * Push tracking to the originating channel for a shipped OMS order.
    */
@@ -100,7 +110,7 @@ export function createFulfillmentPushService(
   }
 
   async function pushToEbay(order: any, orderId: number): Promise<boolean> {
-    if (!ebayApiClient) {
+    if (!_ebayApiClient) {
       console.error(`[FulfillmentPush] eBay API client not available`);
       return false;
     }
@@ -129,7 +139,7 @@ export function createFulfillmentPushService(
     };
 
     // Push to Card Shellz's eBay (or the originating channel)
-    const result = await ebayApiClient.createShippingFulfillment(
+    const result = await _ebayApiClient.createShippingFulfillment(
       order.externalOrderId,
       fulfillmentPayload,
     );
@@ -242,7 +252,7 @@ export function createFulfillmentPushService(
     });
   }
 
-  return { pushTracking };
+  return { pushTracking, setEbayClient };
 }
 
 export type FulfillmentPushService = ReturnType<typeof createFulfillmentPushService>;

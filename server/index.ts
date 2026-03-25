@@ -294,6 +294,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     const ebayAuthService = new EbayAuthService(db, ebayConfig);
     const ebayApiClient = createEbayApiClient(ebayAuthService, 67);
 
+    // Wire eBay client into fulfillment push service for tracking push
+    services.fulfillmentPush.setEbayClient(ebayApiClient);
+
     startEbayOrderPolling(services.oms, ebayApiClient);
 
     // Register eBay order webhook
