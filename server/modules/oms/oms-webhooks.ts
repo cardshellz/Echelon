@@ -58,8 +58,19 @@ interface ShipStationService {
 // ---------------------------------------------------------------------------
 
 function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boolean {
-  const secret = process.env.SHOPIFY_API_SECRET;
-  if (!secret || !hmacHeader) return false;
+  if (!hmacHeader) return false;
+  const crypto = require("crypto");
+  // Try both app API secret and admin webhook secret
+  const secrets = [process.env.SHOPIFY_API_SECRET, process.env.SHOPIFY_WEBHOOK_SECRET].filter(Boolean) as string[];
+  for (const secret of secrets) {
+    const computed = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
+    try {
+      if (crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(hmacHeader))) return true;
+    } catch {
+      if (computed === hmacHeader) return true;
+    }
+  }
+  return false;
 
   const computed = createHmac("sha256", secret)
     .update(rawBody)
