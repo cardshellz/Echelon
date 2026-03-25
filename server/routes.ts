@@ -24,6 +24,7 @@ import { registerVendorPortalRoutes, registerStripeWebhookRoute } from "./module
 import { registerVendorEbayRoutes } from "./modules/dropship/vendor-ebay.routes";
 import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
 import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
+import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -60,6 +61,7 @@ export async function registerRoutes(
   registerVendorEbayRoutes(app);       // vendor eBay OAuth + listing push
   registerStripeWebhookRoute(app);     // Stripe webhook (public, signature-verified)
   registerSubscriptionRoutes(app);     // Subscription admin routes (behind auth)
+  registerDiagnosticsRoutes(app);      // System diagnostics (admin-only)
 
   return httpServer;
 }
