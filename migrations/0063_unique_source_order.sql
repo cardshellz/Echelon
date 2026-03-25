@@ -1,6 +1,12 @@
 -- Add unique constraint to prevent duplicate order ingestion from webhooks
 -- This enforces database-level idempotency: same source order can only be imported once
 
+-- Primary constraint: use the channel-specific ID column (shopify_order_id for Shopify, etc.)
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_shopify_unique 
+ON orders (shopify_order_id) 
+WHERE shopify_order_id IS NOT NULL;
+
+-- Secondary constraint: (source, source_table_id) for non-Shopify channels and belt-and-suspenders
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_source_unique 
 ON orders (source, source_table_id) 
 WHERE source_table_id IS NOT NULL;
