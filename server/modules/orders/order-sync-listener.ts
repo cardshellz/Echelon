@@ -107,9 +107,9 @@ let queueProcessorRunning = false;
  * Returns true if order was created, false if skipped/already exists.
  */
 export async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> {
-  // Check if already synced
+  // Check if already synced (race-safe: unique constraint on source+source_table_id enforces this)
   const alreadySynced = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders WHERE source_table_id = ${shopifyOrderId} LIMIT 1
+    SELECT id FROM orders WHERE source_table_id = ${shopifyOrderId} AND source = 'shopify' LIMIT 1
   `);
   if (alreadySynced.rows.length > 0) {
     return false; // Already exists
@@ -252,7 +252,9 @@ export async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> 
     ? (rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : new Date())
     : undefined;
 
-  const newOrder = await storage.createOrderWithItems({
+  let newOrder;
+  try {
+    newOrder = await storage.createOrderWithItems({
     shopifyOrderId: rawOrder.id,
     externalOrderId: rawOrder.id,
     sourceTableId: rawOrder.id,
@@ -280,6 +282,14 @@ export async function syncSingleOrder(shopifyOrderId: string): Promise<boolean> 
     shopifyCreatedAt: rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : undefined,
     orderPlacedAt: rawOrder.order_date ? new Date(rawOrder.order_date) : rawOrder.created_at ? new Date(rawOrder.created_at) : undefined,
   }, enrichedItems);
+  } catch (createErr: any) {
+    // Handle unique constraint violation (concurrent webhook race)
+    if (createErr.code === '23505' || createErr.message?.includes('unique constraint')) {
+      console.log(`[ORDER SYNC] Order ${rawOrder.order_number} (${shopifyOrderId}) already exists (concurrent insert) — skipping`);
+      return false;
+    }
+    throw createErr; // Re-throw other errors
+  }
 
   // Route order to the correct warehouse via fulfillment routing rules
   try {
