@@ -16,6 +16,31 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       // Delete duplicates where shopify_order_id differs only by gid:// prefix
       // Keep the EARLIEST created row
+      
+      // First: delete inventory_transactions that reference order_items
+      const transactionsResult = await db.execute(sql`
+        DELETE FROM inventory_transactions
+        WHERE order_item_id IN (
+          SELECT oi.id FROM order_items oi
+          WHERE oi.order_id IN (
+            SELECT id FROM (
+              SELECT 
+                id,
+                REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '') as normalized_id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
+                  ORDER BY created_at ASC
+                ) as rn
+              FROM orders
+              WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
+            ) t
+            WHERE rn > 1 AND normalized_id != ''
+          )
+        )
+        RETURNING id
+      `);
+
+      // Second: delete order_items
       const itemsResult = await db.execute(sql`
         DELETE FROM order_items 
         WHERE order_id IN (
@@ -56,6 +81,7 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       res.json({
         success: true,
+        deletedTransactions: transactionsResult.rows.length,
         deletedItems: itemsResult.rows.length,
         deletedOrders: ordersResult.rows.length,
       });
