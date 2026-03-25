@@ -13,6 +13,7 @@
 import { eq, and, sql } from "drizzle-orm";
 import { omsOrders, omsOrderEvents, omsOrderLines, channels, productVariants, inventoryLevels } from "@shared/schema";
 import type { OmsOrderWithLines } from "./oms.service";
+import { buildTrackingUrl } from "./tracking-url.util";
 
 const EBAY_CHANNEL_ID = 67;
 
@@ -339,23 +340,14 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
               // Mark WMS order as shipped (unless already shipped/cancelled)
               if (wmsStatus !== "shipped" && wmsStatus !== "cancelled") {
-                // Build tracking URL based on carrier
-                let trackingUrl = "";
-                const carrierLower = carrier.toLowerCase();
-                if (carrierLower === "usps") {
-                  trackingUrl = `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`;
-                } else if (carrierLower === "ups") {
-                  trackingUrl = `https://www.ups.com/track?tracknum=${trackingNumber}`;
-                } else if (carrierLower === "fedex") {
-                  trackingUrl = `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`;
-                }
+                const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
 
                 await db.execute(sql`
                   UPDATE orders SET
                     warehouse_status = 'shipped',
                     completed_at = ${now},
                     tracking_number = ${trackingNumber},
-                    tracking_url = ${trackingUrl || null}
+                    tracking_url = ${trackingUrl}
                   WHERE id = ${wmsOrderId}
                 `);
 
