@@ -3,6 +3,57 @@ import { db } from "../db";
 import { sql } from "drizzle-orm";
 
 export function registerDiagnosticsRoutes(app: Express) {
+  // Clean up duplicate orders (DELETE operation - requires confirmation)
+  app.post("/api/diagnostics/cleanup-duplicates", async (req, res) => {
+    try {
+      const { confirm } = req.body;
+      if (confirm !== "DELETE_DUPLICATES") {
+        return res.status(400).json({ 
+          error: "Confirmation required",
+          message: "Send { confirm: 'DELETE_DUPLICATES' } to proceed"
+        });
+      }
+
+      // Delete order items first (foreign key constraint)
+      const itemsResult = await db.execute(sql`
+        DELETE FROM order_items 
+        WHERE order_id IN (
+          SELECT id FROM (
+            SELECT id, 
+              ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
+            FROM orders
+            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
+          ) t
+          WHERE rn > 1
+        )
+        RETURNING id
+      `);
+
+      // Delete duplicate orders (keep earliest)
+      const ordersResult = await db.execute(sql`
+        DELETE FROM orders 
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT id, 
+              ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
+            FROM orders
+            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
+          ) t
+          WHERE rn > 1
+        )
+        RETURNING id
+      `);
+
+      res.json({
+        success: true,
+        deletedItems: itemsResult.rows.length,
+        deletedOrders: ordersResult.rows.length,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Check for duplicate orders (admin-only for security)
   app.get("/api/diagnostics/duplicate-orders", async (req, res) => {
     try {
