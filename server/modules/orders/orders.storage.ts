@@ -178,7 +178,7 @@ export const orderMethods: IOrderStorage = {
       sourceTableId: row.source_table_id,
       shopifyOrderId: row.shopify_order_id,
       orderNumber: row.order_number,
-      customerName: row.resolved_customer_name || row.customer_name,
+      customerName: row.customer_name,
       customerEmail: row.customer_email,
       shippingAddress: row.shipping_address,
       shippingCity: row.shipping_city,
