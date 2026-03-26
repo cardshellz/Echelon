@@ -6,7 +6,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
-import { setupOrderSyncListener, initOrderSyncServices, syncSingleOrder } from "./modules/orders/order-sync-listener";
+// REMOVED: order-sync-listener deleted (Phase 3 - duplicate path eliminated)
 import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
@@ -470,13 +470,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     () => {
       log(`serving on port ${port}`);
       
-      // DISABLED: Old Shopify sync path (creates duplicates with OMS webhooks)
-      // Now using direct Echelon OMS webhooks → oms_orders → wmsSync → orders
-      // setupOrderSyncListener();
+      // REMOVED: order-sync-listener deleted (duplicate path)
+      // Now using: Echelon OMS webhooks → oms_orders → wmsSync → orders
 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
-      initReconciliation(syncSingleOrder, services.oms);
-      startShopifyReconciliation();
+      // TODO: Update reconciliation to work without syncSingleOrder
+      // initReconciliation(syncSingleOrder, services.oms);
+      // startShopifyReconciliation();
 
       // Start subscription billing scheduler (runs hourly)
       startBillingScheduler();
