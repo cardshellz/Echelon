@@ -93,6 +93,11 @@ export function registerPickingRoutes(app: Express) {
 
   app.get("/api/picking/queue", async (req, res) => {
     try {
+      // Disable caching - pick queue changes frequently
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      
       const { picking } = req.app.locals.services;
       const orders = await picking.getPickQueue();
       res.json(orders);
