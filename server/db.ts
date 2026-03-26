@@ -588,7 +588,7 @@ export async function runStartupMigrations(): Promise<void> {
         password_hash VARCHAR(200) NOT NULL,
         company_name VARCHAR(200),
         phone VARCHAR(50),
-        shellz_club_member_id INTEGER REFERENCES members(id),
+        shellz_club_member_id VARCHAR(255), -- Shellz Club member ID (external DB, no FK)
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         tier VARCHAR(20) DEFAULT 'standard',
         ebay_oauth_token TEXT,
