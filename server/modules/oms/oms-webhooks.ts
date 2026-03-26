@@ -332,6 +332,7 @@ export function registerOmsWebhooks(
   omsService: OmsService,
   wmsServices: WmsServices | null,
   shipStationService: ShipStationService | null,
+  wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
 ) {
   // Helper: verify HMAC using rawBody from express.json verify callback, return parsed body or null
   function verifyAndParse(req: Request, res: Response): any | null {
@@ -400,11 +401,21 @@ export function registerOmsWebhooks(
         return;
       }
 
-      // Create WMS order for pick queue
-      try {
-        await createWmsOrderFromShopify(omsOrder.id, orderData, shopifyOrder, wmsServices);
-      } catch (e: any) {
-        console.error(`${LOG_PREFIX} WMS order creation failed for ${shopifyOrder.name}: ${e.message}`);
+      // Sync to WMS via sync service (replaces createWmsOrderFromShopify dual-write)
+      if (wmsSyncService) {
+        try {
+          await wmsSyncService.syncOmsOrderToWms(omsOrder.id);
+          console.log(`${LOG_PREFIX} Synced ${shopifyOrder.name} to WMS`);
+        } catch (e: any) {
+          console.error(`${LOG_PREFIX} WMS sync failed for ${shopifyOrder.name}: ${e.message}`);
+        }
+      } else {
+        console.warn(`${LOG_PREFIX} WMS sync service not available, falling back to direct write`);
+        try {
+          await createWmsOrderFromShopify(omsOrder.id, orderData, shopifyOrder, wmsServices);
+        } catch (e: any) {
+          console.error(`${LOG_PREFIX} WMS order creation failed for ${shopifyOrder.name}: ${e.message}`);
+        }
       }
 
       // OMS-level reservation (delegates to WMS reservation service)

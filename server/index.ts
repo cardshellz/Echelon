@@ -272,7 +272,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     reservation: services.reservation,
     fulfillmentRouter: services.fulfillmentRouter,
     slaMonitor: services.slaMonitor,
-  }, services.shipStation);
+  }, services.shipStation, services.wmsSync);
 
   // Wire fulfillment push into ShipStation service for tracking push on ship notify
   (db as any).__fulfillmentPush = services.fulfillmentPush;
