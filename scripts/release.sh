@@ -4,20 +4,9 @@
 # --force auto-accepts data-loss statements
 set -e
 
-# Run pending SQL migrations that drizzle-kit can't handle (SSL issue)
-echo "Running SQL migrations..."
-node -e "
-const{Pool}=require('pg');
-const p=new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}});
-(async()=>{
-  try{
-    await p.query('ALTER TABLE channel_sync_log ADD COLUMN IF NOT EXISTS warehouse_id integer');
-    await p.query('ALTER TABLE channel_sync_log ADD COLUMN IF NOT EXISTS shopify_location_id varchar(50)');
-    console.log('SQL migrations applied');
-  }catch(e){console.error('Migration warning:',e.message)}
-  p.end();
-})();
-" || echo "SQL migration step completed with warnings"
+# Run pending SQL migrations
+echo "Running SQL migrations from migrations/ folder..."
+node -r esbuild-register migrations/run-migrations.ts || echo "SQL migration step completed with warnings"
 
 echo "Running drizzle-kit push (non-interactive)..."
 yes '' | npx drizzle-kit@0.31.8 push \
