@@ -2008,33 +2008,19 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  // OLD: /api/sync/trigger moved to /api/sync/trigger-orders to avoid conflict with new sync engine
+  // DISABLED: order-sync-listener deleted (Phase 3)
   app.post("/api/sync/trigger-orders", requirePermission("shopify", "sync"), async (req, res) => {
-    try {
-      const { syncNewOrders } = await import("../orders/order-sync-listener");
-      await syncNewOrders();
-      res.json({ success: true, message: "Order sync triggered - check logs" });
-    } catch (error) {
-      console.error("Trigger order sync error:", error);
-      res.status(500).json({ error: String(error) });
-    }
+    res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
   
   app.post("/api/debug/trigger-sync", requirePermission("shopify", "sync"), async (req, res) => {
-    try {
-      const { syncNewOrders } = await import("../orders/order-sync-listener");
-      await syncNewOrders();
-      res.json({ success: true, message: "Sync triggered - check logs" });
-    } catch (error) {
-      console.error("Debug trigger sync error:", error);
-      res.status(500).json({ error: String(error) });
-    }
+    res.status(410).json({ error: "Order sync listener removed - orders now sync via OMS webhooks" });
   });
 
   app.get("/api/sync/health", async (req, res) => {
     try {
-      const { getSyncHealth } = await import("../orders/order-sync-listener");
-      const health = getSyncHealth();
+      // DISABLED: order-sync-listener deleted
+      const health = { status: "removed", message: "Order sync listener removed in Phase 3" };
       
       const row = await storage.getSyncHealthStats() as any;
       const latestShopifyOrder = row?.latest_shopify_order;
@@ -2070,8 +2056,8 @@ export function registerInventoryRoutes(app: Express) {
 
   app.post("/api/sync/send-alert", requirePermission("system", "admin"), async (req, res) => {
     try {
-      const { getSyncHealth } = await import("../orders/order-sync-listener");
-      const health = getSyncHealth();
+      // DISABLED: order-sync-listener deleted
+      const health = { status: "removed" };
       
       const adminEmail = await storage.getSetting("admin_alert_email");
       
