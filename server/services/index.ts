@@ -54,6 +54,7 @@ import { createShipmentTrackingService } from "../modules/procurement/shipment-t
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createShipStationService } from "../modules/oms/shipstation.service";
+import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
 import { inventoryStorage } from "../modules/inventory";
@@ -216,6 +217,13 @@ export function createServices(db: any) {
   // ShipStation — order push + webhook integration
   const shipStation = createShipStationService(db, inventoryCore);
 
+  // WMS Sync — bridges OMS → WMS for fulfillment
+  const wmsSync = new WmsSyncService({
+    inventoryCore,
+    reservation,
+    fulfillmentRouter,
+  });
+
   return {
     inventoryCore,
     inventoryLots,
@@ -246,6 +254,7 @@ export function createServices(db: any) {
     oms,
     fulfillmentPush,
     shipStation,
+    wmsSync,
   };
 }
 

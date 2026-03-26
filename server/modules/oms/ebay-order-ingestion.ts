@@ -11,6 +11,7 @@
 import type { Request, Response } from "express";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import type { ShipStationService } from "./shipstation.service";
+import type { WmsSyncService } from "./wms-sync.service";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { EbayAuthService } from "../channels/adapters/ebay/ebay-auth.service";
 import type { EbayOrder, EbayNotificationPayload } from "../channels/adapters/ebay/ebay-types";
@@ -132,6 +133,7 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let _shipStationService: ShipStationService | null = null;
+let _wmsSyncService: WmsSyncService | null = null;
 let _wmsServices: {
   reservation: { reserveOrder: (orderId: number) => Promise<ReservationResult> };
   fulfillmentRouter: { routeOrder: (ctx: any) => Promise<any>; assignWarehouseToOrder: (orderId: number, routing: any) => Promise<void> };
@@ -295,6 +297,10 @@ async function createWmsOrderFromEbay(
   return newOrder.id;
 }
 
+export function setWmsSyncService(wmsSyncService: WmsSyncService) {
+  _wmsSyncService = wmsSyncService;
+}
+
 export function startEbayOrderPolling(
   omsService: OmsService,
   ebayApiClient: EbayApiClient,
@@ -394,13 +400,22 @@ export async function pollEbayOrders(
           }
         }
 
-        // If this was a new order (not a duplicate), create WMS order + reserve + ShipStation push
+        // If this was a new order (not a duplicate), sync to WMS for fulfillment
         if (isNew) {
-          // Create WMS order for pick queue (this handles reservation via WMS)
-          try {
-            await createWmsOrderFromEbay(result.id, orderData, ebayOrder.orderId);
-          } catch (e: any) {
-            console.error(`[eBay Orders] WMS order creation failed for ${ebayOrder.orderId}: ${e.message}`);
+          // Sync OMS → WMS (replaces old createWmsOrderFromEbay dual-write)
+          if (_wmsSyncService) {
+            try {
+              await _wmsSyncService.syncOmsOrderToWms(result.id);
+            } catch (e: any) {
+              console.error(`[eBay Orders] WMS sync failed for ${ebayOrder.orderId}: ${e.message}`);
+            }
+          } else {
+            console.warn(`[eBay Orders] WMS sync service not initialized — falling back to old dual-write`);
+            try {
+              await createWmsOrderFromEbay(result.id, orderData, ebayOrder.orderId);
+            } catch (e: any) {
+              console.error(`[eBay Orders] WMS order creation failed for ${ebayOrder.orderId}: ${e.message}`);
+            }
           }
 
           // OMS-level reservation (delegates to WMS reservation service)

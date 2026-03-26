@@ -10,7 +10,7 @@ import { setupOrderSyncListener, initOrderSyncServices, syncSingleOrder } from "
 import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
-import { startEbayOrderPolling, setShipStationService, setWmsServices } from "./modules/oms/ebay-order-ingestion";
+import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startVendorOrderPolling, setDropshipOmsService, setDropshipShipStationService, setDropshipWmsServices } from "./modules/dropship/vendor-order-polling";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import { createEbayOrderWebhookHandler } from "./modules/oms/ebay-order-ingestion";
@@ -296,6 +296,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
     // Wire eBay client into fulfillment push service for tracking push
     services.fulfillmentPush.setEbayClient(ebayApiClient);
+
+    // Wire WMS sync service into eBay ingestion
+    setWmsSyncService(services.wmsSync);
 
     startEbayOrderPolling(services.oms, ebayApiClient);
 
