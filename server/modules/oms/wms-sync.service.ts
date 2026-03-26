@@ -45,7 +45,7 @@ export class WmsSyncService {
         .where(
           and(
             eq(wmsOrders.sourceTableId, String(omsOrderId)),
-            eq(wmsOrders.source, sql`'oms'`) // Distinguish from legacy shopify orders
+            eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
           )
         )
         .limit(1);
