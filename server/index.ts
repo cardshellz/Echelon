@@ -7,7 +7,8 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 // REMOVED: order-sync-listener deleted (Phase 3 - duplicate path eliminated)
-import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
+// REMOVED: reconciliation disabled until rebuilt without syncSingleOrder
+// import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
