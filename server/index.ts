@@ -470,8 +470,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     () => {
       log(`serving on port ${port}`);
       
-      // Start listening for new orders in shopify_orders table
-      setupOrderSyncListener();
+      // DISABLED: Old Shopify sync path (creates duplicates with OMS webhooks)
+      // Now using direct Echelon OMS webhooks → oms_orders → wmsSync → orders
+      // setupOrderSyncListener();
 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
       initReconciliation(syncSingleOrder, services.oms);
