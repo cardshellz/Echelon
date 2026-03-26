@@ -336,7 +336,7 @@ export function registerOmsWebhooks(
       const crypto = require("crypto");
       const s = process.env.SHOPIFY_API_SECRET || "";
       const computed = crypto.createHmac("sha256", s).update(rawBody).digest("base64");
-      console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${rawBody.length}`);
+      console.warn(`${LOG_PREFIX} HMAC debug: expected=${computed.substring(0,20)}... got=${(hmac||"").substring(0,20)}... secret_len=${s.length} body_len=${rawBody.length} rawBody_type=${typeof rawBody} is_buffer=${Buffer.isBuffer(rawBody)}`);
       console.warn(`${LOG_PREFIX} HMAC verification failed`);
       res.status(401).send("Unauthorized");
       return null;
