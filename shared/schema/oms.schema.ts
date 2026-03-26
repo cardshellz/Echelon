@@ -40,7 +40,7 @@ export const omsOrders = pgTable("oms_orders", {
   shipToCity: varchar("ship_to_city", { length: 100 }),
   shipToState: varchar("ship_to_state", { length: 100 }),
   shipToZip: varchar("ship_to_zip", { length: 20 }),
-  shipToCountry: varchar("ship_to_country", { length: 10 }),
+  shipToCountry: varchar("ship_to_country", { length: 100 }),
 
   // Totals (cents)
   subtotalCents: integer("subtotal_cents").notNull().default(0),
