@@ -151,27 +151,38 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
 }
 
 export function verifyShopifyWebhook(rawBody: Buffer, hmacHeader: string): boolean {
-  if (!SHOPIFY_API_SECRET) {
-    throw new Error("SHOPIFY_API_SECRET is required for webhook verification");
-  }
-  
   if (!hmacHeader) {
     return false;
   }
   
-  const generatedHash = crypto
-    .createHmac("sha256", SHOPIFY_API_SECRET)
-    .update(rawBody)
-    .digest("base64");
+  // Try both API secret and webhook secret
+  const secrets = [
+    process.env.SHOPIFY_API_SECRET,
+    process.env.SHOPIFY_WEBHOOK_SECRET
+  ].filter(Boolean) as string[];
   
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(generatedHash),
-      Buffer.from(hmacHeader)
-    );
-  } catch {
-    return false;
+  if (secrets.length === 0) {
+    throw new Error("SHOPIFY_API_SECRET or SHOPIFY_WEBHOOK_SECRET is required for webhook verification");
   }
+  
+  for (const secret of secrets) {
+    const generatedHash = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest("base64");
+    
+    try {
+      if (crypto.timingSafeEqual(Buffer.from(generatedHash), Buffer.from(hmacHeader))) {
+        return true;
+      }
+    } catch {
+      if (generatedHash === hmacHeader) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
 }
 
 /**
