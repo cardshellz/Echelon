@@ -71,20 +71,6 @@ function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boo
     }
   }
   return false;
-
-  const computed = createHmac("sha256", secret)
-    .update(rawBody)
-    .digest("base64");
-
-  // Timing-safe comparison
-  if (computed.length !== hmacHeader.length) return false;
-  const a = Buffer.from(computed);
-  const b = Buffer.from(hmacHeader);
-  try {
-    return require("crypto").timingSafeEqual(a, b);
-  } catch {
-    return computed === hmacHeader;
-  }
 }
 
 // ---------------------------------------------------------------------------
