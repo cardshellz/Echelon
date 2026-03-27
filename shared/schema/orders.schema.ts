@@ -352,6 +352,12 @@ export const outboundShipments = pgTable("outbound_shipments", {
   trackingUrl: text("tracking_url"),
   shippedAt: timestamp("shipped_at"),
   deliveredAt: timestamp("delivered_at"),
+  
+  // Shipping costs (for dropship invoicing & profitability)
+  carrierCostCents: integer("carrier_cost_cents").default(0), // Actual carrier charge
+  dunnageCostCents: integer("dunnage_cost_cents").default(0), // Packaging materials
+  // totalShippingCostCents computed column added via migration
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
