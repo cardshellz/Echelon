@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { db } from "../db";
 import { sql } from "drizzle-orm";
+import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 
 export function registerDiagnosticsRoutes(app: Express) {
   // Clean up duplicate orders with normalized Shopify IDs (handles gid:// prefix differences)
@@ -177,6 +178,22 @@ export function registerDiagnosticsRoutes(app: Express) {
         details: pickQueueDupes.rows,
       });
     } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Backfill member tiers for existing orders
+  app.post("/api/diagnostics/backfill-member-tiers", async (req, res) => {
+    try {
+      const { limit = 100 } = req.body;
+      const enriched = await backfillMemberTiers(limit);
+      res.json({ 
+        success: true,
+        enriched,
+        message: `Enriched ${enriched} orders with member tiers`
+      });
+    } catch (error: any) {
+      console.error("Member tier backfill error:", error);
       res.status(500).json({ error: error.message });
     }
   });

@@ -22,6 +22,7 @@ import { db } from "../../db";
 import { ordersStorage } from "../orders";
 import { warehouseStorage } from "../warehouse";
 import { pushToMissionControl } from "./mc-push";
+import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -387,6 +388,11 @@ export function registerOmsWebhooks(
         console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), skipping`);
         return;
       }
+
+      // Enrich with member tier (non-blocking, logs errors)
+      enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || '').catch(err => {
+        console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
+      });
 
       // Sync to WMS via sync service (replaces createWmsOrderFromShopify dual-write)
       if (wmsSyncService) {
