@@ -8,8 +8,8 @@ import {
   channelFeeds,
   replenRules,
   replenTasks,
-  shipments,
-  shipmentItems,
+  outboundShipments,
+  outboundShipmentItems,
   warehouseLocations,
   purchaseOrderLines,
   inboundShipmentLines,
@@ -262,17 +262,17 @@ export const productMethods: IProductStorage = {
   async getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]> {
     if (variantIds.length === 0) return [];
     const result = await db.select({
-      id: shipmentItems.id,
-      shipmentId: shipmentItems.shipmentId,
-      productVariantId: shipmentItems.productVariantId,
-      qty: shipmentItems.qty,
-      status: shipments.status,
+      id: outboundShipmentItems.id,
+      shipmentId: outboundShipmentItems.shipmentId,
+      productVariantId: outboundShipmentItems.productVariantId,
+      qty: outboundShipmentItems.qty,
+      status: outboundShipments.status,
     })
-      .from(shipmentItems)
-      .innerJoin(shipments, eq(shipmentItems.shipmentId, shipments.id))
+      .from(outboundShipmentItems)
+      .innerJoin(outboundShipments, eq(outboundShipmentItems.shipmentId, outboundShipments.id))
       .where(and(
-        inArray(shipmentItems.productVariantId, variantIds),
-        inArray(shipments.status, ["pending", "packed"]),
+        inArray(outboundShipmentItems.productVariantId, variantIds),
+        inArray(outboundShipments.status, ["pending", "packed"]),
       ));
     return result;
   },

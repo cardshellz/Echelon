@@ -7,7 +7,7 @@ import {
   type ItemStatus,
   orders,
   orderItems,
-  shipments,
+  outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
@@ -1027,10 +1027,10 @@ export const orderMethods: IOrderStorage = {
     const baseQuery = db
       .select({
         order: orders,
-        shipment: shipments,
+        shipment: outboundShipments,
       })
       .from(orders)
-      .leftJoin(shipments, eq(shipments.orderId, orders.id));
+      .leftJoin(outboundShipments, eq(outboundShipments.orderId, orders.id));
 
     const results = since
       ? await baseQuery.where(gte(orders.createdAt, since))
@@ -1043,8 +1043,8 @@ export const orderMethods: IOrderStorage = {
     if (orderIds.length === 0) return [];
     return await db
       .select()
-      .from(shipments)
-      .where(inArray(shipments.orderId, orderIds));
+      .from(outboundShipments)
+      .where(inArray(outboundShipments.orderId, orderIds));
   },
 
   async getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]> {

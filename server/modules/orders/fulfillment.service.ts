@@ -1,7 +1,7 @@
 import { eq, and, sql, desc } from "drizzle-orm";
 import {
-  shipments,
-  shipmentItems,
+  outboundShipments,
+  outboundShipmentItems,
   orders,
   orderItems,
   productVariants,
@@ -101,7 +101,7 @@ class FulfillmentService {
   }): Promise<Shipment> {
     return this.db.transaction(async (tx: any) => {
       const [created] = await tx
-        .insert(shipments)
+        .insert(outboundShipments)
         .values({
           orderId: params.orderId,
           channelId: params.channelId ?? null,
@@ -150,7 +150,7 @@ class FulfillmentService {
       }));
 
       const created = await tx
-        .insert(shipmentItems)
+        .insert(outboundShipmentItems)
         .values(values)
         .returning();
 
@@ -188,8 +188,8 @@ class FulfillmentService {
       // 1. Load the shipment
       const [shipment] = await tx
         .select()
-        .from(shipments)
-        .where(eq(shipments.id, shipmentId))
+        .from(outboundShipments)
+        .where(eq(outboundShipments.id, shipmentId))
         .limit(1);
 
       if (!shipment) {
@@ -204,8 +204,8 @@ class FulfillmentService {
       // 2. Load shipment items
       const items: ShipmentItem[] = await tx
         .select()
-        .from(shipmentItems)
-        .where(eq(shipmentItems.shipmentId, shipmentId));
+        .from(outboundShipmentItems)
+        .where(eq(outboundShipmentItems.shipmentId, shipmentId));
 
       // 3. For each item, release inventory via inventoryCore (qty = variant units)
       const variantIds: number[] = [];
@@ -241,9 +241,9 @@ class FulfillmentService {
       if (params?.trackingUrl) updateSet.trackingUrl = params.trackingUrl;
 
       await tx
-        .update(shipments)
+        .update(outboundShipments)
         .set(updateSet)
-        .where(eq(shipments.id, shipmentId));
+        .where(eq(outboundShipments.id, shipmentId));
 
       return variantIds;
     });
@@ -292,8 +292,8 @@ class FulfillmentService {
       // -- Idempotency check --
       const [existing] = await tx
         .select()
-        .from(shipments)
-        .where(eq(shipments.externalFulfillmentId, params.fulfillmentId))
+        .from(outboundShipments)
+        .where(eq(outboundShipments.externalFulfillmentId, params.fulfillmentId))
         .limit(1);
 
       if (existing) {
@@ -317,7 +317,7 @@ class FulfillmentService {
 
       // -- Create shipment --
       const [shipment] = await tx
-        .insert(shipments)
+        .insert(outboundShipments)
         .values({
           orderId: internalOrder.id,
           channelId: internalOrder.channelId ?? null,
@@ -425,7 +425,7 @@ class FulfillmentService {
       }
 
       if (shipmentItemValues.length > 0) {
-        await tx.insert(shipmentItems).values(shipmentItemValues);
+        await tx.insert(outboundShipmentItems).values(shipmentItemValues);
       }
 
       // -- Confirm the shipment (releases inventory where possible) --
@@ -459,8 +459,8 @@ class FulfillmentService {
       // Re-read the shipment after confirmation to return the updated row
       const [updated] = await tx
         .select()
-        .from(shipments)
-        .where(eq(shipments.id, createdShipment.id))
+        .from(outboundShipments)
+        .where(eq(outboundShipments.id, createdShipment.id))
         .limit(1);
 
       // Collect variant IDs for post-commit channel sync
@@ -486,9 +486,9 @@ class FulfillmentService {
   // =========================================================================
 
   /**
-   * Get all shipments associated with a given order.
+   * Get all outboundShipments associated with a given order.
    *
-   * An order may have multiple shipments when it is partially fulfilled
+   * An order may have multiple outboundShipments when it is partially fulfilled
    * in separate packages.
    *
    * @param orderId  The internal order ID.
@@ -497,8 +497,8 @@ class FulfillmentService {
   async getShipmentsByOrder(orderId: number): Promise<Shipment[]> {
     const rows = await this.db
       .select()
-      .from(shipments)
-      .where(eq(shipments.orderId, orderId));
+      .from(outboundShipments)
+      .where(eq(outboundShipments.orderId, orderId));
 
     return rows as Shipment[];
   }
@@ -515,16 +515,16 @@ class FulfillmentService {
   ): Promise<{ shipment: Shipment; items: ShipmentItem[] } | null> {
     const [shipment] = await this.db
       .select()
-      .from(shipments)
-      .where(eq(shipments.id, shipmentId))
+      .from(outboundShipments)
+      .where(eq(outboundShipments.id, shipmentId))
       .limit(1);
 
     if (!shipment) return null;
 
     const items: ShipmentItem[] = await this.db
       .select()
-      .from(shipmentItems)
-      .where(eq(shipmentItems.shipmentId, shipmentId));
+      .from(outboundShipmentItems)
+      .where(eq(outboundShipmentItems.shipmentId, shipmentId));
 
     return { shipment: shipment as Shipment, items };
   }
@@ -544,13 +544,13 @@ class FulfillmentService {
     deliveredAt?: Date,
   ): Promise<void> {
     await this.db
-      .update(shipments)
+      .update(outboundShipments)
       .set({
         status: "delivered",
         deliveredAt: deliveredAt ?? new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(shipments.id, shipmentId));
+      .where(eq(outboundShipments.id, shipmentId));
   }
 
   // =========================================================================
@@ -578,8 +578,8 @@ class FulfillmentService {
     // 1. Load the shipment
     const [shipment] = await tx
       .select()
-      .from(shipments)
-      .where(eq(shipments.id, shipmentId))
+      .from(outboundShipments)
+      .where(eq(outboundShipments.id, shipmentId))
       .limit(1);
 
     if (!shipment) {
@@ -593,8 +593,8 @@ class FulfillmentService {
     // 2. Load shipment items
     const items: ShipmentItem[] = await tx
       .select()
-      .from(shipmentItems)
-      .where(eq(shipmentItems.shipmentId, shipmentId));
+      .from(outboundShipmentItems)
+      .where(eq(outboundShipmentItems.shipmentId, shipmentId));
 
     // 3. Release inventory for each item (qty is in variant units)
     for (const item of items) {
@@ -628,9 +628,9 @@ class FulfillmentService {
     if (params?.trackingUrl) updateSet.trackingUrl = params.trackingUrl;
 
     await tx
-      .update(shipments)
+      .update(outboundShipments)
       .set(updateSet)
-      .where(eq(shipments.id, shipmentId));
+      .where(eq(outboundShipments.id, shipmentId));
   }
 
   /**

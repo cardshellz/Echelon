@@ -3,7 +3,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { products, productVariants } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
-import { orders, orderItems, shipments } from "./orders.schema";
+import { orders, orderItems, outboundShipments } from "./orders.schema";
 import { receivingOrders, purchaseOrders } from "./procurement.schema";
 
 // Inventory levels per location - all quantities in variant units (e.g., 5 cases, 10 packs)
@@ -145,7 +145,7 @@ export const inventoryTransactions = pgTable("inventory_transactions", {
   orderItemId: integer("order_item_id").references(() => orderItems.id),
   receivingOrderId: integer("receiving_order_id").references(() => receivingOrders.id), // Link to receiving
   cycleCountId: integer("cycle_count_id").references(() => cycleCounts.id), // Link to cycle count
-  shipmentId: integer("shipment_id").references(() => shipments.id), // Link to shipment
+  shipmentId: integer("shipment_id").references(() => outboundShipments.id), // Link to shipment
 
   referenceType: varchar("reference_type", { length: 30 }), // "order", "receiving", "cycle_count", "manual"
   referenceId: varchar("reference_id", { length: 100 }), // External reference ID

@@ -14,7 +14,7 @@ import {
   purchaseOrders,
   purchaseOrderLines,
   vendors,
-  shipmentCosts,
+  inboundFreightCosts,
   inboundShipments,
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
@@ -988,11 +988,11 @@ export async function createInvoiceFromShipmentCosts(
   // Fetch unlinked costs
   const costs = await db
     .select()
-    .from(shipmentCosts)
+    .from(inboundFreightCosts)
     .where(
       and(
-        eq(shipmentCosts.inboundShipmentId, shipmentId),
-        sql`${shipmentCosts.vendorInvoiceId} IS NULL`
+        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
+        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`
       )
     );
 
@@ -1041,9 +1041,9 @@ export async function createInvoiceFromShipmentCosts(
 
     // Link shipment cost back to the invoice
     await db
-      .update(shipmentCosts)
+      .update(inboundFreightCosts)
       .set({ vendorInvoiceId: invoice.id, updatedAt: new Date() })
-      .where(eq(shipmentCosts.id, cost.id));
+      .where(eq(inboundFreightCosts.id, cost.id));
   }
 
   return { ...invoice, inboundShipmentId: shipmentId };
@@ -1055,22 +1055,22 @@ export async function createInvoiceFromShipmentCosts(
 export async function getShipmentCostPaymentStatus(shipmentId: number) {
   const costs = await db
     .select({
-      costId: shipmentCosts.id,
-      costType: shipmentCosts.costType,
-      description: shipmentCosts.description,
-      vendorName: shipmentCosts.vendorName,
-      actualCents: shipmentCosts.actualCents,
-      estimatedCents: shipmentCosts.estimatedCents,
-      vendorInvoiceId: shipmentCosts.vendorInvoiceId,
+      costId: inboundFreightCosts.id,
+      costType: inboundFreightCosts.costType,
+      description: inboundFreightCosts.description,
+      vendorName: inboundFreightCosts.vendorName,
+      actualCents: inboundFreightCosts.actualCents,
+      estimatedCents: inboundFreightCosts.estimatedCents,
+      vendorInvoiceId: inboundFreightCosts.vendorInvoiceId,
       invoiceStatus: vendorInvoices.status,
       invoiceNumber: vendorInvoices.invoiceNumber,
       invoicedAmountCents: vendorInvoices.invoicedAmountCents,
       paidAmountCents: vendorInvoices.paidAmountCents,
       balanceCents: vendorInvoices.balanceCents,
     })
-    .from(shipmentCosts)
-    .leftJoin(vendorInvoices, eq(shipmentCosts.vendorInvoiceId, vendorInvoices.id))
-    .where(eq(shipmentCosts.inboundShipmentId, shipmentId));
+    .from(inboundFreightCosts)
+    .leftJoin(vendorInvoices, eq(inboundFreightCosts.vendorInvoiceId, vendorInvoices.id))
+    .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
 
   let totalCents = 0;
   let linkedCents = 0;
@@ -1139,16 +1139,16 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
  * Link a single shipment cost to an existing vendor invoice.
  */
 export async function linkCostToInvoice(costId: number, vendorInvoiceId: number) {
-  const [cost] = await db.select().from(shipmentCosts).where(eq(shipmentCosts.id, costId));
+  const [cost] = await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, costId));
   if (!cost) throw new Error("Shipment cost not found");
 
   const [invoice] = await db.select().from(vendorInvoices).where(eq(vendorInvoices.id, vendorInvoiceId));
   if (!invoice) throw new Error("Vendor invoice not found");
 
   await db
-    .update(shipmentCosts)
+    .update(inboundFreightCosts)
     .set({ vendorInvoiceId, vendorId: invoice.vendorId, updatedAt: new Date() })
-    .where(eq(shipmentCosts.id, costId));
+    .where(eq(inboundFreightCosts.id, costId));
 
   // Set shipment backreference if not already set
   if (!invoice.inboundShipmentId) {
@@ -1166,7 +1166,7 @@ export async function linkCostToInvoice(costId: number, vendorInvoiceId: number)
  */
 export async function unlinkCostFromInvoice(costId: number) {
   await db
-    .update(shipmentCosts)
+    .update(inboundFreightCosts)
     .set({ vendorInvoiceId: null, updatedAt: new Date() })
-    .where(eq(shipmentCosts.id, costId));
+    .where(eq(inboundFreightCosts.id, costId));
 }

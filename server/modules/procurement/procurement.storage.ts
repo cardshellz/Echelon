@@ -50,8 +50,8 @@ import {
   orderItemFinancials,
   inboundShipments,
   inboundShipmentLines,
-  shipmentCosts,
-  shipmentCostAllocations,
+  inboundFreightCosts,
+  inboundFreightAllocations,
   landedCostSnapshots,
   inboundShipmentStatusHistory,
   eq, and, or, inArray, sql, desc, asc, lte, like,
@@ -770,51 +770,51 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getShipmentCosts(inboundShipmentId: number): Promise<ShipmentCost[]> {
-    return await db.select().from(shipmentCosts).where(eq(shipmentCosts.inboundShipmentId, inboundShipmentId));
+    return await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.inboundShipmentId, inboundShipmentId));
   },
 
   async getShipmentCostById(id: number): Promise<ShipmentCost | undefined> {
-    const result = await db.select().from(shipmentCosts).where(eq(shipmentCosts.id, id)).limit(1);
+    const result = await db.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).limit(1);
     return result[0];
   },
 
   async createShipmentCost(data: InsertShipmentCost): Promise<ShipmentCost> {
-    const result = await db.insert(shipmentCosts).values(data as any).returning();
+    const result = await db.insert(inboundFreightCosts).values(data as any).returning();
     return result[0];
   },
 
   async updateShipmentCost(id: number, updates: Partial<InsertShipmentCost>): Promise<ShipmentCost | null> {
-    const result = await db.update(shipmentCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(shipmentCosts.id, id)).returning();
+    const result = await db.update(inboundFreightCosts).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundFreightCosts.id, id)).returning();
     return result[0] || null;
   },
 
   async deleteShipmentCost(id: number): Promise<boolean> {
-    const result = await db.delete(shipmentCosts).where(eq(shipmentCosts.id, id)).returning();
+    const result = await db.delete(inboundFreightCosts).where(eq(inboundFreightCosts.id, id)).returning();
     return result.length > 0;
   },
 
   async getShipmentCostAllocations(shipmentCostId: number): Promise<any[]> {
-    return await db.select().from(shipmentCostAllocations).where(eq(shipmentCostAllocations.shipmentCostId, shipmentCostId));
+    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.shipmentCostId, shipmentCostId));
   },
 
   async getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]> {
-    return await db.select().from(shipmentCostAllocations).where(eq(shipmentCostAllocations.inboundShipmentLineId, inboundShipmentLineId));
+    return await db.select().from(inboundFreightAllocations).where(eq(inboundFreightAllocations.inboundShipmentLineId, inboundShipmentLineId));
   },
 
   async createShipmentCostAllocation(data: InsertShipmentCostAllocation): Promise<any> {
-    const result = await db.insert(shipmentCostAllocations).values(data as any).returning();
+    const result = await db.insert(inboundFreightAllocations).values(data as any).returning();
     return result[0];
   },
 
   async bulkCreateShipmentCostAllocations(allocations: InsertShipmentCostAllocation[]): Promise<any[]> {
     if (allocations.length === 0) return [];
-    return await db.insert(shipmentCostAllocations).values(allocations as any).returning();
+    return await db.insert(inboundFreightAllocations).values(allocations as any).returning();
   },
 
   async deleteAllocationsForShipment(inboundShipmentId: number): Promise<void> {
     const costs = await this.getShipmentCosts(inboundShipmentId);
     if (costs.length > 0) {
-      await db.delete(shipmentCostAllocations).where(inArray(shipmentCostAllocations.shipmentCostId, costs.map(c => c.id)));
+      await db.delete(inboundFreightAllocations).where(inArray(inboundFreightAllocations.shipmentCostId, costs.map(c => c.id)));
     }
   },
 

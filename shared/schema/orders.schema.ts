@@ -340,7 +340,7 @@ export type CombinedOrderGroup = typeof combinedOrderGroups.$inferSelect;
 // ============================================
 
 // Shipments - tracks fulfillment from warehouse through carrier delivery
-export const shipments = pgTable("shipments", {
+export const outboundShipments = pgTable("outbound_shipments", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").references(() => orders.id),
   channelId: integer("channel_id").references(() => channels.id),
@@ -356,19 +356,19 @@ export const shipments = pgTable("shipments", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const insertShipmentSchema = createInsertSchema(shipments).omit({
+export const insertOutboundShipmentSchema = createInsertSchema(outboundShipments).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
 });
 
-export type InsertShipment = z.infer<typeof insertShipmentSchema>;
-export type Shipment = typeof shipments.$inferSelect;
+export type InsertOutboundShipment = z.infer<typeof insertOutboundShipmentSchema>;
+export type OutboundShipment = typeof outboundShipments.$inferSelect;
 
 // Shipment items - individual items within a shipment
-export const shipmentItems = pgTable("shipment_items", {
+export const outboundShipmentItems = pgTable("outbound_shipment_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shipmentId: integer("shipment_id").notNull().references(() => shipments.id, { onDelete: "cascade" }),
+  shipmentId: integer("shipment_id").notNull().references(() => outboundShipments.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").references(() => orderItems.id),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
@@ -376,13 +376,13 @@ export const shipmentItems = pgTable("shipment_items", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const insertShipmentItemSchema = createInsertSchema(shipmentItems).omit({
+export const insertOutboundShipmentItemSchema = createInsertSchema(outboundShipmentItems).omit({
   id: true,
   createdAt: true,
 });
 
-export type InsertShipmentItem = z.infer<typeof insertShipmentItemSchema>;
-export type ShipmentItem = typeof shipmentItems.$inferSelect;
+export type InsertOutboundShipmentItem = z.infer<typeof insertOutboundShipmentItemSchema>;
+export type OutboundShipmentItem = typeof outboundShipmentItems.$inferSelect;
 
 // ============================================================================
 // ORDER ITEM COSTS — COGS per shipment (Phase 6, schema defined now)

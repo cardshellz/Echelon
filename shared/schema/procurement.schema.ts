@@ -667,7 +667,7 @@ export type VendorInvoice = typeof vendorInvoices.$inferSelect;
 // 13. SHIPMENT COSTS (refs inboundShipments, vendors, vendorInvoices)
 // ============================================================================
 
-export const shipmentCosts = pgTable("shipment_costs", {
+export const inboundFreightCosts = pgTable("inbound_freight_costs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   inboundShipmentId: integer("inbound_shipment_id").notNull().references(() => inboundShipments.id, { onDelete: "cascade" }),
   costType: varchar("cost_type", { length: 30 }).notNull(),
@@ -690,22 +690,22 @@ export const shipmentCosts = pgTable("shipment_costs", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
-export const insertShipmentCostSchema = createInsertSchema(shipmentCosts).omit({
+export const insertInboundFreightCostSchema = createInsertSchema(inboundFreightCosts).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
 });
 
-export type InsertShipmentCost = z.infer<typeof insertShipmentCostSchema>;
-export type ShipmentCost = typeof shipmentCosts.$inferSelect;
+export type InsertInboundFreightCost = z.infer<typeof insertInboundFreightCostSchema>;
+export type InboundFreightCost = typeof inboundFreightCosts.$inferSelect;
 
 // ============================================================================
 // 14. SHIPMENT COST ALLOCATIONS (refs shipmentCosts, inboundShipmentLines)
 // ============================================================================
 
-export const shipmentCostAllocations = pgTable("shipment_cost_allocations", {
+export const inboundFreightAllocations = pgTable("inbound_freight_allocations", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  shipmentCostId: integer("shipment_cost_id").notNull().references(() => shipmentCosts.id, { onDelete: "cascade" }),
+  shipmentCostId: integer("shipment_cost_id").notNull().references(() => inboundFreightCosts.id, { onDelete: "cascade" }),
   inboundShipmentLineId: integer("inbound_shipment_line_id").notNull().references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
   allocationBasisValue: numeric("allocation_basis_value", { precision: 14, scale: 6 }),
   allocationBasisTotal: numeric("allocation_basis_total", { precision: 14, scale: 6 }),
@@ -714,13 +714,13 @@ export const shipmentCostAllocations = pgTable("shipment_cost_allocations", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const insertShipmentCostAllocationSchema = createInsertSchema(shipmentCostAllocations).omit({
+export const insertInboundFreightAllocationSchema = createInsertSchema(inboundFreightAllocations).omit({
   id: true,
   createdAt: true,
 });
 
-export type InsertShipmentCostAllocation = z.infer<typeof insertShipmentCostAllocationSchema>;
-export type ShipmentCostAllocation = typeof shipmentCostAllocations.$inferSelect;
+export type InsertInboundFreightAllocation = z.infer<typeof insertInboundFreightAllocationSchema>;
+export type InboundFreightAllocation = typeof inboundFreightAllocations.$inferSelect;
 
 // ============================================================================
 // 15. LANDED COST SNAPSHOTS (refs inboundShipmentLines, purchaseOrderLines)

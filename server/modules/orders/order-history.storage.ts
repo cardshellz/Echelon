@@ -1,7 +1,7 @@
 import {
   db, eq, and, or, inArray, sql, desc, asc, gte, lte, like,
   type Order, type OrderItem, type PickingLog,
-  orders, orderItems, pickingLogs, users, shipments, shipmentItems, productVariants,
+  orders, orderItems, pickingLogs, users, outboundShipments, outboundShipmentItems, productVariants,
 } from "../../storage/base";
 
 export interface IOrderHistoryStorage {
@@ -234,16 +234,16 @@ export const orderHistoryMethods: IOrderHistoryStorage = {
       picker = pickerResult[0];
     }
 
-    const orderShipments = await db.select().from(shipments).where(eq(shipments.orderId, orderId)).orderBy(asc(shipments.createdAt));
+    const orderShipments = await db.select().from(outboundShipments).where(eq(outboundShipments.orderId, orderId)).orderBy(asc(outboundShipments.createdAt));
     const shipmentHistory = [];
     for (const s of orderShipments) {
       const sItems = await db.select({
         sku: productVariants.sku,
         name: productVariants.name,
-        qty: shipmentItems.qty,
-      }).from(shipmentItems)
-        .leftJoin(productVariants, eq(shipmentItems.productVariantId, productVariants.id))
-        .where(eq(shipmentItems.shipmentId, s.id));
+        qty: outboundShipmentItems.qty,
+      }).from(outboundShipmentItems)
+        .leftJoin(productVariants, eq(outboundShipmentItems.productVariantId, productVariants.id))
+        .where(eq(outboundShipmentItems.shipmentId, s.id));
       shipmentHistory.push({
         id: s.id,
         status: s.status,
