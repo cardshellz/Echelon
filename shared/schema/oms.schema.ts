@@ -64,6 +64,9 @@ export const omsOrders = pgTable("oms_orders", {
   shipstationOrderId: integer("shipstation_order_id"),
   shipstationOrderKey: varchar("shipstation_order_key", { length: 100 }),
 
+  // Member enrichment (historical snapshot for analytics)
+  memberTier: varchar("member_tier", { length: 50 }), // Tier at time of order
+
   // Metadata
   rawPayload: jsonb("raw_payload"),
   notes: text("notes"),
