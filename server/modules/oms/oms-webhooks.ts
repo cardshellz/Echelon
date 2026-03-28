@@ -539,10 +539,11 @@ export function registerOmsWebhooks(
                 sku: item.sku || existingLine.sku,
                 title: item.title || existingLine.title,
                 quantity: item.quantity ?? existingLine.quantity,
-                unitPriceCents: dollarsToCents(item.price),
-                totalCents:
+                paidPriceCents: dollarsToCents(item.price),
+                totalPriceCents:
                   dollarsToCents(item.price) * (item.quantity || 1) -
                   (item.total_discount ? dollarsToCents(item.total_discount) : 0),
+                totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
                 productVariantId: productVariantId || existingLine.productVariantId,
               })
               .where(eq(omsOrderLines.id, existingLine.id));
@@ -556,12 +557,11 @@ export function registerOmsWebhooks(
               title: item.title,
               variantTitle: item.variant_title,
               quantity: item.quantity || 1,
-              unitPriceCents: dollarsToCents(item.price),
-              totalCents:
+              paidPriceCents: dollarsToCents(item.price),
+              totalPriceCents:
                 dollarsToCents(item.price) * (item.quantity || 1) -
                 (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-              taxCents: 0,
-              discountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
+              totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
             });
           }
         }

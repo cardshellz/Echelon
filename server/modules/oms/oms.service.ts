@@ -91,6 +91,45 @@ export function createOmsService(db: any, reservationService?: any) {
       .limit(1);
 
     if (existing.length > 0) {
+      // Check if line items exist for this order
+      const existingLines = await db
+        .select()
+        .from(omsOrderLines)
+        .where(eq(omsOrderLines.orderId, existing[0].id))
+        .limit(1);
+
+      // If no line items, create them (handles partial ingestion recovery)
+      if (existingLines.length === 0 && data.lineItems.length > 0) {
+        for (const item of data.lineItems) {
+          let productVariantId: number | null = null;
+
+          if (item.sku) {
+            const [variant] = await db
+              .select({ id: productVariants.id })
+              .from(productVariants)
+              .where(eq(productVariants.sku, item.sku.toUpperCase()))
+              .limit(1);
+            if (variant) productVariantId = variant.id;
+          }
+
+          await db.insert(omsOrderLines).values({
+            orderId: existing[0].id,
+            productVariantId,
+            externalLineItemId: item.externalLineItemId,
+            externalProductId: item.externalProductId || null,
+            sku: item.sku,
+            title: item.title,
+            variantTitle: item.variantTitle,
+            quantity: item.quantity,
+            paidPriceCents: item.paidPriceCents || 0,
+            totalPriceCents: item.totalCents || 0,
+            totalDiscountCents: item.discountCents || 0,
+            orderNumber: data.externalOrderNumber || null,
+          } satisfies InsertOmsOrderLine);
+        }
+        console.log(`[OMS] Backfilled ${data.lineItems.length} missing line items for order ${existing[0].id}`);
+      }
+
       return existing[0];
     }
 
