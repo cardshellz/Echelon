@@ -1022,22 +1022,23 @@ class PickingService {
 
         // Replen prediction
         if (item.status === "pending" && item.sku) {
-          const prediction = replenPredictionMap.get(item.sku);
-          if (prediction) {
-            const postPickQty = prediction.systemQty - item.quantity;
-            const replenNeeded = postPickQty <= prediction.triggerValue;
-            updatedItem.replenPrediction = {
-              systemQty: prediction.systemQty,
-              postPickQty: Math.max(0, postPickQty),
-              triggerValue: prediction.triggerValue,
-              replenNeeded,
-              replenMethod: prediction.replenMethod,
-              autoReplen: prediction.autoReplen,
-              sourceLocationCode: replenNeeded ? prediction.sourceLocationCode : null,
-              sourceQty: replenNeeded ? prediction.sourceQty : 0,
-              sourceVariantName: replenNeeded ? prediction.sourceVariantName : null,
-            };
-          }
+          // Replen prediction removed - not used by frontend and was causing React errors
+          // const prediction = replenPredictionMap.get(item.sku);
+          // if (prediction) {
+          //   const postPickQty = prediction.systemQty - item.quantity;
+          //   const replenNeeded = postPickQty <= prediction.triggerValue;
+          //   updatedItem.replenPrediction = {
+          //     systemQty: prediction.systemQty,
+          //     postPickQty: Math.max(0, postPickQty),
+          //     triggerValue: prediction.triggerValue,
+          //     replenNeeded,
+          //     replenMethod: prediction.replenMethod,
+          //     autoReplen: prediction.autoReplen,
+          //     sourceLocationCode: replenNeeded ? prediction.sourceLocationCode : null,
+          //     sourceQty: replenNeeded ? prediction.sourceQty : 0,
+          //     sourceVariantName: replenNeeded ? prediction.sourceVariantName : null,
+          //   };
+          // }
         }
 
         return updatedItem;
