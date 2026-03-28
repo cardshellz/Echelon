@@ -91,7 +91,7 @@ BEGIN
       qty := COALESCE((line_item->>'quantity')::INTEGER, 1);
       discount := COALESCE((line_item->>'total_discount')::NUMERIC, 0);
       
-      -- Insert line item
+      -- Insert line item (ON CONFLICT DO NOTHING to skip duplicates)
       INSERT INTO oms_order_lines (
         order_id,
         external_line_item_id,
@@ -118,7 +118,7 @@ BEGIN
         ROUND(discount * 100),
         NOW(),
         NOW()
-      );
+      ) ON CONFLICT (external_line_item_id) DO NOTHING;
     END LOOP;
     
     RAISE NOTICE 'Backfilled order %', order_rec.id;
