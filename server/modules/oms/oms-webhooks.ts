@@ -23,6 +23,7 @@ import { ordersStorage } from "../orders";
 import { warehouseStorage } from "../warehouse";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
+import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,19 +88,25 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
   const shipping = shopifyOrder.shipping_address || {};
   const customer = shopifyOrder.customer || {};
 
-  const lineItems: LineItemData[] = (shopifyOrder.line_items || []).map((item: any) => ({
-    externalLineItemId: String(item.id),
-    sku: item.sku || null,
-    title: item.title || item.name,
-    variantTitle: item.variant_title || null,
-    quantity: item.quantity || 1,
-    unitPriceCents: dollarsToCents(item.price),
-    totalCents: dollarsToCents(item.price) * (item.quantity || 1) -
-      (item.total_discount ? dollarsToCents(item.total_discount) : 0),
-    taxCents: (item.tax_lines || []).reduce(
-      (sum: number, t: any) => sum + dollarsToCents(t.price), 0
-    ),
-    discountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
+  // Use normalizer to extract line items with full discount splitting
+  const discountApplications = shopifyOrder.discount_applications || [];
+  const normalizedItems = normalizeShopifyLineItems(
+    shopifyOrder.line_items || [], 
+    discountApplications,
+    shopifyOrder.order_number
+  );
+
+  const lineItems: LineItemData[] = normalizedItems.map((item) => ({
+    externalLineItemId: item.externalLineItemId,
+    externalProductId: item.externalProductId,
+    sku: item.sku,
+    title: item.title,
+    variantTitle: item.variantTitle,
+    quantity: item.quantity,
+    paidPriceCents: item.paidPriceCents,
+    totalCents: item.totalCents,
+    taxCents: 0, // Tax handled at order level
+    discountCents: item.discountCents,
   }));
 
   // Financial status

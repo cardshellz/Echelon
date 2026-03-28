@@ -6,7 +6,7 @@
  * The existing WMS pick/pack/ship flow (orders, order_items) is NOT modified.
  */
 
-import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
@@ -102,16 +102,32 @@ export const omsOrderLines = pgTable("oms_order_lines", {
   orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   externalLineItemId: varchar("external_line_item_id", { length: 100 }),
+  externalProductId: varchar("external_product_id", { length: 100 }),
   sku: varchar("sku", { length: 100 }),
   title: varchar("title", { length: 300 }),
   variantTitle: varchar("variant_title", { length: 200 }),
+  name: text("name"),
+  vendor: varchar("vendor", { length: 200 }),
   quantity: integer("quantity").notNull(),
-  unitPriceCents: integer("unit_price_cents").notNull().default(0),
-  totalCents: integer("total_cents").notNull().default(0),
-  taxCents: integer("tax_cents").notNull().default(0),
-  discountCents: integer("discount_cents").notNull().default(0),
+  paidPriceCents: integer("paid_price_cents").notNull().default(0),
+  totalPriceCents: integer("total_price_cents").notNull().default(0),
+  totalDiscountCents: integer("total_discount_cents").notNull().default(0),
+  planDiscountCents: integer("plan_discount_cents").notNull().default(0),
+  couponDiscountCents: integer("coupon_discount_cents").notNull().default(0),
+  discountAllocations: jsonb("discount_allocations"),
+  taxable: boolean("taxable").default(true),
+  taxLines: jsonb("tax_lines"),
+  requiresShipping: boolean("requires_shipping").default(true),
+  giftCard: boolean("gift_card").default(false),
+  productExists: boolean("product_exists").default(true),
+  fulfillableQuantity: integer("fulfillable_quantity"),
+  fulfillmentService: varchar("fulfillment_service", { length: 100 }),
   fulfillmentStatus: varchar("fulfillment_status", { length: 30 }).default("unfulfilled"),
+  properties: jsonb("properties"),
+  compareAtPriceCents: integer("compare_at_price_cents"),
+  orderNumber: varchar("order_number", { length: 50 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at"),
 }, (table) => [
   index("idx_oms_lines_order").on(table.orderId),
   index("idx_oms_lines_variant").on(table.productVariantId),

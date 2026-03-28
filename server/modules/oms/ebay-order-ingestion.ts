@@ -50,22 +50,24 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     // For unit price: lineItemCost / quantity
     const lineItemCostCents = dollarsToCents(item.lineItemCost?.value);
     const qty = item.quantity || 1;
-    const unitPriceCents = Math.round(lineItemCostCents / qty);
+    const paidPriceCents = Math.round(lineItemCostCents / qty);
+    const discountCents = item.discountedLineItemCost
+      ? lineItemCostCents - dollarsToCents(item.discountedLineItemCost?.value)
+      : 0;
 
     // Tax: eBay collects and remits — omit from line items
     const taxCents = 0;
 
     return {
       externalLineItemId: item.lineItemId,
+      externalProductId: item.legacyItemId || null, // eBay product ID
       sku: item.sku,
       title: item.title,
       quantity: qty,
-      unitPriceCents,
+      paidPriceCents,
       totalCents: lineItemCostCents, // product cost only, no shipping/tax
       taxCents,
-      discountCents: item.discountedLineItemCost
-        ? lineItemCostCents - dollarsToCents(item.discountedLineItemCost?.value)
-        : 0,
+      discountCents,
     };
   });
 

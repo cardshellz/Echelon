@@ -68,7 +68,6 @@ export async function bridgeShopifyOrderToOms(
       sku: item.sku,
       title: item.name || item.title,
       quantity: item.quantity,
-      unitPriceCents: item.paid_price_cents || 0,
       totalCents: item.total_price_cents || 0,
       discountCents: item.total_discount_cents || 0,
     }));

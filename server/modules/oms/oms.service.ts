@@ -47,11 +47,12 @@ export interface OrderData {
 
 export interface LineItemData {
   externalLineItemId?: string;
+  externalProductId?: string | null;
   sku?: string;
   title?: string;
   variantTitle?: string;
   quantity: number;
-  unitPriceCents?: number;
+  paidPriceCents?: number;
   totalCents?: number;
   taxCents?: number;
   discountCents?: number;
@@ -143,14 +144,15 @@ export function createOmsService(db: any, reservationService?: any) {
         orderId: order.id,
         productVariantId,
         externalLineItemId: item.externalLineItemId,
+        externalProductId: item.externalProductId || null,
         sku: item.sku,
         title: item.title,
         variantTitle: item.variantTitle,
         quantity: item.quantity,
-        unitPriceCents: item.unitPriceCents || 0,
-        totalCents: item.totalCents || 0,
-        taxCents: item.taxCents || 0,
-        discountCents: item.discountCents || 0,
+        paidPriceCents: item.paidPriceCents || 0,
+        totalPriceCents: item.totalCents || 0,
+        totalDiscountCents: item.discountCents || 0,
+        orderNumber: data.externalOrderNumber || null,
       } satisfies InsertOmsOrderLine);
     }
 
