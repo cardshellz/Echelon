@@ -608,10 +608,17 @@ export default function Picking() {
     : localSingleQueue;
 
   // Sync completed orders from API into local state to persist across refetches
+  // Uses a ref to track last-synced IDs and avoid unnecessary state updates (prevents infinite re-render loop)
+  const lastSyncedCompletedIdsRef = useRef<string>("");
   useEffect(() => {
     if (pickingMode === "single" && ordersFromApi.length > 0) {
       const completedFromApi = ordersFromApi.filter(o => o.status === "completed");
       if (completedFromApi.length > 0) {
+        // Build a fingerprint of completed order IDs to detect actual changes
+        const completedFingerprint = completedFromApi.map(o => o.id).sort().join(",");
+        if (completedFingerprint === lastSyncedCompletedIdsRef.current) return;
+        lastSyncedCompletedIdsRef.current = completedFingerprint;
+
         setLocalSingleQueue(prev => {
           // Get current completed orders from local state
           const localCompleted = prev.filter(o => o.status === "completed");
