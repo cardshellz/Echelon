@@ -136,6 +136,9 @@ export class WmsSyncService {
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
           productVariantId: variantId,
+          priceCents: line.paidPriceCents || null,
+          discountCents: line.totalDiscountCents || 0,
+          totalPriceCents: line.totalPriceCents || null,
         });
       }
 
