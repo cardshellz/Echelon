@@ -14,7 +14,7 @@ export async function getAllPlans(): Promise<PlanRecord[]> {
   const result = await pool.query(
     `SELECT id, name, tier, billing_interval, billing_interval_count,
             price_cents, shopify_selling_plan_gid, includes_dropship, is_active
-     FROM plans ORDER BY id`
+     FROM membership.plans ORDER BY id`
   );
   return result.rows;
 }
@@ -23,7 +23,7 @@ export async function getActivePlans(): Promise<PlanRecord[]> {
   const result = await pool.query(
     `SELECT id, name, tier, billing_interval, billing_interval_count,
             price_cents, shopify_selling_plan_gid, includes_dropship, is_active
-     FROM plans WHERE is_active = true ORDER BY id`
+     FROM membership.plans WHERE is_active = true ORDER BY id`
   );
   return result.rows;
 }
@@ -34,7 +34,7 @@ export async function updatePlanSellingPlan(
   shopifySellingPlanId: number
 ): Promise<void> {
   await pool.query(
-    `UPDATE plans SET shopify_selling_plan_gid = $1, shopify_selling_plan_id = $2 WHERE id = $3`,
+    `UPDATE membership.plans SET shopify_selling_plan_gid = $1, shopify_selling_plan_id = $2 WHERE id = $3`,
     [shopifySellingPlanGid, shopifySellingPlanId, planId]
   );
 }
@@ -65,14 +65,14 @@ export async function updatePlanDetails(
 
   values.push(planId);
   await pool.query(
-    `UPDATE plans SET ${setClauses.join(", ")} WHERE id = $${idx}`,
+    `UPDATE membership.plans SET ${setClauses.join(", ")} WHERE id = $${idx}`,
     values
   );
 }
 
 export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord | null> {
   const result = await pool.query(
-    `SELECT p.* FROM plans p
+    `SELECT p.* FROM membership.plans p
      JOIN selling_plan_map spm ON spm.plan_id = p.id
      WHERE spm.shopify_selling_plan_gid = $1 LIMIT 1`,
     [gid]
@@ -81,7 +81,7 @@ export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord |
 }
 
 export async function getPlanById(planId: number): Promise<PlanRecord | null> {
-  const result = await pool.query(`SELECT * FROM plans WHERE id = $1`, [planId]);
+  const result = await pool.query(`SELECT * FROM membership.plans WHERE id = $1`, [planId]);
   return result.rows[0] || null;
 }
 
@@ -121,7 +121,7 @@ export async function getSellingPlanMap(): Promise<Array<{
 
 export async function findMemberByShopifyCustomerId(customerId: number): Promise<any | null> {
   const result = await pool.query(
-    `SELECT * FROM members WHERE shopify_customer_id = $1 LIMIT 1`,
+    `SELECT * FROM membership.members WHERE shopify_customer_id = $1 LIMIT 1`,
     [customerId]
   );
   return result.rows[0] || null;
@@ -129,7 +129,7 @@ export async function findMemberByShopifyCustomerId(customerId: number): Promise
 
 export async function findMemberByEmail(email: string): Promise<any | null> {
   const result = await pool.query(
-    `SELECT * FROM members WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+    `SELECT * FROM membership.members WHERE LOWER(email) = LOWER($1) LIMIT 1`,
     [email]
   );
   return result.rows[0] || null;
@@ -150,14 +150,14 @@ export async function upsertMember(data: {
 
   if (existing) {
     await pool.query(
-      `UPDATE members SET shopify_customer_id = $1, tier = COALESCE($2, tier), updated_at = NOW() WHERE id = $3`,
+      `UPDATE membership.members SET shopify_customer_id = $1, tier = COALESCE($2, tier), updated_at = NOW() WHERE id = $3`,
       [data.shopify_customer_id, data.tier || null, existing.id]
     );
     return existing.id;
   }
 
   const result = await pool.query(
-    `INSERT INTO members (email, shopify_customer_id, first_name, last_name, tier, created_at, updated_at)
+    `INSERT INTO membership.members (email, shopify_customer_id, first_name, last_name, tier, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, NOW(), NOW()) RETURNING id`,
     [data.email, data.shopify_customer_id, data.first_name || null, data.last_name || null, data.tier || "standard"]
   );
@@ -165,14 +165,14 @@ export async function upsertMember(data: {
 }
 
 export async function updateMemberTier(memberId: number, tier: string): Promise<void> {
-  await pool.query(`UPDATE members SET tier = $1, updated_at = NOW() WHERE id = $2`, [tier, memberId]);
+  await pool.query(`UPDATE membership.members SET tier = $1, updated_at = NOW() WHERE id = $2`, [tier, memberId]);
 }
 
 // ─── Subscriptions ───────────────────────────────────────────────────
 
 export async function findSubscriptionByContractId(contractId: number): Promise<SubscriptionRecord | null> {
   const result = await pool.query(
-    `SELECT * FROM member_subscriptions WHERE shopify_subscription_contract_id = $1 LIMIT 1`,
+    `SELECT * FROM membership.member_subscriptions WHERE shopify_subscription_contract_id = $1 LIMIT 1`,
     [contractId]
   );
   return result.rows[0] || null;
@@ -190,7 +190,7 @@ export async function createSubscription(data: {
   billing_status?: string;
 }): Promise<number> {
   const result = await pool.query(
-    `INSERT INTO member_subscriptions
+    `INSERT INTO membership.member_subscriptions
        (member_id, plan_id, shopify_subscription_contract_id, shopify_subscription_contract_gid,
         shopify_customer_id, next_billing_date, current_period_start, current_period_end,
         billing_status, status, started_at, created_at)
@@ -231,7 +231,7 @@ export async function updateSubscriptionStatus(
 
   vals.push(subscriptionId);
   await pool.query(
-    `UPDATE member_subscriptions SET ${sets.join(", ")} WHERE id = $${idx}`,
+    `UPDATE membership.member_subscriptions SET ${sets.join(", ")} WHERE id = $${idx}`,
     vals
   );
 }
@@ -243,7 +243,7 @@ export async function updateSubscriptionBillingDate(
   periodEnd: Date
 ): Promise<void> {
   await pool.query(
-    `UPDATE member_subscriptions
+    `UPDATE membership.member_subscriptions
      SET next_billing_date = $1, current_period_start = $2, current_period_end = $3,
          failed_billing_attempts = 0, billing_status = 'current', billing_in_progress = false
      WHERE id = $4`,
@@ -253,14 +253,14 @@ export async function updateSubscriptionBillingDate(
 
 export async function updateSubscriptionPlan(subscriptionId: number, planId: number): Promise<void> {
   await pool.query(
-    `UPDATE member_subscriptions SET plan_id = $1 WHERE id = $2`,
+    `UPDATE membership.member_subscriptions SET plan_id = $1 WHERE id = $2`,
     [planId, subscriptionId]
   );
 }
 
 export async function incrementFailedBilling(subscriptionId: number): Promise<number> {
   const result = await pool.query(
-    `UPDATE member_subscriptions
+    `UPDATE membership.member_subscriptions
      SET failed_billing_attempts = failed_billing_attempts + 1,
          billing_status = 'past_due', billing_in_progress = false
      WHERE id = $1
@@ -272,7 +272,7 @@ export async function incrementFailedBilling(subscriptionId: number): Promise<nu
 
 export async function setBillingInProgress(subscriptionId: number, inProgress: boolean): Promise<void> {
   await pool.query(
-    `UPDATE member_subscriptions SET billing_in_progress = $1 WHERE id = $2`,
+    `UPDATE membership.member_subscriptions SET billing_in_progress = $1 WHERE id = $2`,
     [inProgress, subscriptionId]
   );
 }
@@ -280,8 +280,8 @@ export async function setBillingInProgress(subscriptionId: number, inProgress: b
 export async function getDueBillings(): Promise<SubscriptionRecord[]> {
   const result = await pool.query(
     `SELECT ms.*, p.price_cents, p.billing_interval, p.billing_interval_count, p.tier, p.name as plan_name
-     FROM member_subscriptions ms
-     JOIN plans p ON p.id = ms.plan_id
+     FROM membership.member_subscriptions ms
+     JOIN membership.plans p ON p.id = ms.plan_id
      WHERE ms.billing_status IN ('current', 'past_due')
        AND ms.status = 'active'
        AND ms.next_billing_date <= NOW()
@@ -375,9 +375,9 @@ export async function getBillingLogs(filters?: {
   const result = await pool.query(
     `SELECT sbl.*, ms.member_id, m.email as member_email, p.name as plan_name
      FROM subscription_billing_log sbl
-     JOIN member_subscriptions ms ON ms.id = sbl.member_subscription_id
-     LEFT JOIN members m ON m.id = ms.member_id
-     LEFT JOIN plans p ON p.id = ms.plan_id
+     JOIN membership.member_subscriptions ms ON ms.id = sbl.member_subscription_id
+     LEFT JOIN membership.members m ON m.id = ms.member_id
+     LEFT JOIN membership.plans p ON p.id = ms.plan_id
      ${whereClause}
      ORDER BY sbl.created_at DESC
      LIMIT $${idx++} OFFSET $${idx}`,
@@ -447,8 +447,8 @@ export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
     const activeResult = await client.query(
       `SELECT p.tier, COUNT(*) as cnt, SUM(COALESCE(p.price_cents, 0)) as total_price,
               p.billing_interval
-       FROM member_subscriptions ms
-       JOIN plans p ON p.id = ms.plan_id
+       FROM membership.member_subscriptions ms
+       JOIN membership.plans p ON p.id = ms.plan_id
        WHERE ms.status = 'active'
        GROUP BY p.tier, p.billing_interval`
     );
@@ -474,32 +474,32 @@ export async function getDashboardStats(): Promise<SubscriptionDashboardStats> {
     }
 
     const pastDueResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM member_subscriptions WHERE billing_status = 'past_due' AND status = 'active'`
+      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions WHERE billing_status = 'past_due' AND status = 'active'`
     );
     const pastDueCount = parseInt(pastDueResult.rows[0].cnt);
 
     // Churn: cancellations in last 30 days / active at start of period
     const churn30Result = await client.query(
-      `SELECT COUNT(*) as cnt FROM member_subscriptions
+      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
        WHERE cancelled_at >= NOW() - INTERVAL '30 days'`
     );
     const totalAtStart30 = totalActive + parseInt(churn30Result.rows[0].cnt);
     const churnRate30 = totalAtStart30 > 0 ? parseInt(churn30Result.rows[0].cnt) / totalAtStart30 : 0;
 
     const churn90Result = await client.query(
-      `SELECT COUNT(*) as cnt FROM member_subscriptions
+      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
        WHERE cancelled_at >= NOW() - INTERVAL '90 days'`
     );
     const totalAtStart90 = totalActive + parseInt(churn90Result.rows[0].cnt);
     const churnRate90 = totalAtStart90 > 0 ? parseInt(churn90Result.rows[0].cnt) / totalAtStart90 : 0;
 
     const newThisMonthResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM member_subscriptions
+      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
        WHERE started_at >= DATE_TRUNC('month', NOW())`
     );
 
     const cancelledThisMonthResult = await client.query(
-      `SELECT COUNT(*) as cnt FROM member_subscriptions
+      `SELECT COUNT(*) as cnt FROM membership.member_subscriptions
        WHERE cancelled_at >= DATE_TRUNC('month', NOW())`
     );
 
@@ -557,9 +557,9 @@ export async function getSubscriberList(filters?: {
 
   const countResult = await pool.query(
     `SELECT COUNT(*) as total
-     FROM member_subscriptions ms
-     JOIN members m ON m.id = ms.member_id
-     JOIN plans p ON p.id = ms.plan_id
+     FROM membership.member_subscriptions ms
+     JOIN membership.members m ON m.id = ms.member_id
+     JOIN membership.plans p ON p.id = ms.plan_id
      ${whereClause}`,
     vals
   );
@@ -570,9 +570,9 @@ export async function getSubscriberList(filters?: {
             ms.failed_billing_attempts, ms.shopify_subscription_contract_id,
             m.email, m.first_name, m.last_name, m.shopify_customer_id,
             p.name as plan_name, p.tier, p.price_cents, p.billing_interval
-     FROM member_subscriptions ms
-     JOIN members m ON m.id = ms.member_id
-     JOIN plans p ON p.id = ms.plan_id
+     FROM membership.member_subscriptions ms
+     JOIN membership.members m ON m.id = ms.member_id
+     JOIN membership.plans p ON p.id = ms.plan_id
      ${whereClause}
      ORDER BY ms.created_at DESC
      LIMIT $${idx++} OFFSET $${idx}`,
@@ -588,9 +588,9 @@ export async function getSubscriptionDetail(subscriptionId: number): Promise<any
   const result = await pool.query(
     `SELECT ms.*, m.email, m.first_name, m.last_name, m.shopify_customer_id as member_shopify_id,
             p.name as plan_name, p.tier, p.price_cents, p.billing_interval, p.includes_dropship
-     FROM member_subscriptions ms
-     JOIN members m ON m.id = ms.member_id
-     JOIN plans p ON p.id = ms.plan_id
+     FROM membership.member_subscriptions ms
+     JOIN membership.members m ON m.id = ms.member_id
+     JOIN membership.plans p ON p.id = ms.plan_id
      WHERE ms.id = $1`,
     [subscriptionId]
   );

@@ -55,7 +55,7 @@ export async function registerVendor(
     let shellzClubMemberIdResolved: string | null = null;
     
     const member = await client.query(
-      `SELECT id FROM members WHERE LOWER(email) = LOWER($1)`,
+      `SELECT id FROM membership.members WHERE LOWER(email) = LOWER($1)`,
       [email.trim()]
     );
     
@@ -76,7 +76,7 @@ export async function registerVendor(
         const membership = await client.query(
           `SELECT mcm.plan_name, p.includes_dropship, p.tier as plan_tier
            FROM member_current_membership mcm
-           LEFT JOIN plans p ON p.id = mcm.plan_id
+           LEFT JOIN membership.plans p ON p.id = mcm.plan_id
            WHERE mcm.member_id = $1 LIMIT 1`,
           [shellzClubMemberIdResolved]
         );
@@ -103,7 +103,7 @@ export async function registerVendor(
     } else if (shellzClubMemberId) {
       // Fallback: try by member ID directly
       const memberById = await client.query(
-        `SELECT id FROM members WHERE id = $1`,
+        `SELECT id FROM membership.members WHERE id = $1`,
         [shellzClubMemberId]
       );
       if (memberById.rows.length > 0) {

@@ -184,7 +184,7 @@ export async function handleContractUpdated(payload: ContractWebhookPayload): Pr
   if (payload.revision_id) {
     const { pool } = await import("../../db");
     await pool.query(
-      `UPDATE member_subscriptions SET revision_id = $1 WHERE id = $2`,
+      `UPDATE membership.member_subscriptions SET revision_id = $1 WHERE id = $2`,
       [payload.revision_id, subscription.id]
     );
   }
@@ -288,7 +288,7 @@ export async function handleBillingFailure(payload: BillingWebhookPayload): Prom
     retryDate.setDate(retryDate.getDate() + 3);
     const { pool } = await import("../../db");
     await pool.query(
-      `UPDATE member_subscriptions SET next_billing_date = $1 WHERE id = $2`,
+      `UPDATE membership.member_subscriptions SET next_billing_date = $1 WHERE id = $2`,
       [retryDate, subscription.id]
     );
   }
@@ -312,7 +312,7 @@ export async function cancelSubscription(subscriptionId: number, reason: string)
   // Clear current membership if no other active subs
   const { pool } = await import("../../db");
   const otherActive = await pool.query(
-    `SELECT id FROM member_subscriptions WHERE member_id = $1 AND status = 'active' AND id != $2 LIMIT 1`,
+    `SELECT id FROM membership.member_subscriptions WHERE member_id = $1 AND status = 'active' AND id != $2 LIMIT 1`,
     [subscription.member_id, subscriptionId]
   );
 
@@ -461,7 +461,7 @@ async function handleCancellation(subscription: any, payload: ContractWebhookPay
   // Clear membership
   const { pool } = await import("../../db");
   const otherActive = await pool.query(
-    `SELECT id FROM member_subscriptions WHERE member_id = $1 AND status = 'active' AND id != $2 LIMIT 1`,
+    `SELECT id FROM membership.member_subscriptions WHERE member_id = $1 AND status = 'active' AND id != $2 LIMIT 1`,
     [subscription.member_id, subscription.id]
   );
 

@@ -229,7 +229,7 @@ async function resolveOrCreatePlans(existingPlans: any[]): Promise<SellingPlanCo
     } else {
       // Create new plan row
       const result = await pool.query(
-        `INSERT INTO plans (name, tier, billing_interval, billing_interval_count, price_cents, includes_dropship, is_active)
+        `INSERT INTO membership.plans (name, tier, billing_interval, billing_interval_count, price_cents, includes_dropship, is_active)
          VALUES ($1, $2, $3, $4, $5, $6, true) RETURNING id`,
         [cfg.name, cfg.tier, cfg.billingInterval === "MONTH" ? "month" : "year", cfg.billingIntervalCount, cfg.priceCents, cfg.includesDropship]
       );

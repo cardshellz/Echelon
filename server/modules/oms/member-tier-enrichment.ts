@@ -31,9 +31,9 @@ async function getMemberTierByEmail(email: string): Promise<string | null> {
   try {
     const result = await shellzClubDb.query<MemberTierLookup>(`
       SELECT p.name as tier
-      FROM members m
+      FROM membership.members m
       JOIN member_current_membership mcm ON mcm.member_id = m.id
-      JOIN plans p ON p.id = mcm.plan_id
+      JOIN membership.plans p ON p.id = mcm.plan_id
       WHERE LOWER(m.email) = LOWER($1)
       AND mcm.status = 'active'
       LIMIT 1

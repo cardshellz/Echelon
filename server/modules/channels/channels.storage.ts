@@ -565,8 +565,8 @@ export const channelMethods: IChannelStorage = {
   async getMemberPlanByEmail(email: string): Promise<string | null> {
     const result = await db.execute<{ plan_name: string }>(sql`
       SELECT p.name as plan_name
-      FROM members m
-      JOIN plans p ON m.plan_id = p.id
+      FROM membership.members m
+      JOIN membership.plans p ON m.plan_id = p.id
       WHERE LOWER(m.email) = LOWER(${email})
       LIMIT 1
     `);
