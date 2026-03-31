@@ -848,8 +848,18 @@ export function registerChannelRoutes(app: Express) {
     try {
       const { channelProductPush } = req.app.locals.services;
       const channelId = parseInt(req.params.channelId);
-      const result = await channelProductPush.pushAllProducts(channelId);
-      res.json(result);
+
+      // Return immediately, process in background
+      res.json({ status: "processing", message: "Push started in background" });
+
+      // Fire and forget
+      channelProductPush.pushAllProducts(channelId)
+        .then((result: any) => {
+          console.log(`[ChannelPush] Bulk push complete: ${result.updated} updated, ${result.created} created, ${result.errors} errors`);
+        })
+        .catch((err: any) => {
+          console.error(`[ChannelPush] Bulk push failed: ${err.message}`);
+        });
     } catch (error: any) {
       console.error("Error bulk pushing products:", error);
       res.status(500).json({ error: error?.message || "Failed to push products" });

@@ -429,11 +429,10 @@ export default function ShopifyChannelPage() {
                 size="sm"
                 onClick={async () => {
                   try {
-                    toast({ title: "Pushing images to Shopify...", description: "Processing in batches — this may take a few minutes" });
-                    const res = await fetch("/api/images/push/shopify", {
+                    toast({ title: "Pushing all products to Shopify...", description: "This runs in the background on the server" });
+                    const res = await fetch("/api/channel-push/all/36", {
                       method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({}),
+                      credentials: "include",
                     });
                     const text = await res.text();
                     let data: any;
@@ -441,8 +440,10 @@ export default function ShopifyChannelPage() {
                     if (!res.ok) {
                       throw new Error(data?.error || `Server returned ${res.status}`);
                     }
-                    const msg = data?.message || `Pushed ${data?.summary?.imagesPushed ?? 0} images`;
-                    toast({ title: "Push complete", description: msg });
+                    toast({ 
+                      title: "Push complete", 
+                      description: `${data?.updated ?? 0} updated, ${data?.created ?? 0} created, ${data?.errors ?? 0} errors`
+                    });
                   } catch (err: any) {
                     toast({ title: "Push failed", description: err.message, variant: "destructive" });
                   }
@@ -450,7 +451,7 @@ export default function ShopifyChannelPage() {
                 className="min-h-[44px]"
               >
                 <Upload className="h-4 w-4 mr-2" />
-                Push All Images
+                Push All to Shopify
               </Button>
             </div>
           </div>
