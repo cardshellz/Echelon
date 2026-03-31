@@ -273,11 +273,14 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/replen/cancel", requireAuth, async (req, res) => {
     try {
       const { replenishment } = req.app.locals.services;
-      const { taskId } = req.body;
+      const { taskId, actualCount } = req.body;
       if (!taskId) {
         return res.status(400).json({ error: "taskId is required" });
       }
-      await replenishment.cancelPickerReplen(taskId);
+      if (actualCount === undefined || actualCount === null || typeof actualCount !== "number") {
+        return res.status(400).json({ error: "actualCount (number) is required — the picker must enter the actual bin count" });
+      }
+      await replenishment.cancelPickerReplen(taskId, actualCount, req.session.user?.id);
       res.json({ success: true });
     } catch (error: any) {
       console.error("Error cancelling replen:", error);

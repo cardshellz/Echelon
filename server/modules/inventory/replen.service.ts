@@ -934,10 +934,22 @@ class ReplenishmentService {
   }
 
   /**
-   * Cancel replen task when picker confirms replen was NOT needed
-   * This handles cases where system thought replen was needed but picker disagrees (drift)
+   * Cancel replen task when picker confirms replen was NOT needed.
+   * 
+   * CRITICAL: Before cancelling, this method reconciles the target bin
+   * to the picker's actual count. The picker is the source of truth for
+   * physical stock — if they say there's 49 units and the system says 1,
+   * the system updates to 49.
+   *
+   * If the actual count reveals a variance from the system, a cycle count
+   * is automatically triggered on the source case bin to verify whether
+   * an unrecorded case break occurred.
+   *
+   * @param taskId - The replen task to cancel
+   * @param actualCount - The picker's actual bin count (source of truth)
+   * @param userId - Who performed the count
    */
-  async cancelPickerReplen(taskId: number): Promise<void> {
+  async cancelPickerReplen(taskId: number, actualCount: number, userId?: string): Promise<void> {
     const [task] = await this.db
       .select()
       .from(replenTasks)
@@ -948,14 +960,120 @@ class ReplenishmentService {
       throw new Error(`Replen task ${taskId} not found`);
     }
 
+    if (task.status === "completed" || task.status === "cancelled") {
+      return; // Already handled
+    }
+
+    const targetVariantId = task.pickProductVariantId ?? task.sourceProductVariantId;
+    const targetLocationId = task.toLocationId;
+
+    if (targetVariantId && targetLocationId) {
+      // Get current system qty at the target bin
+      const currentLevel = await this.inventoryCore.getLevel(targetVariantId, targetLocationId);
+      const systemQty = currentLevel?.variantQty ?? 0;
+      const variance = actualCount - systemQty;
+
+      // Reconcile: picker's count is the source of truth
+      if (variance !== 0) {
+        await this.inventoryCore.adjustInventory({
+          productVariantId: targetVariantId,
+          warehouseLocationId: targetLocationId,
+          qtyDelta: variance,
+          reason: `Bin count reconciliation during replen cancel: system=${systemQty}, actual=${actualCount}, variance=${variance}`,
+          userId: userId ?? undefined,
+        });
+
+        // If we found MORE stock than expected, a case break may have happened unrecorded.
+        // Auto-trigger cycle count on the source case bin to verify.
+        if (variance > 0 && task.fromLocationId) {
+          await this.autoCreateCycleCountForVariance(
+            task.fromLocationId,
+            targetLocationId,
+            targetVariantId,
+            variance,
+            systemQty,
+            actualCount,
+            userId,
+          );
+        }
+
+        console.log(
+          `[Replen] Reconciled bin during cancel: target=${targetLocationId} variant=${targetVariantId} ` +
+          `system=${systemQty} actual=${actualCount} variance=${variance}`
+        );
+      }
+    }
+
     // Cancel the task
     await this.db
       .update(replenTasks)
       .set({
         status: "cancelled",
-        notes: `${task.notes || ""}\nCancelled by picker - replen not needed (system drift)`,
+        notes: `${task.notes || ""}\nCancelled by picker (actual count: ${actualCount})` +
+          (userId ? ` by ${userId}` : ""),
       })
       .where(eq(replenTasks.id, taskId));
+  }
+
+  /**
+   * Auto-create a cycle count task for a source bin when a target bin variance is detected.
+   * This notifies the lead/admin to verify the source case bin.
+   */
+  private async autoCreateCycleCountForVariance(
+    sourceLocationId: number,
+    targetLocationId: number,
+    targetVariantId: number,
+    variance: number,
+    systemQty: number,
+    actualCount: number,
+    userId?: string,
+  ): Promise<void> {
+    try {
+      // Look up source variant (the case) from the replen task
+      const [sourceLoc] = await this.db
+        .select({ code: warehouseLocations.code })
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, sourceLocationId))
+        .limit(1);
+
+      const [targetLoc] = await this.db
+        .select({ code: warehouseLocations.code })
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, targetLocationId))
+        .limit(1);
+
+      const [variant] = await this.db
+        .select({ sku: productVariants.sku, name: productVariants.name })
+        .from(productVariants)
+        .where(eq(productVariants.id, targetVariantId))
+        .limit(1);
+
+      // Fire notification to leads/admins
+      const { notify } = await import("../notifications/notifications.service");
+      await notify("cycle_count_needed", {
+        title: `Bin variance detected: ${variant?.sku ?? 'unknown'}`,
+        message: `${targetLoc?.code ?? 'target bin'} has ${variance} more units than expected ` +
+          `(system: ${systemQty}, actual: ${actualCount}). ` +
+          `Verify source bin ${sourceLoc?.code ?? 'unknown'} — possible unrecorded case break.`,
+        data: {
+          sourceLocationId,
+          targetLocationId,
+          targetVariantId,
+          variance,
+          systemQty,
+          actualCount,
+          triggeredBy: userId ?? "picker_replen_cancel",
+        },
+      });
+
+      console.log(
+        `[Replen] Cycle count notification sent for source bin ${sourceLoc?.code} ` +
+        `(variance: +${variance} at ${targetLoc?.code})`
+      );
+    } catch (err: any) {
+      // Non-blocking — notification failure shouldn't fail the reconciliation
+      console.warn(`[Replen] Failed to send cycle count notification: ${err.message}`);
+    }
   }
 
   // ---------------------------------------------------------------------------
