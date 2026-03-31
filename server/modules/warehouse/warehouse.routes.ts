@@ -711,4 +711,37 @@ export function registerWarehouseRoutes(app: Express) {
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
+
+  // ===== WAREHOUSE FIFO SETTINGS =====
+  
+  app.get("/api/warehouses/:id/fifo", requirePermission("warehouse", "read"), async (req, res) => {
+    try {
+      const warehouseId = parseInt(req.params.id);
+      if (isNaN(warehouseId)) return res.status(400).json({ error: "Invalid warehouse ID" });
+      
+      const key = `warehouse_${warehouseId}_fifo_mode`;
+      const val = await storage.getSetting(key);
+      
+      res.json({ enabled: val === 'true' });
+    } catch (error) {
+      console.error("Error fetching FIFO mode:", error);
+      res.status(500).json({ error: "Failed to fetch FIFO mode" });
+    }
+  });
+
+  app.post("/api/warehouses/:id/fifo", requirePermission("warehouse", "manage"), async (req, res) => {
+    try {
+      const warehouseId = parseInt(req.params.id);
+      if (isNaN(warehouseId)) return res.status(400).json({ error: "Invalid warehouse ID" });
+      
+      const isEnabled = req.body.enabled === true ? 'true' : 'false';
+      const key = `warehouse_${warehouseId}_fifo_mode`;
+      
+      await storage.upsertSetting(key, isEnabled, "picking");
+      res.json({ success: true, enabled: isEnabled === 'true' });
+    } catch (error) {
+      console.error("Error updating FIFO mode:", error);
+      res.status(500).json({ error: "Failed to update FIFO mode" });
+    }
+  });
 }

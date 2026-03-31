@@ -101,7 +101,7 @@ async function releaseHoldOrder(orderId: number): Promise<Order> {
   return res.json();
 }
 
-async function setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order> {
+async function setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order> {
   const res = await fetch(`/api/orders/${orderId}/priority`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -308,7 +308,7 @@ interface PickBatch {
   id: string;
   orders: number;
   items: PickItem[];
-  priority: "rush" | "high" | "normal";
+  priority: number;
   age: string;
   zones: string[];
   status: "ready" | "in_progress" | "completed";
@@ -321,7 +321,7 @@ interface SingleOrder {
   orderNumber: string;
   customer: string;
   items: PickItem[];
-  priority: "rush" | "high" | "normal";
+  priority: number;
   age: string;
   orderDate?: string;
   status: "ready" | "in_progress" | "completed";
@@ -405,6 +405,35 @@ export default function Picking() {
     queryFn: fetchExceptions,
     enabled: !!isAdminOrLead, // Only fetch for admin/lead users
     refetchOnWindowFocus: true,
+  });
+
+  const { data: fifoSettings, refetch: refetchFifo } = useQuery({
+    queryKey: ["warehouse-fifo", 1], // Defaulting to warehouse 1 for now
+    queryFn: async () => {
+      const res = await fetch(`/api/warehouses/1/fifo`);
+      if (!res.ok) return { enabled: false };
+      return res.json();
+    },
+  });
+  
+  const toggleFifoMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await fetch(`/api/warehouses/1/fifo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) throw new Error("Failed to update FIFO settings");
+      return res.json();
+    },
+    onSuccess: () => {
+      refetchFifo();
+      refetch(); // Refetch the queue to apply new sorting
+      toast({ title: "Routing Rules Updated", description: "Warehouse priority routing has been updated." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    }
   });
   
   // Mutation for resolving exceptions
@@ -499,7 +528,7 @@ export default function Picking() {
     id: String(order.id),
     orderNumber: order.orderNumber,
     customer: order.customerName,
-    priority: order.priority as "rush" | "high" | "normal",
+    priority: order.priority,
     age: getOrderAge(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
     orderDate: formatOrderDate(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
     status: order.warehouseStatus === "in_progress" ? "in_progress" : 
@@ -709,15 +738,15 @@ export default function Picking() {
   });
   
   // Mutation for setting order priority (admin/lead only)
-  const rushMutation = useMutation({
-    mutationFn: ({ orderId, priority }: { orderId: number; priority: "rush" | "high" | "normal" }) => 
+  const priorityMutation = useMutation({
+    mutationFn: ({ orderId, priority }: { orderId: number; priority: number | "reset" }) => 
       setOrderPriority(orderId, priority),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
       playSound("success");
       toast({
-        title: data.priority === "rush" ? "Order marked as RUSH" : "Order priority updated",
-        description: `Order ${data.orderNumber} is now ${data.priority} priority`,
+        title: "Priority updated",
+        description: `Order ${data.orderNumber} priority updated to ${data.priority}`,
       });
     },
     onError: (error) => {
@@ -1301,8 +1330,7 @@ export default function Picking() {
       let result = 0;
       switch (sortBy) {
         case "priority": {
-          const priorityOrder = { rush: 0, high: 1, normal: 2 };
-          result = priorityOrder[a.priority] - priorityOrder[b.priority];
+          result = a.priority - b.priority;
           break;
         }
         case "items":
@@ -2376,7 +2404,7 @@ export default function Picking() {
       if (activeFilter === "ready" && (item.status !== "ready" || itemOnHold)) return false;
       if (activeFilter === "active" && item.status !== "in_progress") return false;
       if (activeFilter === "done" && item.status !== "completed") return false;
-      if (activeFilter === "rush" && item.priority !== "rush") return false;
+      if (activeFilter === "rush" && item.priority < 9999) return false;
       if (activeFilter === "hold" && !itemOnHold) return false;
       if (activeFilter === "combined" && !("isCombinedGroup" in item && (item as any).isCombinedGroup)) return false;
       
@@ -2398,8 +2426,7 @@ export default function Picking() {
       let result = 0;
       switch (sortBy) {
         case "priority": {
-          const priorityOrder = { rush: 0, high: 1, normal: 2 };
-          result = priorityOrder[a.priority] - priorityOrder[b.priority];
+          result = a.priority - b.priority;
           break;
         }
         case "items":
@@ -2579,7 +2606,7 @@ export default function Picking() {
               onClick={() => setActiveFilter(activeFilter === "rush" ? "all" : "rush")}
               data-testid="filter-rush"
             >
-              <span className="font-bold">{readyItems.filter(item => item.priority === "rush").length}</span> Rush
+              <span className="font-bold">{readyItems.filter(item => item.priority >= 9999).length}</span> Rush
             </button>
             {holdItems.length > 0 && (
               <button
@@ -2623,6 +2650,30 @@ export default function Picking() {
             </button>
           </div>
         </div>
+
+        {/* Queue Routing Override (Admins/Leads) */}
+        {isAdminOrLead && (
+          <div className="px-3 py-2 bg-amber-50/50 border-b flex justify-between items-center transition-all duration-300">
+            <div className="text-xs text-amber-800">
+              <span className="font-semibold block sm:inline">Warehouse Routing Mode:</span> 
+              <span className="opacity-80 sm:ml-1 block sm:inline">
+                {fifoSettings?.enabled 
+                  ? "Strict FIFO (Oldest First). Base SLAs are ignored." 
+                  : "Smart SLA Priority (Based on rules)."}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="fifo-mode" className="text-xs font-semibold cursor-pointer shrink-0">Global FIFO</Label>
+              <Switch 
+                id="fifo-mode" 
+                checked={fifoSettings?.enabled || false}
+                onCheckedChange={(checked) => toggleFifoMutation.mutate(checked)}
+                disabled={toggleFifoMutation.isPending}
+                className="scale-90 data-[state=checked]:bg-amber-600"
+              />
+            </div>
+          </div>
+        )}
 
         {/* Search and Sort - Mobile responsive */}
         <div className="px-3 py-2 bg-muted/30 border-b">
@@ -2700,8 +2751,8 @@ export default function Picking() {
                 key={batch.id} 
                 className={cn(
                   "cursor-pointer hover:border-primary/50 transition-colors active:scale-[0.99]",
-                  batch.priority === "rush" && "border-l-4 border-l-red-500",
-                  batch.priority === "high" && "border-l-4 border-l-amber-500",
+                  batch.priority >= 9999 && "border-l-4 border-l-red-500",
+                  batch.priority >= 300 && batch.priority < 9999 && "border-l-4 border-l-orange-500",
                   batch.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20"
                 )}
                 onClick={() => batch.status === "ready" ? handleStartPicking(batch.id) : null}
@@ -2719,8 +2770,8 @@ export default function Picking() {
                       <div>
                         <div className="font-semibold flex items-center gap-2 text-base">
                           {batch.id}
-                          {batch.priority === "rush" && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">RUSH</Badge>}
-                          {batch.priority === "high" && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                          {batch.priority >= 9999 && <Badge variant="destructive" className="text-[10px] px-1.5 py-0">🔼 BUMPED</Badge>}
+                          {batch.priority >= 300 && batch.priority < 9999 && <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-orange-300 text-orange-700 bg-orange-50">P{batch.priority}</Badge>}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           {batch.orders} order{batch.orders > 1 ? "s" : ""} • {batch.items.length} items
@@ -2746,8 +2797,8 @@ export default function Picking() {
                 className={cn(
                   "cursor-pointer hover:border-primary/50 transition-all active:scale-[0.99]",
                   order.isCombinedGroup && "border-l-4 border-l-indigo-500 bg-indigo-50/30 dark:bg-indigo-950/20",
-                  !order.isCombinedGroup && order.priority === "rush" && "border-l-4 border-l-red-500",
-                  !order.isCombinedGroup && order.priority === "high" && "border-l-4 border-l-amber-500",
+                  !order.isCombinedGroup && order.priority >= 9999 && "border-l-4 border-l-red-500",
+                  !order.isCombinedGroup && order.priority >= 300 && order.priority < 9999 && "border-l-4 border-l-orange-500",
                   order.status === "in_progress" && "bg-amber-50/50 dark:bg-amber-950/20",
                   order.onHold && "opacity-60 bg-slate-100 dark:bg-slate-800/40",
                   flashingOrderId === order.id && "animate-pulse ring-2 ring-amber-400 bg-amber-50 dark:bg-amber-900/30"
@@ -2842,34 +2893,34 @@ export default function Picking() {
                               <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2">
                                 <span>{order.orderDate}</span>
                                 {/* Admin inline Rush/Hold buttons for ready orders */}
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority !== "rush" && (
+                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority < 9999 && (
                                   <button
-                                    className="text-red-600 hover:text-red-700 flex items-center gap-0.5 font-medium"
+                                    className="text-red-500 hover:text-red-600 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setFlashingOrderId(order.id);
-                                      rushMutation.mutate({ orderId: parseInt(order.id), priority: "rush" });
+                                      priorityMutation.mutate({ orderId: parseInt(order.id), priority: 9999 });
                                       setTimeout(() => setFlashingOrderId(null), 600);
                                     }}
-                                    data-testid={`button-rush-${order.id}`}
+                                    data-testid={`button-bump-${order.id}`}
                                   >
                                     <Zap className="h-3 w-3" />
-                                    Rush
+                                    Bump
                                   </button>
                                 )}
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority === "rush" && (
+                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority >= 9999 && (
                                   <button
                                     className="text-slate-500 hover:text-slate-600 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setFlashingOrderId(order.id);
-                                      rushMutation.mutate({ orderId: parseInt(order.id), priority: "normal" });
+                                      priorityMutation.mutate({ orderId: parseInt(order.id), priority: "reset" });
                                       setTimeout(() => setFlashingOrderId(null), 600);
                                     }}
-                                    data-testid={`button-unrush-${order.id}`}
+                                    data-testid={`button-normalize-${order.id}`}
                                   >
                                     <Zap className="h-3 w-3" />
-                                    Unrush
+                                    Normal
                                   </button>
                                 )}
                                 {order.status === "ready" && !order.onHold && (
@@ -2922,8 +2973,8 @@ export default function Picking() {
                           </Badge>
                         )}
                         {order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-slate-400 text-slate-600 bg-slate-100">HOLD</Badge>}
-                        {order.priority === "rush" && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">RUSH</Badge>}
-                        {order.priority === "high" && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-amber-300 text-amber-700 bg-amber-50">HIGH</Badge>}
+                        {order.priority >= 9999 && !order.onHold && <Badge variant="destructive" className="text-[9px] px-1.5 py-0.5">🔼 BUMPED</Badge>}
+                        {order.priority >= 300 && order.priority < 9999 && !order.onHold && <Badge variant="outline" className="text-[9px] px-1.5 py-0.5 border-orange-300 text-orange-700 bg-orange-50">P{order.priority}</Badge>}
                         {order.status === "completed" && order.c2p && (
                           <span className="text-xs text-emerald-600 font-medium">C2P {order.c2p}</span>
                         )}
@@ -3117,7 +3168,7 @@ export default function Picking() {
       id: String(order.id),
       orderNumber: order.orderNumber,
       customer: order.customerName,
-      priority: order.priority as "rush" | "high" | "normal",
+      priority: order.priority,
       age: getOrderAge(order.orderPlacedAt || order.shopifyCreatedAt || order.createdAt),
       status: "ready" as const,
       assignee: order.assignedPickerId,
@@ -3447,16 +3498,16 @@ export default function Picking() {
               {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
             </Button>
 {/* Priority badge only - order # shown below */}
-            {(activeWork?.priority === "rush" || activeWork?.priority === "high") && (
+            {activeWork?.priority !== undefined && activeWork.priority >= 300 && (
               <Badge 
-                variant="outline" 
+                variant={activeWork.priority >= 9999 ? "destructive" : "outline"} 
                 className={cn(
                   "text-xs px-2 py-0.5",
-                  activeWork?.priority === "rush" && "border-red-300 bg-red-50 text-red-700",
-                  activeWork?.priority === "high" && "border-amber-300 bg-amber-50 text-amber-700"
+                  activeWork.priority >= 9999 && "border-red-300 bg-red-50 text-red-700",
+                  activeWork.priority >= 300 && activeWork.priority < 9999 && "border-orange-300 bg-orange-50 text-orange-700"
                 )}
               >
-                {activeWork?.priority === "rush" ? "RUSH" : "HIGH"}
+                {activeWork.priority >= 9999 ? "🔼 BUMPED" : `P${activeWork.priority}`}
               </Badge>
             )}
           </div>

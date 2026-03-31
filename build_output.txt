@@ -1,0 +1,62 @@
+﻿building client...
+[36mvite v7.1.12 [32mbuilding for production...[36m[39m
+transforming...
+[32mΓ£ô[39m 2900 modules transformed.
+rendering chunks...
+[meta-images] no Replit deployment domain found, skipping meta tag updates
+computing gzip size...
+[2m../dist/public/[22m[32mindex.html                 [39m[1m[2m    3.07 kB[22m[1m[22m[2m Γöé gzip:   1.03 kB[22m
+[2m../dist/public/[22m[35massets/index-CHPExvza.css  [39m[1m[2m  166.86 kB[22m[1m[22m[2m Γöé gzip:  25.95 kB[22m
+[2m../dist/public/[22m[36massets/index-CwJEqiCB.js   [39m[1m[33m2,418.26 kB[39m[22m[2m Γöé gzip: 563.17 kB[22m
+node.exe : [33m
+At C:\Program Files\nodejs\npx.ps1:29 char:3
++   & $NODE_EXE $NPX_CLI_JS $args
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+(!) Some chunks are larger than 500 kB after 
+minification. Consider:
+- Using dynamic import() to code-split the 
+application
+- Use build.rollupOptions.output.manualChunks to 
+improve chunking: https://rollupjs.org/configuratio
+n-options/#output-manualchunks
+- Adjust chunk size limit for this warning via 
+build.chunkSizeWarningLimit.[39m
+[32mΓ£ô built in 10.48s[39m
+building server...
+X [ERROR] Unexpected "==="
+
+    server/modules/subscriptions/subscription.stora
+ge.ts:19:3:
+      19 Γöé =======
+         Γò╡    ~~~
+
+1 error
+Error: Build failed with 1 error:
+server/modules/subscriptions/subscription.storage.t
+s:19:3: ERROR: Unexpected "==="
+    at failureErrorWithLog (C:\Users\owner\Echelon\
+node_modules\esbuild\lib\main.js:1467:15)
+    at C:\Users\owner\Echelon\node_modules\esbuild\
+lib\main.js:926:25
+    at C:\Users\owner\Echelon\node_modules\esbuild\
+lib\main.js:878:52
+    at buildResponseToResult (C:\Users\owner\Echelo
+n\node_modules\esbuild\lib\main.js:924:7)
+    at C:\Users\owner\Echelon\node_modules\esbuild\
+lib\main.js:951:16
+    at responseCallbacks.<computed> (C:\Users\owner
+\Echelon\node_modules\esbuild\lib\main.js:603:9)
+    at handleIncomingPacket (C:\Users\owner\Echelon
+\node_modules\esbuild\lib\main.js:658:12)
+    at Socket.readFromStdout (C:\Users\owner\Echelo
+n\node_modules\esbuild\lib\main.js:581:7)
+    at Socket.emit (node:events:524:28)
+    at addChunk 
+(node:internal/streams/readable:561:12) {
+  errors: [Getter/Setter],
+  warnings: [Getter/Setter]
+}

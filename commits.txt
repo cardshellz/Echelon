@@ -1,0 +1,20 @@
+﻿fix: PriorityControlCard uses correct auth endpoint /api/auth/me
+fix: add missing files - shadow-ingestion.routes.ts, membership.schema.ts
+fix: resolve merge conflict markers in subscription.storage.ts
+feat: WMS numerical priority system - integer schema, composite scoring, UI controls
+fix: Update all SQL references from public to membership schema
+Add backfill scripts and summary documentation
+Fix oms_order_lines bugs: update column names in webhooks, add line items recovery for existing orders
+Fix WMS sync: copy price fields from oms_order_lines to order_items
+fix: Restore replenPrediction + prevent infinite re-render loop in picking queue
+Remove replenPrediction from picking service
+Re-apply schema fixes without replenPrediction
+fix: Historically accurate member tier backfill
+add: Member tier backfill script (direct SQL)
+feat: Add member tier enrichment for OMS orders
+refactor: Simplify member enrichment to tier-only
+feat: Add outbound shipping cost tracking
+refactor: Rename shipment tables for inbound/outbound clarity
+fix: Try both secrets in Shopify webhook verification
+feat: Auto-run SQL migrations on Heroku deploy
+fix: Change dropship member_id to VARCHAR (no cross-DB FK)

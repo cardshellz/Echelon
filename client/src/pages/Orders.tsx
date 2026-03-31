@@ -245,13 +245,14 @@ function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdat
     },
   });
 
-  const isAuthorized = authData?.user?.role === "admin" || authData?.user?.role === "lead";
+  const permissions = (authData as any)?.permissions || (authData as any)?.user?.permissions || {};
+  const isAuthorized = authData?.user?.role === "admin" || permissions?.orders?.includes("override_priority");
   if (!isAuthorized) return null;
 
   const isBumped = order.priority >= 9999;
   const isHeld = order.priority < 0;
 
-  const setPriority = async (priority: number, label: string) => {
+  const setPriority = async (priority: number | "reset", label: string) => {
     try {
       const res = await fetch(`/api/orders/${order.id}/priority`, {
         method: "POST",
@@ -283,7 +284,7 @@ function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdat
             size="sm"
             variant={isBumped ? "default" : "outline"}
             className={cn("w-full justify-start gap-2", isBumped && "bg-red-500 hover:bg-red-600 text-white border-red-500")}
-            onClick={() => isBumped ? setPriority(100, "reset to normal") : setPriority(9999, "bumped to top")}
+            onClick={() => isBumped ? setPriority("reset", "reset to normal") : setPriority(9999, "bumped to top")}
           >
             <ChevronsUp className="h-4 w-4" />
             {isBumped ? "Remove Bump" : "Bump to Top"}
@@ -292,7 +293,7 @@ function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdat
             size="sm"
             variant={isHeld ? "destructive" : "outline"}
             className="w-full justify-start gap-2"
-            onClick={() => isHeld ? setPriority(100, "released from hold") : setPriority(-1, "held")}
+            onClick={() => isHeld ? setPriority("reset", "released from hold") : setPriority(-1, "held")}
           >
             <MinusCircle className="h-4 w-4" />
             {isHeld ? "Release Hold" : "Hold Order"}
@@ -302,7 +303,7 @@ function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdat
               size="sm"
               variant="ghost"
               className="w-full justify-start gap-2 text-muted-foreground"
-              onClick={() => setPriority(100, "reset to SLA priority")}
+              onClick={() => setPriority("reset", "reset to SLA priority")}
             >
               <RotateCcw className="h-4 w-4" />
               Reset to SLA Priority

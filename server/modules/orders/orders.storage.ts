@@ -25,7 +25,7 @@ export interface IOrderStorage {
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
-  setOrderPriority(orderId: number, priority: number): Promise<Order | null>;
+  setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null>;
 
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
@@ -160,6 +160,7 @@ export const orderMethods: IOrderStorage = {
     const orderList = await db.execute(sql`
       SELECT o.*
       FROM orders o
+      LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
           -- Ready/in_progress orders: show in pick queue
@@ -169,7 +170,8 @@ export const orderMethods: IOrderStorage = {
         )
       ORDER BY
         o.on_hold ASC,           -- Held orders sink to the bottom
-        o.priority DESC,         -- Baked-in composite score (Shipping Base + Membership Modifier)
+        CASE WHEN o.priority >= 9999 THEN 1 ELSE 0 END DESC, -- Bumped orders always float to top
+        CASE WHEN s.value = 'true' THEN 0 ELSE o.priority END DESC, -- Bypass standard priority scoring if FIFO enabled
         o.sla_due_at ASC NULLS LAST,
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
@@ -637,10 +639,11 @@ export const orderMethods: IOrderStorage = {
     return result[0] || null;
   },
 
-  async setOrderPriority(orderId: number, priority: number): Promise<Order | null> {
+  async setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null> {
+    const finalPriority = priority === "reset" ? 100 : priority;
     const result = await db
       .update(orders)
-      .set({ priority })
+      .set({ priority: finalPriority })
       .where(eq(orders.id, orderId))
       .returning();
     return result[0] || null;

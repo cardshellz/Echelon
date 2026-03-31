@@ -415,8 +415,8 @@ export function registerPickingRoutes(app: Express) {
       const id = parseInt(req.params.id);
       const { priority } = req.body;
 
-      if (priority === undefined || priority === null || typeof priority !== "number" || !Number.isInteger(priority)) {
-        return res.status(400).json({ error: "Invalid priority. Must be an integer (e.g. 9999=Bump, -1=Hold, 100=Normal)" });
+      if (priority === undefined || priority === null || (priority !== "reset" && (typeof priority !== "number" || !Number.isInteger(priority)))) {
+        return res.status(400).json({ error: "Invalid priority. Must be an integer or 'reset'" });
       }
 
       const orderBefore = await storage.getOrderById(id);
@@ -426,7 +426,7 @@ export function registerPickingRoutes(app: Express) {
         return res.status(404).json({ error: "Order not found" });
       }
 
-      const label = priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`;
+      const label = priority === "reset" ? "reset to SLA priority" : (priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`);
 
       // Log the priority change (non-blocking)
       storage.createPickingLog({

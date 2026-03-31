@@ -1,0 +1,10 @@
+client/src/pages/vendor/VendorWallet.tsx(20,10): error TS2305: Module '"@/components/ui/checkbox"' has no exported member 'Switch'.
+server/modules/channels/source-lock.service.ts(135,9): error TS2322: Type '{}' is not assignable to type 'boolean'.
+server/modules/procurement/procurement.storage.ts(33,8): error TS2305: Module '"../../storage/base"' has no exported member 'ShipmentCost'.
+server/modules/procurement/procurement.storage.ts(34,8): error TS2305: Module '"../../storage/base"' has no exported member 'InsertShipmentCost'.
+server/modules/procurement/procurement.storage.ts(35,8): error TS2724: '"../../storage/base"' has no exported member named 'InsertShipmentCostAllocation'. Did you mean 'InsertApPaymentAllocation'?
+server/modules/procurement/shipment-tracking.service.ts(17,3): error TS2305: Module '"@shared/schema"' has no exported member 'ShipmentCost'.
+server/modules/procurement/shipment-tracking.service.ts(18,3): error TS2305: Module '"@shared/schema"' has no exported member 'InsertShipmentCost'.
+server/modules/procurement/shipment-tracking.service.ts(19,3): error TS2724: '"@shared/schema"' has no exported member named 'InsertShipmentCostAllocation'. Did you mean 'InsertApPaymentAllocation'?
+server/services/index.ts(84,59): error TS2345: Argument of type 'ReplenishmentService' is not assignable to parameter of type 'ReplenishmentService'.
+  Property 'inferUnrecordedReplen' is missing in type 'ReplenishmentService' but required in type 'ReplenishmentService'.
