@@ -206,6 +206,17 @@ export function createChannelProductPushService(db: any) {
     }
 
     if (channel.provider === "shopify") {
+      // Validate: all listed variants must have a price
+      const missingPrice = resolved.variants.filter((v) => v.isListed && (v.price == null || v.price < 0));
+      if (missingPrice.length > 0) {
+        const skus = missingPrice.map((v) => v.sku || v.name).join(", ");
+        return {
+          productId,
+          channelId,
+          status: "error",
+          error: `Cannot push to Shopify — missing price on variant${missingPrice.length > 1 ? "s" : ""}: ${skus}. Set prices in the product variants.`,
+        };
+      }
       return await pushToShopify(resolved, channelId);
     }
 
@@ -463,8 +474,7 @@ export function createChannelProductPushService(db: any) {
         // Shopify REST API uses option1/option2/option3, NOT title
         option1: isSingleDefaultVariant ? "Default Title" : (v.name || v.sku || "Default"),
         barcode: v.barcode || v.gtin || undefined,
-        // Price is required by Shopify — fall back to 0.00 if somehow still null
-        price: v.price != null ? (v.price / 100).toFixed(2) : "0.00",
+        price: (v.price! / 100).toFixed(2),
       };
       if (v.compareAtPrice != null) {
         variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
