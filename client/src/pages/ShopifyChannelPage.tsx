@@ -407,8 +407,14 @@ export default function ShopifyChannelPage() {
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({}),
                     });
-                    const data = await res.json();
-                    toast({ title: `Pulled ${data?.summary?.imagesAdded ?? 0} images from eBay` });
+                    const text = await res.text();
+                    let data: any;
+                    try { data = JSON.parse(text); } catch { data = { error: text }; }
+                    if (!res.ok) {
+                      throw new Error(data?.error || `Server returned ${res.status}`);
+                    }
+                    const msg = data?.message || `Pulled ${data?.summary?.imagesAdded ?? 0} images from eBay`;
+                    toast({ title: "Pull complete", description: msg });
                   } catch (err: any) {
                     toast({ title: "Pull failed", description: err.message, variant: "destructive" });
                   }
@@ -424,18 +430,19 @@ export default function ShopifyChannelPage() {
                 onClick={async () => {
                   try {
                     toast({ title: "Pushing images to Shopify...", description: "Processing in batches — this may take a few minutes" });
-                    // Push in batches of 20 to avoid Heroku 30s timeout
                     const res = await fetch("/api/images/push/shopify", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({}),
                     });
+                    const text = await res.text();
+                    let data: any;
+                    try { data = JSON.parse(text); } catch { data = { error: text }; }
                     if (!res.ok) {
-                      const text = await res.text();
-                      throw new Error(text || `Server error: ${res.status}`);
+                      throw new Error(data?.error || `Server returned ${res.status}`);
                     }
-                    const data = await res.json();
-                    toast({ title: `Pushed ${data?.summary?.imagesPushed ?? 0} images to Shopify` });
+                    const msg = data?.message || `Pushed ${data?.summary?.imagesPushed ?? 0} images`;
+                    toast({ title: "Push complete", description: msg });
                   } catch (err: any) {
                     toast({ title: "Push failed", description: err.message, variant: "destructive" });
                   }
