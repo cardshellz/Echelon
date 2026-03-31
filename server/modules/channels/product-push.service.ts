@@ -138,8 +138,8 @@ export function createChannelProductPushService(db: any) {
         gtin: v.gtin || null,
         mpn: v.mpn || null,
         weight: vo?.weightOverride || null,
-        price: pr?.price ?? null,
-        compareAtPrice: pr?.compareAtPrice ?? null,
+        price: pr?.price ?? v.priceCents ?? null,
+        compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,
         isListed: vo ? vo.isListed === 1 : true,
       };
@@ -451,9 +451,8 @@ export function createChannelProductPushService(db: any) {
           title: v.name,
           barcode: v.barcode || v.gtin, // Prefer barcode, fall back to GTIN
         };
-        if (v.price != null) {
-          variant.price = (v.price / 100).toFixed(2);
-        }
+        // Price is required by Shopify — fall back to 0.00 if somehow still null
+        variant.price = v.price != null ? (v.price / 100).toFixed(2) : "0.00";
         if (v.compareAtPrice != null) {
           variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
         }
