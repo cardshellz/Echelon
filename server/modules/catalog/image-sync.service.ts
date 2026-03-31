@@ -163,6 +163,21 @@ export function createImageSyncService() {
   }
 
   /**
+   * Normalize a Shopify shop domain to just the store name.
+   * Accepts: "cardshellz", "cardshellz.myshopify.com", "https://cardshellz.myshopify.com"
+   * Returns: "cardshellz.myshopify.com"
+   */
+  function normalizeShopDomain(domain: string): string {
+    let d = domain.trim();
+    d = d.replace(/^https?:\/\//, "");
+    d = d.replace(/\/.*$/, "");
+    if (!d.includes(".myshopify.com")) {
+      d = `${d}.myshopify.com`;
+    }
+    return d;
+  }
+
+  /**
    * Pull images from Shopify products and store in Echelon catalog.
    * Uses the Shopify Admin API to fetch product images.
    */
@@ -171,6 +186,7 @@ export function createImageSyncService() {
     accessToken: string,
     productIds?: number[]
   ): Promise<ImagePullResult[]> {
+    const domain = normalizeShopDomain(shopDomain);
     const results: ImagePullResult[] = [];
 
     const shopifyConditions = [sql`${products.shopifyProductId} IS NOT NULL`];
@@ -205,7 +221,7 @@ export function createImageSyncService() {
 
         // Fetch from Shopify
         const shopifyRes = await fetch(
-          `https://${shopDomain}/admin/api/2024-01/products/${product.shopifyProductId}.json`,
+          `https://${domain}/admin/api/2024-01/products/${product.shopifyProductId}.json`,
           {
             headers: {
               "X-Shopify-Access-Token": accessToken,
@@ -295,6 +311,7 @@ export function createImageSyncService() {
     accessToken: string,
     productIds?: number[]
   ): Promise<ImagePushResult[]> {
+    const domain = normalizeShopDomain(shopDomain);
     const results: ImagePushResult[] = [];
 
     // Get products with images and Shopify product IDs
@@ -356,7 +373,7 @@ export function createImageSyncService() {
 
         // Push to Shopify
         const shopifyRes = await fetch(
-          `https://${shopDomain}/admin/api/2024-01/products/${product.shopifyProductId}.json`,
+          `https://${domain}/admin/api/2024-01/products/${product.shopifyProductId}.json`,
           {
             method: "PUT",
             headers: {
