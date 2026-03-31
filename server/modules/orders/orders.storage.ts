@@ -25,7 +25,7 @@ export interface IOrderStorage {
   updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null>;
   holdOrder(orderId: number): Promise<Order | null>;
   releaseHoldOrder(orderId: number): Promise<Order | null>;
-  setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null>;
+  setOrderPriority(orderId: number, priority: number): Promise<Order | null>;
 
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
@@ -167,7 +167,11 @@ export const orderMethods: IOrderStorage = {
           -- Completed orders: show for 24 hours in done queue
           OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
         )
-      ORDER BY COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
+      ORDER BY
+        o.on_hold ASC,           -- Held orders sink to the bottom
+        o.priority DESC,         -- Baked-in composite score (Shipping Base + Membership Modifier)
+        o.sla_due_at ASC NULLS LAST,
+        COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
     const orderRows = (orderList.rows as any[]).map((row: any) => ({
@@ -633,7 +637,7 @@ export const orderMethods: IOrderStorage = {
     return result[0] || null;
   },
 
-  async setOrderPriority(orderId: number, priority: "rush" | "high" | "normal"): Promise<Order | null> {
+  async setOrderPriority(orderId: number, priority: number): Promise<Order | null> {
     const result = await db
       .update(orders)
       .set({ priority })
@@ -641,6 +645,7 @@ export const orderMethods: IOrderStorage = {
       .returning();
     return result[0] || null;
   },
+
 
   async getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined> {
     const result = await db

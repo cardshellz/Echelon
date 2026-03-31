@@ -4,7 +4,7 @@ import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
-import { orders, orderItems, pickingLogs, shipments } from "@shared/schema";
+import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import Papa from "papaparse";
 
@@ -402,26 +402,29 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Set order priority (admin/lead only)
+  // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
   app.post("/api/orders/:id/priority", async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
-      
+
       const id = parseInt(req.params.id);
       const { priority } = req.body;
-      
-      if (!priority || !["rush", "high", "normal"].includes(priority)) {
-        return res.status(400).json({ error: "Invalid priority. Must be rush, high, or normal" });
+
+      if (priority === undefined || priority === null || typeof priority !== "number" || !Number.isInteger(priority)) {
+        return res.status(400).json({ error: "Invalid priority. Must be an integer (e.g. 9999=Bump, -1=Hold, 100=Normal)" });
       }
-      
+
       const orderBefore = await storage.getOrderById(id);
       const order = await storage.setOrderPriority(id, priority);
-      
+
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
-      
+
+      const label = priority >= 9999 ? "bumped to top" : priority < 0 ? "held" : `set to ${priority}`;
+
       // Log the priority change (non-blocking)
       storage.createPickingLog({
         actionType: "priority_changed",
@@ -432,11 +435,11 @@ export function registerPickingRoutes(app: Express) {
         orderNumber: order.orderNumber,
         orderStatusBefore: orderBefore?.warehouseStatus,
         orderStatusAfter: order.warehouseStatus,
-        reason: `Priority changed from ${orderBefore?.priority || 'normal'} to ${priority}`,
+        reason: `Priority ${label} (was ${orderBefore?.priority ?? "unknown"})`,
         deviceType: req.headers["x-device-type"] as string || "desktop",
         sessionId: req.sessionID,
       }).catch(err => console.warn("[PickingLog] Failed to log priority_changed:", err.message));
-      
+
       res.json(order);
     } catch (error) {
       console.error("Error setting priority:", error);

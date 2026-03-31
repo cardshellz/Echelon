@@ -17,9 +17,9 @@ import type { InsertOrder, InsertOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 
 interface WmsSyncServices {
-  inventoryCore: ServiceRegistry["inventoryCore"];
-  reservation: ServiceRegistry["reservation"];
-  fulfillmentRouter: ServiceRegistry["fulfillmentRouter"];
+  inventoryCore: any;
+  reservation: any;
+  fulfillmentRouter: any;
 }
 
 export class WmsSyncService {
@@ -81,7 +81,7 @@ export class WmsSyncService {
 
       // 3. Map OMS → WMS order fields
       const warehouseStatus = this.determineWarehouseStatus(omsOrder);
-      const priority = this.determinePriority(omsOrder);
+      const priority = await this.determinePriority(omsOrder);
 
       const wmsOrderData: InsertOrder = {
         channelId: omsOrder.channelId,
@@ -135,7 +135,7 @@ export class WmsSyncService {
           status: "pending",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
-          productVariantId: variantId,
+          productId: variantId, // Temporary mapping to satisfy schema
           priceCents: line.paidPriceCents || null,
           discountCents: line.totalDiscountCents || 0,
           totalPriceCents: line.totalPriceCents || null,
@@ -186,12 +186,63 @@ export class WmsSyncService {
   }
 
   /**
-   * Determine order priority
-   * Future: Check member tier, product type, SLA requirements
+   * Determine WMS priority via Composite Score:
+   * WMS Priority = (Shipping Speed Base) + (Plan Tier Modifier)
+   * Higher score = higher priority in the pick queue.
+   * WMS "Bump" override uses 9999; "Hold" uses -1.
    */
-  private determinePriority(omsOrder: typeof omsOrders.$inferSelect): string {
-    // Future enhancement: member tier lookup, express shipping detection
-    return "normal";
+  private async determinePriority(omsOrder: typeof omsOrders.$inferSelect): Promise<number> {
+    // 1. Shipping Speed Base — higher base = picked sooner
+    let base = 100; // Standard shipping
+    if (omsOrder.shippingMethod) {
+      const shippingStr = omsOrder.shippingMethod.toLowerCase();
+      if (
+        shippingStr.includes("overnight") ||
+        shippingStr.includes("next day")
+      ) {
+        base = 500; // Overnight: very urgent
+      } else if (
+        shippingStr.includes("express") ||
+        shippingStr.includes("2-day") ||
+        shippingStr.includes("priority")
+      ) {
+        base = 300; // Express: elevated
+      }
+    }
+
+    // 2. Dynamic Tier Modifier from Hub's Plans Table (additive boost)
+    let modifier = 0; // Default: no membership boost
+
+    try {
+      const result = await db.execute(sql`
+        SELECT p.priority_modifier
+        FROM membership.plans p
+        INNER JOIN membership.member_subscriptions ms ON p.id = ms.plan_id
+        INNER JOIN membership.members m ON ms.member_id = m.id
+        WHERE (m.email = ${omsOrder.customerEmail} OR m.shopify_customer_id = ${omsOrder.rawPayload ? (omsOrder.rawPayload as any).customer?.id : null})
+          AND ms.status = 'active'
+        LIMIT 1
+      `);
+
+      if (result.rows.length > 0) {
+        modifier = Number(result.rows[0].priority_modifier);
+      } else if (omsOrder.memberTier) {
+        const planResult = await db.execute(sql`
+          SELECT priority_modifier FROM membership.plans
+          WHERE LOWER(name) = LOWER(${omsOrder.memberTier})
+             OR id = ${omsOrder.memberTier}
+          LIMIT 1
+        `);
+        if (planResult.rows.length > 0) {
+          modifier = Number(planResult.rows[0].priority_modifier);
+        }
+      }
+    } catch (err) {
+      console.warn(`[WMS Sync] Failed to fetch priority modifier for order ${omsOrder.id}:`, err);
+    }
+
+    // Higher = Better: base + modifier. Leads can manually set 9999 (Bump) or -1 (Hold).
+    return base + modifier;
   }
 
   /**
