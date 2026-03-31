@@ -358,18 +358,21 @@ export function createImageSyncService() {
 
         // Build Shopify image objects — use public URLs
         const images = assets.map((a, i) => {
-          // For file-stored assets, use the serve URL
-          // For URL assets, use the original URL
-          const url = (a.storageType === "file" || a.storageType === "both")
-            ? `https://${shopDomain}/api/product-assets/${a.id}/file`  // won't work from Shopify
+          // For URL-based and 'both' assets, use the original public URL
+          // (eBay CDN, Shopify CDN, etc.) — Shopify can fetch these directly
+          // For file-only assets, we can't serve them (Shopify can't reach Echelon)
+          const url = (a.storageType === "file")
+            ? null  // Can't push file-only assets to Shopify — no public URL
             : a.url;
+
+          if (!url) return null;
 
           return {
             src: url,
             position: i + 1,
             alt: a.altText || product.sku || "",
           };
-        }).filter((img) => img.src); // Skip nulls
+        }).filter(Boolean) as { src: string; position: number; alt: string }[];
 
         // Push to Shopify
         const shopifyRes = await fetch(
