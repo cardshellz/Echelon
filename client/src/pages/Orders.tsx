@@ -236,16 +236,16 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
 
 function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdated: () => void }) {
   const { toast } = useToast();
-  const { data: currentUser } = useQuery<{ id: string; role: string; username: string }>({
-    queryKey: ["/api/user"],
+  const { data: authData } = useQuery<{ user: { id: string; role: string; username: string } }>({
+    queryKey: ["/api/auth/me"],
     queryFn: async () => {
-      const res = await fetch("/api/user", { credentials: "include" });
+      const res = await fetch("/api/auth/me", { credentials: "include" });
       if (!res.ok) return null;
       return res.json();
     },
   });
 
-  const isAuthorized = currentUser?.role === "admin" || currentUser?.role === "lead";
+  const isAuthorized = authData?.user?.role === "admin" || authData?.user?.role === "lead";
   if (!isAuthorized) return null;
 
   const isBumped = order.priority >= 9999;
