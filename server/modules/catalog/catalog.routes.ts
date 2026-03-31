@@ -1298,6 +1298,69 @@ export async function registerProductRoutes(app: Express) {
       }
 
       console.log(`[ImageSync] Pushing images to Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+
+      // If no productIds specified, process in batches to avoid timeout
+      if (!productIds?.length) {
+        // Get all product IDs with Shopify IDs and images
+        const productsWithImages = await db.execute(sql`
+          SELECT DISTINCT p.id
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL
+            AND pa.url IS NOT NULL
+        `);
+
+        const allIds = productsWithImages.rows.map((r: any) => r.id);
+        const batchSize = 15;
+        let totalPushed = 0;
+        let totalErrors = 0;
+
+        // Process first batch synchronously, rest in background
+        const firstBatch = allIds.slice(0, batchSize);
+        const remainingBatches = [];
+
+        for (let i = batchSize; i < allIds.length; i += batchSize) {
+          remainingBatches.push(allIds.slice(i, i + batchSize));
+        }
+
+        // First batch — synchronous
+        const firstResults = await imageSync.pushToShopify(shopDomain, accessToken, firstBatch);
+        totalPushed += firstResults.reduce((sum, r) => sum + r.imagesPushed, 0);
+        totalErrors += firstResults.reduce((sum, r) => sum + r.errors.length, 0);
+
+        // Remaining batches — fire and forget
+        if (remainingBatches.length > 0) {
+          console.log(`[ImageSync] ${remainingBatches.length} remaining batches processing in background`);
+          (async () => {
+            for (const batch of remainingBatches) {
+              try {
+                const results = await imageSync.pushToShopify(shopDomain, accessToken, batch);
+                const pushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
+                console.log(`[ImageSync] Background batch: pushed ${pushed} images`);
+              } catch (err: any) {
+                console.error(`[ImageSync] Background batch error: ${err.message}`);
+              }
+            }
+            console.log(`[ImageSync] All background batches complete`);
+          })();
+        }
+
+        return res.json({
+          results: firstResults,
+          summary: {
+            products: firstBatch.length,
+            imagesPushed: totalPushed,
+            errors: totalErrors,
+            backgroundBatches: remainingBatches.length,
+            totalProducts: allIds.length,
+          },
+          message: remainingBatches.length > 0
+            ? `First batch done (${totalPushed} images). ${remainingBatches.length} more batches processing in background.`
+            : `All done (${totalPushed} images).`,
+        });
+      }
+
+      // Specific productIds — process synchronously
       const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
       const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
       const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);

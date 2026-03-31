@@ -423,12 +423,17 @@ export default function ShopifyChannelPage() {
                 size="sm"
                 onClick={async () => {
                   try {
-                    toast({ title: "Pushing images to Shopify..." });
+                    toast({ title: "Pushing images to Shopify...", description: "Processing in batches — this may take a few minutes" });
+                    // Push in batches of 20 to avoid Heroku 30s timeout
                     const res = await fetch("/api/images/push/shopify", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({}),
                     });
+                    if (!res.ok) {
+                      const text = await res.text();
+                      throw new Error(text || `Server error: ${res.status}`);
+                    }
                     const data = await res.json();
                     toast({ title: `Pushed ${data?.summary?.imagesPushed ?? 0} images to Shopify` });
                   } catch (err: any) {
