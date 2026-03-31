@@ -171,7 +171,7 @@ export const productAssets = pgTable("product_assets", {
   productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "cascade" }), // NULL = product-level, set = variant-specific
   assetType: varchar("asset_type", { length: 20 }).notNull().default("image"), // image, video, document
-  url: text("url").notNull(),
+  url: text("url"), // External URL (nullable for file-only assets)
   altText: varchar("alt_text", { length: 500 }),
   position: integer("position").notNull().default(0), // Sort order
   isPrimary: integer("is_primary").notNull().default(0), // 1 = main image
@@ -179,6 +179,7 @@ export const productAssets = pgTable("product_assets", {
   height: integer("height"),
   fileSize: integer("file_size"), // Bytes
   mimeType: varchar("mime_type", { length: 100 }),
+  storageType: varchar("storage_type", { length: 20 }).notNull().default("url"), // 'url' | 'file' | 'both'
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

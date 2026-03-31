@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
+import { productAssets } from "@shared/schema";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
@@ -11,7 +12,7 @@ const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...c
 import { requirePermission } from "../../routes/middleware";
 import { syncPickQueueForSku } from "../orders";
 
-export function registerProductRoutes(app: Express) {
+export async function registerProductRoutes(app: Express) {
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================
@@ -972,6 +973,241 @@ export function registerProductRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error exporting bin assignments:", error);
       res.status(500).json({ error: "Failed to export bin assignments" });
+    }
+  });
+
+  // ============================================================================
+  // PRODUCT ASSET UPLOAD (file storage)
+  // ============================================================================
+
+  const multer = (await import("multer")).default;
+  const assetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
+
+  /**
+   * POST /api/product-assets/upload
+   * Upload an image file and store it in the database.
+   * Accepts multipart form: file, productId, productVariantId (optional), altText, isPrimary, position
+   */
+  app.post("/api/product-assets/upload", requirePermission("inventory", "edit"), assetUpload.single("file"), async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No file provided" });
+      }
+
+      const { productId, productVariantId, altText, isPrimary, position } = req.body;
+
+      if (!productId) {
+        return res.status(400).json({ error: "productId is required" });
+      }
+
+      // Validate file type
+      const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+      if (!allowedTypes.includes(req.file.mimetype)) {
+        return res.status(400).json({ error: `Invalid file type: ${req.file.mimetype}. Allowed: ${allowedTypes.join(", ")}` });
+      }
+
+      // If setting as primary, unset existing primary
+      if (isPrimary === "true" || isPrimary === "1") {
+        await db.execute(sql`
+          UPDATE product_assets SET is_primary = 0
+          WHERE product_id = ${parseInt(productId)}
+            ${productVariantId ? sql`AND product_variant_id = ${parseInt(productVariantId)}` : sql`AND product_variant_id IS NULL`}
+        `);
+      }
+
+      const [asset] = await db
+        .insert(productAssets)
+        .values({
+          productId: parseInt(productId),
+          productVariantId: productVariantId ? parseInt(productVariantId) : null,
+          assetType: "image",
+          url: null,
+          altText: altText || null,
+          position: position ? parseInt(position) : 0,
+          isPrimary: (isPrimary === "true" || isPrimary === "1") ? 1 : 0,
+          fileSize: req.file.size,
+          mimeType: req.file.mimetype,
+          storageType: "file",
+        })
+        .returning();
+
+      // Store the actual file data
+      await db.execute(sql`
+        UPDATE product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
+      `);
+
+      console.log(`[Assets] Uploaded file for product ${productId}: ${req.file.originalname} (${req.file.size} bytes)`);
+
+      res.json({
+        ...asset,
+        // Don't return file_data in the response — too large
+        fileUrl: `/api/product-assets/${asset.id}/file`,
+      });
+    } catch (error: any) {
+      console.error("Error uploading asset:", error);
+      res.status(500).json({ error: "Failed to upload asset" });
+    }
+  });
+
+  /**
+   * GET /api/product-assets/:id/file
+   * Serve a stored image file from the database.
+   */
+  app.get("/api/product-assets/:id/file", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const result = await db.execute(sql`
+        SELECT file_data, mime_type, alt_text FROM product_assets WHERE id = ${id}
+      `);
+
+      if (!result.rows.length || !result.rows[0].file_data) {
+        return res.status(404).json({ error: "File not found" });
+      }
+
+      const row = result.rows[0] as any;
+      res.set("Content-Type", row.mime_type || "image/jpeg");
+      res.set("Cache-Control", "public, max-age=86400"); // Cache 24h
+      if (row.alt_text) {
+        res.set("Content-Disposition", `inline; filename="${row.alt_text || "image"}"`);
+      }
+      res.send(row.file_data);
+    } catch (error: any) {
+      console.error("Error serving asset file:", error);
+      res.status(500).json({ error: "Failed to serve file" });
+    }
+  });
+
+  /**
+   * GET /api/product-assets/:id
+   * Get asset metadata (without file data).
+   */
+  app.get("/api/product-assets/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [asset] = await db
+        .select()
+        .from(productAssets)
+        .where(eq(productAssets.id, id))
+        .limit(1);
+
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+
+      res.json({
+        ...asset,
+        fileUrl: ((asset as any).storageType === "file" || (asset as any).storageType === "both")
+          ? `/api/product-assets/${asset.id}/file`
+          : asset.url,
+      });
+    } catch (error: any) {
+      console.error("Error getting asset:", error);
+      res.status(500).json({ error: "Failed to get asset" });
+    }
+  });
+
+  /**
+   * DELETE /api/product-assets/:id
+   * Delete an asset (both URL reference and stored file).
+   */
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const [deleted] = await db
+        .delete(productAssets)
+        .where(eq(productAssets.id, id))
+        .returning();
+
+      if (!deleted) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+
+      console.log(`[Assets] Deleted asset ${id} for product ${deleted.productId}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Error deleting asset:", error);
+      res.status(500).json({ error: "Failed to delete asset" });
+    }
+  });
+
+  /**
+   * POST /api/product-assets/store-url
+   * Store an external URL as an asset (e.g., from eBay image pull).
+   * Body: { productId, productVariantId, url, altText, isPrimary, position }
+   * Optionally downloads and caches the file locally.
+   */
+  app.post("/api/product-assets/store-url", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productId, productVariantId, url, altText, isPrimary, position, cacheLocally } = req.body;
+
+      if (!productId || !url) {
+        return res.status(400).json({ error: "productId and url are required" });
+      }
+
+      // If setting as primary, unset existing primary
+      if (isPrimary) {
+        await db.execute(sql`
+          UPDATE product_assets SET is_primary = 0
+          WHERE product_id = ${productId}
+            ${productVariantId ? sql`AND product_variant_id = ${productVariantId}` : sql`AND product_variant_id IS NULL`}
+        `);
+      }
+
+      let fileBuffer: Buffer | null = null;
+      let mimeType: string | null = null;
+      let fileSize: number | null = null;
+
+      // Optionally download and cache the file
+      if (cacheLocally) {
+        try {
+          const response = await fetch(url);
+          if (response.ok) {
+            const arrayBuf = await response.arrayBuffer();
+            fileBuffer = Buffer.from(arrayBuf);
+            mimeType = response.headers.get("content-type") || "image/jpeg";
+            fileSize = fileBuffer.length;
+          }
+        } catch (fetchErr: any) {
+          console.warn(`[Assets] Failed to cache file from ${url}: ${fetchErr.message}`);
+          // Continue with URL-only storage
+        }
+      }
+
+      const storageType: string = fileBuffer ? "both" : "url";
+
+      const [asset] = await db
+        .insert(productAssets)
+        .values({
+          productId,
+          productVariantId: productVariantId || null,
+          assetType: "image",
+          url,
+          altText: altText || null,
+          position: position || 0,
+          isPrimary: isPrimary ? 1 : 0,
+          fileSize,
+          mimeType,
+          storageType,
+        })
+        .returning();
+
+      if (fileBuffer) {
+        await db.execute(sql`
+          UPDATE product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
+        `);
+      }
+
+      console.log(`[Assets] Stored URL for product ${productId}: ${url} (storage: ${storageType})`);
+
+      res.json({
+        ...asset,
+        fileUrl: storageType === "both" || storageType === "file"
+          ? `/api/product-assets/${asset.id}/file`
+          : asset.url,
+      });
+    } catch (error: any) {
+      console.error("Error storing URL asset:", error);
+      res.status(500).json({ error: "Failed to store URL asset" });
     }
   });
 }
