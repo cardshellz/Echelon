@@ -823,10 +823,19 @@ export function registerChannelRoutes(app: Express) {
   // Push product to specific channel
   app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelProductPush } = req.app.locals.services;
+      const { channelProductPush, channelSync } = req.app.locals.services;
       const productId = parseInt(req.params.productId);
       const channelId = parseInt(req.params.channelId);
       const result = await channelProductPush.pushProduct(productId, channelId);
+
+      // After a successful product push (create or update), trigger an immediate
+      // inventory sync so Shopify ATP is updated without waiting for the next sweep
+      if (result.status === "created" || result.status === "updated") {
+        channelSync?.syncProduct(productId, "product_push").catch((err: any) =>
+          console.warn(`[ChannelPush] Post-push inventory sync failed for product ${productId}:`, err.message)
+        );
+      }
+
       res.json(result);
     } catch (error: any) {
       console.error("Error pushing product to channel:", error);

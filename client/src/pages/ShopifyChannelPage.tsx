@@ -118,6 +118,28 @@ export default function ShopifyChannelPage() {
     },
   });
 
+  // --- Sync Inventory to Shopify ---
+  const syncInventoryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/channel-sync/all", { method: "POST", credentials: "include" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      toast({
+        title: "Inventory Synced",
+        description: `${data.synced ?? 0} variant${(data.synced ?? 0) !== 1 ? "s" : ""} synced to Shopify`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Inventory Sync Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   // --- Push All mutation ---
   const pushAllMutation = useMutation({
     mutationFn: async () => {
@@ -345,6 +367,21 @@ export default function ShopifyChannelPage() {
                   <RefreshCw className="h-4 w-4 mr-2" />
                 )}
                 Sync from Shopify
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[44px] sm:min-h-0"
+                disabled={syncInventoryMutation.isPending || !shopifyChannel}
+                onClick={() => syncInventoryMutation.mutate()}
+                title="Push current inventory levels to Shopify now"
+              >
+                {syncInventoryMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                )}
+                Sync Inventory
               </Button>
               <Button
                 size="sm"
