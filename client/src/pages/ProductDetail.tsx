@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -45,6 +45,7 @@ import {
   Check,
   Truck,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
@@ -592,6 +593,7 @@ export default function ProductDetail() {
   // --- Image add state ---
   const [addImageUrl, setAddImageUrl] = useState("");
   const [addImageAlt, setAddImageAlt] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (product) {
@@ -791,6 +793,32 @@ export default function ProductDetail() {
       setAddImageUrl("");
       setAddImageAlt("");
       toast({ title: "Image added" });
+    },
+  });
+
+  // File upload mutation
+  const uploadFileMutation = useMutation({
+    mutationFn: async ({ file, altText, isPrimary }: { file: File; altText?: string; isPrimary?: boolean }) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("productId", String(product?.productId));
+      if (altText) formData.append("altText", altText);
+      if (isPrimary) formData.append("isPrimary", "true");
+
+      const res = await fetch("/api/product-assets/upload", {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error("Failed to upload image");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      toast({ title: "Image uploaded" });
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    },
+    onError: (err: Error) => {
+      toast({ title: "Upload failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1687,6 +1715,34 @@ export default function ProductDetail() {
                     </Button>
                   </div>
 
+                  {/* Upload file */}
+                  <div className="flex flex-col sm:flex-row gap-2 items-center">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const isFirstImage = !product.assets || product.assets.length === 0;
+                          uploadFileMutation.mutate({ file, isPrimary: isFirstImage });
+                        }
+                      }}
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploadFileMutation.isPending}
+                      className="min-h-[36px]"
+                    >
+                      <Upload className="h-4 w-4 mr-1" />
+                      {uploadFileMutation.isPending ? "Uploading..." : "Upload File"}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">JPEG, PNG, WebP, GIF — max 10MB</span>
+                  </div>
+
                   {/* Image gallery */}
                   {product.assets && product.assets.length > 0 ? (
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
@@ -1697,7 +1753,9 @@ export default function ProductDetail() {
                         >
                           <div className="aspect-square bg-muted">
                             <img
-                              src={asset.url}
+                              src={(asset as any).storageType === "file" || (asset as any).storageType === "both"
+                                ? `/api/product-assets/${asset.id}/file`
+                                : asset.url}
                               alt={asset.altText || "Product image"}
                               className="w-full h-full object-cover"
                             />
