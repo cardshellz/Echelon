@@ -748,7 +748,7 @@ class PickingService {
     const systemQty = level?.variantQty ?? 0;
     const adjustment = actualBinQty - systemQty;
 
-    // Correct inventory if needed
+    // Correct inventory if needed — picker's count is source of truth
     if (adjustment !== 0) {
       await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
@@ -757,6 +757,38 @@ class PickingService {
         reason: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
         userId: userId || undefined,
       });
+
+      // If we found MORE stock than expected, trigger cycle count notification
+      // on the source case bin — an unrecorded case break may have occurred
+      if (adjustment > 0) {
+        try {
+          const pendingTasks = await this.storage.getPendingReplenTasksForLocation(warehouseLocationId);
+          const matchingTask = pendingTasks.find(
+            (t: any) => t.pickProductVariantId === variant.id && t.fromLocationId
+          );
+
+          if (matchingTask?.fromLocationId) {
+            const { notify } = await import("../notifications/notifications.service");
+
+            await notify("cycle_count_needed", {
+              title: `Bin variance: ${variant.sku}`,
+              message: `Bin has +${adjustment} more than expected ` +
+                `(system: ${systemQty}, actual: ${actualBinQty}). ` +
+                `Verify source bin (location ${matchingTask.fromLocationId}) — possible unrecorded case break.`,
+              data: {
+                sourceLocationId: matchingTask.fromLocationId,
+                targetLocationId: warehouseLocationId,
+                variantId: variant.id,
+                adjustment,
+                systemQty,
+                actualBinQty,
+              },
+            });
+          }
+        } catch (notifyErr: any) {
+          console.warn(`[Picking] Cycle count notification failed: ${notifyErr.message}`);
+        }
+      }
     }
 
     // Cancel pending/blocked replen tasks for this SKU+location
@@ -876,6 +908,29 @@ class PickingService {
         reason,
         userId: userId || undefined,
       });
+
+      // If positive adjustment (more stock than expected) and no replen was done,
+      // an unrecorded case break may have occurred. Notify leads to verify source bin.
+      if (adjustment > 0 && !didReplen) {
+        try {
+          const { notify } = await import("../notifications/notifications.service");
+          await notify("cycle_count_needed", {
+            title: `Bin variance: ${variant.sku}`,
+            message: `Bin has +${adjustment} more than expected ` +
+              `(system: ${postSystemQty}, actual: ${binCount}). ` +
+              `Possible unrecorded case break — verify source bins.`,
+            data: {
+              targetLocationId: locationId,
+              variantId: variant.id,
+              adjustment,
+              systemQty: postSystemQty,
+              actualBinQty: binCount,
+            },
+          });
+        } catch (notifyErr: any) {
+          console.warn(`[BinCount] Cycle count notification failed: ${notifyErr.message}`);
+        }
+      }
     } else {
       // No remaining adjustment — log for audit trail
       await this.inventoryCore.logTransaction({

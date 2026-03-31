@@ -943,12 +943,16 @@ export default function Picking() {
   });
 
   // Mutation for cancelling replen (picker says NO, they didn't replen)
+  // Now requires the actual bin count from the picker — the count is passed
+  // when the bin count dialog is submitted, not when the "NO" button is clicked.
+  // The "NO" button just sets state; the actual cancel API call happens in
+  // binCountMutation when the picker confirms their count.
   const cancelReplenMutation = useMutation({
-    mutationFn: async (taskId: number) => {
+    mutationFn: async ({ taskId, actualCount }: { taskId: number; actualCount: number }) => {
       const res = await fetch("/api/picking/replen/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId }),
+        body: JSON.stringify({ taskId, actualCount }),
       });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
@@ -956,7 +960,6 @@ export default function Picking() {
     onSuccess: () => {
       setReplenConfirmOpen(false);
       setReplenConfirmed(false); // Track that replen was NOT done
-      setBinCountOpen(true); // Now show bin count dialog
       playSound("success");
     },
     onError: (error: Error) => {
