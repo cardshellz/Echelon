@@ -418,9 +418,28 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.id);
+
+      // Check if this product already has images — if not, auto-set as primary
+      const existingAssets = await db
+        .select({ id: productAssets.id })
+        .from(productAssets)
+        .where(eq(productAssets.productId, productId))
+        .limit(1);
+
+      const isPrimary = existingAssets.length === 0 ? 1 : (req.body.isPrimary ? 1 : 0);
+
+      // If setting as primary, unset existing primary
+      if (isPrimary && existingAssets.length > 0) {
+        await db
+          .update(productAssets)
+          .set({ isPrimary: 0 })
+          .where(eq(productAssets.productId, productId));
+      }
+
       const asset = await storage.createProductAsset({
         ...req.body,
         productId,
+        isPrimary,
       });
       res.status(201).json(asset);
     } catch (error) {
