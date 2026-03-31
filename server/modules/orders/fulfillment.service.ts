@@ -8,6 +8,7 @@ import {
   inventoryLevels,
   inventoryTransactions,
 } from "@shared/schema";
+import { omsOrders, omsOrderLines, omsOrderEvents } from "@shared/schema/oms.schema";
 import type {
   OutboundShipment as Shipment,
   InsertOutboundShipment as InsertShipment,
@@ -477,6 +478,54 @@ class FulfillmentService {
       this.channelSync.queueSyncAfterInventoryChange(vid).catch((err: any) =>
         console.warn(`[ChannelSync] Post-fulfillment sync failed for variant ${vid}:`, err),
       );
+    }
+
+    // Post-commit: update OMS order status to shipped
+    // The WMS order has shopifyOrderId — find the matching oms_orders row
+    // and mark it as shipped so the unified order view stays accurate.
+    try {
+      const shopifyOrderIdStr = params.shopifyOrderId;
+      const [omsOrder] = await this.db
+        .select({ id: omsOrders.id })
+        .from(omsOrders)
+        .where(eq(omsOrders.externalOrderId, shopifyOrderIdStr))
+        .limit(1);
+
+      if (omsOrder && omsOrder.id) {
+        const now = new Date();
+        await this.db
+          .update(omsOrders)
+          .set({
+            status: "shipped",
+            fulfillmentStatus: "fulfilled",
+            trackingNumber: params.trackingNumber || null,
+            trackingCarrier: params.trackingCompany || null,
+            shippedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(omsOrders.id, omsOrder.id));
+
+        await this.db
+          .update(omsOrderLines)
+          .set({ fulfillmentStatus: "fulfilled" })
+          .where(eq(omsOrderLines.orderId, omsOrder.id));
+
+        await this.db.insert(omsOrderEvents).values({
+          orderId: omsOrder.id,
+          eventType: "shipped",
+          details: {
+            trackingNumber: params.trackingNumber,
+            carrier: params.trackingCompany,
+            source: "shopify_webhook",
+            fulfillmentId: params.fulfillmentId,
+          },
+        });
+
+        console.log(`[Fulfillment] OMS order ${omsOrder.id} marked shipped via Shopify webhook`);
+      }
+    } catch (err: any) {
+      // Non-blocking — OMS update failure shouldn't fail the shipment
+      console.warn(`[Fulfillment] Failed to update OMS status for Shopify order ${params.shopifyOrderId}: ${err.message}`);
     }
 
     return shipment;
