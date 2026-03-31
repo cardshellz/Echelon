@@ -13,7 +13,7 @@ import type {
 export async function getAllPlans(): Promise<PlanRecord[]> {
   const result = await pool.query(
     `SELECT id, name, tier, billing_interval, billing_interval_count,
-            price_cents, shopify_selling_plan_gid, includes_dropship, is_active
+            price_cents, shopify_selling_plan_gid, includes_dropship, is_active, priority_modifier
      FROM membership.plans ORDER BY id`
   );
   return result.rows;
@@ -22,7 +22,7 @@ export async function getAllPlans(): Promise<PlanRecord[]> {
 export async function getActivePlans(): Promise<PlanRecord[]> {
   const result = await pool.query(
     `SELECT id, name, tier, billing_interval, billing_interval_count,
-            price_cents, shopify_selling_plan_gid, includes_dropship, is_active
+            price_cents, shopify_selling_plan_gid, includes_dropship, is_active, priority_modifier
      FROM membership.plans WHERE is_active = true ORDER BY id`
   );
   return result.rows;
@@ -49,6 +49,7 @@ export async function updatePlanDetails(
     price_cents: number;
     includes_dropship: boolean;
     is_active: boolean;
+    priority_modifier: number;
   }>
 ): Promise<void> {
   const setClauses: string[] = [];

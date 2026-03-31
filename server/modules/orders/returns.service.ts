@@ -2,8 +2,8 @@ import { eq, and, sql } from "drizzle-orm";
 import {
   orders,
   orderItems,
-  shipments,
-  shipmentItems,
+  outboundShipments,
+  outboundShipmentItems,
   productVariants,
   inventoryLevels,
   inventoryTransactions,

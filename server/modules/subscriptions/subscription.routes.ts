@@ -124,9 +124,9 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.put("/api/subscriptions/plans/:id", async (req: Request, res: Response) => {
     try {
       const id = parseInt(req.params.id);
-      const { name, tier, billing_interval, price_cents, includes_dropship, is_active } = req.body;
+      const { name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier } = req.body;
       await storage.updatePlanDetails(id, {
-        name, tier, billing_interval, price_cents, includes_dropship, is_active,
+        name, tier, billing_interval, price_cents, includes_dropship, is_active, priority_modifier,
       });
       res.json({ success: true });
     } catch (err: any) {

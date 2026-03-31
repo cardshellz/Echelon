@@ -32,6 +32,8 @@ export interface OrderData {
   shipToState?: string;
   shipToZip?: string;
   shipToCountry?: string;
+  shippingMethod?: string | null;
+  shippingMethodCode?: string | null;
   subtotalCents?: number;
   shippingCents?: number;
   taxCents?: number;
@@ -48,9 +50,9 @@ export interface OrderData {
 export interface LineItemData {
   externalLineItemId?: string;
   externalProductId?: string | null;
-  sku?: string;
+  sku?: string | null;
   title?: string;
-  variantTitle?: string;
+  variantTitle?: string | null;
   quantity: number;
   paidPriceCents?: number;
   totalCents?: number;

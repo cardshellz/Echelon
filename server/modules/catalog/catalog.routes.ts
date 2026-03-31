@@ -1,4 +1,6 @@
 import type { Express } from "express";
+import { db } from "../../db";
+import { sql } from "drizzle-orm";
 import { catalogStorage } from "../catalog";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";

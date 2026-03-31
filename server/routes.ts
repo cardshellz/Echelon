@@ -18,6 +18,7 @@ import { registerEbayListingRulesRoutes } from "./routes/ebay-listing-rules.rout
 import { registerEbayChannelRoutes } from "./routes/ebay-channel.routes";
 import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
+import { registerShadowIngestionRoutes } from "./modules/oms/shadow-ingestion.routes";
 import { registerDropshipAdminRoutes } from "./modules/dropship/admin.routes";
 import { registerVendorAuthRoutes } from "./modules/dropship/vendor-auth.routes";
 import { registerVendorPortalRoutes, registerStripeWebhookRoute } from "./modules/dropship/vendor-portal.routes";
@@ -53,6 +54,7 @@ export async function registerRoutes(
   registerEbayChannelRoutes(app);
   registerSyncControlRoutes(app);
   registerOmsRoutes(app);
+  registerShadowIngestionRoutes(app);
 
   // Dropship platform routes
   registerDropshipAdminRoutes(app);    // behind Echelon admin auth

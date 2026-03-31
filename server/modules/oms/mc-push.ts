@@ -50,7 +50,7 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
       sku: l.sku || null,
       title: l.title || null,
       quantity: l.quantity,
-      price_cents: l.unitPriceCents || 0,
+      price_cents: (l as any).priceCents || 0,
       product_id: l.productVariantId || null,
     }));
 

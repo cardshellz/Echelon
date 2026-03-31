@@ -85,6 +85,7 @@ export interface PlanRecord {
   shopify_selling_plan_gid: string | null;
   includes_dropship: boolean;
   is_active: boolean;
+  priority_modifier: number;
 }
 
 export interface BillingLogRecord {

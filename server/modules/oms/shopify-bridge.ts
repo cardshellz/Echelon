@@ -11,9 +11,6 @@
 import { sql } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 
-// Channel IDs for Shopify
-const SHOPIFY_US_CHANNEL_ID = 36;
-const SHOPIFY_CA_CHANNEL_ID = 37;
 
 /**
  * Bridge a Shopify order into the OMS.
@@ -47,11 +44,19 @@ export async function bridgeShopifyOrderToOms(
 
     const raw = rawOrderResult.rows[0] as any;
 
-    // Determine channel based on shop_domain
-    let channelId = SHOPIFY_US_CHANNEL_ID;
-    if (raw.shop_domain && raw.shop_domain.includes("-ca")) {
-      channelId = SHOPIFY_CA_CHANNEL_ID;
+    // Determine channel dynamically
+    const domainSearch = raw.shop_domain ? `%${raw.shop_domain}%` : "";
+    const connResult = await db.execute(sql`
+      SELECT channel_id FROM channel_connections 
+      WHERE shop_domain ILIKE ${domainSearch}
+      LIMIT 1
+    `);
+
+    if (connResult.rows.length === 0) {
+      console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown shop domain: ${raw.shop_domain}`);
+      return;
     }
+    const channelId = connResult.rows[0].channel_id;
 
     // Fetch line items
     const rawItems = await db.execute(sql`
@@ -130,7 +135,7 @@ export async function backfillShopifyOrders(
     WHERE NOT EXISTS (
       SELECT 1 FROM oms_orders oo
       WHERE oo.external_order_id = so.id
-        AND oo.channel_id IN (${SHOPIFY_US_CHANNEL_ID}, ${SHOPIFY_CA_CHANNEL_ID})
+        AND oo.channel_id IN (SELECT id FROM channels WHERE provider = 'shopify')
     )
     ORDER BY so.created_at DESC
     LIMIT ${limit}

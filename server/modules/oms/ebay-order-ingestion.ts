@@ -109,19 +109,15 @@ function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
     // Subtotal = sum of product costs (no shipping/tax)
     subtotalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value),
     // Shipping = deliveryCost - deliveryDiscount (net shipping the buyer paid)
-    shippingCents: Math.max(0,
-      dollarsToCents(pricingSummary?.deliveryCost?.value) +
-      dollarsToCents(pricingSummary?.deliveryDiscount?.value) // deliveryDiscount is negative
-    ),
+    shippingCents: dollarsToCents(pricingSummary?.deliveryCost?.value),
     // Tax: eBay collects and remits — we never see this money. Omit from OMS totals.
     // Raw tax data preserved in raw_payload for reference.
     taxCents: 0,
-    // Discounts: product discounts + delivery discount
-    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value) +
-      Math.abs(dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
+    // Discounts: product discounts
+    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value),
     // Total: subtotal + net shipping (no tax — eBay handles it)
     totalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value) +
-      Math.max(0, dollarsToCents(pricingSummary?.deliveryCost?.value) + dollarsToCents(pricingSummary?.deliveryDiscount?.value)),
+      dollarsToCents(pricingSummary?.deliveryCost?.value),
     currency: pricingSummary?.total?.currency || "USD",
     rawPayload: ebayOrder as unknown,
     orderedAt: new Date(ebayOrder.creationDate),
@@ -223,7 +219,7 @@ async function createWmsOrderFromEbay(
       imageUrl,
       barcode: binLocation?.barcode || null,
       requiresShipping: 1,
-      priceCents: line.unitPriceCents ?? null,
+      priceCents: (line as any).paidPriceCents ?? null,
       discountCents: line.discountCents ? Math.round((line.discountCents || 0) / line.quantity) : 0,
       totalPriceCents: line.totalCents ?? null,
     });
@@ -382,7 +378,7 @@ export async function pollEbayOrders(
                 if (wmsOrder.rows.length > 0) {
                   await db.execute(sql`
                     UPDATE orders SET warehouse_status = 'cancelled', cancelled_at = NOW()
-                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('shipped', 'cancelled')
+                    WHERE id = ${wmsOrder.rows[0].id} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
                   `);
                 }
               } catch (e: any) {

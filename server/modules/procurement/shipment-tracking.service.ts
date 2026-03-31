@@ -14,9 +14,9 @@ import type {
   InsertInboundShipment,
   InboundShipmentLine,
   InsertInboundShipmentLine,
-  ShipmentCost,
-  InsertShipmentCost,
-  InsertShipmentCostAllocation,
+  InboundFreightCost,
+  InsertInboundFreightCost,
+  InsertInboundFreightAllocation,
   InsertLandedCostSnapshot,
   InboundShipmentStatusHistory,
   InventoryLot,
@@ -43,16 +43,16 @@ interface Storage {
   updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>): Promise<InboundShipmentLine | null>;
   deleteInboundShipmentLine(id: number): Promise<boolean>;
   // Costs
-  getShipmentCosts(inboundShipmentId: number): Promise<ShipmentCost[]>;
-  getShipmentCostById(id: number): Promise<ShipmentCost | undefined>;
-  createShipmentCost(data: InsertShipmentCost): Promise<ShipmentCost>;
-  updateShipmentCost(id: number, updates: Partial<InsertShipmentCost>): Promise<ShipmentCost | null>;
-  deleteShipmentCost(id: number): Promise<boolean>;
+  getInboundFreightCosts(inboundShipmentId: number): Promise<InboundFreightCost[]>;
+  getInboundFreightCostById(id: number): Promise<InboundFreightCost | undefined>;
+  createInboundFreightCost(data: InsertInboundFreightCost): Promise<InboundFreightCost>;
+  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>): Promise<InboundFreightCost | null>;
+  deleteInboundFreightCost(id: number): Promise<boolean>;
   // Allocations
-  getShipmentCostAllocations(shipmentCostId: number): Promise<any[]>;
+  getInboundFreightCostAllocations(inboundFreightCostId: number): Promise<any[]>;
   getAllocationsForLine(inboundShipmentLineId: number): Promise<any[]>;
-  createShipmentCostAllocation(data: InsertShipmentCostAllocation): Promise<any>;
-  bulkCreateShipmentCostAllocations(allocations: InsertShipmentCostAllocation[]): Promise<any[]>;
+  createInboundFreightCostAllocation(data: InsertInboundFreightAllocation): Promise<any>;
+  bulkCreateInboundFreightCostAllocations(allocations: InsertInboundFreightAllocation[]): Promise<any[]>;
   deleteAllocationsForShipment(inboundShipmentId: number): Promise<void>;
   // Landed cost snapshots
   getLandedCostSnapshots(inboundShipmentLineId: number): Promise<any[]>;
@@ -159,7 +159,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
 
   async function recomputeShipmentTotals(shipmentId: number) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
-    const costs = await storage.getShipmentCosts(shipmentId);
+    const costs = await storage.getInboundFreightCosts(shipmentId);
 
     // Aggregate NET totals from lines (weight/volume computed from per-carton values × cartonCount)
     let totalWeightKg = 0;
@@ -703,7 +703,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
     if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
 
-    const cost = await storage.createShipmentCost({
+    const cost = await storage.createInboundFreightCost({
       inboundShipmentId: shipmentId,
       ...coerced,
     } as any);
@@ -714,8 +714,8 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     return cost;
   }
 
-  async function updateCost(costId: number, updates: Partial<InsertShipmentCost>) {
-    const cost = await storage.getShipmentCostById(costId);
+  async function updateCost(costId: number, updates: Partial<InsertInboundFreightCost>) {
+    const cost = await storage.getInboundFreightCostById(costId);
     if (!cost) throw new ShipmentTrackingError("Cost not found", 404);
 
     const shipment = await getShipment(cost.inboundShipmentId);
@@ -729,14 +729,14 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
     if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
 
-    const updated = await storage.updateShipmentCost(costId, coerced);
+    const updated = await storage.updateInboundFreightCost(costId, coerced);
     await recomputeShipmentTotals(cost.inboundShipmentId);
     try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
     return updated;
   }
 
   async function removeCost(costId: number) {
-    const cost = await storage.getShipmentCostById(costId);
+    const cost = await storage.getInboundFreightCostById(costId);
     if (!cost) throw new ShipmentTrackingError("Cost not found", 404);
 
     const shipment = await getShipment(cost.inboundShipmentId);
@@ -744,7 +744,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       throw new ShipmentTrackingError("Cannot remove costs from a closed shipment");
     }
 
-    await storage.deleteShipmentCost(costId);
+    await storage.deleteInboundFreightCost(costId);
     await recomputeShipmentTotals(cost.inboundShipmentId);
     try { await runAllocation(cost.inboundShipmentId); } catch (_) { }
     return true;
@@ -768,7 +768,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
   }> {
     const shipment = await getShipment(shipmentId);
     const lines = await storage.getInboundShipmentLines(shipmentId);
-    const costs = await storage.getShipmentCosts(shipmentId);
+    const costs = await storage.getInboundFreightCosts(shipmentId);
 
     if (lines.length === 0) {
       throw new ShipmentTrackingError("No lines to allocate costs to");
@@ -788,7 +788,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       lineAllocations.set(line.id, { freightCents: 0, dutyCents: 0, insuranceCents: 0, otherCents: 0 });
     }
 
-    const allNewAllocations: InsertShipmentCostAllocation[] = [];
+    const allNewAllocations: InsertInboundFreightAllocation[] = [];
 
     for (const cost of costs) {
       const effectiveAmount = cost.actualCents ?? cost.estimatedCents ?? 0;
@@ -890,7 +890,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     }
 
     // Bulk insert all allocations
-    await storage.bulkCreateShipmentCostAllocations(allNewAllocations);
+    await storage.bulkCreateInboundFreightCostAllocations(allNewAllocations);
 
     // Update each line's allocated_cost_cents and landed_unit_cost_cents
     let totalAllocated = 0;
@@ -961,7 +961,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
       let freightCents = 0, dutyCents = 0, insuranceCents = 0, otherCents = 0;
 
       for (const alloc of allocations) {
-        const cost = await storage.getShipmentCostById(alloc.shipmentCostId);
+        const cost = await storage.getInboundFreightCostById(alloc.shipmentCostId);
         if (!cost) continue;
         const category = getCostCategory(cost.costType);
         const cents = alloc.allocatedCents || 0;
@@ -1124,7 +1124,7 @@ export function createShipmentTrackingService(_db: any, storage: Storage) {
     addCost,
     updateCost,
     removeCost,
-    getCosts: (shipmentId: number) => storage.getShipmentCosts(shipmentId),
+    getCosts: (shipmentId: number) => storage.getInboundFreightCosts(shipmentId),
 
     // Allocation
     runAllocation,

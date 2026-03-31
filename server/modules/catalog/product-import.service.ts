@@ -33,7 +33,7 @@ const PRODUCT_TYPE_SLUG_MAP: Record<string, string> = {
   "donation": "other",
 };
 
-function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: string): string {
+function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: string | null): string {
   if (!shopifyType || shopifyType.trim() === "") return "other";
   const key = shopifyType.toLowerCase().trim();
   let slug = PRODUCT_TYPE_SLUG_MAP[key] || "other";
@@ -132,13 +132,13 @@ export function createProductImportService() {
       if (echelonProduct) {
         // Update content fields
         await storage.updateProduct(echelonProduct.id, {
-          title: firstVariant.productTitle || firstVariant.title,
-          description: firstVariant.description,
-          brand: firstVariant.vendor,
-          category: firstVariant.productType,
+          title: firstVariant.productTitle || firstVariant.title || undefined,
+          description: firstVariant.description || undefined,
+          brand: firstVariant.vendor || undefined,
+          category: firstVariant.productType || undefined,
           productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
-          tags: firstVariant.tags,
-          status: firstVariant.status,
+          tags: firstVariant.tags || undefined,
+          status: firstVariant.status || undefined,
           shopifyProductId: String(shopifyProductId),
         });
         productsUpdated++;

@@ -9,10 +9,10 @@ import {
   inventoryTransactions,
 } from "@shared/schema";
 import type {
-  Shipment,
-  InsertShipment,
-  ShipmentItem,
-  InsertShipmentItem,
+  OutboundShipment as Shipment,
+  InsertOutboundShipment as InsertShipment,
+  OutboundShipmentItem as ShipmentItem,
+  InsertOutboundShipmentItem as InsertShipmentItem,
   Order,
   OrderItem,
   ProductVariant,
@@ -442,13 +442,14 @@ class FulfillmentService {
       // sees these items as already processed and won't double-deduct.
       // Uses LEAST to cap at the item's total quantity.
       for (const si of shipmentItemValues) {
-        if (si.orderItemId && si.qty > 0) {
+        const qty = si.qty ?? 1;
+        if (si.orderItemId && qty > 0) {
           await tx.execute(sql`
             UPDATE order_items
-            SET picked_quantity = LEAST(quantity, picked_quantity + ${si.qty}),
-                fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${si.qty}),
+            SET picked_quantity = LEAST(quantity, picked_quantity + ${qty}),
+                fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}),
                 status = CASE
-                  WHEN LEAST(quantity, picked_quantity + ${si.qty}) >= quantity THEN 'completed'
+                  WHEN LEAST(quantity, picked_quantity + ${qty}) >= quantity THEN 'completed'
                   ELSE status
                 END
             WHERE id = ${si.orderItemId}

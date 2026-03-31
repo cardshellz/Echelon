@@ -150,7 +150,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         sku: line.sku || "",
         name: line.title || "",
         quantity: line.quantity,
-        unitPrice: (line.unitPriceCents || 0) / 100,
+        unitPrice: ((line as any).priceCents || 0) / 100,
         options: [],
       })),
       amountPaid: (omsOrder.totalCents || 0) / 100,
@@ -326,7 +326,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
         if (inventoryCore) {
           try {
             // Check if this OMS order has a corresponding WMS order
-            const wmsOrderResult = await db.execute<{ id: number; warehouse_status: string }>(sql`
+            const wmsOrderResult: any = await db.execute(sql`
               SELECT id, warehouse_status FROM orders
               WHERE source_table_id = ${String(omsOrderId)} AND source IN ('ebay')
               LIMIT 1

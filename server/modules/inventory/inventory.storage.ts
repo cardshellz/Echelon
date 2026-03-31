@@ -592,7 +592,7 @@ export const inventoryMethods: IInventoryStorage = {
     const result = await db.select({ warehouseLocationId: productLocations.warehouseLocationId })
       .from(productLocations)
       .where(eq(productLocations.productVariantId, productVariantId));
-    return result.map(a => a.warehouseLocationId);
+    return result.map(a => a.warehouseLocationId).filter((id): id is number => id !== null);
   },
 
   async searchSkusByLocation(locationId: number, limit: number): Promise<Record<string, unknown>[]> {

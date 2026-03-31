@@ -6,18 +6,23 @@
  * The existing WMS pick/pack/ship flow (orders, order_items) is NOT modified.
  */
 
-import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index, pgSchema, numeric } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
-import { productVariants } from "./catalog.schema";
+import { productVariants, products } from "./catalog.schema";
 import { warehouses } from "./warehouse.schema";
+import { orders, orderItems } from "./orders.schema";
+import { vendors } from "./procurement.schema";
+
+// Create the explicit PostgreSQL Namespace
+export const omsSchema = pgSchema("oms");
 
 // ============================================
 // OMS ORDERS — Unified order header
 // ============================================
 
-export const omsOrders = pgTable("oms_orders", {
+export const omsOrders = omsSchema.table("oms_orders", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id),
   externalOrderId: varchar("external_order_id", { length: 100 }).notNull(),
@@ -41,6 +46,10 @@ export const omsOrders = pgTable("oms_orders", {
   shipToState: varchar("ship_to_state", { length: 100 }),
   shipToZip: varchar("ship_to_zip", { length: 20 }),
   shipToCountry: varchar("ship_to_country", { length: 100 }),
+
+  // Delivery SLA & Shipping logic
+  shippingMethod: varchar("shipping_method", { length: 200 }),
+  shippingMethodCode: varchar("shipping_method_code", { length: 100 }),
 
   // Totals (cents)
   subtotalCents: integer("subtotal_cents").notNull().default(0),
@@ -97,7 +106,7 @@ export type OmsOrder = typeof omsOrders.$inferSelect;
 // OMS ORDER LINES — Line items
 // ============================================
 
-export const omsOrderLines = pgTable("oms_order_lines", {
+export const omsOrderLines = omsSchema.table("oms_order_lines", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
@@ -145,7 +154,7 @@ export type OmsOrderLine = typeof omsOrderLines.$inferSelect;
 // OMS ORDER EVENTS — Audit trail
 // ============================================
 
-export const omsOrderEvents = pgTable("oms_order_events", {
+export const omsOrderEvents = omsSchema.table("oms_order_events", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
   eventType: varchar("event_type", { length: 50 }).notNull(),
@@ -162,3 +171,85 @@ export const insertOmsOrderEventSchema = createInsertSchema(omsOrderEvents).omit
 
 export type InsertOmsOrderEvent = z.infer<typeof insertOmsOrderEventSchema>;
 export type OmsOrderEvent = typeof omsOrderEvents.$inferSelect;
+
+// ============================================
+// FULFILLMENT ROUTING RULES
+// ============================================
+
+export const fulfillmentRoutingRules = omsSchema.table("fulfillment_routing_rules", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "cascade" }),
+  matchType: varchar("match_type", { length: 20 }).notNull(),
+  matchValue: varchar("match_value", { length: 255 }),
+  warehouseId: integer("warehouse_id").notNull().references(() => warehouses.id, { onDelete: "cascade" }),
+  priority: integer("priority").notNull().default(0),
+  isActive: integer("is_active").notNull().default(1),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertFulfillmentRoutingRuleSchema = createInsertSchema(fulfillmentRoutingRules).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertFulfillmentRoutingRule = z.infer<typeof insertFulfillmentRoutingRuleSchema>;
+export type FulfillmentRoutingRule = typeof fulfillmentRoutingRules.$inferSelect;
+
+// ============================================================================
+// ORDER ITEM COSTS — COGS per shipment calculation
+// ============================================================================
+
+export const orderItemCosts = omsSchema.table("order_item_costs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  inventoryLotId: integer("inventory_lot_id").notNull(), 
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  qty: integer("qty").notNull(), 
+  unitCostCents: integer("unit_cost_cents").notNull(), 
+  totalCostCents: integer("total_cost_cents").notNull(), 
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertOrderItemCostSchema = createInsertSchema(orderItemCosts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOrderItemCost = z.infer<typeof insertOrderItemCostSchema>;
+export type OrderItemCost = typeof orderItemCosts.$inferSelect;
+
+// ============================================================================
+// ORDER ITEM FINANCIALS — Contribution profit per shipped line item
+// ============================================================================
+
+export const orderItemFinancials = omsSchema.table("order_item_financials", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
+  orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
+  productId: integer("product_id").references(() => products.id, { onDelete: "set null" }),
+  productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
+  sku: varchar("sku", { length: 100 }),
+  productName: text("product_name"),
+  qtyShipped: integer("qty_shipped").notNull(),
+  revenueCents: bigint("revenue_cents", { mode: "number" }).notNull(),
+  cogsCents: bigint("cogs_cents", { mode: "number" }).notNull(),
+  grossProfitCents: bigint("gross_profit_cents", { mode: "number" }).notNull(),
+  marginPercent: numeric("margin_percent", { precision: 5, scale: 2 }),
+  avgSellingPriceCents: integer("avg_selling_price_cents"),
+  avgUnitCostCents: integer("avg_unit_cost_cents"),
+  vendorId: integer("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
+  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
+  shippedAt: timestamp("shipped_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertOrderItemFinancialSchema = createInsertSchema(orderItemFinancials).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertOrderItemFinancial = z.infer<typeof insertOrderItemFinancialSchema>;
+export type OrderItemFinancial = typeof orderItemFinancials.$inferSelect;

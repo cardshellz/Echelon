@@ -932,7 +932,7 @@ export function registerInventoryRoutes(app: Express) {
 
       const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
-        const targetLocId = result.targetLocationId || targetLocationId || warehouseLocationId;
+        const targetLocId = (result as any).targetLocationId || targetLocationId || warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
           console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
         );
@@ -2044,7 +2044,7 @@ export function registerInventoryRoutes(app: Express) {
         unsynced24h,
         needsAlert,
         alertMessage: needsAlert ? 
-          health.status === "error" ? `Sync error: ${health.lastSyncError}` :
+          health.status === "error" ? `Sync error: ${(health as any).lastSyncError}` :
           unsynced24h > 0 ? `${unsynced24h} orders waiting to sync` :
           null : null,
       });
@@ -2074,7 +2074,7 @@ export function registerInventoryRoutes(app: Express) {
         console.log("[ALERT] Sync alert triggered but SendGrid not configured");
         console.log("[ALERT] Would send to:", adminEmail);
         console.log("[ALERT] Status:", health.status);
-        console.log("[ALERT] Error:", health.lastSyncError);
+        console.log("[ALERT] Error:", (health as any).lastSyncError);
         
         res.json({ 
           success: true, 

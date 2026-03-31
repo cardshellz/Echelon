@@ -47,8 +47,6 @@ type InventoryCore = {
 type ReplenishmentService = {
   checkAndTriggerAfterPick: (productVariantId: number, warehouseLocationId: number) => Promise<any>;
   checkReplenNeeded: (productVariantId: number, warehouseLocationId: number) => Promise<{ needed: boolean; stockout: boolean; sourceLocationCode: string | null; sourceVariantSku: string | null; sourceVariantName: string | null; qtyTargetUnits: number; [key: string]: any }>;
-  createAndExecuteReplen: (pickVariantId: number, toLocationId: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
-  inferUnrecordedReplen: (pickVariantId: number, toLocationId: number, surplusQty: number, userId?: string) => Promise<{ task: any; moved: number } | null>;
   executeTask: (taskId: number, userId?: string) => Promise<{ moved: number }>;
 };
 
@@ -822,19 +820,22 @@ class PickingService {
       throw new Error(`No variant found for SKU ${sku}`);
     }
 
-    let replenResult: { moved: number } | null = null;
+    let replenResult: any = null;
     let replenFailReason: string | null = null;
 
     // Step 1: If picker confirmed replen, create+execute the task atomically
     if (didReplen) {
       try {
-        replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
-        if (replenResult) {
-          console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
-        } else {
-          replenFailReason = "no_source_stock";
-          console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
-        }
+        // [TODO] createAndExecuteReplen was removed from replen.service.ts
+        // replenResult = await this.replenishment.createAndExecuteReplen(variant.id, locationId, userId);
+        // if (replenResult) {
+        //   console.log(`[BinCount] replen executed: moved ${replenResult.moved} units`);
+        // } else {
+        //   replenFailReason = "no_source_stock";
+        //   console.warn(`[BinCount] replen returned null — likely no source stock or threshold no longer met`);
+        // }
+        replenFailReason = "method_removed";
+        console.warn(`[BinCount] replen triggered but createAndExecuteReplen is not implemented.`);
       } catch (err: any) {
         const msg = err?.message || "unknown_error";
         replenFailReason = msg.startsWith("execute_failed:") ? "execute_failed" : msg;
@@ -849,19 +850,21 @@ class PickingService {
     // Step 3: If there's a surplus and picker didn't explicitly confirm replen,
     // infer that an unrecorded case break / replen occurred. This keeps the
     // source bin accurate instead of dumping everything into a blind cycle count.
-    let inferredReplen: { moved: number } | null = null;
+    let inferredReplen: any = null;
     const surplus = binCount - systemQty;
 
     if (!didReplen && surplus > 0) {
       try {
-        inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
-        if (inferredReplen) {
-          console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
-          // Re-read system qty after the inferred replen credited the destination
-          // (executeTask already adjusted the level)
-        } else {
-          console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
-        }
+        // [TODO] inferUnrecordedReplen was removed from replen.service.ts
+        // inferredReplen = await this.replenishment.inferUnrecordedReplen(variant.id, locationId, surplus, userId);
+        // if (inferredReplen) {
+        //   console.log(`[BinCount] inferred replen: ${inferredReplen.moved} units attributed to unrecorded case break`);
+        //   // Re-read system qty after the inferred replen credited the destination
+        //   // (executeTask already adjusted the level)
+        // } else {
+        //   console.log(`[BinCount] no replen source found — full surplus will be cycle count`);
+        // }
+        console.log(`[BinCount] inferUnrecordedReplen removed — full surplus will be cycle count`);
       } catch (err: any) {
         console.warn(`[BinCount] inferred replen failed:`, err?.message);
       }
