@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/table";
 import {
   ArrowLeft, Store, CheckCircle2, XCircle, AlertCircle, ExternalLink,
-  RefreshCw, Send, Search, Loader2, Package, Clock,
+  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload,
 } from "lucide-react";
 
 interface Channel {
@@ -395,6 +395,50 @@ export default function ShopifyChannelPage() {
                   <Send className="h-4 w-4 mr-2" />
                 )}
                 Push All to Shopify
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    toast({ title: "Pulling images from eBay...", description: "This may take a few minutes" });
+                    const res = await fetch("/api/images/pull/ebay", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({}),
+                    });
+                    const data = await res.json();
+                    toast({ title: `Pulled ${data?.summary?.imagesAdded ?? 0} images from eBay` });
+                  } catch (err: any) {
+                    toast({ title: "Pull failed", description: err.message, variant: "destructive" });
+                  }
+                }}
+                className="min-h-[44px]"
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Pull All Images
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    toast({ title: "Pushing images to Shopify..." });
+                    const res = await fetch("/api/images/push/shopify", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({}),
+                    });
+                    const data = await res.json();
+                    toast({ title: `Pushed ${data?.summary?.imagesPushed ?? 0} images to Shopify` });
+                  } catch (err: any) {
+                    toast({ title: "Push failed", description: err.message, variant: "destructive" });
+                  }
+                }}
+                className="min-h-[44px]"
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                Push All Images
               </Button>
             </div>
           </div>
