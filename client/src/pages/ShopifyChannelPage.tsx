@@ -155,7 +155,12 @@ export default function ShopifyChannelPage() {
         const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         throw new Error(body?.error || `HTTP ${res.status}`);
       }
-      return res.json();
+      const data = await res.json();
+      // Service returns 200 with status:"error"/"skipped" on soft failure
+      if (data?.status === "error" || data?.status === "skipped") {
+        throw new Error(data?.error || `Push ${data?.status}`);
+      }
+      return data;
     },
     onSuccess: (data, _productId) => {
       setPushingProductId(null);
@@ -163,7 +168,7 @@ export default function ShopifyChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       const status = data?.status;
       toast({
-        title: status === "created" ? "Created on Shopify" : status === "updated" ? "Updated on Shopify" : "Pushed",
+        title: status === "created" ? "Created on Shopify" : "Updated on Shopify",
         description: data?.externalProductId ? `Shopify ID: ${data.externalProductId}` : undefined,
       });
     },
