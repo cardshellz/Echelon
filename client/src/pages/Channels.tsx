@@ -562,6 +562,20 @@ export default function Channels() {
                     <Badge variant="secondary">Primary</Badge>
                   )}
                 </div>
+                {channel.provider === 'shopify' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate("/channels/shopify");
+                    }}
+                  >
+                    <Settings className="h-3 w-3 mr-1" />
+                    Configure
+                  </Button>
+                )}
                 {channel.provider === 'ebay' && (
                   <Button
                     variant="outline"

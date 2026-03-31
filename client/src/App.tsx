@@ -55,6 +55,7 @@ import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
+import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
 import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
 import VendorList from "@/pages/VendorList";
@@ -227,6 +228,9 @@ function Router() {
         </Route>
         <Route path="/oms/orders">
           <ProtectedRoute component={OmsOrders} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/channels/shopify">
+          <ProtectedRoute component={ShopifyChannelPage} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />

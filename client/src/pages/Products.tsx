@@ -21,17 +21,8 @@ import {
   Filter,
   ChevronRight,
   Image as ImageIcon,
-  MoreVertical,
-  Plus,
-  Send,
-  Loader2
+  Plus
 } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 
 interface ProductVariant {
@@ -134,69 +125,6 @@ export default function Products() {
     },
   });
 
-  // Fetch channels to find Shopify channel ID
-  const { data: channels = [] } = useQuery<{ id: number; name: string; provider: string; status: string }[]>({
-    queryKey: ["/api/channels"],
-    queryFn: async () => {
-      const res = await fetch("/api/channels");
-      if (!res.ok) throw new Error("Failed to fetch channels");
-      return res.json();
-    },
-  });
-
-  const shopifyChannel = channels.find((c) => c.provider === "shopify" && c.status === "active");
-
-  const [pushingProductId, setPushingProductId] = useState<number | null>(null);
-  const [pushAllPending, setPushAllPending] = useState(false);
-
-  const pushProductMutation = useMutation({
-    mutationFn: async (productId: number) => {
-      setPushingProductId(productId);
-      const url = shopifyChannel
-        ? `/api/channel-push/product/${productId}/channel/${shopifyChannel.id}`
-        : `/api/channel-push/product/${productId}`;
-      const res = await fetch(url, { method: "POST" });
-      if (!res.ok) throw new Error("Push failed");
-      return res.json();
-    },
-    onSuccess: (data, productId) => {
-      setPushingProductId(null);
-      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-      const result = Array.isArray(data) ? data[0] : data;
-      const status = result?.status;
-      toast({
-        title: status === "created" ? "Product created on Shopify" : status === "updated" ? "Product updated on Shopify" : "Product pushed",
-        description: result?.externalProductId ? `Shopify ID: ${result.externalProductId}` : undefined,
-      });
-    },
-    onError: (_err: Error, _productId: number) => {
-      setPushingProductId(null);
-      toast({ title: "Push failed", variant: "destructive" });
-    },
-  });
-
-  const pushAllMutation = useMutation({
-    mutationFn: async () => {
-      if (!shopifyChannel) throw new Error("No active Shopify channel found");
-      setPushAllPending(true);
-      const res = await fetch(`/api/channel-push/all/${shopifyChannel.id}`, { method: "POST" });
-      if (!res.ok) throw new Error("Push all failed");
-      return res.json();
-    },
-    onSuccess: (data) => {
-      setPushAllPending(false);
-      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-      toast({
-        title: "Push All Complete",
-        description: `${data.created || 0} created, ${data.updated || 0} updated, ${data.errors || 0} errors`,
-      });
-    },
-    onError: (err: Error) => {
-      setPushAllPending(false);
-      toast({ title: "Push All Failed", description: err.message, variant: "destructive" });
-    },
-  });
-
   const createMutation = useMutation({
     mutationFn: async (data: typeof newProduct) => {
       const res = await fetch("/api/products", {
@@ -277,18 +205,6 @@ export default function Products() {
             <span className="hidden sm:inline">{syncMutation.isPending ? "Syncing..." : "Sync from Shopify"}</span>
             <span className="sm:hidden">{syncMutation.isPending ? "..." : "Sync"}</span>
           </Button>
-          {shopifyChannel && (
-            <Button
-              variant="outline"
-              onClick={() => pushAllMutation.mutate()}
-              disabled={pushAllMutation.isPending || pushAllPending}
-              className="min-h-[44px] flex-1 md:flex-none"
-            >
-              <Send className={`h-4 w-4 mr-2 ${pushAllMutation.isPending ? "animate-pulse" : ""}`} />
-              <span className="hidden sm:inline">{pushAllMutation.isPending ? "Pushing..." : "Push All to Shopify"}</span>
-              <span className="sm:hidden">{pushAllMutation.isPending ? "..." : "Push All"}</span>
-            </Button>
-          )}
           <Button onClick={() => setCreateDialogOpen(true)} className="min-h-[44px] flex-1 md:flex-none" data-testid="btn-add-product">
             <Plus className="h-4 w-4 mr-2" />
             Add Product
@@ -464,24 +380,6 @@ export default function Products() {
                         )}
                       </div>
                     </div>
-                    {shopifyChannel && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="min-h-[44px] min-w-[44px] px-2 shrink-0"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          pushProductMutation.mutate(product.id);
-                        }}
-                        disabled={pushingProductId === product.id}
-                      >
-                        {pushingProductId === product.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Send className="h-4 w-4" />
-                        )}
-                      </Button>
-                    )}
                     <ChevronRight className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                   </div>
                 </CardContent>
@@ -538,11 +436,7 @@ export default function Products() {
                       <Badge variant={product.isActive ? "default" : "secondary"}>
                         {product.isActive ? "Active" : "Inactive"}
                       </Badge>
-                      {product.shopifyProductId && (
-                        <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                          Shopify ✓
-                        </p>
-                      )}
+
                     </TableCell>
                     <TableCell className="hidden lg:table-cell">
                       <Switch
@@ -554,29 +448,7 @@ export default function Products() {
                       />
                     </TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <MoreVertical className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              pushProductMutation.mutate(product.id);
-                            }}
-                            disabled={pushingProductId === product.id}
-                          >
-                            {pushingProductId === product.id ? (
-                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            ) : (
-                              <Send className="h-4 w-4 mr-2" />
-                            )}
-                            Push to Shopify
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ))}
