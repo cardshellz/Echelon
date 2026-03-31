@@ -33,6 +33,13 @@ type InventoryCore = {
   getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
   upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
   adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
+  adjustInventory: (params: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    qtyDelta: number;
+    reason?: string;
+    userId?: string;
+  }) => Promise<void>;
   logTransaction: (txn: any) => Promise<void>;
   pickItem: (params: {
     productVariantId: number;
@@ -682,28 +689,14 @@ class PickingService {
     const adjustment = actualBinQty - systemQty;
 
     if (adjustment !== 0) {
-      if (!level) {
-        const newLevel = await this.inventoryCore.upsertLevel(variant.id, warehouseLocationId);
-        if (actualBinQty > 0) {
-          await this.inventoryCore.adjustLevel(newLevel.id, { variantQty: actualBinQty });
-        }
-      } else {
-        await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-      }
-
-      await this.inventoryCore.logTransaction({
+      // Use adjustInventory instead of adjustLevel — handles sync triggers,
+      // audit trail, negative guards, and lot tracking automatically
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: warehouseLocationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: systemQty,
-        variantQtyAfter: actualBinQty,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: "picker_case_break",
-        referenceId: `${sku}:${warehouseLocationId}`,
-        notes: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
-        userId: userId || null,
+        warehouseLocationId,
+        qtyDelta: adjustment,
+        reason: `Picker bin count after case break: system=${systemQty}, actual=${actualBinQty}, adj=${adjustment}`,
+        userId: userId || undefined,
       });
     } else {
       // Log verification even when count matches system (audit trail)
@@ -756,21 +749,13 @@ class PickingService {
     const adjustment = actualBinQty - systemQty;
 
     // Correct inventory if needed
-    if (adjustment !== 0 && level) {
-      await this.inventoryCore.adjustLevel(level.id, { variantQty: adjustment });
-      await this.inventoryCore.logTransaction({
+    if (adjustment !== 0) {
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: warehouseLocationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: systemQty,
-        variantQtyAfter: actualBinQty,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: "picker_replen_skip",
-        referenceId: `${sku}:${warehouseLocationId}`,
-        notes: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
-        userId: userId || null,
+        warehouseLocationId,
+        qtyDelta: adjustment,
+        reason: `Picker skipped replen — bin count correction: system=${systemQty}, actual=${actualBinQty}`,
+        userId: userId || undefined,
       });
     }
 
@@ -876,25 +861,20 @@ class PickingService {
     const adjustment = binCount - postSystemQty;
 
     if (adjustment !== 0 && postLevel) {
-      // Remaining gap = unexplained variance (cycle count)
-      await this.inventoryCore.adjustLevel(postLevel.id, { variantQty: adjustment });
-      await this.inventoryCore.logTransaction({
+      // Use adjustInventory for bin count corrections — handles sync triggers,
+      // audit trail, negative guards, and lot tracking automatically
+      const reason = didReplen
+        ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
+        : inferredReplen
+          ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
+          : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`;
+
+      await this.inventoryCore.adjustInventory({
         productVariantId: variant.id,
-        toLocationId: locationId,
-        transactionType: "cycle_count",
-        variantQtyDelta: adjustment,
-        variantQtyBefore: postSystemQty,
-        variantQtyAfter: binCount,
-        sourceState: "on_hand",
-        targetState: "on_hand",
-        referenceType: inferredReplen ? "picker_bin_count_inferred_replen" : didReplen ? "picker_bin_count_post_replen" : "picker_bin_count",
-        referenceId: `${sku}:${locationId}`,
-        notes: didReplen
-          ? `Bin count after replen: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}, replen moved=${replenResult?.moved ?? 'failed'}`
-          : inferredReplen
-            ? `Bin count with inferred replen: system before=${systemQty}, after inferred replen=${postSystemQty}, actual=${binCount}, remaining variance=${adjustment}`
-            : `Bin count: system=${postSystemQty}, actual=${binCount}, adjustment=${adjustment}`,
-        userId: userId || null,
+        warehouseLocationId: locationId,
+        qtyDelta: adjustment,
+        reason,
+        userId: userId || undefined,
       });
     } else {
       // No remaining adjustment — log for audit trail

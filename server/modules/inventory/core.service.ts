@@ -897,7 +897,23 @@ export class InventoryCoreService {
       });
     });
 
-    // transfer does not change ATP — same fungible pool
+    // Cross-warehouse transfer changes per-warehouse ATP.
+    // Same-warehouse transfer does not (same fungible pool).
+    // Check warehouse IDs and only fire notifyChange if they differ.
+    const [fromLoc] = await this.db
+      .select({ warehouseId: warehouseLocations.warehouseId })
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, params.fromLocationId))
+      .limit(1);
+    const [toLoc] = await this.db
+      .select({ warehouseId: warehouseLocations.warehouseId })
+      .from(warehouseLocations)
+      .where(eq(warehouseLocations.id, params.toLocationId))
+      .limit(1);
+
+    if (fromLoc && toLoc && fromLoc.warehouseId !== toLoc.warehouseId) {
+      this.notifyChange(params.productVariantId, "transfer");
+    }
   }
 
   /**
@@ -1031,7 +1047,10 @@ export class InventoryCoreService {
       }
     });
 
-    // sku correction transfer does not change ATP — same fungible pool
+    // SKU correction changes ATP for BOTH source and target variants:
+    // source loses stock, target gains stock. Notify channel sync for both.
+    this.notifyChange(params.sourceVariantId, "sku_correction");
+    this.notifyChange(params.targetVariantId, "sku_correction");
   }
 
   // ---------------------------------------------------------------------------
