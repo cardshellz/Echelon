@@ -443,28 +443,41 @@ export function createChannelProductPushService(db: any) {
   }
 
   function buildShopifyProductPayload(resolved: ResolvedChannelProduct) {
-    const variants = resolved.variants
-      .filter((v) => v.isListed)
-      .map((v) => {
-        const variant: any = {
-          sku: v.sku,
-          title: v.name,
-          barcode: v.barcode || v.gtin, // Prefer barcode, fall back to GTIN
-        };
+    const listedVariants = resolved.variants.filter((v) => v.isListed);
+
+    // Shopify requires options on the product and option1/option2 on variants.
+    // If there's only one variant and its name matches the product title, use "Default Title".
+    const isSingleDefaultVariant =
+      listedVariants.length === 1 &&
+      (listedVariants[0].name === "Default Title" ||
+        listedVariants[0].name === resolved.title ||
+        !listedVariants[0].name);
+
+    const productOptions = isSingleDefaultVariant
+      ? [{ name: "Title" }]
+      : [{ name: "Variant" }];
+
+    const variants = listedVariants.map((v) => {
+      const variant: any = {
+        sku: v.sku,
+        // Shopify REST API uses option1/option2/option3, NOT title
+        option1: isSingleDefaultVariant ? "Default Title" : (v.name || v.sku || "Default"),
+        barcode: v.barcode || v.gtin || undefined,
         // Price is required by Shopify — fall back to 0.00 if somehow still null
-        variant.price = v.price != null ? (v.price / 100).toFixed(2) : "0.00";
-        if (v.compareAtPrice != null) {
-          variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
-        }
-        if (v.weight != null) {
-          variant.weight = v.weight;
-          variant.weight_unit = "g";
-        }
-        if (v.shopifyVariantId) {
-          variant.id = Number(v.shopifyVariantId);
-        }
-        return variant;
-      });
+        price: v.price != null ? (v.price / 100).toFixed(2) : "0.00",
+      };
+      if (v.compareAtPrice != null) {
+        variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
+      }
+      if (v.weight != null) {
+        variant.weight = v.weight;
+        variant.weight_unit = "g";
+      }
+      if (v.shopifyVariantId) {
+        variant.id = Number(v.shopifyVariantId);
+      }
+      return variant;
+    });
 
     const images = resolved.images.map((img) => {
       const image: any = {
@@ -483,6 +496,7 @@ export function createChannelProductPushService(db: any) {
       product_type: resolved.category || "",
       tags: resolved.tags?.join(", ") || "",
       status: resolved.status === "active" ? "active" : "draft",
+      options: productOptions,
       variants,
       images,
     };
