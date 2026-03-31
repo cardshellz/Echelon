@@ -814,9 +814,9 @@ export function registerChannelRoutes(app: Express) {
       const productId = parseInt(req.params.productId);
       const results = await channelProductPush.pushProductToAllChannels(productId);
       res.json({ success: true, results });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error pushing product:", error);
-      res.status(500).json({ error: "Failed to push product" });
+      res.status(500).json({ error: error?.message || "Failed to push product" });
     }
   });
 
@@ -828,9 +828,9 @@ export function registerChannelRoutes(app: Express) {
       const channelId = parseInt(req.params.channelId);
       const result = await channelProductPush.pushProduct(productId, channelId);
       res.json(result);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error pushing product to channel:", error);
-      res.status(500).json({ error: "Failed to push product" });
+      res.status(500).json({ error: error?.message || "Failed to push product" });
     }
   });
 
@@ -841,9 +841,9 @@ export function registerChannelRoutes(app: Express) {
       const channelId = parseInt(req.params.channelId);
       const result = await channelProductPush.pushAllProducts(channelId);
       res.json(result);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error bulk pushing products:", error);
-      res.status(500).json({ error: "Failed to push products" });
+      res.status(500).json({ error: error?.message || "Failed to push products" });
     }
   });
 

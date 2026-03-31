@@ -123,7 +123,10 @@ export default function ShopifyChannelPage() {
     mutationFn: async () => {
       if (!shopifyChannel) throw new Error("No active Shopify channel");
       const res = await fetch(`/api/channel-push/all/${shopifyChannel.id}`, { method: "POST", credentials: "include" });
-      if (!res.ok) throw new Error("Push failed");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
       return res.json();
     },
     onSuccess: (data) => {
@@ -148,7 +151,10 @@ export default function ShopifyChannelPage() {
         method: "POST",
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Push failed");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
       return res.json();
     },
     onSuccess: (data, _productId) => {
