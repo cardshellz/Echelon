@@ -321,6 +321,26 @@ export function createChannelProductPushService(db: any) {
           });
         }
 
+        // Ensure channel feeds exist for all listed variants (in case they were added after initial push)
+        for (const variant of resolved.variants) {
+          if (!variant.isListed) continue;
+          const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+          if (existingFeed) {
+            if (existingFeed.isActive !== 1) await storage.reactivateChannelFeed(existingFeed.id);
+          } else {
+            const shopifyVariantId = variant.shopifyVariantId || null;
+            await storage.createChannelFeedDirect({
+              channelId,
+              productVariantId: variant.id,
+              channelType: "shopify",
+              channelVariantId: shopifyVariantId || variant.sku || String(variant.id),
+              channelProductId: externalProductId,
+              channelSku: variant.sku || null,
+              isActive: 1,
+            });
+          }
+        }
+
         // Update product lastPushedAt
         await storage.updateProduct(resolved.productId, {
           lastPushedAt: new Date(),
@@ -343,21 +363,41 @@ export function createChannelProductPushService(db: any) {
 
         const newExternalProductId = String(shopifyProduct.id);
 
-        // Create channel listings for all variants
+        // Create channel listings + channel feeds for all variants
         for (const variant of resolved.variants) {
           const shopifyVariant = shopifyProduct.variants?.find(
             (sv: any) => sv.sku === variant.sku,
           );
           if (shopifyVariant) {
+            const shopifyVariantId = String(shopifyVariant.id);
+
             await storage.upsertChannelListing({
               channelId,
               productVariantId: variant.id,
               externalProductId: newExternalProductId,
-              externalVariantId: String(shopifyVariant.id),
+              externalVariantId: shopifyVariantId,
               externalSku: variant.sku,
               syncStatus: "synced",
               lastSyncedAt: new Date(),
             });
+
+            // Ensure channel feed exists so inventory sync picks this variant up
+            const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+            if (existingFeed) {
+              if (existingFeed.isActive !== 1) {
+                await storage.reactivateChannelFeed(existingFeed.id);
+              }
+            } else {
+              await storage.createChannelFeedDirect({
+                channelId,
+                productVariantId: variant.id,
+                channelType: "shopify",
+                channelVariantId: shopifyVariantId,
+                channelProductId: newExternalProductId,
+                channelSku: variant.sku || null,
+                isActive: 1,
+              });
+            }
           }
         }
 
