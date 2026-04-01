@@ -20,6 +20,7 @@ import {
 } from "../../storage/base";
 import { pool } from "../../db";
 import { channelConnections } from "@shared/schema";
+import { ShopifyAdapter } from "./adapters/shopify.adapter";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -962,7 +963,6 @@ export function registerChannelRoutes(app: Express) {
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.channelId);
-      const { ShopifyAdapter } = require("../modules/channels/adapters/shopify.adapter");
       const adapter = new ShopifyAdapter(db);
 
       const client = await pool.connect();
