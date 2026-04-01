@@ -143,7 +143,7 @@ export default function ShopifyChannelPage() {
   // --- Import images from eBay ---
   const importImagesFromEbayMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/ebay/import-images", { method: "POST", credentials: "include" });
+      const res = await fetch("/api/images/pull/ebay", { method: "POST", credentials: "include" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         throw new Error(body?.error || `HTTP ${res.status}`);
