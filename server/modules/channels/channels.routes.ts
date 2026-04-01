@@ -873,7 +873,7 @@ export function registerChannelRoutes(app: Express) {
       const client = await pool.connect();
       try {
         const result = await client.query(`
-          SELECT DISTINCT
+          SELECT
             p.id AS product_id,
             p.name,
             p.shopify_product_id,
