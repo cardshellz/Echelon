@@ -550,13 +550,11 @@ export function createChannelProductPushService(db: any) {
       variants,
     };
 
-    // IMPORTANT: Only include images if we actually have some.
-    // Sending images:[] to Shopify deletes all existing images on the listing.
-    // If product_assets is empty, omit the images key entirely so Shopify
-    // keeps whatever images it already has.
-    if (images.length > 0) {
-      payload.images = images;
-    }
+    // IMPORTANT: Never send images in a regular product sync.
+    // Images are managed exclusively via the dedicated Push Images button
+    // which downloads and uploads as base64. Sending src URLs here would
+    // either wipe Shopify's images (empty array) or send eBay/CDN URLs
+    // that Shopify silently rejects. The images key is intentionally omitted.
 
     return payload;
   }
