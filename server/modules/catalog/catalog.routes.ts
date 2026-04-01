@@ -1302,24 +1302,23 @@ export async function registerProductRoutes(app: Express) {
         return res.status(500).json({ error: "Shopify credentials not configured" });
       }
 
-      console.log(`[ImageSync] Pushing images to Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      console.log(`[ImageSync] === PUSH STARTED ===`);
+      console.log(`[ImageSync] Domain: ${shopDomain}`);
+      console.log(`[ImageSync] Token prefix: ${accessToken.substring(0, 10)}...`);
+      console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
 
-      // If no productIds, limit to first 5 for testing
-      const ids = productIds?.length ? productIds : undefined;
-      const results = await imageSync.pushToShopify(shopDomain, accessToken, ids);
+      const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
       const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
       const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
 
-      console.log(`[ImageSync] Push result: ${results.length} products, ${totalPushed} images pushed, ${totalErrors} errors`);
+      console.log(`[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===`);
       for (const r of results) {
-        if (r.errors.length > 0) {
-          console.log(`[ImageSync]   ${r.sku}: ${r.errors.join("; ")}`);
-        }
+        console.log(`[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}`);
       }
 
       res.json({ results, summary: { products: results.length, imagesPushed: totalPushed, errors: totalErrors } });
     } catch (error: any) {
-      console.error("[ImageSync] Push error:", error);
+      console.error("[ImageSync] === FATAL ERROR ===", error.message, error.stack);
       res.status(500).json({ error: error.message || "Failed to push images to Shopify" });
     }
   });
