@@ -845,7 +845,44 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Test: push images for ONE product to Shopify synchronously (debug endpoint)
+  // GET debug: check image push credentials + show first product without making any changes
+  app.get("/api/channel-push/images/:channelId/debug", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            COUNT(pa.id) AS asset_count,
+            MIN(pa.url) AS sample_url
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 3
+        `);
+
+        const totalResult = await client.query(`SELECT COUNT(*) FROM product_assets WHERE url LIKE 'https://%'`);
+        const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM products WHERE shopify_product_id IS NOT NULL`);
+
+        res.json({
+          envVarsSet: { shopDomain: !!shopDomain, accessToken: !!accessToken },
+          shopDomainValue: shopDomain || "NOT SET",
+          totalAssets: parseInt(totalResult.rows[0].count),
+          productsWithShopifyId: parseInt(prodWithShopifyId.rows[0].count),
+          sampleProducts: result.rows,
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST test: push images for ONE product and return full Shopify response
   app.post("/api/channel-push/images/:channelId/test", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
@@ -886,8 +923,7 @@ export function registerChannelRoutes(app: Express) {
           shopifyUrl,
           imageCount: images.length,
           shopifyStatus: resp.status,
-          shopifyResponse: body.substring(0, 500),
-          payload: JSON.stringify(payload).substring(0, 500),
+          shopifyResponse: body.substring(0, 1000),
         });
       } finally {
         client.release();
