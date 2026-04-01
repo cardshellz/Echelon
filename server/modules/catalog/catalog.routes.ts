@@ -463,7 +463,7 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
-  app.delete("/api/product-assets/:id", requirePermission("inventory", "delete"), async (req, res) => {
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const success = await storage.deleteProductAsset(id);
