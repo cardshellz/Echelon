@@ -163,6 +163,29 @@ export default function ShopifyChannelPage() {
     },
   });
 
+  // --- Push images only to Shopify (safe — no prices/variants touched) ---
+  const pushImagesMutation = useMutation({
+    mutationFn: async () => {
+      if (!shopifyChannel) throw new Error("No active Shopify channel");
+      const res = await fetch(`/api/channel-push/images/${shopifyChannel.id}`, { method: "POST", credentials: "include" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      toast({
+        title: "Images Pushed to Shopify",
+        description: `${data.updated} updated · ${data.skipped} skipped · ${data.errors} errors`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Image Push Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
   // --- Push All mutation ---
   const pushAllMutation = useMutation({
     mutationFn: async () => {
@@ -424,15 +447,31 @@ export default function ShopifyChannelPage() {
               <Button
                 size="sm"
                 className="min-h-[44px] sm:min-h-0"
+                disabled={pushImagesMutation.isPending || !shopifyChannel}
+                onClick={() => pushImagesMutation.mutate()}
+                title="Push images only — safe, does not change prices or variants"
+              >
+                {pushImagesMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <ImageIcon className="h-4 w-4 mr-2" />
+                )}
+                Push Images to Shopify
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[44px] sm:min-h-0"
                 disabled={pushAllMutation.isPending || !shopifyChannel}
                 onClick={() => pushAllMutation.mutate()}
+                title="Full product push — updates title, description, variants, prices AND images"
               >
                 {pushAllMutation.isPending ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                 ) : (
                   <Send className="h-4 w-4 mr-2" />
                 )}
-                Push All to Shopify
+                Push All (Full)
               </Button>
 
             </div>

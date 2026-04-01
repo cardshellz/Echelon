@@ -18,6 +18,8 @@ import {
   productVariants,
   eq, and, inArray, isNull, sql,
 } from "../../storage/base";
+import { pool } from "../../db";
+import { channelConnections } from "@shared/schema";
 
 export function registerChannelRoutes(app: Express) {
 
@@ -840,6 +842,106 @@ export function registerChannelRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error pushing product to channel:", error);
       res.status(500).json({ error: error?.message || "Failed to push product" });
+    }
+  });
+
+  // Push images only to Shopify (safe — does not touch prices, variants, or other fields)
+  app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      if (isNaN(channelId)) return res.status(400).json({ error: "Invalid channelId" });
+
+      // Get Shopify credentials
+      const [conn] = await (db as any)
+        .select()
+        .from(channelConnections)
+        .where(eq(channelConnections.channelId, channelId))
+        .limit(1);
+
+      if (!conn?.shopDomain || !conn?.accessToken) {
+        return res.status(400).json({ error: "No Shopify credentials configured for this channel" });
+      }
+
+      const apiVersion = conn.apiVersion || "2024-01";
+      const baseUrl = `https://${conn.shopDomain}/admin/api/${apiVersion}`;
+      const headers = {
+        "X-Shopify-Access-Token": conn.accessToken,
+        "Content-Type": "application/json",
+      };
+
+      // Get all products that have a shopifyProductId and have assets
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT DISTINCT
+            p.id AS product_id,
+            p.name,
+            p.shopify_product_id,
+            json_agg(
+              json_build_object('url', pa.url, 'position', pa.position, 'alt_text', pa.alt_text)
+              ORDER BY pa.position ASC
+            ) AS assets
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL
+            AND pa.url IS NOT NULL
+            AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          ORDER BY p.id ASC
+        `);
+
+        let updated = 0;
+        let skipped = 0;
+        let errors = 0;
+        const details: Array<{ productId: number; name: string; status: string; imageCount?: number; error?: string }> = [];
+
+        for (const row of result.rows) {
+          try {
+            const images = (row.assets as any[])
+              .filter((a: any) => a.url)
+              .map((a: any, i: number) => ({
+                src: a.url,
+                position: i + 1,
+                ...(a.alt_text ? { alt: a.alt_text } : {}),
+              }));
+
+            if (images.length === 0) {
+              skipped++;
+              details.push({ productId: row.product_id, name: row.name, status: "no_images" });
+              continue;
+            }
+
+            // Only send images — nothing else
+            const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+              method: "PUT",
+              headers,
+              body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
+            });
+
+            if (!resp.ok) {
+              const errBody = await resp.text();
+              throw new Error(`Shopify ${resp.status}: ${errBody.substring(0, 200)}`);
+            }
+
+            updated++;
+            details.push({ productId: row.product_id, name: row.name, status: "updated", imageCount: images.length });
+
+            // Small delay to respect Shopify rate limits
+            await new Promise((r) => setTimeout(r, 300));
+          } catch (err: any) {
+            errors++;
+            details.push({ productId: row.product_id, name: row.name, status: "error", error: err.message });
+            await new Promise((r) => setTimeout(r, 300));
+          }
+        }
+
+        res.json({ total: result.rows.length, updated, skipped, errors, details });
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      console.error("Error pushing images to Shopify:", error);
+      res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
 
