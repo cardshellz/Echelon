@@ -155,7 +155,7 @@ export default function ShopifyChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       toast({
         title: "Images Imported from eBay",
-        description: `${data.summary?.imagesAdded ?? data.imported ?? 0} images added · ${data.summary?.errors ?? data.errors ?? 0} errors`,
+        description: data.status === "started" ? "Running in background — check logs for progress" : `${data.summary?.imagesAdded ?? data.imported ?? 0} images added · ${data.summary?.errors ?? data.errors ?? 0} errors`,
       });
     },
     onError: (err: Error) => {
