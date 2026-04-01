@@ -958,25 +958,37 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Push images only to Shopify — uses channel_listings for fresh Shopify product IDs
+  // Push images only to Shopify — uses ShopifyAdapter (same as orchestrator) for credentials
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.channelId);
-      // Use channel_connections DB credentials — same source as pushToShopify in product-push.service.ts
+      // Get credentials the exact same way ShopifyAdapter does
       const [conn] = await (db as any)
         .select()
         .from(channelConnections)
         .where(eq(channelConnections.channelId, channelId))
         .limit(1);
-      // Fall back to env vars only if DB has nothing
+
+      if (!conn) {
+        // Try env vars as last resort
+        const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+        const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+        if (!shopDomain || !accessToken) {
+          return res.status(400).json({ error: `No channel_connections row found for channelId=${channelId} and no env vars set` });
+        }
+        console.log(`[ImagePush] No DB connection for channel ${channelId}, using env vars`);
+        // fall through with env vars below
+      }
+
       const shopDomain = conn?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
       const accessToken = conn?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
       if (!shopDomain || !accessToken) {
-        return res.status(500).json({ error: "No Shopify credentials in channel_connections or env vars" });
+        return res.status(400).json({ error: `channel_connections row exists for channelId=${channelId} but shopDomain/accessToken empty` });
       }
       const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
       const baseUrl = `https://${domain}/admin/api/${conn?.apiVersion || "2024-01"}`;
       const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
+      console.log(`[ImagePush] Using domain=${domain} tokenLen=${accessToken.length} channelId=${channelId} connId=${conn?.id}`);
 
       const client = await pool.connect();
       try {
