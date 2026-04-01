@@ -605,11 +605,29 @@ export class ShopifyAdapter implements IChannelAdapter {
 
     if (shopifyImages.length === 0) return;
 
-    await this.shopifyPut(
-      creds,
-      `/products/${shopifyProductId}.json`,
-      { product: { id: Number(shopifyProductId), images: shopifyImages } },
+    // Fetch existing images so we don't overwrite them — POST each new image individually
+    const existing = await this.shopifyGet(creds, `/products/${shopifyProductId}/images.json`);
+    const existingFilenames = new Set<string>(
+      (existing?.images || []).map((img: any) => {
+        // Shopify stores src like https://cdn.shopify.com/.../filename.jpg?v=123
+        const src: string = img.src || "";
+        return src.split("/").pop()?.split("?")[0] || "";
+      })
     );
+
+    let position = (existing?.images?.length || 0) + 1;
+    for (const img of shopifyImages) {
+      if (existingFilenames.has(img.filename)) {
+        console.log(`[pushImagesOnly] Skipping existing image: ${img.filename}`);
+        continue;
+      }
+      await this.shopifyPost(
+        creds,
+        `/products/${shopifyProductId}/images.json`,
+        { image: { ...img, position } },
+      );
+      position++;
+    }
   }
 
   // -------------------------------------------------------------------------
