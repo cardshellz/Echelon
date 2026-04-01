@@ -965,6 +965,9 @@ export function registerChannelRoutes(app: Express) {
       const channelId = parseInt(req.params.channelId);
       const adapter = new ShopifyAdapter(db);
 
+      // Respond immediately — image push takes too long for a synchronous request
+      res.json({ status: "started", message: "Image push started in background. Check Heroku logs for progress." });
+
       const client = await pool.connect();
       try {
         const result = await client.query(`
@@ -1020,13 +1023,16 @@ export function registerChannelRoutes(app: Express) {
         }
 
         console.log(`[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors`);
-        res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
+        // Send result only if not already responded (background mode)
+        if (!res.headersSent) {
+          res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
+        }
       } finally {
         client.release();
       }
     } catch (error: any) {
       console.error("[ImagePush] Error:", error);
-      res.status(500).json({ error: error?.message || "Failed to push images" });
+      if (!res.headersSent) res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
   // Push all products to a channel (bulk)

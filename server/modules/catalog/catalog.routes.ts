@@ -1246,7 +1246,20 @@ export async function registerProductRoutes(app: Express) {
     try {
       const { productIds } = req.body;
       console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
-      const results = await imageSync.pullFromEbay(productIds);
+
+      // Get eBay access token to use Browse API (much more reliable than scraping)
+      let ebayAccessToken: string | undefined;
+      try {
+        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
+        const config = createEbayAuthConfig();
+        const authService = new EbayAuthService(db as any, config);
+        ebayAccessToken = await authService.getAccessToken(67);
+        console.log(`[ImageSync] Got eBay access token (${ebayAccessToken?.substring(0, 10)}...)`);
+      } catch (authErr: any) {
+        console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
+      }
+
+      const results = await imageSync.pullFromEbay(productIds, ebayAccessToken);
       const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
       const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
       res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });

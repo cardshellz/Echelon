@@ -55,7 +55,7 @@ export function createImageSyncService() {
    * Pull images from eBay listings and store in Echelon catalog.
    * Scrapes eBay listing pages for i.ebayimg.com image URLs.
    */
-  async function pullFromEbay(productIds?: number[]): Promise<ImagePullResult[]> {
+  async function pullFromEbay(productIds?: number[], ebayAccessToken?: string): Promise<ImagePullResult[]> {
     const results: ImagePullResult[] = [];
 
     // Get eBay listings to process
@@ -104,8 +104,14 @@ export function createImageSyncService() {
           continue;
         }
 
-        // Scrape images from eBay listing page
-        const imageUrls = await scrapeEbayImages(listing.ebayUrl);
+        // Use eBay Browse API if we have an access token, otherwise fall back to scraping
+        let imageUrls: string[] = [];
+        if (ebayAccessToken && listing.ebayItemId) {
+          imageUrls = await fetchEbayImagesViaApi(listing.ebayItemId, ebayAccessToken);
+        }
+        if (imageUrls.length === 0) {
+          imageUrls = await scrapeEbayImages(listing.ebayUrl);
+        }
         result.imagesFound = imageUrls.length;
 
         if (imageUrls.length === 0) {
@@ -474,6 +480,39 @@ export function createImageSyncService() {
   // =========================================================================
   // Helpers
   // =========================================================================
+
+  async function fetchEbayImagesViaApi(ebayItemId: string, accessToken: string): Promise<string[]> {
+    try {
+      console.log(`[ImageSync] Fetching images via eBay Browse API for item ${ebayItemId}`);
+      const response = await fetch(
+        `https://api.ebay.com/buy/browse/v1/item/v1|${ebayItemId}|0`,
+        {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+          },
+        }
+      );
+      if (!response.ok) {
+        console.warn(`[ImageSync] eBay Browse API failed: ${response.status} for item ${ebayItemId}`);
+        return [];
+      }
+      const data: any = await response.json();
+      const images: string[] = [];
+      if (data.image?.imageUrl) images.push(data.image.imageUrl);
+      if (Array.isArray(data.additionalImages)) {
+        for (const img of data.additionalImages) {
+          if (img.imageUrl) images.push(img.imageUrl);
+        }
+      }
+      console.log(`[ImageSync] Browse API found ${images.length} images for item ${ebayItemId}`);
+      return images;
+    } catch (err: any) {
+      console.warn(`[ImageSync] Browse API error for item ${ebayItemId}: ${err.message}`);
+      return [];
+    }
+  }
 
   async function scrapeEbayImages(ebayUrl: string): Promise<string[]> {
     console.log(`[ImageSync] Scraping eBay page: ${ebayUrl}`);
