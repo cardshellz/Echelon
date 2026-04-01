@@ -482,34 +482,46 @@ export function createImageSyncService() {
   // =========================================================================
 
   async function fetchEbayImagesViaApi(ebayItemId: string, accessToken: string): Promise<string[]> {
+    // Try Sell Inventory API first (seller token has access to this)
+    // The inventory item SKU is needed — but we can also try the Trading API GetItem call
+    // which works with seller OAuth tokens and returns PictureURL array
     try {
-      console.log(`[ImageSync] Fetching images via eBay Browse API for item ${ebayItemId}`);
-      const response = await fetch(
-        `https://api.ebay.com/buy/browse/v1/item/v1|${ebayItemId}|0`,
-        {
-          headers: {
-            "Authorization": `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-          },
-        }
-      );
+      console.log(`[ImageSync] Fetching images via eBay Trading API GetItem for item ${ebayItemId}`);
+      const xmlBody = `<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>${accessToken}</eBayAuthToken>
+  </RequesterCredentials>
+  <ItemID>${ebayItemId}</ItemID>
+  <IncludeItemSpecifics>false</IncludeItemSpecifics>
+  <OutputSelector>PictureDetails</OutputSelector>
+</GetItemRequest>`;
+
+      const response = await fetch("https://api.ebay.com/ws/api.dll", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/xml",
+          "X-EBAY-API-SITEID": "0",
+          "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+          "X-EBAY-API-CALL-NAME": "GetItem",
+          "X-EBAY-API-IAF-TOKEN": accessToken,
+        },
+        body: xmlBody,
+      });
+
       if (!response.ok) {
-        console.warn(`[ImageSync] eBay Browse API failed: ${response.status} for item ${ebayItemId}`);
+        console.warn(`[ImageSync] Trading API GetItem failed: ${response.status} for item ${ebayItemId}`);
         return [];
       }
-      const data: any = await response.json();
-      const images: string[] = [];
-      if (data.image?.imageUrl) images.push(data.image.imageUrl);
-      if (Array.isArray(data.additionalImages)) {
-        for (const img of data.additionalImages) {
-          if (img.imageUrl) images.push(img.imageUrl);
-        }
-      }
-      console.log(`[ImageSync] Browse API found ${images.length} images for item ${ebayItemId}`);
-      return images;
+
+      const xml = await response.text();
+      // Extract PictureURL values from XML
+      const matches = xml.match(/<PictureURL>(.*?)<\/PictureURL>/g) || [];
+      const urls = matches.map(m => m.replace(/<\/?PictureURL>/g, "").trim());
+      console.log(`[ImageSync] Trading API found ${urls.length} images for item ${ebayItemId}`);
+      return urls;
     } catch (err: any) {
-      console.warn(`[ImageSync] Browse API error for item ${ebayItemId}: ${err.message}`);
+      console.warn(`[ImageSync] Trading API error for item ${ebayItemId}: ${err.message}`);
       return [];
     }
   }
