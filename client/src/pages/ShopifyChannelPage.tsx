@@ -178,10 +178,10 @@ export default function ShopifyChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       const firstErr = data.firstErrors?.[0];
       toast({
-        title: data.errors > 0 && data.updated === 0 ? "Image Push Failed" : "Images Pushed to Shopify",
+        title: data.status === "started" ? "Images Pushed to Shopify" : (data.errors > 0 && data.updated === 0 ? "Image Push Failed" : "Images Pushed to Shopify"),
         description: firstErr
           ? `${data.errors} errors — ${firstErr}`
-          : `${data.updated} updated · ${data.skipped} skipped`,
+          : data.status === "started" ? "Running in background — check logs for progress" : `${data.updated} updated · ${data.skipped} skipped`,
         variant: data.errors > 0 ? "destructive" : undefined,
       });
     },
