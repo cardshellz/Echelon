@@ -890,52 +890,67 @@ export function registerChannelRoutes(app: Express) {
           ORDER BY p.id ASC
         `);
 
-        let updated = 0;
-        let skipped = 0;
-        let errors = 0;
-        const details: Array<{ productId: number; name: string; status: string; imageCount?: number; error?: string }> = [];
+        const rows = result.rows;
 
-        for (const row of result.rows) {
-          try {
-            const images = (row.assets as any[])
-              .filter((a: any) => a.url)
-              .map((a: any, i: number) => ({
-                src: a.url,
-                position: i + 1,
-                ...(a.alt_text ? { alt: a.alt_text } : {}),
-              }));
+        // Respond immediately — process in background to avoid Heroku 30s timeout
+        // With 178 products × ~300ms per Shopify API call = ~54 seconds
+        res.json({ total: rows.length, status: "started", message: `Pushing images for ${rows.length} products in background. Check server logs for progress.` });
 
-            if (images.length === 0) {
-              skipped++;
-              details.push({ productId: row.product_id, name: row.name, status: "no_images" });
-              continue;
+        // Fire and forget
+        (async () => {
+          let updated = 0;
+          let skipped = 0;
+          let errors = 0;
+
+          for (const row of rows) {
+            try {
+              const images = (row.assets as any[])
+                .filter((a: any) => a.url)
+                .map((a: any, i: number) => ({
+                  src: a.url,
+                  position: i + 1,
+                  ...(a.alt_text ? { alt: a.alt_text } : {}),
+                }));
+
+              if (images.length === 0) {
+                skipped++;
+                continue;
+              }
+
+              const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
+              });
+
+              if (resp.status === 429) {
+                const retryAfter = parseInt(resp.headers.get("Retry-After") || "5", 10);
+                console.log(`[ImagePush] Rate limited, waiting ${retryAfter}s`);
+                await new Promise((r) => setTimeout(r, retryAfter * 1000));
+                // Retry once
+                const retry = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+                  method: "PUT",
+                  headers,
+                  body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
+                });
+                if (!retry.ok) throw new Error(`Shopify ${retry.status} on retry`);
+              } else if (!resp.ok) {
+                const errBody = await resp.text();
+                throw new Error(`Shopify ${resp.status}: ${errBody.substring(0, 200)}`);
+              }
+
+              updated++;
+              console.log(`[ImagePush] ✓ ${row.name} (${images.length} images)`);
+              await new Promise((r) => setTimeout(r, 250));
+            } catch (err: any) {
+              errors++;
+              console.error(`[ImagePush] ✗ ${row.name}: ${err.message}`);
+              await new Promise((r) => setTimeout(r, 250));
             }
-
-            // Only send images — nothing else
-            const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-              method: "PUT",
-              headers,
-              body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
-            });
-
-            if (!resp.ok) {
-              const errBody = await resp.text();
-              throw new Error(`Shopify ${resp.status}: ${errBody.substring(0, 200)}`);
-            }
-
-            updated++;
-            details.push({ productId: row.product_id, name: row.name, status: "updated", imageCount: images.length });
-
-            // Small delay to respect Shopify rate limits
-            await new Promise((r) => setTimeout(r, 300));
-          } catch (err: any) {
-            errors++;
-            details.push({ productId: row.product_id, name: row.name, status: "error", error: err.message });
-            await new Promise((r) => setTimeout(r, 300));
           }
-        }
 
-        res.json({ total: result.rows.length, updated, skipped, errors, details });
+          console.log(`[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors`);
+        })().catch((err) => console.error("[ImagePush] Fatal error:", err.message));
       } finally {
         client.release();
       }
