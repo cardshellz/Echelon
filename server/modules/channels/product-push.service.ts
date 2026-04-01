@@ -500,9 +500,7 @@ export function createChannelProductPushService(db: any) {
     // If there's only one variant and its name matches the product title, use "Default Title".
     const isSingleDefaultVariant =
       listedVariants.length === 1 &&
-      (listedVariants[0].name === "Default Title" ||
-        listedVariants[0].name === resolved.title ||
-        !listedVariants[0].name);
+      (!listedVariants[0].name || listedVariants[0].name === "Default Title");
 
     const productOptions = isSingleDefaultVariant
       ? [{ name: "Title" }]
@@ -547,7 +545,9 @@ export function createChannelProductPushService(db: any) {
       tags: resolved.tags?.join(", ") || "",
       // Status is managed in Shopify directly — only sync to archived if archived in Echelon
       ...(resolved.status === "archived" ? { status: "archived" } : {}),
-      options: productOptions,
+      // Only include options on new products — updating options on existing products
+      // renames them in Shopify and can corrupt variant structure
+      ...(resolved.variants.every((v) => !v.shopifyVariantId) ? { options: productOptions } : {}),
       variants,
     };
 
