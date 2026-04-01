@@ -545,7 +545,7 @@ export function createChannelProductPushService(db: any) {
       body_html: resolved.description || "",
       product_type: resolved.category || "",
       tags: resolved.tags?.join(", ") || "",
-      status: resolved.status === "active" ? "active" : "draft",
+      status: resolved.status === "archived" ? "archived" : "active",
       options: productOptions,
       variants,
     };
