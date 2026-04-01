@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/table";
 import {
   ArrowLeft, Store, CheckCircle2, XCircle, AlertCircle, ExternalLink,
-  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload,
+  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload, Image as ImageIcon,
 } from "lucide-react";
 
 interface Channel {
@@ -137,6 +137,29 @@ export default function ShopifyChannelPage() {
     },
     onError: (err: Error) => {
       toast({ title: "Inventory Sync Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // --- Import images from eBay ---
+  const importImagesFromEbayMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/ebay/import-images", { method: "POST", credentials: "include" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      toast({
+        title: "Images Imported from eBay",
+        description: `${data.imported} products updated · ${data.skipped} skipped · ${data.errors} errors`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Image Import Failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -382,6 +405,21 @@ export default function ShopifyChannelPage() {
                   <RefreshCw className="h-4 w-4 mr-2" />
                 )}
                 Sync Inventory
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[44px] sm:min-h-0"
+                disabled={importImagesFromEbayMutation.isPending}
+                onClick={() => importImagesFromEbayMutation.mutate()}
+                title="Pull product images from eBay listings into Echelon, then they'll push to Shopify on next push"
+              >
+                {importImagesFromEbayMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <ImageIcon className="h-4 w-4 mr-2" />
+                )}
+                Import Images from eBay
               </Button>
               <Button
                 size="sm"

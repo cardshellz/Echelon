@@ -540,7 +540,7 @@ export function createChannelProductPushService(db: any) {
       return image;
     });
 
-    return {
+    const payload: Record<string, any> = {
       title: resolved.title,
       body_html: resolved.description || "",
       product_type: resolved.category || "",
@@ -548,8 +548,17 @@ export function createChannelProductPushService(db: any) {
       status: resolved.status === "active" ? "active" : "draft",
       options: productOptions,
       variants,
-      images,
     };
+
+    // IMPORTANT: Only include images if we actually have some.
+    // Sending images:[] to Shopify deletes all existing images on the listing.
+    // If product_assets is empty, omit the images key entirely so Shopify
+    // keeps whatever images it already has.
+    if (images.length > 0) {
+      payload.images = images;
+    }
+
+    return payload;
   }
 
   return {
