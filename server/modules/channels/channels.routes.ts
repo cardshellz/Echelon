@@ -952,13 +952,21 @@ export function registerChannelRoutes(app: Express) {
   // Push images only to Shopify — uses channel_listings for fresh Shopify product IDs
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
-      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      const channelId = parseInt(req.params.channelId);
+      // Use channel_connections DB credentials — same source as pushToShopify in product-push.service.ts
+      const [conn] = await (db as any)
+        .select()
+        .from(channelConnections)
+        .where(eq(channelConnections.channelId, channelId))
+        .limit(1);
+      // Fall back to env vars only if DB has nothing
+      const shopDomain = conn?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = conn?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
       if (!shopDomain || !accessToken) {
-        return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN env vars not set" });
+        return res.status(500).json({ error: "No Shopify credentials in channel_connections or env vars" });
       }
       const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
-      const baseUrl = `https://${domain}/admin/api/2024-01`;
+      const baseUrl = `https://${domain}/admin/api/${conn?.apiVersion || "2024-01"}`;
       const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
       const client = await pool.connect();
