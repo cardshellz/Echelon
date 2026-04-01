@@ -958,121 +958,59 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Push images only to Shopify — uses ShopifyAdapter (same as orchestrator) for credentials
+  // Push images only to Shopify — uses channelProductPush service (same path as working push)
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
+      const { channelProductPush } = req.app.locals.services;
       const channelId = parseInt(req.params.channelId);
-      // Get credentials the exact same way ShopifyAdapter does
-      const [conn] = await (db as any)
-        .select()
-        .from(channelConnections)
-        .where(eq(channelConnections.channelId, channelId))
-        .limit(1);
-
-      if (!conn) {
-        // Try env vars as last resort
-        const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
-        const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
-        if (!shopDomain || !accessToken) {
-          return res.status(400).json({ error: `No channel_connections row found for channelId=${channelId} and no env vars set` });
-        }
-        console.log(`[ImagePush] No DB connection for channel ${channelId}, using env vars`);
-        // fall through with env vars below
-      }
-
-      const shopDomain = conn?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
-      const accessToken = conn?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
-      if (!shopDomain || !accessToken) {
-        return res.status(400).json({ error: `channel_connections row exists for channelId=${channelId} but shopDomain/accessToken empty` });
-      }
-      const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
-      const baseUrl = `https://${domain}/admin/api/${conn?.apiVersion || "2024-01"}`;
-      const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
-      console.log(`[ImagePush] Using domain=${domain} tokenLen=${accessToken.length} channelId=${channelId} connId=${conn?.id}`);
 
       const client = await pool.connect();
       try {
-        // Get products with assets — join to channel_listings for fresh Shopify product IDs
+        // Get all products that have assets
         const result = await client.query(`
-          SELECT
-            p.id AS product_id,
-            p.name,
-            COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
-            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text) ORDER BY pa.position ASC) AS assets
+          SELECT DISTINCT p.id AS product_id
           FROM products p
           JOIN product_assets pa ON pa.product_id = p.id
-          LEFT JOIN (
-            SELECT DISTINCT ON (pv.product_id)
-              pv.product_id,
-              cl.external_product_id AS shopify_product_id
-            FROM channel_listings cl
-            JOIN product_variants pv ON pv.id = cl.product_variant_id
-            WHERE cl.channel_id = 36 AND cl.external_product_id IS NOT NULL
-            ORDER BY pv.product_id ASC, cl.id DESC
-          ) cl_data ON cl_data.product_id = p.id
           WHERE pa.url IS NOT NULL AND pa.url LIKE 'https://%'
-          GROUP BY p.id, p.name, cl_data.shopify_product_id, p.shopify_product_id
           ORDER BY p.id ASC
         `);
 
-        const rows = result.rows.filter((r: any) => r.shopify_product_id);
-
-        if (rows.length === 0) {
-          return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with Shopify IDs and image assets found" });
+        if (result.rows.length === 0) {
+          return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with image assets" });
         }
 
-        // Sample first image URL for diagnostics
-        const sampleUrl = rows[0]?.assets?.[0]?.url || "none";
-        console.log(`[ImagePush] Starting: ${rows.length} products, sample URL: ${sampleUrl}`);
-
-        const pushOne = async (row: any): Promise<{ name: string; status: string; error?: string }> => {
-          const images = (row.assets as any[])
-            .filter((a: any) => a.url)
-            .map((a: any, i: number) => ({ src: a.url, position: i + 1, ...(a.alt ? { alt: a.alt } : {}) }));
-          if (images.length === 0) return { name: row.name, status: "skipped" };
-
-          const doReq = () => fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-            method: "PUT", headers,
-            body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
-          });
-
-          let resp = await doReq();
-          if (resp.status === 429) {
-            const wait = parseInt(resp.headers.get("Retry-After") || "5", 10) * 1000;
-            await new Promise((r) => setTimeout(r, wait));
-            resp = await doReq();
-          }
-          if (!resp.ok) {
-            const b = await resp.text();
-            const msg = `[${row.name}] Shopify ${resp.status}: ${b.substring(0, 400)}`;
-            console.error(`[ImagePush] ERROR: ${msg}`);
-            throw new Error(msg);
-          }
-          console.log(`[ImagePush] ✓ ${row.name} shopifyId=${row.shopify_product_id} images=${images.length}`);
-          return { name: row.name, status: "updated" };
-        };
-
-        const BATCH = 5;
+        const productIds = result.rows.map((r: any) => r.product_id);
         let updated = 0, skipped = 0, errors = 0;
         const errorDetails: string[] = [];
 
-        for (let i = 0; i < rows.length; i += BATCH) {
-          const batch = rows.slice(i, i + BATCH);
-          const results = await Promise.allSettled(batch.map(pushOne));
-          for (const r of results) {
-            if (r.status === "fulfilled") { r.value.status === "updated" ? updated++ : skipped++; }
-            else { errors++; errorDetails.push(r.reason?.message || "unknown"); }
+        // Process in batches to avoid timeout
+        const BATCH = 5;
+        for (let i = 0; i < productIds.length; i += BATCH) {
+          const batch = productIds.slice(i, i + BATCH);
+          const batchResults = await Promise.allSettled(
+            batch.map((pid: number) => channelProductPush.pushProduct(pid, channelId))
+          );
+          for (const r of batchResults) {
+            if (r.status === "fulfilled") {
+              const v = r.value as any;
+              if (v.status === "updated" || v.status === "created") updated++;
+              else if (v.status === "skipped") skipped++;
+              else { errors++; errorDetails.push(v.error || "unknown"); }
+            } else {
+              errors++;
+              errorDetails.push(r.reason?.message || "unknown");
+            }
           }
-          if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
+          if (i + BATCH < productIds.length) await new Promise((r) => setTimeout(r, 100));
         }
 
-        console.log(`[ImagePush] Done: ${updated} updated, ${skipped} skipped, ${errors} errors`);
-        res.json({ total: rows.length, updated, skipped, errors, sampleUrl, firstErrors: errorDetails.slice(0, 3) });
+        console.log(`[ImagePush] Complete via channelProductPush: ${updated} updated, ${skipped} skipped, ${errors} errors`);
+        res.json({ total: productIds.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 3) });
       } finally {
         client.release();
       }
     } catch (error: any) {
-      console.error("Error pushing images to Shopify:", error);
+      console.error("Error pushing images:", error);
       res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
