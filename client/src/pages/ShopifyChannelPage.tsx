@@ -143,7 +143,7 @@ export default function ShopifyChannelPage() {
   // --- Import images from eBay ---
   const importImagesFromEbayMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/images/pull/ebay", { method: "POST", credentials: "include" });
+      const res = await fetch("/api/images/pull/ebay", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         throw new Error(body?.error || `HTTP ${res.status}`);
@@ -155,7 +155,7 @@ export default function ShopifyChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       toast({
         title: "Images Imported from eBay",
-        description: `${data.imported} products updated · ${data.skipped} skipped · ${data.errors} errors`,
+        description: `${data.summary?.imagesAdded ?? data.imported ?? 0} images added · ${data.summary?.errors ?? data.errors ?? 0} errors`,
       });
     },
     onError: (err: Error) => {
