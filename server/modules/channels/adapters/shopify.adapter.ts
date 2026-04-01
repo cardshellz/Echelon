@@ -572,13 +572,36 @@ export class ShopifyAdapter implements IChannelAdapter {
     images: Array<{ url: string; altText?: string | null; position: number }>,
   ): Promise<void> {
     const creds = await this.getCredentials(channelId);
-    const shopifyImages = images
-      .filter((img) => img.url)
-      .map((img, i) => ({
-        src: img.url,
-        position: i + 1,
-        ...(img.altText ? { alt: img.altText } : {}),
-      }));
+
+    // Download each image and send as base64 attachment.
+    // Shopify silently rejects CDN/eBay URLs passed as `src` — it needs to
+    // actually fetch and re-host the image, which requires a direct download.
+    const shopifyImages: Array<Record<string, any>> = [];
+    for (const img of images.filter((i) => i.url)) {
+      try {
+        const resp = await fetch(img.url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; CardShellz/1.0)",
+          },
+        });
+        if (!resp.ok) {
+          console.warn(`[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}`);
+          continue;
+        }
+        const buffer = Buffer.from(await resp.arrayBuffer());
+        const base64 = buffer.toString("base64");
+        // Derive a filename from the URL
+        const filename = img.url.split("/").pop()?.split("?")[0] || `image_${shopifyImages.length + 1}.jpg`;
+        shopifyImages.push({
+          attachment: base64,
+          filename,
+          position: shopifyImages.length + 1,
+          ...(img.altText ? { alt: img.altText } : {}),
+        });
+      } catch (err: any) {
+        console.warn(`[pushImagesOnly] Error downloading image ${img.url}:`, err.message);
+      }
+    }
 
     if (shopifyImages.length === 0) return;
 
