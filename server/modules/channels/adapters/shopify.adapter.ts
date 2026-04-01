@@ -563,6 +563,33 @@ export class ShopifyAdapter implements IChannelAdapter {
   }
 
   // -------------------------------------------------------------------------
+  // Push images only — does NOT touch variants, title, price, or any other field
+  // -------------------------------------------------------------------------
+
+  async pushImagesOnly(
+    channelId: number,
+    shopifyProductId: string,
+    images: Array<{ url: string; altText?: string | null; position: number }>,
+  ): Promise<void> {
+    const creds = await this.getCredentials(channelId);
+    const shopifyImages = images
+      .filter((img) => img.url)
+      .map((img, i) => ({
+        src: img.url,
+        position: i + 1,
+        ...(img.altText ? { alt: img.altText } : {}),
+      }));
+
+    if (shopifyImages.length === 0) return;
+
+    await this.shopifyPut(
+      creds,
+      `/products/${shopifyProductId}.json`,
+      { product: { id: Number(shopifyProductId), images: shopifyImages } },
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Shopify API Helpers
   // -------------------------------------------------------------------------
 
