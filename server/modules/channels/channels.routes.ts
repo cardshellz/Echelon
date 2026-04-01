@@ -845,6 +845,58 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
+  // Test: push images for ONE product to Shopify synchronously (debug endpoint)
+  app.post("/api/channel-push/images/:channelId/test", requirePermission("channels", "edit"), async (req, res) => {
+    try {
+      const channelId = parseInt(req.params.channelId);
+      const [conn] = await (db as any).select().from(channelConnections).where(eq(channelConnections.channelId, channelId)).limit(1);
+      if (!conn?.shopDomain || !conn?.accessToken) return res.status(400).json({ error: "No Shopify credentials" });
+
+      const apiVersion = conn.apiVersion || "2024-01";
+      const baseUrl = `https://${conn.shopDomain}/admin/api/${apiVersion}`;
+      const headers = { "X-Shopify-Access-Token": conn.accessToken, "Content-Type": "application/json" };
+
+      const client = await pool.connect();
+      try {
+        const result = await client.query(`
+          SELECT p.id, p.name, p.shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position) ORDER BY pa.position ASC) AS assets
+          FROM products p
+          JOIN product_assets pa ON pa.product_id = p.id
+          WHERE p.shopify_product_id IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, p.shopify_product_id
+          LIMIT 1
+        `);
+
+        if (result.rows.length === 0) return res.json({ error: "No products with shopify_product_id and assets found" });
+
+        const row = result.rows[0];
+        const images = (row.assets as any[]).filter((a: any) => a.url).map((a: any, i: number) => ({ src: a.url, position: i + 1 }));
+
+        const shopifyUrl = `${baseUrl}/products/${row.shopify_product_id}.json`;
+        const payload = { product: { id: Number(row.shopify_product_id), images } };
+
+        const resp = await fetch(shopifyUrl, { method: "PUT", headers, body: JSON.stringify(payload) });
+        const body = await resp.text();
+
+        res.json({
+          productId: row.id,
+          productName: row.name,
+          shopifyProductId: row.shopify_product_id,
+          shopifyUrl,
+          imageCount: images.length,
+          shopifyStatus: resp.status,
+          shopifyResponse: body.substring(0, 500),
+          payload: JSON.stringify(payload).substring(0, 500),
+        });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Push images only to Shopify (safe — does not touch prices, variants, or other fields)
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
