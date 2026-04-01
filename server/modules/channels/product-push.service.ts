@@ -545,7 +545,8 @@ export function createChannelProductPushService(db: any) {
       body_html: resolved.description || "",
       product_type: resolved.category || "",
       tags: resolved.tags?.join(", ") || "",
-      status: resolved.status === "archived" ? "archived" : "active",
+      // Status is managed in Shopify directly — only sync to archived if archived in Echelon
+      ...(resolved.status === "archived" ? { status: "archived" } : {}),
       options: productOptions,
       variants,
     };
