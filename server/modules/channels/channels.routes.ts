@@ -933,98 +933,85 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Push images only to Shopify (safe — does not touch prices, variants, or other fields)
+  // Push images only to Shopify — uses channel_listings for fresh Shopify product IDs
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      // Use env vars — same as the rest of the Shopify integration
       const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
       const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
       if (!shopDomain || !accessToken) {
         return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN env vars not set" });
       }
-
       const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
       const baseUrl = `https://${domain}/admin/api/2024-01`;
-      const headers = {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      };
+      const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
-      // Get all products that have a shopifyProductId and have assets
       const client = await pool.connect();
       try {
+        // Get products with assets — join to channel_listings for fresh Shopify product IDs
         const result = await client.query(`
           SELECT
             p.id AS product_id,
             p.name,
-            p.shopify_product_id,
-            json_agg(
-              json_build_object('url', pa.url, 'position', pa.position, 'alt_text', pa.alt_text)
-              ORDER BY pa.position ASC
-            ) AS assets
+            COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
+            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text) ORDER BY pa.position ASC) AS assets
           FROM products p
           JOIN product_assets pa ON pa.product_id = p.id
-          WHERE p.shopify_product_id IS NOT NULL
-            AND pa.url IS NOT NULL
-            AND pa.url LIKE 'https://%'
-          GROUP BY p.id, p.name, p.shopify_product_id
+          LEFT JOIN (
+            SELECT DISTINCT ON (pv.product_id)
+              pv.product_id,
+              cl.external_product_id AS shopify_product_id
+            FROM channel_listings cl
+            JOIN product_variants pv ON pv.id = cl.product_variant_id
+            WHERE cl.channel_id = 36 AND cl.external_product_id IS NOT NULL
+            ORDER BY pv.product_id ASC, cl.id DESC
+          ) cl_data ON cl_data.product_id = p.id
+          WHERE pa.url IS NOT NULL AND pa.url LIKE 'https://%'
+          GROUP BY p.id, p.name, cl_data.shopify_product_id, p.shopify_product_id
           ORDER BY p.id ASC
         `);
 
-        const rows = result.rows;
+        const rows = result.rows.filter((r: any) => r.shopify_product_id);
 
-        // Process in concurrent batches of 5 to stay under Heroku 30s timeout
-        // 178 products / 5 per batch × ~250ms per batch = ~9 seconds
+        if (rows.length === 0) {
+          return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with Shopify IDs and image assets found" });
+        }
+
         const pushOne = async (row: any): Promise<{ name: string; status: string; error?: string }> => {
           const images = (row.assets as any[])
             .filter((a: any) => a.url)
-            .map((a: any, i: number) => ({ src: a.url, position: i + 1, ...(a.alt_text ? { alt: a.alt_text } : {}) }));
-
+            .map((a: any, i: number) => ({ src: a.url, position: i + 1, ...(a.alt ? { alt: a.alt } : {}) }));
           if (images.length === 0) return { name: row.name, status: "skipped" };
 
-          const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-            method: "PUT",
-            headers,
+          const doReq = () => fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+            method: "PUT", headers,
             body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
           });
 
+          let resp = await doReq();
           if (resp.status === 429) {
             const wait = parseInt(resp.headers.get("Retry-After") || "5", 10) * 1000;
             await new Promise((r) => setTimeout(r, wait));
-            const retry = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-              method: "PUT", headers,
-              body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
-            });
-            if (!retry.ok) { const b = await retry.text(); throw new Error(`Shopify ${retry.status}: ${b.substring(0, 200)}`); }
-            return { name: row.name, status: "updated" };
+            resp = await doReq();
           }
-
-          if (!resp.ok) { const b = await resp.text(); throw new Error(`Shopify ${resp.status}: ${b.substring(0, 200)}`); }
+          if (!resp.ok) { const b = await resp.text(); throw new Error(`Shopify ${resp.status}: ${b.substring(0, 300)}`); }
           return { name: row.name, status: "updated" };
         };
 
-        // Batch concurrency
         const BATCH = 5;
-        let updated = 0; let skipped = 0; let errors = 0;
+        let updated = 0, skipped = 0, errors = 0;
         const errorDetails: string[] = [];
 
         for (let i = 0; i < rows.length; i += BATCH) {
           const batch = rows.slice(i, i + BATCH);
           const results = await Promise.allSettled(batch.map(pushOne));
           for (const r of results) {
-            if (r.status === "fulfilled") {
-              if (r.value.status === "updated") updated++;
-              else skipped++;
-            } else {
-              errors++;
-              errorDetails.push(r.reason?.message || "unknown");
-            }
+            if (r.status === "fulfilled") { r.value.status === "updated" ? updated++ : skipped++; }
+            else { errors++; errorDetails.push(r.reason?.message || "unknown"); }
           }
-          // Small pause between batches
           if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
         }
 
-        res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 3) });
+        res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
       } finally {
         client.release();
       }
@@ -1033,7 +1020,6 @@ export function registerChannelRoutes(app: Express) {
       res.status(500).json({ error: error?.message || "Failed to push images" });
     }
   });
-
   // Push all products to a channel (bulk)
   app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
