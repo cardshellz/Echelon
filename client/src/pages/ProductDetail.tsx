@@ -971,21 +971,22 @@ export default function ProductDetail() {
 
   const pushImagesMutation = useMutation({
     mutationFn: async (target: string) => {
-      const res = await fetch(`/api/images/push/${target}`, {
+      // Use the existing product push which includes images
+      const res = await fetch(`/api/channel-push/product/${product?.productId}/channel/36`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ productIds: [product?.productId] }),
       });
-      if (!res.ok) throw new Error(`Failed to push images to ${target}`);
-      return res.json();
+      const text = await res.text();
+      let data: any;
+      try { data = JSON.parse(text); } catch { data = { error: text }; }
+      if (!res.ok) throw new Error(data?.error || `Server returned ${res.status}`);
+      return data;
     },
-    onSuccess: (data: any, target: string) => {
-      const pushed = data?.summary?.imagesPushed ?? 0;
-      toast({ title: `Pushed ${pushed} image${pushed !== 1 ? "s" : ""} to ${target}` });
+    onSuccess: (data: any) => {
+      toast({ title: "Push complete", description: `Product pushed to Shopify (${data?.status || "ok"})` });
     },
-    onError: (_err: Error, target: string) => {
-      toast({ title: `Failed to push images to ${target}`, variant: "destructive" });
+    onError: (err: Error) => {
+      toast({ title: "Push failed", description: err.message, variant: "destructive" });
     },
   });
 
