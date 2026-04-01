@@ -976,6 +976,10 @@ export function registerChannelRoutes(app: Express) {
           return res.json({ total: 0, updated: 0, skipped: 0, errors: 0, message: "No products with Shopify IDs and image assets found" });
         }
 
+        // Sample first image URL for diagnostics
+        const sampleUrl = rows[0]?.assets?.[0]?.url || "none";
+        console.log(`[ImagePush] Starting: ${rows.length} products, sample URL: ${sampleUrl}`);
+
         const pushOne = async (row: any): Promise<{ name: string; status: string; error?: string }> => {
           const images = (row.assets as any[])
             .filter((a: any) => a.url)
@@ -993,7 +997,13 @@ export function registerChannelRoutes(app: Express) {
             await new Promise((r) => setTimeout(r, wait));
             resp = await doReq();
           }
-          if (!resp.ok) { const b = await resp.text(); throw new Error(`Shopify ${resp.status}: ${b.substring(0, 300)}`); }
+          if (!resp.ok) {
+            const b = await resp.text();
+            const msg = `[${row.name}] Shopify ${resp.status}: ${b.substring(0, 400)}`;
+            console.error(`[ImagePush] ERROR: ${msg}`);
+            throw new Error(msg);
+          }
+          console.log(`[ImagePush] ✓ ${row.name} shopifyId=${row.shopify_product_id} images=${images.length}`);
           return { name: row.name, status: "updated" };
         };
 
@@ -1011,7 +1021,8 @@ export function registerChannelRoutes(app: Express) {
           if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
         }
 
-        res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 5) });
+        console.log(`[ImagePush] Done: ${updated} updated, ${skipped} skipped, ${errors} errors`);
+        res.json({ total: rows.length, updated, skipped, errors, sampleUrl, firstErrors: errorDetails.slice(0, 3) });
       } finally {
         client.release();
       }
