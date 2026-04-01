@@ -864,6 +864,14 @@ export function registerChannelRoutes(app: Express) {
           LIMIT 3
         `);
 
+        // Check channel_connections credentials
+        const connCheck = await client.query(`
+          SELECT channel_id, shop_domain,
+            CASE WHEN access_token IS NOT NULL AND access_token != '' THEN 'SET' ELSE 'EMPTY' END AS access_token_status,
+            LENGTH(access_token) AS token_length
+          FROM channel_connections WHERE channel_id = 36
+        `);
+
         const totalResult = await client.query(`SELECT COUNT(*) FROM product_assets WHERE url LIKE 'https://%'`);
         const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM products WHERE shopify_product_id IS NOT NULL`);
 
@@ -888,6 +896,7 @@ export function registerChannelRoutes(app: Express) {
           totalAssets: parseInt(totalResult.rows[0].count),
           productsWithShopifyId: parseInt(prodWithShopifyId.rows[0].count),
           sampleProducts: result.rows,
+          channelCredentials: connCheck.rows,
           shopifyIdComparison: listingsCheck.rows,
         });
       } finally {
