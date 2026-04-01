@@ -848,13 +848,13 @@ export function registerChannelRoutes(app: Express) {
   // Test: push images for ONE product to Shopify synchronously (debug endpoint)
   app.post("/api/channel-push/images/:channelId/test", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const channelId = parseInt(req.params.channelId);
-      const [conn] = await (db as any).select().from(channelConnections).where(eq(channelConnections.channelId, channelId)).limit(1);
-      if (!conn?.shopDomain || !conn?.accessToken) return res.status(400).json({ error: "No Shopify credentials" });
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      if (!shopDomain || !accessToken) return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN not set" });
 
-      const apiVersion = conn.apiVersion || "2024-01";
-      const baseUrl = `https://${conn.shopDomain}/admin/api/${apiVersion}`;
-      const headers = { "X-Shopify-Access-Token": conn.accessToken, "Content-Type": "application/json" };
+      const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+      const baseUrl = `https://${domain}/admin/api/2024-01`;
+      const headers = { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" };
 
       const client = await pool.connect();
       try {
@@ -900,24 +900,17 @@ export function registerChannelRoutes(app: Express) {
   // Push images only to Shopify (safe — does not touch prices, variants, or other fields)
   app.post("/api/channel-push/images/:channelId", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const channelId = parseInt(req.params.channelId);
-      if (isNaN(channelId)) return res.status(400).json({ error: "Invalid channelId" });
-
-      // Get Shopify credentials
-      const [conn] = await (db as any)
-        .select()
-        .from(channelConnections)
-        .where(eq(channelConnections.channelId, channelId))
-        .limit(1);
-
-      if (!conn?.shopDomain || !conn?.accessToken) {
-        return res.status(400).json({ error: "No Shopify credentials configured for this channel" });
+      // Use env vars — same as the rest of the Shopify integration
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "SHOPIFY_SHOP_DOMAIN or SHOPIFY_ACCESS_TOKEN env vars not set" });
       }
 
-      const apiVersion = conn.apiVersion || "2024-01";
-      const baseUrl = `https://${conn.shopDomain}/admin/api/${apiVersion}`;
+      const domain = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+      const baseUrl = `https://${domain}/admin/api/2024-01`;
       const headers = {
-        "X-Shopify-Access-Token": conn.accessToken,
+        "X-Shopify-Access-Token": accessToken,
         "Content-Type": "application/json",
       };
 
