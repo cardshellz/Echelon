@@ -434,63 +434,7 @@ export default function ShopifyChannelPage() {
                 )}
                 Push All to Shopify
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={async () => {
-                  try {
-                    toast({ title: "Pulling images from eBay...", description: "This may take a few minutes" });
-                    const res = await fetch("/api/images/pull/ebay", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({}),
-                    });
-                    const text = await res.text();
-                    let data: any;
-                    try { data = JSON.parse(text); } catch { data = { error: text }; }
-                    if (!res.ok) {
-                      throw new Error(data?.error || `Server returned ${res.status}`);
-                    }
-                    const msg = data?.message || `Pulled ${data?.summary?.imagesAdded ?? 0} images from eBay`;
-                    toast({ title: "Pull complete", description: msg });
-                  } catch (err: any) {
-                    toast({ title: "Pull failed", description: err.message, variant: "destructive" });
-                  }
-                }}
-                className="min-h-[44px]"
-              >
-                <Download className="h-4 w-4 mr-2" />
-                Pull All Images
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={async () => {
-                  try {
-                    toast({ title: "Pushing all products to Shopify...", description: "This runs in the background on the server" });
-                    const res = await fetch("/api/channel-push/all/36", {
-                      method: "POST",
-                      credentials: "include",
-                    });
-                    const text = await res.text();
-                    let data: any;
-                    try { data = JSON.parse(text); } catch { data = { error: text }; }
-                    if (!res.ok) {
-                      throw new Error(data?.error || `Server returned ${res.status}`);
-                    }
-                    toast({ 
-                      title: "Push complete", 
-                      description: `${data?.updated ?? 0} updated, ${data?.created ?? 0} created, ${data?.errors ?? 0} errors`
-                    });
-                  } catch (err: any) {
-                    toast({ title: "Push failed", description: err.message, variant: "destructive" });
-                  }
-                }}
-                className="min-h-[44px]"
-              >
-                <Upload className="h-4 w-4 mr-2" />
-                Push All to Shopify
-              </Button>
+
             </div>
           </div>
         </CardHeader>
