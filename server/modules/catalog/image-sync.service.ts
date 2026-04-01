@@ -84,6 +84,8 @@ export function createImageSyncService() {
       return true;
     });
 
+    console.log(`[ImageSync] pullFromEbay: processing ${uniqueListings.length} unique products`);
+
     for (const listing of uniqueListings) {
       const result: ImagePullResult = {
         productId: listing.productId,
@@ -92,6 +94,8 @@ export function createImageSyncService() {
         imagesAdded: 0,
         errors: [],
       };
+
+      console.log(`[ImageSync] Processing product ${listing.productId} (${listing.sku}) - ${listing.ebayUrl || 'NO URL'}`);
 
       try {
         if (!listing.ebayUrl) {
@@ -105,6 +109,7 @@ export function createImageSyncService() {
         result.imagesFound = imageUrls.length;
 
         if (imageUrls.length === 0) {
+          result.errors.push("No images found on eBay page (blocked or listing changed)");
           results.push(result);
           continue;
         }
@@ -471,19 +476,35 @@ export function createImageSyncService() {
   // =========================================================================
 
   async function scrapeEbayImages(ebayUrl: string): Promise<string[]> {
-    const response = await fetch(ebayUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html",
-      },
-    });
+    console.log(`[ImageSync] Scraping eBay page: ${ebayUrl}`);
+    try {
+      const response = await fetch(ebayUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      });
 
-    if (!response.ok) return [];
+      if (!response.ok) {
+        console.warn(`[ImageSync] eBay page fetch failed: ${response.status} for ${ebayUrl}`);
+        return [];
+      }
 
-    const html = await response.text();
-    const urlPattern = /https:\/\/i\.ebayimg\.com\/images\/g\/[A-Za-z0-9_-]+\/s-l1600\.jpg/g;
-    const matches = html.match(urlPattern) || [];
-    return [...new Set(matches)];
+      const html = await response.text();
+      // Match both s-l1600 and s-l500 variants
+      const urlPattern = /https:\/\/i\.ebayimg\.com\/images\/g\/[A-Za-z0-9~_-]+\/s-l(?:1600|500|400|300)\.(?:jpg|png|webp)/g;
+      const matches = html.match(urlPattern) || [];
+      const unique = [...new Set(matches)];
+      // Prefer highest resolution: upgrade any lower-res to s-l1600
+      const upgraded = unique.map(u => u.replace(/s-l(?:500|400|300)\./, 's-l1600.'));
+      const deduped = [...new Set(upgraded)];
+      console.log(`[ImageSync] Found ${deduped.length} images at ${ebayUrl}`);
+      return deduped;
+    } catch (err: any) {
+      console.warn(`[ImageSync] Error scraping ${ebayUrl}: ${err.message}`);
+      return [];
+    }
   }
 
   async function downloadImage(url: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
