@@ -944,65 +944,58 @@ export function registerChannelRoutes(app: Express) {
 
         const rows = result.rows;
 
-        // Respond immediately — process in background to avoid Heroku 30s timeout
-        // With 178 products × ~300ms per Shopify API call = ~54 seconds
-        res.json({ total: rows.length, status: "started", message: `Pushing images for ${rows.length} products in background. Check server logs for progress.` });
+        // Process in concurrent batches of 5 to stay under Heroku 30s timeout
+        // 178 products / 5 per batch × ~250ms per batch = ~9 seconds
+        const pushOne = async (row: any): Promise<{ name: string; status: string; error?: string }> => {
+          const images = (row.assets as any[])
+            .filter((a: any) => a.url)
+            .map((a: any, i: number) => ({ src: a.url, position: i + 1, ...(a.alt_text ? { alt: a.alt_text } : {}) }));
 
-        // Fire and forget
-        (async () => {
-          let updated = 0;
-          let skipped = 0;
-          let errors = 0;
+          if (images.length === 0) return { name: row.name, status: "skipped" };
 
-          for (const row of rows) {
-            try {
-              const images = (row.assets as any[])
-                .filter((a: any) => a.url)
-                .map((a: any, i: number) => ({
-                  src: a.url,
-                  position: i + 1,
-                  ...(a.alt_text ? { alt: a.alt_text } : {}),
-                }));
+          const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
+          });
 
-              if (images.length === 0) {
-                skipped++;
-                continue;
-              }
-
-              const resp = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-                method: "PUT",
-                headers,
-                body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
-              });
-
-              if (resp.status === 429) {
-                const retryAfter = parseInt(resp.headers.get("Retry-After") || "5", 10);
-                console.log(`[ImagePush] Rate limited, waiting ${retryAfter}s`);
-                await new Promise((r) => setTimeout(r, retryAfter * 1000));
-                // Retry once
-                const retry = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
-                  method: "PUT",
-                  headers,
-                  body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
-                });
-                if (!retry.ok) throw new Error(`Shopify ${retry.status} on retry`);
-              } else if (!resp.ok) {
-                const errBody = await resp.text();
-                throw new Error(`Shopify ${resp.status}: ${errBody.substring(0, 200)}`);
-              }
-
-              updated++;
-              console.log(`[ImagePush] ✓ ${row.name} (${images.length} images)`);
-              await new Promise((r) => setTimeout(r, 250));
-            } catch (err: any) {
-              errors++;
-              console.error(`[ImagePush] ✗ ${row.name}: ${err.message}`);
-              await new Promise((r) => setTimeout(r, 250));
-            }
+          if (resp.status === 429) {
+            const wait = parseInt(resp.headers.get("Retry-After") || "5", 10) * 1000;
+            await new Promise((r) => setTimeout(r, wait));
+            const retry = await fetch(`${baseUrl}/products/${row.shopify_product_id}.json`, {
+              method: "PUT", headers,
+              body: JSON.stringify({ product: { id: Number(row.shopify_product_id), images } }),
+            });
+            if (!retry.ok) { const b = await retry.text(); throw new Error(`Shopify ${retry.status}: ${b.substring(0, 200)}`); }
+            return { name: row.name, status: "updated" };
           }
 
-          console.log(`[ImagePush] Complete: ${updated} updated, ${skipped} skipped, ${errors} errors`);
-        })().catch((err) => console.error("[ImagePush] Fatal error:", err.message));
+          if (!resp.ok) { const b = await resp.text(); throw new Error(`Shopify ${resp.status}: ${b.substring(0, 200)}`); }
+          return { name: row.name, status: "updated" };
+        };
+
+        // Batch concurrency
+        const BATCH = 5;
+        let updated = 0; let skipped = 0; let errors = 0;
+        const errorDetails: string[] = [];
+
+        for (let i = 0; i < rows.length; i += BATCH) {
+          const batch = rows.slice(i, i + BATCH);
+          const results = await Promise.allSettled(batch.map(pushOne));
+          for (const r of results) {
+            if (r.status === "fulfilled") {
+              if (r.value.status === "updated") updated++;
+              else skipped++;
+            } else {
+              errors++;
+              errorDetails.push(r.reason?.message || "unknown");
+            }
+          }
+          // Small pause between batches
+          if (i + BATCH < rows.length) await new Promise((r) => setTimeout(r, 200));
+        }
+
+        res.json({ total: rows.length, updated, skipped, errors, firstErrors: errorDetails.slice(0, 3) });
       } finally {
         client.release();
       }

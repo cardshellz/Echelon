@@ -178,9 +178,8 @@ export default function ShopifyChannelPage() {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       toast({
         title: "Images Pushed to Shopify",
-        description: data.message || (data.updated != null
-          ? `${data.updated} updated · ${data.skipped} skipped · ${data.errors} errors`
-          : `Processing ${data.total} products in background`),
+        description: `${data.updated} updated · ${data.skipped} skipped · ${data.errors} errors`,
+        variant: data.errors > 0 ? "destructive" : undefined,
       });
     },
     onError: (err: Error) => {
