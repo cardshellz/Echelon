@@ -560,8 +560,13 @@ export function createImageSyncService() {
 
   async function downloadImage(url: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
     try {
-      const response = await fetch(url);
-      if (!response.ok) return null;
+      const response = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+      });
+      if (!response.ok) {
+        console.warn(`[ImageSync] Failed to download image ${url}: ${response.status}`);
+        return null;
+      }
       const arrayBuf = await response.arrayBuffer();
       return {
         buffer: Buffer.from(arrayBuf),

@@ -974,7 +974,7 @@ export function registerChannelRoutes(app: Express) {
           SELECT
             p.id AS product_id, p.name,
             COALESCE(cl_data.shopify_product_id, p.shopify_product_id) AS shopify_product_id,
-            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text) ORDER BY pa.position ASC) AS assets
+            json_agg(json_build_object('url', pa.url, 'position', pa.position, 'alt', pa.alt_text, 'file_data', encode(pa.file_data, 'base64'), 'mime_type', pa.mime_type) ORDER BY pa.position ASC) AS assets
           FROM products p
           JOIN product_assets pa ON pa.product_id = p.id
           LEFT JOIN (
@@ -1005,7 +1005,7 @@ export function registerChannelRoutes(app: Express) {
           const batchResults = await Promise.allSettled(batch.map(async (row: any) => {
             const images = (row.assets as any[])
               .filter((a: any) => a.url)
-              .map((a: any, idx: number) => ({ url: a.url, altText: a.alt || null, position: idx }));
+              .map((a: any, idx: number) => ({ url: a.url, altText: a.alt || null, position: idx, fileData: a.file_data || null, mimeType: a.mime_type || null }));
             if (images.length === 0) return "skipped";
             await adapter.pushImagesOnly(channelId, row.shopify_product_id, images);
             return "updated";

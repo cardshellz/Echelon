@@ -569,29 +569,37 @@ export class ShopifyAdapter implements IChannelAdapter {
   async pushImagesOnly(
     channelId: number,
     shopifyProductId: string,
-    images: Array<{ url: string; altText?: string | null; position: number }>,
+    images: Array<{ url: string; altText?: string | null; position: number; fileData?: string | null; mimeType?: string | null }>,
   ): Promise<void> {
     const creds = await this.getCredentials(channelId);
 
     // Download each image and send as base64 attachment.
-    // Shopify silently rejects CDN/eBay URLs passed as `src` — it needs to
-    // actually fetch and re-host the image, which requires a direct download.
+    // Shopify silently rejects CDN/eBay URLs passed as `src` — needs actual bytes.
+    // Use pre-stored file_data if available to avoid re-downloading.
     const shopifyImages: Array<Record<string, any>> = [];
     for (const img of images.filter((i) => i.url)) {
       try {
-        const resp = await fetch(img.url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; CardShellz/1.0)",
-          },
-        });
-        if (!resp.ok) {
-          console.warn(`[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}`);
-          continue;
-        }
-        const buffer = Buffer.from(await resp.arrayBuffer());
-        const base64 = buffer.toString("base64");
-        // Derive a filename from the URL
+        let base64: string;
         const filename = img.url.split("/").pop()?.split("?")[0] || `image_${shopifyImages.length + 1}.jpg`;
+
+        if (img.fileData) {
+          // Already downloaded and stored in DB — use directly
+          base64 = img.fileData;
+          console.log(`[pushImagesOnly] Using stored file_data for ${filename}`);
+        } else {
+          // Download now
+          const resp = await fetch(img.url, {
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+          });
+          if (!resp.ok) {
+            console.warn(`[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}`);
+            continue;
+          }
+          const buffer = Buffer.from(await resp.arrayBuffer());
+          base64 = buffer.toString("base64");
+          console.log(`[pushImagesOnly] Downloaded ${filename} (${buffer.length} bytes)`);
+        }
+
         shopifyImages.push({
           attachment: base64,
           filename,
@@ -599,7 +607,7 @@ export class ShopifyAdapter implements IChannelAdapter {
           ...(img.altText ? { alt: img.altText } : {}),
         });
       } catch (err: any) {
-        console.warn(`[pushImagesOnly] Error downloading image ${img.url}:`, err.message);
+        console.warn(`[pushImagesOnly] Error processing image ${img.url}:`, err.message);
       }
     }
 
