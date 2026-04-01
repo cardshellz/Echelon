@@ -43,7 +43,7 @@ export async function registerRoutes(
   registerPickingRoutes(app);
   registerShopifyRoutes(app);
   registerWarehouseRoutes(app);
-  registerProductRoutes(app);
+  await registerProductRoutes(app);
   registerInventoryRoutes(app);
   registerChannelRoutes(app);
   registerSettingsRoutes(app);
