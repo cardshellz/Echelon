@@ -344,62 +344,87 @@ export function createImageSyncService() {
           continue;
         }
 
-        // Get catalog images
-        const assets = await db
-          .select()
-          .from(productAssets)
-          .where(eq(productAssets.productId, product.id))
-          .orderBy(productAssets.position);
+        // Get catalog images (use raw SQL to ensure file_data is included)
+        const assetResult = await db.execute(sql`
+          SELECT id, url, alt_text, position, storage_type, file_data, mime_type
+          FROM product_assets
+          WHERE product_id = ${product.id}
+          ORDER BY position
+        `);
+        const assets = assetResult.rows as any[];
 
         if (assets.length === 0) {
           results.push(result);
           continue;
         }
 
-        // Build Shopify image objects — use public URLs
-        const images = assets.map((a, i) => {
-          // For URL-based and 'both' assets, use the original public URL
-          // (eBay CDN, Shopify CDN, etc.) — Shopify can fetch these directly
-          // For file-only assets, we can't serve them (Shopify can't reach Echelon)
-          const url = (a.storageType === "file")
-            ? null  // Can't push file-only assets to Shopify — no public URL
-            : a.url;
+        // Push each image to Shopify using binary attachment (not URL fetch)
+        // This is more reliable than URL-based because it doesn't depend on
+        // external CDNs being accessible to Shopify's image fetcher.
+        let pushed = 0;
+        for (const asset of assets) {
+          try {
+            let imageData: string;
+            let mimeType: string;
 
-          if (!url) return null;
+            if (asset.file_data) {
+              // We have the binary cached — use it directly
+              imageData = (asset.file_data as Buffer).toString("base64");
+              mimeType = asset.mime_type || "image/jpeg";
+            } else if (asset.url) {
+              // Download first, then upload as binary
+              const downloaded = await downloadImage(asset.url);
+              if (!downloaded) {
+                result.errors.push(`Failed to download: ${asset.url}`);
+                continue;
+              }
+              imageData = downloaded.buffer.toString("base64");
+              mimeType = downloaded.mimeType;
+            } else {
+              continue;
+            }
 
-          return {
-            src: url,
-            position: i + 1,
-            alt: a.altText || product.sku || "",
-          };
-        }).filter(Boolean) as { src: string; position: number; alt: string }[];
+            // Upload to Shopify as attachment
+            const shopifyRes = await fetch(
+              `https://${domain}/admin/api/2024-01/products/${product.shopifyProductId}/images.json`,
+              {
+                method: "POST",
+                headers: {
+                  "X-Shopify-Access-Token": accessToken,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  image: {
+                    attachment: imageData,
+                    filename: `${product.sku || "image"}-${pushed + 1}.jpg`,
+                    alt: asset.alt_text || product.sku || "",
+                    position: pushed + 1,
+                  },
+                }),
+              }
+            );
 
-        // Push to Shopify
-        const shopifyRes = await fetch(
-          `https://${domain}/admin/api/2024-01/products/${product.shopifyProductId}.json`,
-          {
-            method: "PUT",
-            headers: {
-              "X-Shopify-Access-Token": accessToken,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              product: {
-                id: product.shopifyProductId,
-                images,
-              },
-            }),
+            if (shopifyRes.status === 429) {
+              const retryAfter = parseInt(shopifyRes.headers.get("Retry-After") || "2");
+              await new Promise((r) => setTimeout(r, retryAfter * 1000));
+              continue; // Will retry in next loop iteration
+            }
+
+            if (!shopifyRes.ok) {
+              const error = await shopifyRes.text();
+              result.errors.push(`Shopify rejected: ${error.substring(0, 200)}`);
+              continue;
+            }
+
+            pushed++;
+            result.imagesPushed = pushed;
+
+            // Rate limit: ~2 requests/second for image uploads
+            await new Promise((r) => setTimeout(r, 600));
+          } catch (err: any) {
+            result.errors.push(`Image ${asset.id}: ${err.message}`);
           }
-        );
-
-        if (!shopifyRes.ok) {
-          const error = await shopifyRes.text();
-          result.errors.push(`Shopify API error: ${error}`);
-          results.push(result);
-          continue;
         }
-
-        result.imagesPushed = images.length;
 
         // Rate limit
         await new Promise((r) => setTimeout(r, 500));
