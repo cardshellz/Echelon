@@ -1259,10 +1259,20 @@ export async function registerProductRoutes(app: Express) {
         console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
       }
 
-      const results = await imageSync.pullFromEbay(productIds, ebayAccessToken);
-      const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
-      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
-      res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });
+      // Respond immediately — processing 90+ products takes too long for a single request
+      res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
+
+      // Run in background
+      imageSync.pullFromEbay(productIds, ebayAccessToken).then((results) => {
+        const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+        console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
+        results.filter(r => r.errors.length > 0).forEach(r => {
+          console.log(`[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}`);
+        });
+      }).catch((err) => {
+        console.error("[ImageSync] pullFromEbay background error:", err.message);
+      });
     } catch (error: any) {
       console.error("Error pulling eBay images:", error);
       res.status(500).json({ error: error.message || "Failed to pull eBay images" });
