@@ -385,16 +385,13 @@ export default function ShopifyChannelPage() {
               </Button>
               <Button
                 size="sm"
-                className="min-h-[44px] sm:min-h-0"
-                disabled={pushAllMutation.isPending || !shopifyChannel}
-                onClick={() => pushAllMutation.mutate()}
+                variant="outline"
+                className="min-h-[44px] sm:min-h-0 opacity-50 cursor-not-allowed"
+                disabled={true}
+                title="Product push is disabled to prevent data loss. Contact an admin to re-enable."
               >
-                {pushAllMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4 mr-2" />
-                )}
-                Push All to Shopify
+                <Send className="h-4 w-4 mr-2" />
+                Push Disabled
               </Button>
             </div>
           </div>
@@ -448,7 +445,7 @@ export default function ShopifyChannelPage() {
                       <TableHead className="w-[120px]">Shopify ID</TableHead>
                       <TableHead className="w-[110px] text-center">Status</TableHead>
                       <TableHead className="w-[120px]">Last Synced</TableHead>
-                      <TableHead className="w-[80px] text-right">Action</TableHead>
+                      {/* Push action column disabled */}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -505,22 +502,7 @@ export default function ShopifyChannelPage() {
                             <span className="text-xs text-muted-foreground">Never</span>
                           )}
                         </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 px-2 text-xs"
-                            disabled={pushingProductId === item.productId || pushProductMutation.isPending}
-                            onClick={() => pushProductMutation.mutate(item.productId)}
-                            title={item.status === "listed" ? "Update on Shopify" : "Push to Shopify"}
-                          >
-                            {pushingProductId === item.productId ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Send className="h-3.5 w-3.5" />
-                            )}
-                          </Button>
-                        </TableCell>
+                        {/* Push button removed — feature disabled */}
                       </TableRow>
                     ))}
                     {filteredFeed.length === 0 && (

@@ -807,53 +807,33 @@ export function registerChannelRoutes(app: Express) {
     }
   });
 
-  // Push product to all active channels
-  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const { channelProductPush } = req.app.locals.services;
-      const productId = parseInt(req.params.productId);
-      const results = await channelProductPush.pushProductToAllChannels(productId);
-      res.json({ success: true, results });
-    } catch (error: any) {
-      console.error("Error pushing product:", error);
-      res.status(500).json({ error: error?.message || "Failed to push product" });
-    }
+  // ⛔ PRODUCT PUSH DISABLED — all three push endpoints return 403.
+  // The push feature is not production-ready and has caused data loss
+  // (deleted images, created phantom products, set listings to draft).
+  // To re-enable, restore the original handlers from git history.
+
+  // Push product to all active channels — DISABLED
+  app.post("/api/channel-push/product/:productId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
   });
 
-  // Push product to specific channel
-  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const { channelProductPush, channelSync } = req.app.locals.services;
-      const productId = parseInt(req.params.productId);
-      const channelId = parseInt(req.params.channelId);
-      const result = await channelProductPush.pushProduct(productId, channelId);
-
-      // After a successful product push (create or update), trigger an immediate
-      // inventory sync so Shopify ATP is updated without waiting for the next sweep
-      if (result.status === "created" || result.status === "updated") {
-        channelSync?.syncProduct(productId, "product_push").catch((err: any) =>
-          console.warn(`[ChannelPush] Post-push inventory sync failed for product ${productId}:`, err.message)
-        );
-      }
-
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error pushing product to channel:", error);
-      res.status(500).json({ error: error?.message || "Failed to push product" });
-    }
+  // Push product to specific channel — DISABLED
+  app.post("/api/channel-push/product/:productId/channel/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
   });
 
-  // Push all products to a channel (bulk)
-  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (req, res) => {
-    try {
-      const { channelProductPush } = req.app.locals.services;
-      const channelId = parseInt(req.params.channelId);
-      const result = await channelProductPush.pushAllProducts(channelId);
-      res.json(result);
-    } catch (error: any) {
-      console.error("Error bulk pushing products:", error);
-      res.status(500).json({ error: error?.message || "Failed to push products" });
-    }
+  // Push all products to a channel (bulk) — DISABLED
+  app.post("/api/channel-push/all/:channelId", requirePermission("channels", "edit"), async (_req, res) => {
+    return res.status(403).json({
+      error: "Product push is currently disabled",
+      message: "The Shopify product push feature has been turned off to prevent data loss. Contact an admin to re-enable.",
+    });
   });
 
   // Get channel sync status for a product
