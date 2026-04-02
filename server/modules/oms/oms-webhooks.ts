@@ -106,6 +106,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
     totalCents: item.totalCents,
     taxCents: 0, // Tax handled at order level
     discountCents: item.discountCents,
+    requiresShipping: item.requiresShipping,
   }));
 
   // Financial status
@@ -233,6 +234,9 @@ async function createWmsOrderFromShopify(
       }
     }
 
+    // Propagate requiresShipping from Shopify (false = donation/membership/digital)
+    const itemRequiresShipping = line.requiresShipping !== false;
+
     enrichedItems.push({
       orderId: 0, // Set by createOrderWithItems
       sourceItemId: line.externalLineItemId || null,
@@ -241,12 +245,12 @@ async function createWmsOrderFromShopify(
       quantity: line.quantity,
       pickedQuantity: 0,
       fulfilledQuantity: 0,
-      status: "pending",
+      status: itemRequiresShipping ? "pending" : "completed",
       location: binLocation?.location || "UNASSIGNED",
       zone: binLocation?.zone || "U",
       imageUrl,
       barcode: binLocation?.barcode || null,
-      requiresShipping: 1,
+      requiresShipping: itemRequiresShipping ? 1 : 0,
       priceCents: line.paidPriceCents ?? null,
       discountCents: line.discountCents ? Math.round((line.discountCents || 0) / line.quantity) : 0,
       totalPriceCents: line.totalCents ?? null,
@@ -255,6 +259,9 @@ async function createWmsOrderFromShopify(
 
   const totalUnits = enrichedItems.reduce((sum, item) => sum + item.quantity, 0);
   const orderNumber = orderData.externalOrderNumber || String(shopifyOrder.order_number);
+
+  // Check if any item requires shipping
+  const hasShippableItems = enrichedItems.some(item => item.requiresShipping === 1);
 
   const newOrder = await ordersStorage.createOrderWithItems({
     channelId,
@@ -272,7 +279,7 @@ async function createWmsOrderFromShopify(
     shippingCountry: orderData.shipToCountry || null,
     financialStatus: orderData.financialStatus || "paid",
     priority: "normal",
-    warehouseStatus: "ready",
+    warehouseStatus: hasShippableItems ? "ready" : "completed", // Non-shippable orders skip pick queue
     itemCount: enrichedItems.length,
     unitCount: totalUnits,
     totalAmount: orderData.totalCents ? String(orderData.totalCents / 100) : null,

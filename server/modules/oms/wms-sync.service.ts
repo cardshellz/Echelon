@@ -79,8 +79,13 @@ export class WmsSyncService {
         return null;
       }
 
-      // 3. Map OMS → WMS order fields
-      const warehouseStatus = this.determineWarehouseStatus(omsOrder);
+      // 3. Check if order has any shippable items
+      const hasShippableItems = omsLines.some(line => line.requiresShipping !== false);
+
+      // 4. Map OMS → WMS order fields
+      const warehouseStatus = hasShippableItems
+        ? this.determineWarehouseStatus(omsOrder)
+        : "completed"; // Pure digital/donation/membership → skip pick queue
       const priority = await this.determinePriority(omsOrder);
 
       const wmsOrderData: InsertOrder = {
@@ -124,6 +129,9 @@ export class WmsSyncService {
           }
         }
 
+        // Propagate requiresShipping from OMS (false = donation/membership/digital)
+        const itemRequiresShipping = line.requiresShipping !== false;
+
         wmsLineItems.push({
           orderId: 0, // Will be set by createOrderWithItems
           sourceItemId: line.externalLineItemId || null,
@@ -132,10 +140,11 @@ export class WmsSyncService {
           quantity: line.quantity || 0,
           pickedQuantity: 0,
           fulfilledQuantity: 0,
-          status: "pending",
+          status: itemRequiresShipping ? "pending" : "completed",
           location: binLocation?.location || "UNASSIGNED",
           zone: binLocation?.zone || "U",
           productId: variantId, // Temporary mapping to satisfy schema
+          requiresShipping: itemRequiresShipping ? 1 : 0,
           priceCents: line.paidPriceCents || null,
           discountCents: line.totalDiscountCents || 0,
           totalPriceCents: line.totalPriceCents || null,
