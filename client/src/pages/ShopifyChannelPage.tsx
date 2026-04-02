@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/table";
 import {
   ArrowLeft, Store, CheckCircle2, XCircle, AlertCircle, ExternalLink,
-  RefreshCw, Send, Search, Loader2, Package, Clock,
+  RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload, Image as ImageIcon,
 } from "lucide-react";
 
 interface Channel {
@@ -137,6 +137,56 @@ export default function ShopifyChannelPage() {
     },
     onError: (err: Error) => {
       toast({ title: "Inventory Sync Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // --- Import images from eBay ---
+  const importImagesFromEbayMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/images/pull/ebay", { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/products"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      toast({
+        title: "Images Imported from eBay",
+        description: data.status === "started" ? "Running in background — check logs for progress" : `${data.summary?.imagesAdded ?? data.imported ?? 0} images added · ${data.summary?.errors ?? data.errors ?? 0} errors`,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Image Import Failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  // --- Push images only to Shopify (safe — no prices/variants touched) ---
+  const pushImagesMutation = useMutation({
+    mutationFn: async () => {
+      if (!shopifyChannel) throw new Error("No active Shopify channel");
+      const res = await fetch(`/api/channel-push/images/${shopifyChannel.id}`, { method: "POST", credentials: "include" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      const firstErr = data.firstErrors?.[0];
+      toast({
+        title: data.status === "started" ? "Images Pushed to Shopify" : (data.errors > 0 && data.updated === 0 ? "Image Push Failed" : "Images Pushed to Shopify"),
+        description: firstErr
+          ? `${data.errors} errors — ${firstErr}`
+          : data.status === "started" ? "Running in background — check logs for progress" : `${data.updated} updated · ${data.skipped} skipped`,
+        variant: data.errors > 0 ? "destructive" : undefined,
+      });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Image Push Failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -384,8 +434,37 @@ export default function ShopifyChannelPage() {
                 Sync Inventory
               </Button>
               <Button
-                size="sm"
                 variant="outline"
+                size="sm"
+                className="min-h-[44px] sm:min-h-0"
+                disabled={importImagesFromEbayMutation.isPending}
+                onClick={() => importImagesFromEbayMutation.mutate()}
+                title="Pull product images from eBay listings into Echelon, then they'll push to Shopify on next push"
+              >
+                {importImagesFromEbayMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <ImageIcon className="h-4 w-4 mr-2" />
+                )}
+                Import Images from eBay
+              </Button>
+              <Button
+                size="sm"
+                className="min-h-[44px] sm:min-h-0"
+                disabled={pushImagesMutation.isPending || !shopifyChannel}
+                onClick={() => pushImagesMutation.mutate()}
+                title="Push images only — safe, does not change prices or variants"
+              >
+                {pushImagesMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <ImageIcon className="h-4 w-4 mr-2" />
+                )}
+                Push Images to Shopify
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 className="min-h-[44px] sm:min-h-0 opacity-50 cursor-not-allowed"
                 disabled={true}
                 title="Product push is disabled to prevent data loss. Contact an admin to re-enable."
@@ -393,6 +472,7 @@ export default function ShopifyChannelPage() {
                 <Send className="h-4 w-4 mr-2" />
                 Push Disabled
               </Button>
+
             </div>
           </div>
         </CardHeader>

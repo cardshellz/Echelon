@@ -1493,6 +1493,27 @@ ${categoriesXml}
             .filter((url: string) => url && url.startsWith("https://"))
             .slice(0, 12); // eBay max 12
 
+          // If no images in Echelon, fetch existing images from eBay to avoid wiping them
+          let effectiveImageUrls = imageUrls;
+          if (effectiveImageUrls.length === 0) {
+            try {
+              const firstSku = varResult.rows[0]?.sku;
+              if (firstSku) {
+                const existingItem = await ebayApiRequest(
+                  "GET",
+                  `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
+                  accessToken,
+                );
+                if (existingItem?.product?.imageUrls?.length > 0) {
+                  effectiveImageUrls = existingItem.product.imageUrls;
+                  console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
+                }
+              }
+            } catch (e: any) {
+              console.warn(`[eBay Sync] Could not fetch existing images from eBay:`, e.message);
+            }
+          }
+
           // 4. Fetch effective eBay category + policies
           let ebayBrowseCategoryId = product.ebay_browse_category_id;
           let storeCategoryNames: string[] = [];
@@ -1586,7 +1607,7 @@ ${categoriesXml}
                 condition: "NEW",
                 product: {
                   title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                  ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                   aspects: variantAspects,
                 },
                 availability: {
@@ -1648,7 +1669,7 @@ ${categoriesXml}
               const groupBody: Record<string, any> = {
                 title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
                 description: product.description || `<p>${product.name}</p>`,
-                ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                 aspects: aspects, // Product-level aspects (non-varying)
                 variantSKUs: successfulSkus,
                 variesBy: {
@@ -2042,6 +2063,27 @@ ${categoriesXml}
             .filter((url: string) => url && url.startsWith("https://"))
             .slice(0, 12);
 
+          // If no images in Echelon, fetch existing images from eBay to avoid wiping them
+          let effectiveImageUrls = imageUrls;
+          if (effectiveImageUrls.length === 0) {
+            try {
+              const firstSku = varResult.rows[0]?.sku;
+              if (firstSku) {
+                const existingItem = await ebayApiRequest(
+                  "GET",
+                  `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
+                  accessToken,
+                );
+                if (existingItem?.product?.imageUrls?.length > 0) {
+                  effectiveImageUrls = existingItem.product.imageUrls;
+                  console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
+                }
+              }
+            } catch (e: any) {
+              console.warn(`[eBay Sync] Could not fetch existing images from eBay:`, e.message);
+            }
+          }
+
           // 4. Category & policies
           let ebayBrowseCategoryId = product.ebay_browse_category_id;
           let storeCategoryNames: string[] = [];
@@ -2139,7 +2181,7 @@ ${categoriesXml}
                 condition: "NEW",
                 product: {
                   title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
-                  ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                   aspects: variantAspects,
                 },
                 availability: {
@@ -2199,7 +2241,7 @@ ${categoriesXml}
               const groupBody: Record<string, any> = {
                 title: product.name.length > 80 ? product.name.substring(0, 77) + "..." : product.name,
                 description: product.description || `<p>${product.name}</p>`,
-                ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                 aspects,
                 variantSKUs: successfulSkus,
                 variesBy: {
@@ -2621,6 +2663,27 @@ ${categoriesXml}
               .filter((url: string) => url && url.startsWith("https://"))
               .slice(0, 12);
 
+            // If no images in Echelon, fetch existing images from eBay to avoid wiping them
+            let effectiveImageUrls = imageUrls;
+            if (effectiveImageUrls.length === 0) {
+              try {
+                const firstSku = variants[0]?.variant_sku;
+                if (firstSku) {
+                  const existingItem = await ebayApiRequest(
+                    "GET",
+                    `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
+                    accessToken,
+                  );
+                  if (existingItem?.product?.imageUrls?.length > 0) {
+                    effectiveImageUrls = existingItem.product.imageUrls;
+                    console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
+                  }
+                }
+              } catch (e: any) {
+                console.warn(`[eBay Sync] Could not fetch existing images from eBay:`, e.message);
+              }
+            }
+
             const isMultiVariant = variants.length > 1;
             const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
@@ -2663,7 +2726,7 @@ ${categoriesXml}
                   condition: "NEW",
                   product: {
                     title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-                    ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                    ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                     aspects: variantAspects,
                     description: product.product_description || `<p>${product.product_name}</p>`,
                   },
@@ -2736,7 +2799,7 @@ ${categoriesXml}
                 const groupBody: Record<string, any> = {
                   title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
                   description: product.product_description || `<p>${product.product_name}</p>`,
-                  ...(imageUrls.length > 0 ? { imageUrls } : {}),
+                  ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
                   aspects,
                   variantSKUs: successfulSkus,
                   variesBy: {
@@ -3308,6 +3371,107 @@ ${categoriesXml}
   });
 
   // -----------------------------------------------------------------------
+  // POST /api/ebay/import-images — Import product images from eBay into product_assets
+  // -----------------------------------------------------------------------
+  app.post("/api/ebay/import-images", async (_req: Request, res: Response) => {
+    try {
+      const authService = getAuthService();
+      if (!authService) {
+        res.status(500).json({ error: "eBay OAuth not configured" });
+        return;
+      }
+
+      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
+      const client = await pool.connect();
+
+      try {
+        // Get one SKU per product from synced eBay listings
+        const listingsResult = await client.query(`
+          SELECT DISTINCT ON (p.id)
+            p.id AS product_id,
+            p.name AS product_name,
+            cl.external_sku
+          FROM channel_listings cl
+          JOIN product_variants pv ON pv.id = cl.product_variant_id
+          JOIN products p ON p.id = pv.product_id
+          WHERE cl.channel_id = $1
+            AND cl.sync_status = 'synced'
+            AND cl.external_sku IS NOT NULL
+          ORDER BY p.id ASC, cl.id ASC
+        `, [EBAY_CHANNEL_ID]);
+
+        const prods = listingsResult.rows;
+        let imported = 0;
+        let skipped = 0;
+        let errors = 0;
+        const details: Array<{ productId: number; productName: string; status: string; imageCount?: number; error?: string }> = [];
+
+        for (const prod of prods) {
+          try {
+            const item = await ebayApiRequest(
+              "GET",
+              `/sell/inventory/v1/inventory_item/${encodeURIComponent(prod.external_sku)}`,
+              accessToken,
+            );
+
+            const ebayImageUrls: string[] = item?.product?.imageUrls || [];
+            if (ebayImageUrls.length === 0) {
+              skipped++;
+              details.push({ productId: prod.product_id, productName: prod.product_name, status: "no_images" });
+              continue;
+            }
+
+            const existingResult = await client.query(
+              `SELECT url FROM product_assets WHERE product_id = $1`,
+              [prod.product_id],
+            );
+            const existingUrls = new Set(existingResult.rows.map((r: any) => r.url));
+
+            const posResult = await client.query(
+              `SELECT COALESCE(MAX(position), -1) AS max_pos FROM product_assets WHERE product_id = $1`,
+              [prod.product_id],
+            );
+            let position = (posResult.rows[0]?.max_pos ?? -1) + 1;
+
+            let addedCount = 0;
+            for (const url of ebayImageUrls) {
+              if (!url || existingUrls.has(url)) continue;
+              await client.query(
+                `INSERT INTO product_assets (product_id, asset_type, url, position, is_primary, storage_type, created_at)
+                 VALUES ($1, 'image', $2, $3, $4, 'url', NOW())`,
+                [prod.product_id, url, position, position === 0 ? 1 : 0],
+              );
+              position++;
+              addedCount++;
+            }
+
+            if (addedCount > 0) {
+              imported++;
+              details.push({ productId: prod.product_id, productName: prod.product_name, status: "imported", imageCount: addedCount });
+            } else {
+              skipped++;
+              details.push({ productId: prod.product_id, productName: prod.product_name, status: "already_exists" });
+            }
+
+            await delay(200);
+          } catch (err: any) {
+            errors++;
+            details.push({ productId: prod.product_id, productName: prod.product_name, status: "error", error: err.message.substring(0, 200) });
+            await delay(200);
+          }
+        }
+
+        res.json({ total: prods.length, imported, skipped, errors, details });
+      } finally {
+        client.release();
+      }
+    } catch (err: any) {
+      console.error("[eBay Import Images] Error:", err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // POST /api/ebay/admin/cleanup-prod60 — One-time cleanup of PROD-60 group
   // -----------------------------------------------------------------------
   app.post("/api/ebay/admin/cleanup-prod60", async (_req: Request, res: Response) => {
@@ -3793,6 +3957,27 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
         .filter((url: string) => url && url.startsWith("https://"))
         .slice(0, 12);
 
+      // If no images in Echelon, fetch existing images from eBay to avoid wiping them
+      let effectiveImageUrls = imageUrls;
+      if (effectiveImageUrls.length === 0) {
+        try {
+          const firstSku = variants[0]?.variant_sku;
+          if (firstSku) {
+            const existingItem = await ebayApiRequest(
+              "GET",
+              `/sell/inventory/v1/inventory_item/${encodeURIComponent(firstSku)}`,
+              accessToken,
+            );
+            if (existingItem?.product?.imageUrls?.length > 0) {
+              effectiveImageUrls = existingItem.product.imageUrls;
+              console.log(`[eBay Sync] Using ${effectiveImageUrls.length} existing eBay images for product (no Echelon assets)`);
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[eBay Sync] Could not fetch existing images from eBay:`, e.message);
+        }
+      }
+
       const isMultiVariant = variants.length > 1;
       const variationAspectName = isMultiVariant ? determineVariationAspectName(variants) : "";
 
@@ -3834,7 +4019,7 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
             condition: "NEW",
             product: {
               title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
-              ...(imageUrls.length > 0 ? { imageUrls } : {}),
+              ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
               aspects: variantAspects,
             },
             availability: {
@@ -3970,7 +4155,7 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
           const groupBody: Record<string, any> = {
             title: product.product_name.length > 80 ? product.product_name.substring(0, 77) + "..." : product.product_name,
             description: product.product_description || `<p>${product.product_name}</p>`,
-            ...(imageUrls.length > 0 ? { imageUrls } : {}),
+            ...(effectiveImageUrls.length > 0 ? { imageUrls: effectiveImageUrls } : {}),
             aspects,
             variantSKUs: successfulSkus,
             variesBy: {

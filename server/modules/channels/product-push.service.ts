@@ -500,9 +500,7 @@ export function createChannelProductPushService(db: any) {
     // If there's only one variant and its name matches the product title, use "Default Title".
     const isSingleDefaultVariant =
       listedVariants.length === 1 &&
-      (listedVariants[0].name === "Default Title" ||
-        listedVariants[0].name === resolved.title ||
-        !listedVariants[0].name);
+      (!listedVariants[0].name || listedVariants[0].name === "Default Title");
 
     const productOptions = isSingleDefaultVariant
       ? [{ name: "Title" }]
@@ -540,16 +538,26 @@ export function createChannelProductPushService(db: any) {
       return image;
     });
 
-    return {
+    const payload: Record<string, any> = {
       title: resolved.title,
       body_html: resolved.description || "",
       product_type: resolved.category || "",
       tags: resolved.tags?.join(", ") || "",
-      status: resolved.status === "active" ? "active" : "draft",
-      options: productOptions,
+      // Status is managed in Shopify directly — only sync to archived if archived in Echelon
+      ...(resolved.status === "archived" ? { status: "archived" } : {}),
+      // Only include options on new products — updating options on existing products
+      // renames them in Shopify and can corrupt variant structure
+      ...(resolved.variants.every((v) => !v.shopifyVariantId) ? { options: productOptions } : {}),
       variants,
-      images,
     };
+
+    // IMPORTANT: Never send images in a regular product sync.
+    // Images are managed exclusively via the dedicated Push Images button
+    // which downloads and uploads as base64. Sending src URLs here would
+    // either wipe Shopify's images (empty array) or send eBay/CDN URLs
+    // that Shopify silently rejects. The images key is intentionally omitted.
+
+    return payload;
   }
 
   return {

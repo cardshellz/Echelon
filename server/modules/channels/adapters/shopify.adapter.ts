@@ -563,6 +563,82 @@ export class ShopifyAdapter implements IChannelAdapter {
   }
 
   // -------------------------------------------------------------------------
+  // Push images only — does NOT touch variants, title, price, or any other field
+  // -------------------------------------------------------------------------
+
+  async pushImagesOnly(
+    channelId: number,
+    shopifyProductId: string,
+    images: Array<{ url: string; altText?: string | null; position: number; fileData?: string | null; mimeType?: string | null }>,
+  ): Promise<void> {
+    const creds = await this.getCredentials(channelId);
+
+    // Download each image and send as base64 attachment.
+    // Shopify silently rejects CDN/eBay URLs passed as `src` — needs actual bytes.
+    // Use pre-stored file_data if available to avoid re-downloading.
+    const shopifyImages: Array<Record<string, any>> = [];
+    for (const img of images.filter((i) => i.url)) {
+      try {
+        let base64: string;
+        const filename = img.url.split("/").pop()?.split("?")[0] || `image_${shopifyImages.length + 1}.jpg`;
+
+        if (img.fileData) {
+          // Already downloaded and stored in DB — use directly
+          base64 = img.fileData;
+          console.log(`[pushImagesOnly] Using stored file_data for ${filename}`);
+        } else {
+          // Download now
+          const resp = await fetch(img.url, {
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+          });
+          if (!resp.ok) {
+            console.warn(`[pushImagesOnly] Failed to download image ${img.url}: ${resp.status}`);
+            continue;
+          }
+          const buffer = Buffer.from(await resp.arrayBuffer());
+          base64 = buffer.toString("base64");
+          console.log(`[pushImagesOnly] Downloaded ${filename} (${buffer.length} bytes)`);
+        }
+
+        shopifyImages.push({
+          attachment: base64,
+          filename,
+          position: shopifyImages.length + 1,
+          ...(img.altText ? { alt: img.altText } : {}),
+        });
+      } catch (err: any) {
+        console.warn(`[pushImagesOnly] Error processing image ${img.url}:`, err.message);
+      }
+    }
+
+    if (shopifyImages.length === 0) return;
+
+    // Fetch existing images so we don't overwrite them — POST each new image individually
+    const existing = await this.shopifyGet(creds, `/products/${shopifyProductId}/images.json`);
+    const existingFilenames = new Set<string>(
+      (existing?.images || []).map((img: any) => {
+        // Shopify stores src like https://cdn.shopify.com/.../filename.jpg?v=123
+        const src: string = img.src || "";
+        return src.split("/").pop()?.split("?")[0] || "";
+      })
+    );
+
+    let position = (existing?.images?.length || 0) + 1;
+    for (const img of shopifyImages) {
+      if (existingFilenames.has(img.filename)) {
+        console.log(`[pushImagesOnly] Skipping existing image: ${img.filename}`);
+        continue;
+      }
+      await this.shopifyPost(
+        creds,
+        `/products/${shopifyProductId}/images.json`,
+        { image: { ...img, position } },
+      );
+      position++;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Shopify API Helpers
   // -------------------------------------------------------------------------
 

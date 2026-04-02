@@ -3,6 +3,7 @@ import { db } from "../../db";
 import { sql, eq } from "drizzle-orm";
 import { productAssets } from "@shared/schema";
 import { catalogStorage } from "../catalog";
+import { createImageSyncService } from "./image-sync.service";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
@@ -418,9 +419,28 @@ export async function registerProductRoutes(app: Express) {
   app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.id);
+
+      // Check if this product already has images — if not, auto-set as primary
+      const existingAssets = await db
+        .select({ id: productAssets.id })
+        .from(productAssets)
+        .where(eq(productAssets.productId, productId))
+        .limit(1);
+
+      const isPrimary = existingAssets.length === 0 ? 1 : (req.body.isPrimary ? 1 : 0);
+
+      // If setting as primary, unset existing primary
+      if (isPrimary && existingAssets.length > 0) {
+        await db
+          .update(productAssets)
+          .set({ isPrimary: 0 })
+          .where(eq(productAssets.productId, productId));
+      }
+
       const asset = await storage.createProductAsset({
         ...req.body,
         productId,
+        isPrimary,
       });
       res.status(201).json(asset);
     } catch (error) {
@@ -443,7 +463,7 @@ export async function registerProductRoutes(app: Express) {
     }
   });
 
-  app.delete("/api/product-assets/:id", requirePermission("inventory", "delete"), async (req, res) => {
+  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const success = await storage.deleteProductAsset(id);
@@ -1208,6 +1228,138 @@ export async function registerProductRoutes(app: Express) {
     } catch (error: any) {
       console.error("Error storing URL asset:", error);
       res.status(500).json({ error: "Failed to store URL asset" });
+    }
+  });
+
+  // ============================================================================
+  // IMAGE SYNC — Pull/Push between Echelon and channels
+  // ============================================================================
+
+  const imageSync = createImageSyncService();
+
+  /**
+   * POST /api/images/pull/ebay
+   * Pull images from eBay listings into Echelon catalog.
+   * Body: { productIds?: number[] } — optional filter to specific products
+   */
+  app.post("/api/images/pull/ebay", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+
+      // Get eBay access token to use Browse API (much more reliable than scraping)
+      let ebayAccessToken: string | undefined;
+      try {
+        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
+        const config = createEbayAuthConfig();
+        const authService = new EbayAuthService(db as any, config);
+        ebayAccessToken = await authService.getAccessToken(67);
+        console.log(`[ImageSync] Got eBay access token (${ebayAccessToken?.substring(0, 10)}...)`);
+      } catch (authErr: any) {
+        console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
+      }
+
+      // Respond immediately — processing 90+ products takes too long for a single request
+      res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
+
+      // Run in background
+      imageSync.pullFromEbay(productIds, ebayAccessToken).then((results) => {
+        const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+        const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+        console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
+        results.filter(r => r.errors.length > 0).forEach(r => {
+          console.log(`[ImageSync]   ${r.sku}: errors=${JSON.stringify(r.errors)}`);
+        });
+      }).catch((err) => {
+        console.error("[ImageSync] pullFromEbay background error:", err.message);
+      });
+    } catch (error: any) {
+      console.error("Error pulling eBay images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull eBay images" });
+    }
+  });
+
+  /**
+   * POST /api/images/pull/shopify
+   * Pull images from Shopify products into Echelon catalog.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/pull/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] Pulling images from Shopify${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      const results = await imageSync.pullFromShopify(shopDomain, accessToken, productIds);
+      const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+      res.json({ results, summary: { products: results.length, imagesAdded: totalAdded, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("Error pulling Shopify images:", error);
+      res.status(500).json({ error: error.message || "Failed to pull Shopify images" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  /**
+   * POST /api/images/push/shopify
+   * Push Echelon catalog images to Shopify.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/shopify", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN;
+      const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+      if (!shopDomain || !accessToken) {
+        return res.status(500).json({ error: "Shopify credentials not configured" });
+      }
+
+      console.log(`[ImageSync] === PUSH STARTED ===`);
+      console.log(`[ImageSync] Domain: ${shopDomain}`);
+      console.log(`[ImageSync] Token prefix: ${accessToken.substring(0, 10)}...`);
+      console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
+
+      const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
+      const totalPushed = results.reduce((sum, r) => sum + r.imagesPushed, 0);
+      const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
+
+      console.log(`[ImageSync] === RESULT: ${totalPushed} pushed, ${totalErrors} errors ===`);
+      for (const r of results) {
+        console.log(`[ImageSync]   ${r.sku}: pushed=${r.imagesPushed}, errors=${JSON.stringify(r.errors)}`);
+      }
+
+      res.json({ results, summary: { products: results.length, imagesPushed: totalPushed, errors: totalErrors } });
+    } catch (error: any) {
+      console.error("[ImageSync] === FATAL ERROR ===", error.message, error.stack);
+      res.status(500).json({ error: error.message || "Failed to push images to Shopify" });
+    }
+  });
+
+  /**
+   * POST /api/images/push/ebay
+   * Push Echelon catalog images to eBay listings.
+   * Body: { productIds?: number[] }
+   */
+  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), async (req, res) => {
+    try {
+      const { productIds } = req.body;
+      console.log(`[ImageSync] Pushing images to eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
+      const results = await imageSync.pushToEbay("", productIds);
+      res.json({ results });
+    } catch (error: any) {
+      console.error("Error pushing images to eBay:", error);
+      res.status(500).json({ error: error.message || "Failed to push images to eBay" });
     }
   });
 }

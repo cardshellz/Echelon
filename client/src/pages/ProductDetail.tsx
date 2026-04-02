@@ -46,6 +46,7 @@ import {
   Truck,
   Trash2,
   Upload,
+  Download,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
@@ -943,6 +944,49 @@ export default function ProductDetail() {
     },
     onError: () => {
       toast({ title: "Failed to sync inventory", variant: "destructive" });
+    },
+  });
+
+  // Image sync mutations
+  const pullImagesMutation = useMutation({
+    mutationFn: async (source: string) => {
+      const res = await fetch(`/api/images/pull/${source}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ productIds: [product?.productId] }),
+      });
+      if (!res.ok) throw new Error(`Failed to pull images from ${source}`);
+      return res.json();
+    },
+    onSuccess: (data: any, source: string) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
+      const added = data?.summary?.imagesAdded ?? 0;
+      toast({ title: `Pulled ${added} image${added !== 1 ? "s" : ""} from ${source}` });
+    },
+    onError: (_err: Error, source: string) => {
+      toast({ title: `Failed to pull images from ${source}`, variant: "destructive" });
+    },
+  });
+
+  const pushImagesMutation = useMutation({
+    mutationFn: async (target: string) => {
+      // Use the existing product push which includes images
+      const res = await fetch(`/api/channel-push/product/${product?.productId}/channel/36`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const text = await res.text();
+      let data: any;
+      try { data = JSON.parse(text); } catch { data = { error: text }; }
+      if (!res.ok) throw new Error(data?.error || `Server returned ${res.status}`);
+      return data;
+    },
+    onSuccess: (data: any) => {
+      toast({ title: "Push complete", description: `Product pushed to Shopify (${data?.status || "ok"})` });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Push failed", description: err.message, variant: "destructive" });
     },
   });
 
@@ -1870,6 +1914,37 @@ export default function ProductDetail() {
                       <Send className="h-4 w-4 mr-1" />
                     )}
                     Push Product
+                  </Button>
+                  {/* Image sync buttons */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => pullImagesMutation.mutate("ebay")}
+                    disabled={pullImagesMutation.isPending}
+                    className="min-h-[44px]"
+                    title="Pull images from eBay listings into catalog"
+                  >
+                    {pullImagesMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                    ) : (
+                      <Download className="h-4 w-4 mr-1" />
+                    )}
+                    Pull Images
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => pushImagesMutation.mutate("shopify")}
+                    disabled={pushImagesMutation.isPending}
+                    className="min-h-[44px]"
+                    title="Push catalog images to Shopify"
+                  >
+                    {pushImagesMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                    ) : (
+                      <Upload className="h-4 w-4 mr-1" />
+                    )}
+                    Push Images
                   </Button>
                 </div>
               </div>

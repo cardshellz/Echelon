@@ -8,8 +8,110 @@ const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...in
 import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
+import crypto from "crypto";
 
 export function registerShopifyRoutes(app: Express) {
+
+  // -----------------------------------------------------------------------
+  // GET /api/shopify/oauth/install — Start OAuth flow (redirect to Shopify consent)
+  // Usage: visit https://your-app.herokuapp.com/api/shopify/oauth/install
+  // -----------------------------------------------------------------------
+  app.get("/api/shopify/oauth/install", (_req: Request, res: Response) => {
+    const shopDomain = process.env.SHOPIFY_SHOP_DOMAIN || "card-shellz";
+    const apiKey = process.env.SHOPIFY_API_KEY;
+    const redirectUri = process.env.SHOPIFY_OAUTH_REDIRECT_URI ||
+      `https://cardshellz-echelon-f21ea7da3008.herokuapp.com/api/shopify/oauth/callback`;
+
+    if (!apiKey) {
+      return res.status(500).send("SHOPIFY_API_KEY not set");
+    }
+
+    const shop = shopDomain.includes(".") ? shopDomain : `${shopDomain}.myshopify.com`;
+    const scopes = [
+      "read_products", "write_products",
+      "read_inventory", "write_inventory",
+      "read_orders", "write_orders",
+      "read_fulfillments", "write_fulfillments",
+      "read_shipping",
+      "read_locations",
+    ].join(",");
+
+    const state = crypto.randomBytes(16).toString("hex");
+    const installUrl = `https://${shop}/admin/oauth/authorize?client_id=${apiKey}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    res.redirect(installUrl);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/shopify/oauth/callback — Handle OAuth callback from Shopify
+  // Exchanges auth code for access token and saves to channel_connections
+  // -----------------------------------------------------------------------
+  app.get("/api/shopify/oauth/callback", async (req: Request, res: Response) => {
+    try {
+      const { code, shop, state, hmac } = req.query as Record<string, string>;
+
+      if (!code || !shop) {
+        return res.status(400).send("Missing code or shop parameter");
+      }
+
+      const apiKey = process.env.SHOPIFY_API_KEY;
+      const apiSecret = process.env.SHOPIFY_API_SECRET;
+
+      if (!apiKey || !apiSecret) {
+        return res.status(500).send("SHOPIFY_API_KEY or SHOPIFY_API_SECRET not set");
+      }
+
+      // Exchange code for access token
+      const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: apiKey, client_secret: apiSecret, code }),
+      });
+
+      if (!tokenRes.ok) {
+        const err = await tokenRes.text();
+        console.error("[Shopify OAuth] Token exchange failed:", err);
+        return res.status(400).send(`Token exchange failed: ${err}`);
+      }
+
+      const tokenData = await tokenRes.json() as { access_token: string; scope: string };
+      const accessToken = tokenData.access_token;
+
+      console.log(`[Shopify OAuth] Got new access token for ${shop}, scopes: ${tokenData.scope}`);
+
+      // Save to channel_connections for the Shopify channel (id=36)
+      // Find channel by shop domain
+      const conn = await storage.getChannelConnectionByShopDomain(shop);
+      if (conn) {
+        // Update existing connection
+        await (storage as any).updateChannelConnectionToken?.(conn.channelId, accessToken) ||
+          console.log(`[Shopify OAuth] No updateChannelConnectionToken method — update manually`);
+      }
+
+      // Also update env-level token via direct DB update
+      const { db } = await import("../db");
+      const { channelConnections } = await import("@shared/schema");
+      const { eq } = await import("drizzle-orm");
+
+      await (db as any)
+        .update(channelConnections)
+        .set({ accessToken, updatedAt: new Date() })
+        .where(eq(channelConnections.channelId, 36));
+
+      console.log(`[Shopify OAuth] ✅ Access token saved for channel 36 (${shop})`);
+
+      res.send(`
+        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2>✅ Shopify OAuth Complete</h2>
+          <p>Access token saved for <strong>${shop}</strong></p>
+          <p>Scopes: <code>${tokenData.scope}</code></p>
+          <p>You can close this tab.</p>
+        </body></html>
+      `);
+    } catch (err: any) {
+      console.error("[Shopify OAuth] Callback error:", err.message);
+      res.status(500).send(`OAuth error: ${err.message}`);
+    }
+  });
   const {
     productImport,
   } = app.locals.services;
