@@ -162,7 +162,6 @@ export const orderMethods: IOrderStorage = {
   },
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     
     const orderList = await db.execute(sql`
       SELECT o.*
@@ -173,7 +172,7 @@ export const orderMethods: IOrderStorage = {
           -- Ready/in_progress orders: show in pick queue
           o.warehouse_status IN ('ready', 'in_progress')
           -- Completed orders: show for 24 hours in done queue
-          OR (o.warehouse_status = 'completed' AND o.completed_at >= ${twentyFourHoursAgo})
+          OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
       ORDER BY
         o.on_hold ASC,           -- Held orders sink to the bottom
@@ -246,8 +245,8 @@ export const orderMethods: IOrderStorage = {
       quantity: row.quantity,
       pickedQuantity: row.picked_quantity,
       price: row.price,
-      requiresShipping: row.requires_shipping === 1,
-      taxable: row.taxable === 1,
+      requiresShipping: row.requires_shipping,
+      taxable: row.taxable,
       fulfillmentStatus: row.fulfillment_status,
       status: row.status,
       assignedPickerId: row.assigned_picker_id,
