@@ -284,9 +284,9 @@ export const orderMethods: IOrderStorage = {
             WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
             SELECT pv.sku, COALESCE(pva.url, pa.url) as image_url
-            FROM public.product_variants pv
-            LEFT JOIN public.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
-            LEFT JOIN public.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
+            FROM catalog.product_variants pv
+            LEFT JOIN catalog.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
+            LEFT JOIN catalog.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
             WHERE UPPER(pv.sku) IN (${imageSkuList})
               AND COALESCE(pva.url, pa.url) IS NOT NULL
           ) sub
@@ -311,7 +311,7 @@ export const orderMethods: IOrderStorage = {
         const barcodeSkuList = sql.join(skusMissingBarcodes.map(s => sql`${s}`), sql`, `);
         const barcodeResults = await db.execute<{ sku: string; barcode: string }>(sql`
           SELECT UPPER(pv.sku) as sku, pv.barcode
-          FROM public.product_variants pv
+          FROM catalog.product_variants pv
           WHERE UPPER(pv.sku) IN (${barcodeSkuList})
             AND pv.barcode IS NOT NULL
         `);

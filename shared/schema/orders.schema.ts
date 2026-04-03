@@ -63,7 +63,9 @@ export type ShipmentStatus = typeof shipmentStatusEnum[number];
 // ORDERS
 // ============================================
 
-export const orders = pgTable("orders", {
+export const wmsSchema = pgSchema("wms");
+
+export const orders = wmsSchema.table("orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
 
   // ===== MULTI-CHANNEL LINKAGE =====
@@ -151,7 +153,7 @@ export type Order = typeof orders.$inferSelect;
 // ORDER ITEMS
 // ============================================
 
-export const orderItems = pgTable("order_items", {
+export const orderItems = wmsSchema.table("order_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
 
