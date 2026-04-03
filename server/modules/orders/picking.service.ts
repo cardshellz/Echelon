@@ -37,7 +37,7 @@ type InventoryCore = {
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
-    reason?: string;
+    reason: string;
     userId?: string;
   }) => Promise<void>;
   logTransaction: (txn: any) => Promise<void>;

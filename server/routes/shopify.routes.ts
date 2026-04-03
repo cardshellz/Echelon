@@ -257,8 +257,6 @@ export function registerShopifyRoutes(app: Express) {
           warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
-          totalAmount: rawOrder.total_price_cents ? String(rawOrder.total_price_cents / 100) : null,
-          currency: rawOrder.currency,
           shopifyCreatedAt: rawOrder.order_date || rawOrder.created_at || undefined,
           orderPlacedAt: rawOrder.order_date || rawOrder.created_at || undefined,
         }, enrichedItems);

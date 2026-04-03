@@ -129,7 +129,7 @@ export class WmsSyncService {
         const itemRequiresShipping = line.requiresShipping !== false;
 
         wmsLineItems.push({
-          wmsOrderId: 0, // Will be set by createOrderWithItems
+          orderId: 0, // Will be set by createOrderWithItems
           omsOrderLineId: line.id,
           sku: line.sku || "UNKNOWN",
           name: line.title || "Unknown Item",
@@ -275,7 +275,7 @@ export class WmsSyncService {
       SELECT oo.id 
       FROM oms_orders oo
       WHERE NOT EXISTS (
-        SELECT 1 FROM orders o
+        SELECT 1 FROM wms.orders o
         WHERE o.source_table_id = oo.id::text
           AND o.source = 'oms'
       )

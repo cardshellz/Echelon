@@ -115,7 +115,7 @@ class SLAMonitorService {
 
     // 1. Mark shipped/completed orders as "met" if they were shipped before SLA due
     const metResult = await this.db.execute(sql`
-      UPDATE orders SET sla_status = 'met'
+      UPDATE wms.orders SET sla_status = 'met'
       WHERE sla_due_at IS NOT NULL
         AND sla_status NOT IN ('met')
         AND warehouse_status IN ('shipped', 'completed')
@@ -124,7 +124,7 @@ class SLAMonitorService {
 
     // 2. Mark shipped orders as "overdue" if they shipped after SLA due
     await this.db.execute(sql`
-      UPDATE orders SET sla_status = 'overdue'
+      UPDATE wms.orders SET sla_status = 'overdue'
       WHERE sla_due_at IS NOT NULL
         AND sla_status NOT IN ('met', 'overdue')
         AND warehouse_status IN ('shipped', 'completed')
@@ -133,7 +133,7 @@ class SLAMonitorService {
 
     // 3. Mark active (non-terminal) orders past due as "overdue"
     await this.db.execute(sql`
-      UPDATE orders SET sla_status = 'overdue'
+      UPDATE wms.orders SET sla_status = 'overdue'
       WHERE sla_due_at IS NOT NULL
         AND sla_status NOT IN ('met', 'overdue')
         AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
@@ -142,7 +142,7 @@ class SLAMonitorService {
 
     // 4. Mark active orders within 24h of due as "at_risk"
     await this.db.execute(sql`
-      UPDATE orders SET sla_status = 'at_risk'
+      UPDATE wms.orders SET sla_status = 'at_risk'
       WHERE sla_due_at IS NOT NULL
         AND sla_status NOT IN ('met', 'overdue', 'at_risk')
         AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
@@ -152,7 +152,7 @@ class SLAMonitorService {
 
     // 5. Mark remaining active orders as "on_time"
     await this.db.execute(sql`
-      UPDATE orders SET sla_status = 'on_time'
+      UPDATE wms.orders SET sla_status = 'on_time'
       WHERE sla_due_at IS NOT NULL
         AND sla_status IS DISTINCT FROM 'on_time'
         AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
@@ -187,7 +187,7 @@ class SLAMonitorService {
         o.sla_due_at,
         o.sla_status,
         o.order_placed_at
-      FROM orders o
+      FROM wms.orders o
       LEFT JOIN channels c ON o.channel_id = c.id
       LEFT JOIN warehouses w ON o.warehouse_id = w.id
       WHERE o.sla_due_at IS NOT NULL
@@ -220,7 +220,7 @@ class SLAMonitorService {
       count: string;
     }>(sql`
       SELECT sla_status, COUNT(*)::text as count
-      FROM orders
+      FROM wms.orders
       WHERE sla_due_at IS NOT NULL
         AND warehouse_status NOT IN ('cancelled')
       GROUP BY sla_status

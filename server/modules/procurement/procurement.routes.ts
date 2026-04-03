@@ -1551,7 +1551,6 @@ export function registerPurchasingRoutes(app: Express) {
         customerEmail: r.order.customerEmail,
         warehouseStatus: r.order.warehouseStatus,
         orderPlacedAt: r.order.orderPlacedAt?.toISOString() ?? null,
-        totalAmount: r.order.totalAmount,
         shipment: r.shipment ? {
           carrier: r.shipment.carrier,
           trackingNumber: r.shipment.trackingNumber,

@@ -70,6 +70,7 @@ export const orders = wmsSchema.table("orders", {
 
   // ===== MULTI-CHANNEL LINKAGE =====
   // Links to source raw tables (shopify_orders, ebay_orders, etc.) for full order data
+  omsFulfillmentOrderId: varchar("oms_fulfillment_order_id", { length: 128 }),
   channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
   source: varchar("source", { length: 20 }).notNull().default("shopify"), // shopify, ebay, amazon, etsy, manual, api
   externalOrderId: varchar("external_order_id", { length: 100 }), // External system's order ID
@@ -159,6 +160,7 @@ export const orderItems = wmsSchema.table("order_items", {
 
   // ===== CHANNEL LINKAGE =====
   // Links to source raw tables for full line item data (pricing, properties, etc.)
+  omsOrderLineId: integer("oms_order_line_id"),
   shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
 
@@ -195,71 +197,18 @@ export type InsertOrderItem = z.infer<typeof insertOrderItemSchema>;
 export type OrderItem = typeof orderItems.$inferSelect;
 
 // ============================================
-// WMS SHADOW TABLES (Namespace wms.*)
+// WMS SHADOW TABLES (Namespace wms.*) [ALIASED]
 // ============================================
 
+export const wmsOrders = orders;
+export const insertWmsOrderSchema = insertOrderSchema;
+export type InsertWmsOrder = InsertOrder;
+export type WmsOrder = Order;
 
-export const wmsOrders = wmsSchema.table("orders", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  omsFulfillmentOrderId: varchar("oms_fulfillment_order_id", { length: 128 }),
-  channelId: integer("channel_id").references(() => channels.id, { onDelete: "set null" }),
-  source: varchar("source", { length: 20 }).notNull().default("shopify"),
-  externalOrderId: varchar("external_order_id", { length: 100 }),
-  orderNumber: varchar("order_number", { length: 50 }).notNull(),
-  customerName: text("customer_name").notNull(),
-  customerEmail: text("customer_email"),
-  shippingName: text("shipping_name"),
-  shippingAddress: text("shipping_address"),
-  shippingCity: text("shipping_city"),
-  shippingState: text("shipping_state"),
-  shippingPostalCode: text("shipping_postal_code"),
-  shippingCountry: text("shipping_country"),
-  warehouseId: integer("warehouse_id").references(() => warehouses.id, { onDelete: "set null" }),
-  priority: integer("priority").notNull().default(100),
-  warehouseStatus: varchar("warehouse_status", { length: 20 }).notNull().default("ready"),
-  onHold: integer("on_hold").notNull().default(0),
-  heldAt: timestamp("held_at"),
-  assignedPickerId: varchar("assigned_picker_id", { length: 100 }),
-  batchId: varchar("batch_id", { length: 50 }),
-  combinedGroupId: integer("combined_group_id"),
-  combinedRole: varchar("combined_role", { length: 20 }),
-  itemCount: integer("item_count").notNull().default(0),
-  unitCount: integer("unit_count").notNull().default(0),
-  pickedCount: integer("picked_count").notNull().default(0),
-  orderPlacedAt: timestamp("order_placed_at"),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  startedAt: timestamp("started_at"),
-  completedAt: timestamp("completed_at"),
-});
-
-export const insertWmsOrderSchema = createInsertSchema(wmsOrders).omit({ id: true, createdAt: true });
-export type InsertWmsOrder = z.infer<typeof insertWmsOrderSchema>;
-export type WmsOrder = typeof wmsOrders.$inferSelect;
-
-export const wmsOrderItems = wmsSchema.table("order_items", {
-  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  orderId: integer("order_id").notNull().references(() => wmsOrders.id, { onDelete: "cascade" }),
-  omsOrderLineId: integer("oms_order_line_id"),
-  productId: integer("product_id"),
-  sku: varchar("sku", { length: 100 }).notNull(),
-  name: text("name").notNull(),
-  imageUrl: text("image_url"),
-  barcode: varchar("barcode", { length: 100 }),
-  customsDeclaredValueCents: integer("customs_declared_value_cents"),
-  quantity: integer("quantity").notNull(),
-  pickedQuantity: integer("picked_quantity").notNull().default(0),
-  fulfilledQuantity: integer("fulfilled_quantity").notNull().default(0),
-  status: varchar("status", { length: 20 }).notNull().default("pending"),
-  location: varchar("location", { length: 50 }).notNull().default("UNASSIGNED"),
-  zone: varchar("zone", { length: 10 }).notNull().default("U"),
-  shortReason: text("short_reason"),
-  pickedAt: timestamp("picked_at"),
-  requiresShipping: integer("requires_shipping").notNull().default(1),
-});
-
-export const insertWmsOrderItemSchema = createInsertSchema(wmsOrderItems).omit({ id: true });
-export type InsertWmsOrderItem = z.infer<typeof insertWmsOrderItemSchema>;
-export type WmsOrderItem = typeof wmsOrderItems.$inferSelect;
+export const wmsOrderItems = orderItems;
+export const insertWmsOrderItemSchema = insertOrderItemSchema;
+export type InsertWmsOrderItem = InsertOrderItem;
+export type WmsOrderItem = OrderItem;
 
 // ============================================
 // PICKING LOGS (Audit Trail)

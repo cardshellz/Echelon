@@ -223,7 +223,7 @@ export const pickingLogMethods: IPickingLogStorage = {
       SELECT 
         AVG(EXTRACT(EPOCH FROM (c.timestamp - cl.timestamp))) as avg_claim_to_complete,
         AVG(EXTRACT(EPOCH FROM (cl.timestamp - o.created_at))) as avg_queue_wait
-      FROM orders o
+      FROM wms.orders o
       LEFT JOIN picking_logs cl ON cl.order_id = o.id AND cl.action_type = 'order_claimed'
       LEFT JOIN picking_logs c ON c.order_id = o.id AND c.action_type = 'order_completed'
       WHERE o.warehouse_status = 'completed' 

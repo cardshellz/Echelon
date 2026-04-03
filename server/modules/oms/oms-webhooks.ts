@@ -179,7 +179,7 @@ async function createWmsOrderFromShopify(
 
   // Dedup: check if WMS order already exists for this OMS order
   const existing = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders
+    SELECT id FROM wms.orders
     WHERE source = 'shopify' AND source_table_id = ${omsIdStr}
     LIMIT 1
   `);
@@ -189,7 +189,7 @@ async function createWmsOrderFromShopify(
 
   // Also check by Shopify GID (in case old flow already created it)
   const existingByGid = await db.execute<{ id: number }>(sql`
-    SELECT id FROM orders
+    SELECT id FROM wms.orders
     WHERE source = 'shopify' AND (
       source_table_id = ${shopifyGid}
       OR shopify_order_id = ${shopifyGid}
@@ -251,9 +251,6 @@ async function createWmsOrderFromShopify(
       imageUrl,
       barcode: binLocation?.barcode || null,
       requiresShipping: itemRequiresShipping ? 1 : 0,
-      priceCents: line.paidPriceCents ?? null,
-      discountCents: line.discountCents ? Math.round((line.discountCents || 0) / line.quantity) : 0,
-      totalPriceCents: line.totalCents ?? null,
     });
   }
 
@@ -278,12 +275,10 @@ async function createWmsOrderFromShopify(
     shippingPostalCode: orderData.shipToZip || null,
     shippingCountry: orderData.shipToCountry || null,
     financialStatus: orderData.financialStatus || "paid",
-    priority: "normal",
+    priority: 50,
     warehouseStatus: hasShippableItems ? "ready" : "completed", // Non-shippable orders skip pick queue
     itemCount: enrichedItems.length,
     unitCount: totalUnits,
-    totalAmount: orderData.totalCents ? String(orderData.totalCents / 100) : null,
-    currency: orderData.currency || "USD",
     orderPlacedAt: orderData.orderedAt || new Date(),
   }, enrichedItems);
 
@@ -568,10 +563,6 @@ export function registerOmsWebhooks(
                 sku: item.sku || existingLine.sku,
                 title: item.title || existingLine.title,
                 quantity: item.quantity ?? existingLine.quantity,
-                paidPriceCents: dollarsToCents(item.price),
-                totalPriceCents:
-                  dollarsToCents(item.price) * (item.quantity || 1) -
-                  (item.total_discount ? dollarsToCents(item.total_discount) : 0),
                 totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
                 productVariantId: productVariantId || existingLine.productVariantId,
               })
@@ -586,10 +577,6 @@ export function registerOmsWebhooks(
               title: item.title,
               variantTitle: item.variant_title,
               quantity: item.quantity || 1,
-              paidPriceCents: dollarsToCents(item.price),
-              totalPriceCents:
-                dollarsToCents(item.price) * (item.quantity || 1) -
-                (item.total_discount ? dollarsToCents(item.total_discount) : 0),
               totalDiscountCents: item.total_discount ? dollarsToCents(item.total_discount) : 0,
             });
           }
@@ -597,14 +584,14 @@ export function registerOmsWebhooks(
 
         // Update WMS order items if they exist
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
           const wmsOrderId = wmsOrder.rows[0].id;
           // Update WMS order shipping address
           await db.execute(sql`
-            UPDATE orders SET
+            UPDATE wms.orders SET
               shipping_name = ${shipping.name || null},
               shipping_address = ${shipping.address1 || null},
               shipping_city = ${shipping.city || null},
@@ -691,7 +678,7 @@ export function registerOmsWebhooks(
       if (wmsServices) {
         // Find WMS order
         const wmsOrder = await db.execute<{ id: number }>(sql`
-          SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+          SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
           LIMIT 1
         `);
         if (wmsOrder.rows.length > 0) {
@@ -705,7 +692,7 @@ export function registerOmsWebhooks(
 
           // Update WMS order status
           await db.execute(sql`
-            UPDATE orders SET
+            UPDATE wms.orders SET
               warehouse_status = 'cancelled', 
               cancelled_at = ${now}
             WHERE id = ${wmsOrderId} AND warehouse_status NOT IN ('in_progress', 'ready_to_ship', 'shipped', 'cancelled')
@@ -796,13 +783,13 @@ export function registerOmsWebhooks(
 
       // Update WMS order tracking
       const wmsOrder = await db.execute<{ id: number }>(sql`
-        SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+        SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
         LIMIT 1
       `);
       if (wmsOrder.rows.length > 0) {
         // If WMS order isn't shipped yet, transition it
         await db.execute(sql`
-          UPDATE orders SET
+          UPDATE wms.orders SET
             warehouse_status = CASE
               WHEN warehouse_status NOT IN ('shipped', 'cancelled') THEN 'shipped'
               ELSE warehouse_status
@@ -911,7 +898,7 @@ export function registerOmsWebhooks(
         if (restockItems.length > 0) {
           // Find WMS order
           const wmsOrder = await db.execute<{ id: number }>(sql`
-            SELECT id FROM orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
+            SELECT id FROM wms.orders WHERE source = 'shopify' AND source_table_id = ${String(existing.id)}
             LIMIT 1
           `);
 

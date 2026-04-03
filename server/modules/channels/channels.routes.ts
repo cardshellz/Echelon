@@ -169,7 +169,6 @@ export function registerChannelRoutes(app: Express) {
     channelId: z.number().optional().nullable(),
     source: z.enum(["shopify", "ebay", "amazon", "etsy", "manual", "api"]).default("manual"),
     priority: z.enum(["rush", "high", "normal"]).default("normal"),
-    totalAmount: z.string().optional(),
     currency: z.string().default("USD"),
     shippingAddress: z.string().optional(),
     shippingCity: z.string().optional(),
@@ -207,7 +206,6 @@ export function registerChannelRoutes(app: Express) {
         channelId: data.channelId || null,
         source: data.source,
         priority: data.priority,
-        totalAmount: data.totalAmount || null,
         currency: data.currency,
         shippingAddress: data.shippingAddress || null,
         shippingCity: data.shippingCity || null,
@@ -307,8 +305,8 @@ export function registerChannelRoutes(app: Express) {
         }, 0);
         if (itemsSubtotal > 0) financials.subtotalCents = itemsSubtotal;
       }
-      if (financials.totalCents == null && order.totalAmount) {
-        financials.totalCents = Math.round(parseFloat(order.totalAmount) * 100);
+      if (financials.totalCents == null) {
+        // totalAmount is no longer accessible on WMS orders
       }
       if (financials.discountCents == null) {
         const itemDiscounts = items.reduce((s: number, i: any) => s + ((i.discountCents || 0) * i.quantity), 0);
@@ -2202,8 +2200,8 @@ export function registerChannelRoutes(app: Express) {
       const lookbackDays = 90;
       const result: any = await db.execute(sql`
         SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
         JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE pv.product_id = ${productId}
           AND o.cancelled_at IS NULL

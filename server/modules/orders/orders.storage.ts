@@ -359,11 +359,11 @@ export const orderMethods: IOrderStorage = {
           const fixedStatus = hasShort ? "exception" : "completed";
           try {
             await db.execute(
-              sql`UPDATE orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
+              sql`UPDATE wms.orders SET warehouse_status = ${fixedStatus}, completed_at = NOW() WHERE id = ${order.id}`
             );
             const nonShippablePending = items.filter(i => i.requiresShipping !== 1 && i.status === "pending");
             for (const item of nonShippablePending) {
-              await db.execute(sql`UPDATE order_items SET status = 'completed' WHERE id = ${item.id}`);
+              await db.execute(sql`UPDATE wms.order_items SET status = 'completed' WHERE id = ${item.id}`);
               item.status = "completed";
             }
             order.warehouseStatus = fixedStatus;
@@ -554,7 +554,7 @@ export const orderMethods: IOrderStorage = {
 
     if (status === "shipped" || status === "completed" || status === "cancelled") {
       await db.execute(sql`
-        UPDATE order_items SET status = 'completed'
+        UPDATE wms.order_items SET status = 'completed'
         WHERE order_id = ${orderId}
           AND status NOT IN ('completed', 'short')
       `);
@@ -704,7 +704,7 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .select()
       .from(orderItems)
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId));
+      .where(eq(orderItems.shopifyLineItemId, String(shopifyLineItemId)));
     return result[0];
   },
 
@@ -720,7 +720,7 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .update(orderItems)
       .set({ fulfilledQuantity: newFulfilledQty })
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId))
+      .where(eq(orderItems.shopifyLineItemId, String(shopifyLineItemId)))
       .returning();
     
     return result[0] || null;
@@ -875,9 +875,9 @@ export const orderMethods: IOrderStorage = {
   },
 
   async syncFulfilledStatusesFromShopify() {
-    // 1. Update ORDERS status to 'completed' where OMS shows fulfilled/shipped
+    // 1. Update wms.orders status to 'completed' where OMS shows fulfilled/shipped
     await db.execute(sql`
-      UPDATE orders o SET
+      UPDATE wms.orders o SET
         status = 'completed',
         completed_at = COALESCE(o.completed_at, NOW())
       FROM oms_orders oms
@@ -886,9 +886,9 @@ export const orderMethods: IOrderStorage = {
         AND o.warehouse_status != 'completed'
     `);
 
-    // 2. Update ORDER_ITEMS to 'completed' with full picked_quantity where OMS line item is fulfilled
+    // 2. Update wms.order_items to 'completed' with full picked_quantity where OMS line item is fulfilled
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
@@ -900,11 +900,11 @@ export const orderMethods: IOrderStorage = {
 
     // 3. Also update items where the parent ORDER is fulfilled in OMS
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
-      FROM orders o
+      FROM wms.orders o
       INNER JOIN oms_orders oms ON o.order_number = oms.external_order_number
       WHERE oi.order_id = o.id
         AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
@@ -913,7 +913,7 @@ export const orderMethods: IOrderStorage = {
 
     // 4. Handle partial fulfillments - update items individually from OMS line items
     await db.execute(sql`
-      UPDATE order_items oi SET
+      UPDATE wms.order_items oi SET
         status = 'completed',
         picked_quantity = oi.quantity,
         fulfilled_quantity = oi.quantity
@@ -926,7 +926,7 @@ export const orderMethods: IOrderStorage = {
 
   async backfillOrdersFromShopifyRaw(): Promise<{ updated: number }> {
     const result = await db.execute(sql`
-      UPDATE orders o SET
+      UPDATE wms.orders o SET
         customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
         customer_email = COALESCE(oms.customer_email, o.customer_email),
         shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
@@ -943,7 +943,7 @@ export const orderMethods: IOrderStorage = {
 
   async countOrdersMissingShippingData(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM orders
+      SELECT COUNT(*) as count FROM wms.orders
       WHERE source = 'shopify'
         AND shopify_order_id IS NOT NULL
         AND (shipping_address IS NULL OR shipping_city IS NULL)
@@ -991,8 +991,8 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(`
       SELECT o.id as order_id, o.warehouse_status, o.order_number,
              oi.id as item_id, oi.sku, oi.requires_shipping
-      FROM orders o
-      LEFT JOIN order_items oi ON oi.order_id = o.id
+      FROM wms.orders o
+      LEFT JOIN wms.order_items oi ON oi.order_id = o.id
       WHERE o.warehouse_status IN ('ready', 'in_progress')
       LIMIT 5
     `);
@@ -1003,13 +1003,13 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(sql`
       SELECT oi.id, oi.order_id, oi.sku, oi.name, oi.status, oi.quantity,
              oi.picked_quantity, oi.requires_shipping, oi.location
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
+      FROM wms.order_items oi
+      JOIN wms.orders o ON o.id = oi.order_id
       WHERE o.order_number = ${orderNumber}
     `);
     const orderResult = await db.execute(sql`
       SELECT id, order_number, item_count, unit_count, picked_count, warehouse_status
-      FROM orders WHERE order_number = ${orderNumber}
+      FROM wms.orders WHERE order_number = ${orderNumber}
     `);
     return { order: (orderResult.rows as any[])[0], items: result.rows as any[] };
   },
@@ -1018,9 +1018,9 @@ export const orderMethods: IOrderStorage = {
     const result = await db.execute(sql`
       SELECT o.id, o.order_number, o.item_count, o.unit_count, o.picked_count,
              o.warehouse_status,
-             (SELECT SUM(oi.picked_quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
-             (SELECT SUM(oi.quantity) FROM order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
-      FROM orders o
+             (SELECT SUM(oi.picked_quantity) FROM wms.order_items oi WHERE oi.order_id = o.id) as actual_picked_sum,
+             (SELECT SUM(oi.quantity) FROM wms.order_items oi WHERE oi.order_id = o.id) as actual_unit_sum
+      FROM wms.orders o
       WHERE o.picked_count > o.unit_count
         AND o.warehouse_status NOT IN ('cancelled')
       ORDER BY o.picked_count - o.unit_count DESC
@@ -1031,7 +1031,7 @@ export const orderMethods: IOrderStorage = {
 
   async fixOrderCounts(): Promise<number> {
     const result = await db.execute(sql`
-      UPDATE orders o
+      UPDATE wms.orders o
       SET
         item_count = sub.actual_item_count,
         unit_count = sub.actual_unit_count,
@@ -1042,7 +1042,7 @@ export const orderMethods: IOrderStorage = {
           COUNT(*) as actual_item_count,
           COALESCE(SUM(oi.quantity), 0) as actual_unit_count,
           COALESCE(SUM(CASE WHEN oi.requires_shipping = 1 THEN oi.picked_quantity ELSE 0 END), 0) as actual_picked_count
-        FROM order_items oi
+        FROM wms.order_items oi
         GROUP BY oi.order_id
       ) sub
       WHERE o.id = sub.order_id
@@ -1056,10 +1056,10 @@ export const orderMethods: IOrderStorage = {
   async getStuckInProgressOrders(): Promise<any[]> {
     const result = await db.execute(sql`
       SELECT o.id, o.order_number, o.warehouse_status, o.item_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
-        (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
-      FROM orders o
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1) as shippable_count,
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status IN ('completed', 'short')) as shippable_done_count,
+        (SELECT COUNT(*) FROM wms.order_items oi WHERE oi.order_id = o.id AND oi.requires_shipping = 1 AND oi.status = 'short') as short_count
+      FROM wms.orders o
       WHERE o.warehouse_status = 'in_progress'
     `);
     return result.rows as any[];
@@ -1067,7 +1067,7 @@ export const orderMethods: IOrderStorage = {
 
   async transitionStuckOrder(orderId: number, newStatus: string): Promise<void> {
     await db.execute(sql`
-      UPDATE orders
+      UPDATE wms.orders
       SET warehouse_status = ${newStatus}, completed_at = NOW()
       WHERE id = ${orderId}
     `);
@@ -1075,7 +1075,7 @@ export const orderMethods: IOrderStorage = {
 
   async completeNonShippableItems(orderId: number): Promise<void> {
     await db.execute(sql`
-      UPDATE order_items
+      UPDATE wms.order_items
       SET status = 'completed'
       WHERE order_id = ${orderId} AND requires_shipping = 0 AND status = 'pending'
     `);
@@ -1108,8 +1108,8 @@ export const orderMethods: IOrderStorage = {
   async getPendingOrderItemsForSku(sku: string): Promise<{ id: number; location: string | null; zone: string | null }[]> {
     const result = await db.execute(sql`
       SELECT oi.id, oi.location, oi.zone
-      FROM order_items oi
-      JOIN orders o ON oi.order_id = o.id
+      FROM wms.order_items oi
+      JOIN wms.orders o ON oi.order_id = o.id
       WHERE UPPER(oi.sku) = ${sku.toUpperCase()}
         AND oi.status = 'pending'
         AND o.warehouse_status IN ('ready', 'in_progress')

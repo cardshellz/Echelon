@@ -386,7 +386,7 @@ async function runReconciliation(): Promise<ReconciliationResult> {
     // Batch-check which orders already exist in WMS
     const shopifyIds = shopifyOrders.map((o) => String(o.id));
     const existingWms = await db.execute<{ source_table_id: string }>(sql`
-      SELECT source_table_id FROM orders
+      SELECT source_table_id FROM wms.orders
       WHERE source_table_id = ANY(${sql.raw(`ARRAY[${shopifyIds.map(id => `'${id}'`).join(',')}]`)})
     `);
     const existingSet = new Set(existingWms.rows.map((r) => r.source_table_id));

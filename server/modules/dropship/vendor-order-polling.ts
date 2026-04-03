@@ -505,18 +505,16 @@ async function createDropshipWmsOrder(
     shippingPostalCode: address?.postalCode || null,
     shippingCountry: address?.countryCode || "US",
     financialStatus: "paid",
-    priority: "high", // Dropship orders get high priority (1 business day SLA)
+    priority: 10, // Dropship orders get high priority (1 business day SLA)
     warehouseStatus: "ready",
     itemCount: enrichedItems.length,
     unitCount: totalUnits,
-    totalAmount: String(totalCostCents / 100),
-    currency: "USD",
     orderPlacedAt: new Date(),
   }, enrichedItems);
 
   // Set vendor_id and order_source on WMS order (columns added by migration but not in Drizzle schema)
   await db.execute(sql`
-    UPDATE orders SET vendor_id = ${vendorId}, order_source = 'dropship_ebay'
+    UPDATE wms.orders SET vendor_id = ${vendorId}, order_source = 'dropship_ebay'
     WHERE id = ${newOrder.id}
   `);
 

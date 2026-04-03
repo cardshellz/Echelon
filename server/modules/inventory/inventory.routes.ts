@@ -1105,8 +1105,7 @@ export function registerInventoryRoutes(app: Express) {
           warehouseStatus: order.warehouseStatus,
           financialStatus: order.financialStatus,
           itemCount: order.itemCount,
-          totalAmount: order.totalAmount,
-        },
+          },
         items: enrichedItems,
         returnHistory,
       });

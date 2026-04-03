@@ -58,8 +58,8 @@ async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<num
   try {
     const result: any = await (db as any).execute(sql`
       SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
-      FROM order_items oi
-      JOIN orders o ON o.id = oi.order_id
+      FROM wms.order_items oi
+      JOIN wms.orders o ON o.id = oi.order_id
       JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
       WHERE pv.product_id = ${productId}
         AND o.cancelled_at IS NULL

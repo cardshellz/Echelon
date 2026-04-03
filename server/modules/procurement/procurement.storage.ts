@@ -914,8 +914,8 @@ export const procurementMethods: IProcurementStorage = {
       LEFT JOIN (
         SELECT pv.product_id,
                SUM(oi.quantity * pv.units_per_variant) AS total_outbound_pieces
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
+        FROM wms.order_items oi
+        JOIN wms.orders o ON o.id = oi.order_id
         JOIN product_variants pv ON pv.sku = oi.sku AND pv.is_active = true
         WHERE o.cancelled_at IS NULL
           AND o.warehouse_status != 'cancelled'
@@ -967,8 +967,8 @@ export const procurementMethods: IProcurementStorage = {
           ELSE 0
         END AS margin_percent,
         COUNT(DISTINCT oi.id) AS line_count
-      FROM orders o
-      JOIN order_items oi ON oi.order_id = o.id
+      FROM wms.orders o
+      JOIN wms.order_items oi ON oi.order_id = o.id
       LEFT JOIN (
         SELECT order_item_id, SUM(total_cost_cents) AS cogs_cents
         FROM order_item_costs
@@ -1000,7 +1000,7 @@ export const procurementMethods: IProcurementStorage = {
         END AS margin_percent,
         pv.last_cost_cents,
         pv.avg_cost_cents
-      FROM order_items oi
+      FROM wms.order_items oi
       JOIN product_variants pv ON UPPER(pv.sku) = UPPER(oi.sku)
       JOIN products p ON p.id = pv.product_id
       LEFT JOIN (

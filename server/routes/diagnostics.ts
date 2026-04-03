@@ -22,7 +22,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       const transactionsResult = await db.execute(sql`
         DELETE FROM inventory_transactions
         WHERE order_item_id IN (
-          SELECT oi.id FROM order_items oi
+          SELECT oi.id FROM wms.order_items oi
           WHERE oi.order_id IN (
             SELECT id FROM (
               SELECT 
@@ -32,7 +32,7 @@ export function registerDiagnosticsRoutes(app: Express) {
                   PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
                   ORDER BY created_at ASC
                 ) as rn
-              FROM orders
+              FROM wms.orders
               WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
             ) t
             WHERE rn > 1 AND normalized_id != ''
@@ -43,7 +43,7 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       // Second: delete order_items
       const itemsResult = await db.execute(sql`
-        DELETE FROM order_items 
+        DELETE FROM wms.order_items 
         WHERE order_id IN (
           SELECT id FROM (
             SELECT 
@@ -53,7 +53,7 @@ export function registerDiagnosticsRoutes(app: Express) {
                 PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
                 ORDER BY created_at ASC
               ) as rn
-            FROM orders
+            FROM wms.orders
             WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
           ) t
           WHERE rn > 1 AND normalized_id != ''
@@ -62,7 +62,7 @@ export function registerDiagnosticsRoutes(app: Express) {
       `);
 
       const ordersResult = await db.execute(sql`
-        DELETE FROM orders 
+        DELETE FROM wms.orders 
         WHERE id IN (
           SELECT id FROM (
             SELECT 
@@ -72,7 +72,7 @@ export function registerDiagnosticsRoutes(app: Express) {
                 PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
                 ORDER BY created_at ASC
               ) as rn
-            FROM orders
+            FROM wms.orders
             WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
           ) t
           WHERE rn > 1 AND normalized_id != ''
@@ -104,12 +104,12 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       // Delete order items first (foreign key constraint)
       const itemsResult = await db.execute(sql`
-        DELETE FROM order_items 
+        DELETE FROM wms.order_items 
         WHERE order_id IN (
           SELECT id FROM (
             SELECT id, 
               ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
-            FROM orders
+            FROM wms.orders
             WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
           ) t
           WHERE rn > 1
@@ -119,12 +119,12 @@ export function registerDiagnosticsRoutes(app: Express) {
 
       // Delete duplicate orders (keep earliest)
       const ordersResult = await db.execute(sql`
-        DELETE FROM orders 
+        DELETE FROM wms.orders 
         WHERE id IN (
           SELECT id FROM (
             SELECT id, 
               ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
-            FROM orders
+            FROM wms.orders
             WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
           ) t
           WHERE rn > 1
@@ -151,7 +151,7 @@ export function registerDiagnosticsRoutes(app: Express) {
           COUNT(*) as count,
           array_agg(id ORDER BY created_at) as order_ids,
           array_agg(warehouse_status) as statuses
-        FROM orders 
+        FROM wms.orders 
         WHERE warehouse_status IN ('ready', 'in_progress')
         GROUP BY order_number 
         HAVING COUNT(*) > 1
@@ -163,7 +163,7 @@ export function registerDiagnosticsRoutes(app: Express) {
         SELECT 
           order_number,
           COUNT(*) as count
-        FROM orders
+        FROM wms.orders
         WHERE source = 'shopify'
         GROUP BY order_number
         HAVING COUNT(*) > 1

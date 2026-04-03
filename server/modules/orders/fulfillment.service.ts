@@ -446,7 +446,7 @@ class FulfillmentService {
         const qty = si.qty ?? 1;
         if (si.orderItemId && qty > 0) {
           await tx.execute(sql`
-            UPDATE order_items
+            UPDATE wms.order_items
             SET picked_quantity = LEAST(quantity, picked_quantity + ${qty}),
                 fulfilled_quantity = LEAST(quantity, COALESCE(fulfilled_quantity, 0) + ${qty}),
                 status = CASE

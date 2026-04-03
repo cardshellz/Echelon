@@ -842,7 +842,7 @@ export const inventoryMethods: IInventoryStorage = {
         (SELECT MAX(ordered_at) FROM oms_orders) as latest_oms_order,
         (SELECT MAX(created_at) FROM orders) as latest_synced_order,
         (SELECT COUNT(*) FROM oms_orders oms
-         WHERE NOT EXISTS(SELECT 1 FROM orders WHERE order_number = oms.external_order_number)
+         WHERE NOT EXISTS(SELECT 1 FROM wms.orders WHERE order_number = oms.external_order_number)
          AND oms.created_at > NOW() - INTERVAL '24 hours'
          AND oms.cancelled_at IS NULL
          AND oms.fulfillment_status IS DISTINCT FROM 'fulfilled'
@@ -854,7 +854,7 @@ export const inventoryMethods: IInventoryStorage = {
   async getDebugOrderDates(orderNumber: string): Promise<Record<string, unknown> | null> {
     const result = await db.execute(sql`
       SELECT id, order_number, order_placed_at, shopify_created_at, created_at
-      FROM orders WHERE order_number LIKE ${'%' + orderNumber}
+      FROM wms.orders WHERE order_number LIKE ${'%' + orderNumber}
       LIMIT 1
     `);
     return (result.rows[0] as Record<string, unknown>) || null;
@@ -863,7 +863,7 @@ export const inventoryMethods: IInventoryStorage = {
   async getDebugSyncStatus(): Promise<{ missingCount: number; sampleOrders: Record<string, unknown>[] }> {
     const missing = await db.execute<{ count: string }>(sql`
       SELECT COUNT(*) as count FROM oms_orders
-      WHERE external_order_number NOT IN (SELECT order_number FROM orders WHERE order_number IS NOT NULL)
+      WHERE external_order_number NOT IN (SELECT order_number FROM wms.orders WHERE order_number IS NOT NULL)
     `);
 
     const sample = await db.execute<{
@@ -872,7 +872,7 @@ export const inventoryMethods: IInventoryStorage = {
       created_at: Date | null;
     }>(sql`
       SELECT id::text as id, external_order_number as order_number, created_at FROM oms_orders
-      WHERE external_order_number NOT IN (SELECT order_number FROM orders WHERE order_number IS NOT NULL)
+      WHERE external_order_number NOT IN (SELECT order_number FROM wms.orders WHERE order_number IS NOT NULL)
       ORDER BY created_at DESC
       LIMIT 5
     `);
