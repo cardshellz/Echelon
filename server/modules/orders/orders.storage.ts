@@ -238,7 +238,7 @@ export const orderMethods: IOrderStorage = {
     // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
-      wmsOrderId: row.order_id,
+      orderId: row.order_id,
       orderId: row.order_id,
       omsOrderLineId: row.oms_order_line_id,
       productId: row.product_id,
@@ -501,7 +501,7 @@ export const orderMethods: IOrderStorage = {
       await db
         .update(orderItems)
         .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.wmsOrderId, orderId));
+        .where(eq(orderItems.orderId, orderId));
     }
     
     return result[0] || null;
@@ -531,7 +531,7 @@ export const orderMethods: IOrderStorage = {
       await db
         .update(orderItems)
         .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.wmsOrderId, orderId));
+        .where(eq(orderItems.orderId, orderId));
     }
     
     return result[0] || null;
@@ -578,7 +578,7 @@ export const orderMethods: IOrderStorage = {
   },
 
   async getOrderItems(orderId: number): Promise<OrderItem[]> {
-    return await db.select().from(orderItems).where(eq(orderItems.wmsOrderId, orderId));
+    return await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
   },
 
   async getOrderItemById(itemId: number): Promise<OrderItem | undefined> {
@@ -739,7 +739,7 @@ export const orderMethods: IOrderStorage = {
     
     const result: (Order & { items: OrderItem[] })[] = [];
     for (const order of exceptionOrders) {
-      const items = await db.select().from(orderItems).where(eq(orderItems.wmsOrderId, order.id));
+      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
       result.push({ ...order, items });
     }
     
