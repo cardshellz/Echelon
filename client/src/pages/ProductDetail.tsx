@@ -2509,7 +2509,9 @@ export default function ProductDetail() {
                   const primaryAsset = product.assets?.find((a) => a.isPrimary === 1) || product.assets?.[0];
                   return primaryAsset ? (
                     <img
-                      src={primaryAsset.url}
+                      src={(primaryAsset as any).storageType === "file" || (primaryAsset as any).storageType === "both"
+                        ? `/api/product-assets/${primaryAsset.id}/file`
+                        : primaryAsset.url}
                       alt={primaryAsset.altText || product.name}
                       className="w-full h-full object-cover"
                     />

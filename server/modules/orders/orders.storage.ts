@@ -282,12 +282,16 @@ export const orderMethods: IOrderStorage = {
             SELECT pl.sku, pl.image_url FROM product_locations pl
             WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
-            SELECT pv.sku, COALESCE(pva.url, pa.url) as image_url
+            SELECT pv.sku, 
+              COALESCE(
+                CASE WHEN pva.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pva.id || '/file' ELSE pva.url END,
+                CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END
+              ) as image_url
             FROM catalog.product_variants pv
             LEFT JOIN catalog.product_assets pva ON pva.product_variant_id = pv.id AND pva.is_primary = 1
             LEFT JOIN catalog.product_assets pa ON pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1
             WHERE UPPER(pv.sku) IN (${imageSkuList})
-              AND COALESCE(pva.url, pa.url) IS NOT NULL
+              AND (pva.id IS NOT NULL OR pa.id IS NOT NULL)
           ) sub
         `);
         for (const row of imageResults.rows) {

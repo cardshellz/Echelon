@@ -337,8 +337,8 @@ export const productMethods: IProductStorage = {
         WHERE UPPER(pl.sku) = ${upperSku} AND pl.image_url IS NOT NULL
         UNION ALL
         SELECT COALESCE(
-          (SELECT pa.url FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
-          (SELECT pa.url FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
+          (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_variant_id = pv.id AND pa.is_primary = 1 LIMIT 1),
+          (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = pv.product_id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1)
         ) as image_url
         FROM product_variants pv
         WHERE UPPER(pv.sku) = ${upperSku}
@@ -375,7 +375,7 @@ export const productMethods: IProductStorage = {
         warehouseLocationId: productLocations.warehouseLocationId,
         warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
-        imageUrl: sql<string | null>`(SELECT url FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+        imageUrl: sql<string | null>`(SELECT CASE WHEN storage_type IN ('file', 'both') THEN '/api/product-assets/' || id || '/file' ELSE url END FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
         updatedAt: productLocations.updatedAt,
       })
       .from(products)
@@ -398,7 +398,7 @@ export const productMethods: IProductStorage = {
         shopifyProductId: products.shopifyProductId,
         sku: products.sku,
         title: sql<string>`COALESCE(${products.title}, ${products.name})`.as('title'),
-        imageUrl: sql<string | null>`(SELECT url FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+        imageUrl: sql<string | null>`(SELECT CASE WHEN storage_type IN ('file', 'both') THEN '/api/product-assets/' || id || '/file' ELSE url END FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
       })
       .from(products)
       .leftJoin(productLocations, eq(products.id, productLocations.productId))
@@ -512,7 +512,7 @@ export const productMethods: IProductStorage = {
         pv.name as variant_name,
         p.sku as product_sku,
         COALESCE(p.title, p.name) as product_title,
-        (SELECT pa.url FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
+        (SELECT CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END FROM product_assets pa WHERE pa.product_id = p.id AND pa.product_variant_id IS NULL AND pa.is_primary = 1 LIMIT 1) as image_url
       FROM product_variants pv
       JOIN products p ON p.id = pv.product_id
       WHERE pv.is_active = true
