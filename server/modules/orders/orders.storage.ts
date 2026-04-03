@@ -143,13 +143,13 @@ export const orderMethods: IOrderStorage = {
     
     const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
     const allItems = await db.execute(sql`
-      SELECT * FROM public.order_items 
-      WHERE order_id IN (${idList})
+      SELECT * FROM wms.order_items 
+      WHERE wms_order_id IN (${idList})
     `);
     
     const itemsByOrderId = new Map<number, any[]>();
     for (const item of allItems.rows) {
-      const orderId = (item as any).order_id as number;
+      const orderId = (item as any).wms_order_id as number;
       const existing = itemsByOrderId.get(orderId) || [];
       existing.push(item);
       itemsByOrderId.set(orderId, existing);
@@ -165,7 +165,7 @@ export const orderMethods: IOrderStorage = {
     
     const orderList = await db.execute(sql`
       SELECT o.*
-      FROM public.orders o
+      FROM wms.orders o
       LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
@@ -175,11 +175,8 @@ export const orderMethods: IOrderStorage = {
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
       ORDER BY
-        o.on_hold ASC,           -- Held orders sink to the bottom
-        CASE WHEN o.priority >= 9999 THEN 1 ELSE 0 END DESC, -- Bumped orders always float to top
-        CASE WHEN s.value = 'true' THEN 0 ELSE o.priority END DESC, -- Bypass standard priority scoring if FIFO enabled
-        o.sla_due_at ASC NULLS LAST,
-        COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
+        o.on_hold ASC,
+        COALESCE(o.order_placed_at, o.created_at) ASC
     `);
     
     const orderRows = (orderList.rows as any[]).map((row: any) => ({
@@ -231,33 +228,43 @@ export const orderMethods: IOrderStorage = {
     const orderIds = orderRows.map((o: any) => o.id);
     const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
-      SELECT * FROM public.order_items 
-      WHERE order_id IN (${idList})
+      SELECT * FROM wms.order_items 
+      WHERE wms_order_id IN (${idList})
     `);
     
-    // Map raw legacy items to the expected structure
+    // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
-      wmsOrderId: row.order_id,
+      wmsOrderId: row.wms_order_id,
+      orderId: row.wms_order_id,
+      omsOrderLineId: row.oms_order_line_id,
+      productId: row.product_id,
       sku: row.sku,
-      title: row.title,
+      name: row.name,
+      title: row.name,
       barcode: row.barcode,
       quantity: row.quantity,
       pickedQuantity: row.picked_quantity,
-      price: row.price,
+      fulfilledQuantity: row.fulfilled_quantity,
       requiresShipping: row.requires_shipping,
-      taxable: row.taxable,
-      fulfillmentStatus: row.fulfillment_status,
       status: row.status,
-      assignedPickerId: row.assigned_picker_id,
-      pickerName: row.picker_name,
+      location: row.location,
+      zone: row.zone,
+      shortReason: row.short_reason,
+      pickedAt: row.picked_at,
       imageUrl: row.image_url,
-      locationId: row.location_id,
-      locationPath: row.location_path,
-      binLocation: row.bin_location,
-      notes: row.notes,
-      sourceTableId: row.source_table_id,
-      externalOrderItemId: row.external_order_item_id
+      // Fields not in wms schema — default values for compatibility
+      price: null,
+      taxable: null,
+      fulfillmentStatus: null,
+      assignedPickerId: null,
+      pickerName: null,
+      locationId: null,
+      locationPath: null,
+      binLocation: row.location,
+      notes: null,
+      sourceTableId: null,
+      externalOrderItemId: null,
     }));
     
     const skusMissingImages = Array.from(new Set(
