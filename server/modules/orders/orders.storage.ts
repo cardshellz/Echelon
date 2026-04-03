@@ -141,10 +141,10 @@ export const orderMethods: IOrderStorage = {
     const orderIds = orderList.map(o => o.id);
     if (orderIds.length === 0) return [];
     
-    // We must hit public.order_items because the legacy orders are there
+    const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
     const allItems = await db.execute(sql`
       SELECT * FROM public.order_items 
-      WHERE order_id = ANY(${orderIds}::int[])
+      WHERE order_id IN (${idList})
     `);
     
     const itemsByOrderId = new Map<number, any[]>();
@@ -229,10 +229,11 @@ export const orderMethods: IOrderStorage = {
       return [];
     }
     
-    const orderIds = orderRows.map(o => o.id);
+    const orderIds = orderRows.map((o: any) => o.id);
+    const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
       SELECT * FROM public.order_items 
-      WHERE order_id = ANY(${orderIds}::int[])
+      WHERE order_id IN (${idList})
     `);
     
     // Map raw legacy items to the expected structure
