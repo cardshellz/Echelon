@@ -198,7 +198,6 @@ export type OrderItem = typeof orderItems.$inferSelect;
 // WMS SHADOW TABLES (Namespace wms.*)
 // ============================================
 
-export const wmsSchema = pgSchema("wms");
 
 export const wmsOrders = wmsSchema.table("orders", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),

@@ -239,7 +239,6 @@ export const orderMethods: IOrderStorage = {
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
       orderId: row.order_id,
-      orderId: row.order_id,
       omsOrderLineId: row.oms_order_line_id,
       productId: row.product_id,
       sku: row.sku,
