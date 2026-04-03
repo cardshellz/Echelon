@@ -237,7 +237,7 @@ export type WmsOrder = typeof wmsOrders.$inferSelect;
 
 export const wmsOrderItems = wmsSchema.table("order_items", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-  wmsOrderId: integer("wms_order_id").notNull().references(() => wmsOrders.id, { onDelete: "cascade" }),
+  orderId: integer("order_id").notNull().references(() => wmsOrders.id, { onDelete: "cascade" }),
   omsOrderLineId: integer("oms_order_line_id"),
   productId: integer("product_id"),
   sku: varchar("sku", { length: 100 }).notNull(),
