@@ -1,12 +1,12 @@
 import {
-  type WmsOrder as Order,
-  type InsertWmsOrder as InsertOrder,
-  type WmsOrderItem as OrderItem,
-  type InsertWmsOrderItem as InsertOrderItem,
+  type Order,
+  type InsertOrder,
+  type OrderItem,
+  type InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
-  wmsOrders as orders,
-  wmsOrderItems as orderItems,
+  orders,
+  orderItems,
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
@@ -33,8 +33,8 @@ export interface IOrderStorage {
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number, postPickStatus?: string): Promise<Order | null>;
 
-  updateItemFulfilledQuantity(omsOrderLineId: number, additionalQty: number): Promise<OrderItem | null>;
-  getOrderItemByShopifyLineId(omsOrderLineId: number): Promise<OrderItem | undefined>;
+  updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null>;
+  getOrderItemByShopifyLineId(shopifyLineItemId: number): Promise<OrderItem | undefined>;
   areAllItemsFulfilled(orderId: number): Promise<boolean>;
 
   getOrderByOrderNumber(orderNumber: string): Promise<Order | undefined>;
@@ -187,7 +187,7 @@ export const orderMethods: IOrderStorage = {
       channelId: row.channel_id,
       source: row.source,
       externalOrderId: row.external_order_id,
-      omsFulfillmentOrderId: row.source_table_id,
+      sourceTableId: row.source_table_id,
       orderNumber: row.order_number,
       customerName: row.customer_name,
       customerEmail: row.customer_email,
@@ -330,9 +330,9 @@ export const orderMethods: IOrderStorage = {
     
     const itemsByOrderId = new Map<number, OrderItem[]>();
     for (const item of enrichedItems) {
-      const existing = itemsByOrderId.get(item.wmsOrderId) || [];
+      const existing = itemsByOrderId.get(item.orderId) || [];
       existing.push(item);
-      itemsByOrderId.set(item.wmsOrderId, existing);
+      itemsByOrderId.set(item.orderId, existing);
     }
     
     for (const order of orderRows) {
@@ -376,10 +376,10 @@ export const orderMethods: IOrderStorage = {
         return existingByShopifyId;
       }
     }
-    if (order.omsFulfillmentOrderId) {
-      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.omsFulfillmentOrderId, order.omsFulfillmentOrderId));
+    if (order.sourceTableId) {
+      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.sourceTableId, order.sourceTableId));
       if (existingBySourceTableId.length > 0) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by omsFulfillmentOrderId: ${order.omsFulfillmentOrderId}`);
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`);
         return existingBySourceTableId[0];
       }
     }
@@ -394,7 +394,7 @@ export const orderMethods: IOrderStorage = {
         const { orderId, ...rest } = item;
         return {
           ...rest,
-          wmsOrderId: newOrder.id,
+          orderId: newOrder.id,
         };
       });
       await db.insert(orderItems).values(itemsWithOrderId);
@@ -687,16 +687,16 @@ export const orderMethods: IOrderStorage = {
   },
 
 
-  async getOrderItemByShopifyLineId(omsOrderLineId: number): Promise<OrderItem | undefined> {
+  async getOrderItemByShopifyLineId(shopifyLineItemId: number): Promise<OrderItem | undefined> {
     const result = await db
       .select()
       .from(orderItems)
-      .where(eq(orderItems.omsOrderLineId, omsOrderLineId));
+      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId));
     return result[0];
   },
 
-  async updateItemFulfilledQuantity(omsOrderLineId: number, additionalQty: number): Promise<OrderItem | null> {
-    const item = await this.getOrderItemByShopifyLineId(omsOrderLineId);
+  async updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null> {
+    const item = await this.getOrderItemByShopifyLineId(shopifyLineItemId);
     if (!item) return null;
     
     const newFulfilledQty = Math.min(
@@ -707,7 +707,7 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .update(orderItems)
       .set({ fulfilledQuantity: newFulfilledQty })
-      .where(eq(orderItems.omsOrderLineId, omsOrderLineId))
+      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId))
       .returning();
     
     return result[0] || null;

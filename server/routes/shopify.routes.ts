@@ -173,7 +173,7 @@ export function registerShopifyRoutes(app: Express) {
       
       for (const rawOrder of rawOrderRows) {
         // Check if order already exists in operational table
-        const existingOrder = await storage.getOrderByShopifyId(rawOrder.id);
+        const existingOrder = await storage.getOrderByExternalId(rawOrder.id);
         if (existingOrder) {
           skipped++;
           continue;
@@ -253,7 +253,7 @@ export function registerShopifyRoutes(app: Express) {
           financialStatus: rawOrder.financial_status,
           shopifyFulfillmentStatus: rawOrder.fulfillment_status,
           cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
-          priority: "normal",
+          priority: 100,
           warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
@@ -498,7 +498,7 @@ export function registerShopifyRoutes(app: Express) {
     const activeOrders = allOrders.filter(o => 
       o.warehouseStatus !== "shipped" && 
       o.warehouseStatus !== "cancelled" && 
-      o.shopifyOrderId
+      o.externalOrderId
     );
     
     console.log(`Fulfillment sync: ${activeOrders.length} active orders to check (not shipped/cancelled, have Shopify ID)`);
@@ -509,8 +509,8 @@ export function registerShopifyRoutes(app: Express) {
     
     // Get their Shopify IDs
     const shopifyOrderIds = activeOrders
-      .filter(o => o.shopifyOrderId)
-      .map(o => o.shopifyOrderId!);
+      .filter(o => o.externalOrderId)
+      .map(o => o.externalOrderId!);
     
     if (shopifyOrderIds.length === 0) {
       return { shipped: 0, cancelled: 0, checked: 0 };
@@ -525,13 +525,13 @@ export function registerShopifyRoutes(app: Express) {
     let cancelled = 0;
     
     for (const status of fulfillmentStatuses) {
-      const order = activeOrders.find(o => o.shopifyOrderId === status.shopifyOrderId);
+      const order = activeOrders.find(o => o.externalOrderId === status.shopifyOrderId);
       if (!order) {
         console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
         continue;
       }
       
-      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.shopifyOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
+      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
       
       // If FULLY fulfilled in Shopify (all line items), mark as shipped
       // For partial fulfillments, we rely on webhooks to track individual line items
@@ -775,7 +775,7 @@ export function registerShopifyRoutes(app: Express) {
     lineItems: Array<{ id: number; quantity: number }>,
     source: string
   ): Promise<boolean> {
-    const order = await storage.getOrderByShopifyId(shopifyOrderId);
+    const order = await storage.getOrderByExternalId(shopifyOrderId);
     if (!order) {
       console.log(`Fulfillment ${source}: No order found for Shopify ID ${shopifyOrderId}`);
       return false;
@@ -792,7 +792,7 @@ export function registerShopifyRoutes(app: Express) {
       const shopifyLineItemId = String(lineItem.id);
       const fulfilledQty = lineItem.quantity;
       
-      const updated = await storage.updateItemFulfilledQuantity(shopifyLineItemId, fulfilledQty);
+      const updated = await storage.updateItemFulfilledQuantity(Number(shopifyLineItemId), fulfilledQty);
       if (updated) {
         itemsUpdated++;
         console.log(`Fulfillment ${source}: Updated line item ${shopifyLineItemId} +${fulfilledQty} fulfilled (now ${updated.fulfilledQuantity}/${updated.quantity})`);
@@ -815,9 +815,8 @@ export function registerShopifyRoutes(app: Express) {
     }
   }
   
-  // Helper to check order fulfillment status from Shopify (used by sync, not webhooks)
   async function checkOrderFulfillmentFromShopify(shopifyOrderId: string, source: string): Promise<void> {
-    const order = await storage.getOrderByShopifyId(shopifyOrderId);
+    const order = await storage.getOrderByExternalId(shopifyOrderId);
     if (!order || order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
       return;
     }
