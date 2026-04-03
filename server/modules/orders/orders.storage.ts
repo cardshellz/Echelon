@@ -1,12 +1,12 @@
 import {
-  type Order,
-  type InsertOrder,
-  type OrderItem,
-  type InsertOrderItem,
+  type WmsOrder as Order,
+  type InsertWmsOrder as InsertOrder,
+  type WmsOrderItem as OrderItem,
+  type InsertWmsOrderItem as InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
-  orders,
-  orderItems,
+  wmsOrders as orders,
+  wmsOrderItems as orderItems,
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
