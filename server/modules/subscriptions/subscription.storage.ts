@@ -74,7 +74,7 @@ export async function updatePlanDetails(
 export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord | null> {
   const result = await pool.query(
     `SELECT p.* FROM membership.plans p
-     JOIN selling_plan_map spm ON spm.plan_id = p.id
+     JOIN membership.selling_plan_map spm ON spm.plan_id = p.id
      WHERE spm.shopify_selling_plan_gid = $1 LIMIT 1`,
     [gid]
   );
@@ -97,7 +97,7 @@ export async function upsertSellingPlanMap(entry: {
   price_cents: number;
 }): Promise<void> {
   await pool.query(
-    `INSERT INTO selling_plan_map (shopify_selling_plan_gid, shopify_selling_plan_group_gid, plan_id, plan_name, billing_interval, price_cents, updated_at)
+    `INSERT INTO membership.selling_plan_map (shopify_selling_plan_gid, shopify_selling_plan_group_gid, plan_id, plan_name, billing_interval, price_cents, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, NOW())
      ON CONFLICT (shopify_selling_plan_gid) DO UPDATE SET
        plan_id = $3, plan_name = $4, billing_interval = $5, price_cents = $6, updated_at = NOW()`,
@@ -114,7 +114,7 @@ export async function getSellingPlanMap(): Promise<Array<{
   price_cents: number;
   is_active: boolean;
 }>> {
-  const result = await pool.query(`SELECT * FROM selling_plan_map ORDER BY plan_id`);
+  const result = await pool.query(`SELECT * FROM membership.selling_plan_map ORDER BY plan_id`);
   return result.rows;
 }
 

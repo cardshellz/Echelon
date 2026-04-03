@@ -1029,7 +1029,7 @@ export async function registerProductRoutes(app: Express) {
       // If setting as primary, unset existing primary
       if (isPrimary === "true" || isPrimary === "1") {
         await db.execute(sql`
-          UPDATE product_assets SET is_primary = 0
+          UPDATE catalog.product_assets SET is_primary = 0
           WHERE product_id = ${parseInt(productId)}
             ${productVariantId ? sql`AND product_variant_id = ${parseInt(productVariantId)}` : sql`AND product_variant_id IS NULL`}
         `);
@@ -1053,7 +1053,7 @@ export async function registerProductRoutes(app: Express) {
 
       // Store the actual file data
       await db.execute(sql`
-        UPDATE product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
+        UPDATE catalog.product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
       `);
 
       console.log(`[Assets] Uploaded file for product ${productId}: ${req.file.originalname} (${req.file.size} bytes)`);
@@ -1167,7 +1167,7 @@ export async function registerProductRoutes(app: Express) {
       // If setting as primary, unset existing primary
       if (isPrimary) {
         await db.execute(sql`
-          UPDATE product_assets SET is_primary = 0
+          UPDATE catalog.product_assets SET is_primary = 0
           WHERE product_id = ${productId}
             ${productVariantId ? sql`AND product_variant_id = ${productVariantId}` : sql`AND product_variant_id IS NULL`}
         `);
@@ -1213,7 +1213,7 @@ export async function registerProductRoutes(app: Express) {
 
       if (fileBuffer) {
         await db.execute(sql`
-          UPDATE product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
+          UPDATE catalog.product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
         `);
       }
 

@@ -746,10 +746,10 @@ export function registerPickingRoutes(app: Express) {
           new Date(completeLog.timestamp).getTime() - new Date(claimLog.timestamp).getTime() : null,
         totalItemsPicked: itemPicks.length,
         shortedItems: logs.filter(l => l.actionType === "item_shorted").length,
-        queueWaitMs: order.shopifyCreatedAt && claimLog ? 
-          new Date(claimLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
-        c2pMs: order.shopifyCreatedAt && completeLog ?
-          new Date(completeLog.timestamp).getTime() - new Date(order.shopifyCreatedAt).getTime() : null,
+        queueWaitMs: order.orderPlacedAt && claimLog ? 
+          new Date(claimLog.timestamp).getTime() - new Date(order.orderPlacedAt).getTime() : null,
+        c2pMs: order.orderPlacedAt && completeLog ?
+          new Date(completeLog.timestamp).getTime() - new Date(order.orderPlacedAt).getTime() : null,
       };
       
       res.json({ order, logs, metrics });
@@ -998,26 +998,7 @@ export function registerPickingRoutes(app: Express) {
         storage.getOrderHistoryCount(filters)
       ]);
       
-      const channelIds = Array.from(new Set(orders.map(o => o.channelId).filter(Boolean))) as number[];
-      const channelMap = new Map<number, { name: string; provider: string }>();
-      
-      for (const channelId of channelIds) {
-        const channel = await storage.getChannelById(channelId);
-        if (channel) {
-          channelMap.set(channelId, { name: channel.name, provider: channel.provider });
-        }
-      }
-      
-      const ordersWithChannel = orders.map(order => {
-        const channelInfo = order.channelId ? channelMap.get(order.channelId) : null;
-        return {
-          ...order,
-          channelName: channelInfo?.name || null,
-          channelProvider: channelInfo?.provider || order.source || null,
-        };
-      });
-      
-      res.json({ orders: ordersWithChannel, total });
+      res.json({ orders, total });
     } catch (error) {
       console.error("Error fetching order history:", error);
       res.status(500).json({ error: "Failed to fetch order history" });
@@ -1070,18 +1051,19 @@ export function registerPickingRoutes(app: Express) {
       
       const orders = await storage.getOrderHistory(filters);
       
-      const csvData = orders.map(order => ({
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        status: order.warehouseStatus,
-        priority: order.priority,
-        itemCount: order.itemCount,
-        pickedCount: order.pickedCount,
-        picker: order.pickerName || 'N/A',
-        createdAt: order.createdAt?.toISOString() || '',
-        completedAt: order.completedAt?.toISOString() || '',
-        shopifyOrderId: order.shopifyOrderId,
-      }));
+      const csvData = orders.map((order: any) => {
+        const totalItems = order.items?.reduce((sum: number, line: any) => sum + line.quantity, 0) || 0;
+        return {
+          orderNumber: order.externalOrderNumber,
+          customerName: order.customerName,
+          status: order.status,
+          financialStatus: order.financialStatus,
+          fulfillmentStatus: order.fulfillmentStatus,
+          itemCount: totalItems,
+          totalCents: order.totalCents,
+          orderedAt: order.orderedAt?.toISOString() || '',
+        };
+      });
       
       const csv = Papa.unparse(csvData);
       

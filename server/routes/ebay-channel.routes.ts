@@ -565,7 +565,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         await client.query(
-          "UPDATE products SET ebay_browse_category_id = $1, ebay_browse_category_name = $2 WHERE id = $3",
+          "UPDATE catalog.products SET ebay_browse_category_id = $1, ebay_browse_category_name = $2 WHERE id = $3",
           [ebayBrowseCategoryId || null, ebayBrowseCategoryName || null, productId]
         );
         res.json({ success: true, productId, ebayBrowseCategoryId: ebayBrowseCategoryId || null, ebayBrowseCategoryName: ebayBrowseCategoryName || null });
@@ -596,7 +596,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         await client.query(
-          "UPDATE product_variants SET ebay_listing_excluded = $1 WHERE id = $2",
+          "UPDATE catalog.product_variants SET ebay_listing_excluded = $1 WHERE id = $2",
           [excluded, variantId]
         );
         res.json({ success: true, variantId, excluded });
@@ -1458,7 +1458,7 @@ ${categoriesXml}
           const prodResult = await client.query(
             `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id,
                     ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-             FROM products WHERE id = $1 AND is_active = true`,
+             FROM catalog.products WHERE id = $1 AND is_active = true`,
             [productId],
           );
           if (prodResult.rows.length === 0) {
@@ -1485,7 +1485,7 @@ ${categoriesXml}
 
           // 3. Fetch images
           const imgResult = await client.query(
-            `SELECT url FROM product_assets WHERE product_id = $1 ORDER BY position ASC`,
+            `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
             [productId],
           );
           const imageUrls = imgResult.rows
@@ -2016,7 +2016,7 @@ ${categoriesXml}
             `SELECT id, name, sku, description, brand, product_type, ebay_browse_category_id,
                     ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override,
                     ebay_listing_excluded
-             FROM products WHERE id = $1 AND is_active = true`,
+             FROM catalog.products WHERE id = $1 AND is_active = true`,
             [productId],
           );
           if (prodResult.rows.length === 0) {
@@ -2055,7 +2055,7 @@ ${categoriesXml}
 
           // 3. Fetch images
           const imgResult = await client.query(
-            `SELECT url FROM product_assets WHERE product_id = $1 ORDER BY position ASC`,
+            `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
             [productId],
           );
           const imageUrls = imgResult.rows
@@ -2655,7 +2655,7 @@ ${categoriesXml}
             for (const po of prodOverrides.rows) aspects[po.aspect_name] = [po.aspect_value];
 
             const imgResult = await client.query(
-              `SELECT url FROM product_assets WHERE product_id = $1 ORDER BY position ASC`,
+              `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
               [productId],
             );
             const imageUrls = imgResult.rows
@@ -2867,9 +2867,9 @@ ${categoriesXml}
         const result = await client.query(
           `SELECT r.*,
                   CASE r.scope
-                    WHEN 'product' THEN (SELECT name FROM products WHERE id = r.scope_id::int LIMIT 1)
-                    WHEN 'variant' THEN (SELECT pv.name || ' (' || pv.sku || ')' FROM product_variants pv WHERE pv.id = r.scope_id::int LIMIT 1)
-                    WHEN 'category' THEN (SELECT pt.name FROM product_types pt WHERE pt.slug = r.scope_id LIMIT 1)
+                    WHEN 'product' THEN (SELECT name FROM catalog.products WHERE id = r.scope_id::int LIMIT 1)
+                    WHEN 'variant' THEN (SELECT pv.name || ' (' || pv.sku || ')' FROM catalog.product_variants pv WHERE pv.id = r.scope_id::int LIMIT 1)
+                    WHEN 'category' THEN (SELECT pt.name FROM catalog.product_types pt WHERE pt.slug = r.scope_id LIMIT 1)
                     ELSE NULL
                   END AS scope_label
            FROM channel_pricing_rules r
@@ -3015,7 +3015,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         const varResult = await client.query(
-          `SELECT pv.id, pv.product_id, pv.price_cents, pv.sku, pv.name FROM product_variants pv WHERE pv.id = $1`,
+          `SELECT pv.id, pv.product_id, pv.price_cents, pv.sku, pv.name FROM catalog.product_variants pv WHERE pv.id = $1`,
           [variantId],
         );
         if (varResult.rows.length === 0) { res.status(404).json({ error: "Variant not found" }); return; }
@@ -3215,7 +3215,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         await client.query(
-          "UPDATE products SET ebay_listing_excluded = $1 WHERE id = $2",
+          "UPDATE catalog.products SET ebay_listing_excluded = $1 WHERE id = $2",
           [excluded, productId]
         );
         res.json({ success: true, productId, excluded });
@@ -3246,7 +3246,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         await client.query(
-          `UPDATE products SET
+          `UPDATE catalog.products SET
              ebay_fulfillment_policy_override = $1,
              ebay_return_policy_override = $2,
              ebay_payment_policy_override = $3
@@ -3281,7 +3281,7 @@ ${categoriesXml}
       const client = await pool.connect();
       try {
         await client.query(
-          `UPDATE product_variants SET
+          `UPDATE catalog.product_variants SET
              ebay_fulfillment_policy_override = $1,
              ebay_return_policy_override = $2,
              ebay_payment_policy_override = $3
@@ -3312,7 +3312,7 @@ ${categoriesXml}
       try {
         const result = await client.query(
           `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-           FROM products WHERE id = $1`,
+           FROM catalog.products WHERE id = $1`,
           [productId]
         );
         if (result.rows.length === 0) {
@@ -3348,7 +3348,7 @@ ${categoriesXml}
       try {
         const result = await client.query(
           `SELECT ebay_fulfillment_policy_override, ebay_return_policy_override, ebay_payment_policy_override
-           FROM product_variants WHERE id = $1`,
+           FROM catalog.product_variants WHERE id = $1`,
           [variantId]
         );
         if (result.rows.length === 0) {
@@ -3422,13 +3422,13 @@ ${categoriesXml}
             }
 
             const existingResult = await client.query(
-              `SELECT url FROM product_assets WHERE product_id = $1`,
+              `SELECT url FROM catalog.product_assets WHERE product_id = $1`,
               [prod.product_id],
             );
             const existingUrls = new Set(existingResult.rows.map((r: any) => r.url));
 
             const posResult = await client.query(
-              `SELECT COALESCE(MAX(position), -1) AS max_pos FROM product_assets WHERE product_id = $1`,
+              `SELECT COALESCE(MAX(position), -1) AS max_pos FROM catalog.product_assets WHERE product_id = $1`,
               [prod.product_id],
             );
             let position = (posResult.rows[0]?.max_pos ?? -1) + 1;
@@ -3437,7 +3437,7 @@ ${categoriesXml}
             for (const url of ebayImageUrls) {
               if (!url || existingUrls.has(url)) continue;
               await client.query(
-                `INSERT INTO product_assets (product_id, asset_type, url, position, is_primary, storage_type, created_at)
+                `INSERT INTO catalog.product_assets (product_id, asset_type, url, position, is_primary, storage_type, created_at)
                  VALUES ($1, 'image', $2, $3, $4, 'url', NOW())`,
                 [prod.product_id, url, position, position === 0 ? 1 : 0],
               );
@@ -3620,7 +3620,7 @@ async function upsertChannelListing(
 async function upsertPushError(client: any, channelId: number, productId: number, error: string): Promise<void> {
   // Find all variant IDs for this product
   const varResult = await client.query(
-    `SELECT id FROM product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true LIMIT 1`,
+    `SELECT id FROM catalog.product_variants WHERE product_id = $1 AND sku IS NOT NULL AND is_active = true LIMIT 1`,
     [productId],
   );
   if (varResult.rows.length > 0) {
@@ -3682,7 +3682,7 @@ async function resolveChannelPrice(
 
   // 3. Check category-level rule (lookup product's product_type)
   const productTypeResult = await client.query(
-    `SELECT product_type FROM products WHERE id = $1`,
+    `SELECT product_type FROM catalog.products WHERE id = $1`,
     [productId],
   );
   if (productTypeResult.rows.length > 0 && productTypeResult.rows[0].product_type) {
@@ -3949,7 +3949,7 @@ async function syncActiveListings(filter: SyncFilter | null): Promise<{
 
       // Get images
       const imgResult = await client.query(
-        `SELECT url FROM product_assets WHERE product_id = $1 ORDER BY position ASC`,
+        `SELECT url FROM catalog.product_assets WHERE product_id = $1 ORDER BY position ASC`,
         [productId],
       );
       const imageUrls = imgResult.rows

@@ -12,8 +12,8 @@
 import { db } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
-import { orders as wmsOrders, orderItems } from "@shared/schema";
-import type { InsertOrder, InsertOrderItem } from "@shared/schema";
+import { wmsOrders, wmsOrderItems } from "@shared/schema";
+import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import type { ServiceRegistry } from "../../services";
 
 interface WmsSyncServices {
@@ -44,7 +44,7 @@ export class WmsSyncService {
         .from(wmsOrders)
         .where(
           and(
-            eq(wmsOrders.sourceTableId, String(omsOrderId)),
+            eq(wmsOrders.omsFulfillmentOrderId, String(omsOrderId)),
             eq(wmsOrders.source, 'oms') // Distinguish from legacy shopify orders
           )
         )
@@ -88,10 +88,10 @@ export class WmsSyncService {
         : "completed"; // Pure digital/donation/membership → skip pick queue
       const priority = await this.determinePriority(omsOrder);
 
-      const wmsOrderData: InsertOrder = {
+      const wmsOrderData: InsertWmsOrder = {
         channelId: omsOrder.channelId,
         source: "oms", // Mark as coming from OMS layer
-        sourceTableId: String(omsOrderId), // Link back to oms_orders for dedup
+        omsFulfillmentOrderId: String(omsOrderId), // Link back to oms_orders for dedup
         externalOrderId: omsOrder.externalOrderId,
         orderNumber: omsOrder.externalOrderNumber || `OMS-${omsOrderId}`,
         customerName: omsOrder.customerName || omsOrder.shipToName || `Order ${omsOrderId}`,
@@ -102,19 +102,15 @@ export class WmsSyncService {
         shippingState: omsOrder.shipToState || null,
         shippingPostalCode: omsOrder.shipToZip || null,
         shippingCountry: omsOrder.shipToCountry || "US",
-        financialStatus: omsOrder.financialStatus || "paid",
         priority,
         warehouseStatus,
         itemCount: omsLines.length,
         unitCount: omsLines.reduce((sum, line) => sum + (line.quantity || 0), 0),
-        totalAmount: omsOrder.totalCents ? String(omsOrder.totalCents / 100) : null,
-        currency: omsOrder.currency || "USD",
         orderPlacedAt: omsOrder.orderedAt,
-        shopifyCreatedAt: omsOrder.orderedAt, // Legacy field, use ordered_at
       };
 
       // 4. Map line items
-      const wmsLineItems: InsertOrderItem[] = [];
+      const wmsLineItems: InsertWmsOrderItem[] = [];
 
       for (const line of omsLines) {
         // Resolve product_variant_id and bin location from catalog
@@ -133,8 +129,8 @@ export class WmsSyncService {
         const itemRequiresShipping = line.requiresShipping !== false;
 
         wmsLineItems.push({
-          orderId: 0, // Will be set by createOrderWithItems
-          sourceItemId: line.externalLineItemId || null,
+          wmsOrderId: 0, // Will be set by createOrderWithItems
+          omsOrderLineId: line.id,
           sku: line.sku || "UNKNOWN",
           name: line.title || "Unknown Item",
           quantity: line.quantity || 0,
@@ -145,9 +141,6 @@ export class WmsSyncService {
           zone: binLocation?.zone || "U",
           productId: variantId, // Temporary mapping to satisfy schema
           requiresShipping: itemRequiresShipping ? 1 : 0,
-          priceCents: line.paidPriceCents || null,
-          discountCents: line.totalDiscountCents || 0,
-          totalPriceCents: line.totalPriceCents || null,
         });
       }
 

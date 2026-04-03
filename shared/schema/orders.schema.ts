@@ -118,8 +118,6 @@ export const orders = pgTable("orders", {
   metadata: jsonb("metadata"), // Extra data from external sources
 
   // ===== DISPLAY (legacy, for order cards) =====
-  totalAmount: text("total_amount"),
-  currency: varchar("currency", { length: 3 }).default("USD"),
   legacyOrderId: varchar("legacy_order_id", { length: 100 }), // Legacy order ID from external systems
 
   // ===== TIMESTAMPS =====
@@ -168,11 +166,6 @@ export const orderItems = pgTable("order_items", {
   name: text("name").notNull(),
   imageUrl: text("image_url"),
   barcode: varchar("barcode", { length: 100 }), // For scanner matching
-
-  // ===== FINANCIALS (from channel) =====
-  priceCents: integer("price_cents"), // Sale price per unit
-  discountCents: integer("discount_cents").default(0), // Per-unit discount
-  totalPriceCents: integer("total_price_cents"), // Line total after discount
 
   // ===== QUANTITIES =====
   quantity: integer("quantity").notNull(),
@@ -422,6 +415,9 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
+  boxId: varchar("box_id", { length: 100 }), // WMS Cartonization assigned box
+  weightOz: integer("weight_oz"), // Actual picked weight
+  trackingId: varchar("tracking_id", { length: 200 }), // Package tracking num if split into multiple tracking nums
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

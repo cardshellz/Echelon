@@ -8,9 +8,13 @@
  * This does NOT modify the existing Shopify flow. It's additive only.
  */
 
-import { sql } from "drizzle-orm";
+import { sql, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
+import { getShopifyConfig } from "../integrations/shopify";
+import { channelConnections } from "@shared/schema";
 
+
+import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
 
 /**
  * Bridge a Shopify order into the OMS.
@@ -26,62 +30,107 @@ export async function bridgeShopifyOrderToOms(
   shopifyOrderId: string,
 ): Promise<void> {
   try {
-    // Fetch from shopify_orders
+    // Fetch shop_domain and full order row from legacy table
     const rawOrderResult = await db.execute(sql`
-      SELECT
-        id, order_number, customer_name, customer_email,
-        shipping_name, shipping_address1, shipping_city,
-        shipping_state, shipping_postal_code, shipping_country,
-        total_price_cents, subtotal_price_cents, total_shipping_cents,
-        total_tax_cents, total_discounts_cents,
-        currency, order_date, financial_status, fulfillment_status,
-        cancelled_at, shop_domain
-      FROM shopify_orders
-      WHERE id = ${shopifyOrderId}
+      SELECT * FROM shopify_orders WHERE id = ${shopifyOrderId}
     `);
-
+    
     if (rawOrderResult.rows.length === 0) return;
-
-    const raw = rawOrderResult.rows[0] as any;
+    const raw = rawOrderResult.rows[0];
+    const orderDomain = raw.shop_domain;
 
     // Determine channel dynamically
-    const domainSearch = raw.shop_domain ? `%${raw.shop_domain}%` : "";
-    const connResult = await db.execute(sql`
-      SELECT channel_id FROM channel_connections 
-      WHERE shop_domain ILIKE ${domainSearch}
-      LIMIT 1
-    `);
+    let connResult;
+    if (orderDomain) {
+      connResult = await db.execute(sql`
+        SELECT * FROM channel_connections
+        WHERE shop_domain ILIKE ${`%${orderDomain}%`}
+        LIMIT 1
+      `);
+    } else {
+      // Legacy rows without shop_domain MUST default strictly to the primary US store 
+      // because is_default was accidentally pointing to the CA store in the DB
+      connResult = await db.execute(sql`
+        SELECT cc.* FROM channel_connections cc
+        JOIN channels c ON c.id = cc.channel_id
+        WHERE cc.shop_domain ILIKE '%card-shellz.myshopify.com%' AND c.provider = 'shopify'
+        LIMIT 1
+      `);
+    }
 
     if (connResult.rows.length === 0) {
-      console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown shop domain: ${raw.shop_domain}`);
+      console.warn(`[Shopify Bridge] Ignoring order ${shopifyOrderId} - unknown channel`);
       return;
     }
-    const channelId = connResult.rows[0].channel_id;
+    
+    const { channel_id: channelId } = connResult.rows[0];
 
-    // Fetch line items
-    const rawItems = await db.execute(sql`
-      SELECT
-        id, shopify_line_item_id, sku, name, title,
-        quantity, paid_price_cents, total_price_cents,
-        total_discount_cents, fulfillment_status
-      FROM shopify_order_items
-      WHERE order_id = ${shopifyOrderId}
+    const orderItemsResult = await db.execute(sql`
+      SELECT * FROM shopify_order_items WHERE order_id = ${shopifyOrderId}
     `);
+    const orderItems = orderItemsResult.rows;
 
-    const lineItems: LineItemData[] = (rawItems.rows as any[]).map((item: any) => ({
-      externalLineItemId: item.shopify_line_item_id,
-      sku: item.sku,
-      title: item.name || item.title,
-      quantity: item.quantity,
-      totalCents: item.total_price_cents || 0,
-      discountCents: item.total_discount_cents || 0,
-    }));
+    const discountCodesArray: string[] = raw.discount_codes || [];
 
-    // Map financial_status
+    const lineItems: LineItemData[] = orderItems.map((item: any) => {
+      let planDiscountCents = 0;
+      let couponDiscountCents = 0;
+      const discountAllocations = item.discount_allocations || [];
+      
+      for (const alloc of discountAllocations) {
+        const allocAmount = Math.round(parseFloat(alloc.amount || "0") * 100);
+        // Detect rewards
+        const isRewards = discountCodesArray.some((code: string) => 
+          code.toUpperCase().startsWith("SHELLZ-") || code.toUpperCase().includes("REWARDS")
+        );
+        
+        // Deduce app type
+        let appType = alloc.application_type;
+        if (!appType && alloc.discount_application_index !== undefined) {
+           if (discountCodesArray.length === 0) appType = "manual";
+        }
+
+        if (appType === "manual" && !isRewards) {
+          planDiscountCents += allocAmount;
+        } else {
+          couponDiscountCents += allocAmount;
+        }
+      }
+
+      const totalDiscountCents = planDiscountCents + couponDiscountCents;
+      
+      // Calculate retail price from legacy table's final totals + legacy discounts
+      const oldPlan = item.plan_discount_cents || 0;
+      const oldCoupon = item.coupon_discount_cents || 0;
+      const qty = item.quantity || 1;
+      const retailPriceCents = Math.round(((item.total_price_cents || 0) + oldPlan + oldCoupon) / qty);
+      
+      const paidPriceCents = Math.round(retailPriceCents - (totalDiscountCents / qty));
+      const totalCents = (retailPriceCents * qty) - totalDiscountCents;
+
+      return {
+        externalLineItemId: item.shopify_line_item_id || String(item.id),
+        sku: item.sku,
+        title: item.title,
+        quantity: qty,
+        paidPriceCents,
+        totalCents,
+        discountCents: totalDiscountCents,
+        planDiscountCents,
+        couponDiscountCents,
+        taxable: item.taxable !== false,
+        requiresShipping: item.requires_shipping !== false,
+        fulfillableQuantity: item.fulfillable_quantity ?? null,
+        fulfillmentService: item.fulfillment_service ?? null,
+        properties: item.properties || null,
+        taxLines: item.tax_lines || null,
+        discountAllocations: item.discount_allocations || null,
+      };
+    });
+
     let financialStatus = raw.financial_status || "paid";
     let fulfillmentStatus = raw.fulfillment_status || "unfulfilled";
 
-    // Determine OMS status
     let status = "pending";
     if (raw.cancelled_at) {
       status = "cancelled";
@@ -96,10 +145,11 @@ export async function bridgeShopifyOrderToOms(
       status,
       financialStatus,
       fulfillmentStatus,
-      customerName: raw.customer_name || raw.shipping_name,
-      customerEmail: raw.customer_email,
+      customerName: raw.customer_name || raw.shipping_name || "",
+      customerEmail: raw.customer_email || "",
       shipToName: raw.shipping_name,
       shipToAddress1: raw.shipping_address1,
+      shipToAddress2: raw.shipping_address2,
       shipToCity: raw.shipping_city,
       shipToState: raw.shipping_state,
       shipToZip: raw.shipping_postal_code,
@@ -110,13 +160,19 @@ export async function bridgeShopifyOrderToOms(
       discountCents: raw.total_discounts_cents || 0,
       totalCents: raw.total_price_cents || 0,
       currency: raw.currency || "USD",
-      orderedAt: raw.order_date ? new Date(raw.order_date) : new Date(),
+      taxExempt: raw.tax_exempt === true,
+      rawPayload: null, // we don't have the raw payload anymore
+      notes: raw.note,
+      tags: Array.isArray(raw.tags) ? raw.tags : (typeof raw.tags === 'string' ? raw.tags.split(",").map((t: string) => t.trim()) : []),
+      shippingMethod: null,
+      shippingMethodCode: null,
+      orderedAt: raw.created_at ? new Date(raw.created_at) : new Date(),
       lineItems,
     };
 
     await omsService.ingestOrder(channelId, shopifyOrderId, orderData);
   } catch (err: any) {
-    // Non-fatal: the WMS order is already created, this is supplementary
+    console.error(err);
     console.error(`[Shopify Bridge] Failed to bridge order ${shopifyOrderId} to OMS: ${err.message}`);
   }
 }

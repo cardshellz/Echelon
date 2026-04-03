@@ -2,77 +2,31 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import {
-  Search,
-  Filter,
-  Download,
-  X,
-  ChevronRight,
-  Clock,
-  Package,
-  User,
-  Calendar,
-  CheckCircle2,
-  AlertTriangle,
-  Truck,
-  XCircle,
-  ChevronDown,
-  ChevronUp,
-  ExternalLink,
+  Search, Filter, Download, X, ChevronRight, Package,
+  Calendar, CheckCircle2, AlertTriangle, Truck, XCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-import type { Order, OrderItem, PickingLog } from "@shared/schema";
+import type { OmsOrder, OmsOrderLine } from "@shared/schema";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
-type OrderWithItems = Order & { items: OrderItem[]; pickerName?: string; channelName?: string | null; channelProvider?: string | null };
+type OrderWithItems = OmsOrder & { items: OmsOrderLine[]; channelProvider?: string | null };
 
-// Channel badge styling helper
 function getChannelBadgeStyle(provider: string | null | undefined): { className: string; label: string } {
   switch (provider?.toLowerCase()) {
-    case "shopify":
-      return { className: "bg-green-100 text-green-700 border-green-300", label: "Shopify" };
-    case "amazon":
-      return { className: "bg-orange-100 text-orange-700 border-orange-300", label: "Amazon" };
-    case "ebay":
-      return { className: "bg-blue-100 text-blue-700 border-blue-300", label: "eBay" };
-    case "etsy":
-      return { className: "bg-orange-50 text-orange-600 border-orange-200", label: "Etsy" };
-    case "manual":
-      return { className: "bg-slate-100 text-slate-600 border-slate-300", label: "Manual" };
-    default:
-      return { className: "bg-gray-100 text-gray-600 border-gray-300", label: provider || "Unknown" };
+    case "shopify": return { className: "bg-green-100 text-green-700 border-green-300", label: "Shopify" };
+    case "amazon": return { className: "bg-orange-100 text-orange-700 border-orange-300", label: "Amazon" };
+    case "ebay": return { className: "bg-blue-100 text-blue-700 border-blue-300", label: "eBay" };
+    case "etsy": return { className: "bg-orange-50 text-orange-600 border-orange-200", label: "Etsy" };
+    default: return { className: "bg-gray-100 text-gray-600 border-gray-300", label: provider || "Unknown" };
   }
 }
 
@@ -81,31 +35,7 @@ const CHANNEL_OPTIONS = [
   { label: "Shopify", value: "shopify" },
   { label: "Amazon", value: "amazon" },
   { label: "eBay", value: "ebay" },
-  { label: "Etsy", value: "etsy" },
-  { label: "Manual", value: "manual" },
 ];
-
-interface ShipmentDetail {
-  id: number;
-  status: string;
-  carrier: string | null;
-  trackingNumber: string | null;
-  trackingUrl: string | null;
-  shippedAt: string | null;
-  deliveredAt: string | null;
-  createdAt: string;
-  source: string;
-  externalFulfillmentId: string | null;
-  items: Array<{ sku: string | null; name: string | null; qty: number }>;
-}
-
-interface OrderDetail {
-  order: Order;
-  items: OrderItem[];
-  pickingLogs: PickingLog[];
-  picker?: { id: string; displayName: string | null };
-  shipmentHistory: ShipmentDetail[];
-}
 
 const DATE_PRESETS = [
   { label: "Today", value: "today" },
@@ -116,114 +46,31 @@ const DATE_PRESETS = [
 
 const STATUS_OPTIONS = [
   { label: "All", value: "" },
-  { label: "Ready", value: "ready" },
-  { label: "In Progress", value: "in_progress" },
-  { label: "Completed", value: "completed" },
+  { label: "Pending", value: "pending" },
+  { label: "Confirmed", value: "confirmed" },
+  { label: "Processing", value: "processing" },
   { label: "Shipped", value: "shipped" },
-  { label: "Exception", value: "exception" },
+  { label: "Delivered", value: "delivered" },
   { label: "Cancelled", value: "cancelled" },
 ];
 
-const PRIORITY_OPTIONS = [
-  { label: "All", value: "" },
-  { label: "Rush", value: "rush" },
-  { label: "High", value: "high" },
-  { label: "Normal", value: "normal" },
-];
-
 function getStatusColor(status: string) {
-  switch (status) {
-    case "ready":
-      return "bg-sky-100 text-sky-800 border-sky-200";
-    case "in_progress":
-      return "bg-purple-100 text-purple-800 border-purple-200";
-    case "completed":
-      return "bg-green-100 text-green-800 border-green-200";
-    case "shipped":
-      return "bg-blue-100 text-blue-800 border-blue-200";
-    case "exception":
-      return "bg-amber-100 text-amber-800 border-amber-200";
-    case "cancelled":
-      return "bg-red-100 text-red-800 border-red-200";
-    default:
-      return "bg-gray-100 text-gray-800 border-gray-200";
+  switch (status?.toLowerCase()) {
+    case "pending": return "bg-sky-100 text-sky-800 border-sky-200";
+    case "confirmed": return "bg-purple-100 text-purple-800 border-purple-200";
+    case "processing": return "bg-amber-100 text-amber-800 border-amber-200";
+    case "shipped": case "delivered": return "bg-green-100 text-green-800 border-green-200";
+    case "cancelled": return "bg-red-100 text-red-800 border-red-200";
+    default: return "bg-gray-100 text-gray-800 border-gray-200";
   }
 }
 
-function getStatusIcon(status: string) {
-  switch (status) {
-    case "completed":
-      return <CheckCircle2 className="h-3.5 w-3.5" />;
-    case "shipped":
-      return <Truck className="h-3.5 w-3.5" />;
-    case "exception":
-      return <AlertTriangle className="h-3.5 w-3.5" />;
-    case "cancelled":
-      return <XCircle className="h-3.5 w-3.5" />;
-    default:
-      return null;
-  }
-}
-
-function getPriorityColor(priority: string) {
-  switch (priority) {
-    case "rush":
-      return "bg-red-100 text-red-800";
-    case "high":
-      return "bg-orange-100 text-orange-800";
-    default:
-      return "bg-gray-100 text-gray-600";
-  }
-}
-
-function getActionLabel(actionType: string): string {
-  switch (actionType) {
-    case "order_claimed":
-      return "Order Claimed";
-    case "order_released":
-      return "Order Released";
-    case "order_completed":
-      return "Order Completed";
-    case "item_picked":
-      return "Item Picked";
-    case "item_shorted":
-      return "Item Shorted";
-    case "item_quantity_adjusted":
-      return "Qty Adjusted";
-    case "order_held":
-      return "Order Held";
-    case "order_unhold":
-      return "Hold Released";
-    case "order_exception":
-      return "Exception Created";
-    case "exception_resolved":
-      return "Exception Resolved";
-    default:
-      return actionType;
-  }
-}
-
-function getPickMethodLabel(method: string | null): string {
-  switch (method) {
-    case "scan":
-      return "Scanned";
-    case "manual":
-      return "Manual (+1)";
-    case "pick_all":
-      return "Pick All";
-    case "short":
-      return "Shorted";
-    default:
-      return method || "";
-  }
-}
+interface OrderDetail { order: OmsOrder; items: OmsOrderLine[]; events: any[]; }
 
 export default function OrderHistory() {
   const [search, setSearch] = useState("");
   const [datePreset, setDatePreset] = useState("7days");
   const [status, setStatus] = useState("");
-  const [priority, setPriority] = useState("");
-  const [pickerId, setPickerId] = useState("");
   const [sku, setSku] = useState("");
   const [channel, setChannel] = useState("");
   const [page, setPage] = useState(0);
@@ -235,51 +82,33 @@ export default function OrderHistory() {
   const getDateRange = () => {
     const now = new Date();
     switch (datePreset) {
-      case "today":
-        return { startDate: startOfDay(now), endDate: endOfDay(now) };
-      case "7days":
-        return { startDate: startOfDay(subDays(now, 7)), endDate: endOfDay(now) };
-      case "30days":
-        return { startDate: startOfDay(subDays(now, 30)), endDate: endOfDay(now) };
-      default:
-        return {};
+      case "today": return { startDate: startOfDay(now), endDate: endOfDay(now) };
+      case "7days": return { startDate: startOfDay(subDays(now, 7)), endDate: endOfDay(now) };
+      case "30days": return { startDate: startOfDay(subDays(now, 30)), endDate: endOfDay(now) };
+      default: return {};
     }
   };
 
   const buildQueryParams = () => {
     const params = new URLSearchParams();
     const { startDate, endDate } = getDateRange();
-
     if (search) params.set("search", search);
     if (status && status !== "all") params.set("status", status);
-    if (priority && priority !== "all") params.set("priority", priority);
-    if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
     if (sku) params.set("sku", sku);
     if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
     params.set("limit", pageSize.toString());
     params.set("offset", (page * pageSize).toString());
-    
     return params.toString();
   };
 
-  const { data, isLoading, refetch } = useQuery<{ orders: OrderWithItems[]; total: number }>({
-    queryKey: ["orderHistory", search, datePreset, status, priority, pickerId, sku, channel, page],
+  const { data, isLoading } = useQuery<{ orders: OrderWithItems[]; total: number }>({
+    queryKey: ["orderHistory", search, datePreset, status, sku, channel, page],
     queryFn: async () => {
       const res = await fetch(`/api/orders/history?${buildQueryParams()}`);
       if (!res.ok) throw new Error("Failed to fetch order history");
       return res.json();
-    },
-  });
-
-  const { data: pickers } = useQuery<{ id: string; displayName: string | null; username: string }[]>({
-    queryKey: ["pickers"],
-    queryFn: async () => {
-      const res = await fetch("/api/users");
-      if (!res.ok) return [];
-      const users = await res.json();
-      return users.filter((u: any) => u.role === "picker" || u.role === "lead");
     },
   });
 
@@ -296,31 +125,17 @@ export default function OrderHistory() {
   const handleExport = () => {
     const params = new URLSearchParams();
     const { startDate, endDate } = getDateRange();
-    
     if (search) params.set("search", search);
     if (status && status !== "all") params.set("status", status);
-    if (priority && priority !== "all") params.set("priority", priority);
-    if (pickerId && pickerId !== "all") params.set("pickerId", pickerId);
     if (sku) params.set("sku", sku);
     if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
-
     window.location.href = `/api/orders/history/export?${params.toString()}`;
   };
 
-  const clearFilters = () => {
-    setSearch("");
-    setDatePreset("7days");
-    setStatus("");
-    setPriority("");
-    setPickerId("");
-    setSku("");
-    setChannel("");
-    setPage(0);
-  };
-
-  const hasActiveFilters = search || status || priority || pickerId || sku || channel || datePreset !== "7days";
+  const clearFilters = () => { setSearch(""); setDatePreset("7days"); setStatus(""); setSku(""); setChannel(""); setPage(0); };
+  const hasActiveFilters = search || status || sku || channel || datePreset !== "7days";
   const totalPages = data ? Math.ceil(data.total / pageSize) : 0;
 
   return (
@@ -329,11 +144,9 @@ export default function OrderHistory() {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-2 md:p-6">
           <div>
             <h1 className="text-xl md:text-2xl font-bold">Order History</h1>
-            <p className="text-xs md:text-sm text-muted-foreground">
-              Search and view all orders
-            </p>
+            <p className="text-xs md:text-sm text-muted-foreground">Search and view all orders</p>
           </div>
-          <Button variant="outline" onClick={handleExport} className="min-h-[44px]" data-testid="button-export">
+          <Button variant="outline" onClick={handleExport} className="min-h-[44px]">
             <Download className="h-4 w-4 mr-2" />
             <span className="hidden sm:inline">Export CSV</span>
             <span className="sm:hidden">Export</span>
@@ -343,254 +156,86 @@ export default function OrderHistory() {
         <div className="px-2 md:px-6 pb-4 flex flex-col sm:flex-row gap-2">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search order #, customer name..."
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-              className="pl-9 h-11"
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              data-testid="input-search"
-            />
+            <Input placeholder="Search order #, customer name..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(0); }} className="pl-9 h-11" autoComplete="off" />
           </div>
           <div className="flex gap-2">
             <Select value={datePreset} onValueChange={(v) => { setDatePreset(v); setPage(0); }}>
-              <SelectTrigger className="w-[140px] h-11" data-testid="select-date-preset">
-                <Calendar className="h-4 w-4 mr-2" />
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {DATE_PRESETS.map((preset) => (
-                  <SelectItem key={preset.value} value={preset.value}>
-                    {preset.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
+              <SelectTrigger className="w-[140px] h-11"><Calendar className="h-4 w-4 mr-2" /><SelectValue /></SelectTrigger>
+              <SelectContent>{DATE_PRESETS.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
             </Select>
 
             <Sheet open={filterOpen} onOpenChange={setFilterOpen}>
               <SheetTrigger asChild>
-                <Button variant="outline" className="min-h-[44px]" data-testid="button-filters">
+                <Button variant="outline" className="min-h-[44px]">
                   <Filter className="h-4 w-4 mr-2" />
                   Filters
-                  {hasActiveFilters && (
-                    <Badge variant="secondary" className="ml-2 h-5 px-1.5">
-                      {[search, status, priority, pickerId, sku].filter(Boolean).length + (datePreset !== "7days" ? 1 : 0)}
-                    </Badge>
-                  )}
+                  {hasActiveFilters && <Badge variant="secondary" className="ml-2 h-5 px-1.5">{[search, status, sku].filter(Boolean).length + (datePreset !== "7days" ? 1 : 0)}</Badge>}
                 </Button>
               </SheetTrigger>
               <SheetContent className="max-h-[90vh] overflow-y-auto">
-                <SheetHeader>
-                  <SheetTitle>Filters</SheetTitle>
-                </SheetHeader>
+                <SheetHeader><SheetTitle>Filters</SheetTitle></SheetHeader>
                 <div className="mt-6 space-y-6">
                   <div>
                     <label className="text-sm font-medium mb-2 block">Status</label>
                     <Select value={status} onValueChange={(v) => { setStatus(v); setPage(0); }}>
-                      <SelectTrigger className="h-11" data-testid="select-status">
-                        <SelectValue placeholder="All statuses" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {STATUS_OPTIONS.map((opt) => (
-                          <SelectItem key={opt.value} value={opt.value || "all"}>
-                            {opt.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
+                      <SelectTrigger className="h-11"><SelectValue placeholder="All statuses" /></SelectTrigger>
+                      <SelectContent>{STATUS_OPTIONS.map(opt => <SelectItem key={opt.value} value={opt.value || "all"}>{opt.label}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>
-
-                  <div>
-                    <label className="text-sm font-medium mb-2 block">Priority</label>
-                    <Select value={priority} onValueChange={(v) => { setPriority(v); setPage(0); }}>
-                      <SelectTrigger className="h-11" data-testid="select-priority">
-                        <SelectValue placeholder="All priorities" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {PRIORITY_OPTIONS.map((opt) => (
-                          <SelectItem key={opt.value} value={opt.value || "all"}>
-                            {opt.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div>
-                    <label className="text-sm font-medium mb-2 block">Picker</label>
-                    <Select value={pickerId} onValueChange={(v) => { setPickerId(v); setPage(0); }}>
-                      <SelectTrigger className="h-11" data-testid="select-picker">
-                        <SelectValue placeholder="All pickers" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">All pickers</SelectItem>
-                        {pickers?.map((picker) => (
-                          <SelectItem key={picker.id} value={picker.id}>
-                            {picker.displayName || picker.username}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
                   <div>
                     <label className="text-sm font-medium mb-2 block">Contains SKU</label>
-                    <Input
-                      placeholder="Enter SKU..."
-                      value={sku}
-                      onChange={(e) => { setSku(e.target.value); setPage(0); }}
-                      className="h-11"
-                      autoComplete="off"
-                      autoCorrect="off"
-                      autoCapitalize="off"
-                      spellCheck={false}
-                      data-testid="input-sku"
-                    />
+                    <Input placeholder="Enter SKU..." value={sku} onChange={(e) => { setSku(e.target.value); setPage(0); }} className="h-11" />
                   </div>
-
                   <div>
                     <label className="text-sm font-medium mb-2 block">Channel</label>
                     <Select value={channel} onValueChange={(v) => { setChannel(v); setPage(0); }}>
-                      <SelectTrigger className="h-11" data-testid="select-channel">
-                        <SelectValue placeholder="All channels" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CHANNEL_OPTIONS.map((opt) => (
-                          <SelectItem key={opt.value} value={opt.value || "all"}>
-                            {opt.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
+                      <SelectTrigger className="h-11"><SelectValue placeholder="All channels" /></SelectTrigger>
+                      <SelectContent>{CHANNEL_OPTIONS.map(opt => <SelectItem key={opt.value} value={opt.value || "all"}>{opt.label}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>
-
                   <div className="flex gap-2 pt-4">
-                    <Button variant="outline" onClick={clearFilters} className="flex-1 min-h-[44px]" data-testid="button-clear-filters">
-                      Clear All
-                    </Button>
-                    <Button onClick={() => setFilterOpen(false)} className="flex-1 min-h-[44px]" data-testid="button-apply-filters">
-                      Apply
-                    </Button>
+                    <Button variant="outline" onClick={clearFilters} className="flex-1 min-h-[44px]">Clear All</Button>
+                    <Button onClick={() => setFilterOpen(false)} className="flex-1 min-h-[44px]">Apply</Button>
                   </div>
                 </div>
               </SheetContent>
             </Sheet>
           </div>
         </div>
-
-        {hasActiveFilters && (
-          <div className="px-2 md:px-6 pb-3 flex flex-wrap gap-2">
-            {search && (
-              <Badge variant="secondary" className="gap-1">
-                Order: {search}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setSearch("")} />
-              </Badge>
-            )}
-            {status && (
-              <Badge variant="secondary" className="gap-1">
-                Status: {status}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setStatus("")} />
-              </Badge>
-            )}
-            {priority && (
-              <Badge variant="secondary" className="gap-1">
-                Priority: {priority}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setPriority("")} />
-              </Badge>
-            )}
-            {pickerId && (
-              <Badge variant="secondary" className="gap-1">
-                Picker: {pickers?.find(p => p.id === pickerId)?.displayName || pickerId}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setPickerId("")} />
-              </Badge>
-            )}
-            {sku && (
-              <Badge variant="secondary" className="gap-1">
-                SKU: {sku}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setSku("")} />
-              </Badge>
-            )}
-            {channel && (
-              <Badge variant="secondary" className="gap-1" data-testid="badge-filter-channel">
-                Channel: {CHANNEL_OPTIONS.find(c => c.value === channel)?.label || channel}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setChannel("")} data-testid="button-remove-channel-filter" />
-              </Badge>
-            )}
-            {datePreset !== "7days" && (
-              <Badge variant="secondary" className="gap-1">
-                Date: {DATE_PRESETS.find(p => p.value === datePreset)?.label}
-                <X className="h-3 w-3 cursor-pointer" onClick={() => setDatePreset("7days")} />
-              </Badge>
-            )}
-          </div>
-        )}
       </div>
 
       <div className="flex-1 overflow-hidden flex">
         <div className="flex-1 overflow-auto">
           {isLoading ? (
-            <div className="p-4 space-y-3">
-              {[...Array(10)].map((_, i) => (
-                <Skeleton key={i} className="h-16 w-full" />
-              ))}
-            </div>
+            <div className="p-4 space-y-3">{[...Array(10)].map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
           ) : data?.orders.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
-              <Package className="h-12 w-12 mb-4 opacity-50" />
-              <p>No orders found</p>
-              <p className="text-sm">Try adjusting your filters</p>
-            </div>
+            <div className="flex flex-col items-center justify-center h-64 text-muted-foreground"><Package className="h-12 w-12 mb-4 opacity-50" /><p>No orders found</p></div>
           ) : (
             <>
               {/* Mobile card layout */}
               <div className="md:hidden p-2 space-y-3">
-                {data?.orders.map((order) => (
-                  <Card
-                    key={order.id}
-                    className={cn(
-                      "cursor-pointer transition-colors hover:bg-muted/50",
-                      selectedOrderId === order.id && "bg-muted"
-                    )}
-                    onClick={() => setSelectedOrderId(order.id)}
-                    data-testid={`card-order-${order.id}`}
-                  >
+                {data?.orders.map((order) => {
+                  const itemCount = order.items?.reduce((sum, item) => sum + item.quantity, 0) || 0;
+                  return (
+                  <Card key={order.id} className={cn("cursor-pointer transition-colors hover:bg-muted/50", selectedOrderId === order.id && "bg-muted")} onClick={() => setSelectedOrderId(order.id)}>
                     <CardContent className="p-3">
                       <div className="flex items-start justify-between mb-2">
                         <div>
-                          <div className="font-medium text-sm flex items-center gap-2">
-                            #{order.orderNumber}
-                            {order.priority !== "normal" && (
-                              <Badge variant="outline" className={`text-xs ${getPriorityColor(order.priority)}`}>
-                                {order.priority}
-                              </Badge>
-                            )}
-                          </div>
+                          <div className="font-medium text-sm flex items-center gap-2">#{order.externalOrderNumber}</div>
                           <p className="text-sm text-muted-foreground">{order.customerName}</p>
                         </div>
-                        <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
-                          {getStatusIcon(order.warehouseStatus)}
-                          {order.warehouseStatus}
-                        </Badge>
+                        <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>{order.status}</Badge>
                       </div>
                       <div className="flex items-center justify-between text-sm">
                         <div className="flex items-center gap-3 text-muted-foreground">
-                          <span className="flex items-center gap-1">
-                            <Calendar className="h-3.5 w-3.5" />
-                            {order.completedAt ? format(new Date(order.completedAt), "MMM d") : "—"}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <Package className="h-3.5 w-3.5" />
-                            {order.pickedCount}/{order.itemCount}
-                          </span>
+                          <span className="flex items-center gap-1"><Calendar className="h-3.5 w-3.5" />{order.orderedAt ? format(new Date(order.orderedAt), "MMM d") : "—"}</span>
+                          <span className="flex items-center gap-1"><Package className="h-3.5 w-3.5" />{itemCount}</span>
                         </div>
                         <ChevronRight className="h-4 w-4 text-muted-foreground" />
                       </div>
                     </CardContent>
                   </Card>
-                ))}
+                )})}
               </div>
 
               {/* Desktop table layout */}
@@ -602,114 +247,61 @@ export default function OrderHistory() {
                       <TableHead>Channel</TableHead>
                       <TableHead>Customer</TableHead>
                       <TableHead>Items</TableHead>
-                      <TableHead>Picker</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead>Order Date</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data?.orders.map((order) => (
-                      <TableRow
-                        key={order.id}
-                        className={`cursor-pointer hover:bg-muted/50 ${selectedOrderId === order.id ? 'bg-muted' : ''}`}
-                        onClick={() => setSelectedOrderId(order.id)}
-                        data-testid={`row-order-${order.id}`}
-                      >
-                        <TableCell className="font-medium">
-                          #{order.orderNumber}
-                          {order.priority !== "normal" && (
-                            <Badge variant="outline" className={`ml-2 text-xs ${getPriorityColor(order.priority)}`}>
-                              {order.priority}
-                            </Badge>
-                          )}
-                        </TableCell>
+                    {data?.orders.map((order) => {
+                      const itemCount = order.items?.reduce((sum, item) => sum + item.quantity, 0) || 0;
+                      return (
+                      <TableRow key={order.id} className={`cursor-pointer hover:bg-muted/50 ${selectedOrderId === order.id ? 'bg-muted' : ''}`} onClick={() => setSelectedOrderId(order.id)}>
+                        <TableCell className="font-medium">#{order.externalOrderNumber}</TableCell>
                         <TableCell>
                           {order.channelProvider ? (
-                            <Badge variant="outline" className={cn("text-xs", getChannelBadgeStyle(order.channelProvider).className)} data-testid={`badge-channel-${order.id}`}>
+                            <Badge variant="outline" className={cn("text-xs", getChannelBadgeStyle(order.channelProvider).className)}>
                               {getChannelBadgeStyle(order.channelProvider).label}
                             </Badge>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
+                          ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
                         <TableCell>{order.customerName}</TableCell>
+                        <TableCell><span className="text-muted-foreground">{itemCount}</span></TableCell>
                         <TableCell>
-                          <span className="text-muted-foreground">
-                            {order.pickedCount}/{order.itemCount}
-                          </span>
+                          <Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>{order.status}</Badge>
                         </TableCell>
-                        <TableCell>{order.pickerName || "—"}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
-                            {getStatusIcon(order.warehouseStatus)}
-                            {order.warehouseStatus}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {(order.orderPlacedAt || order.createdAt) ? format(new Date(order.orderPlacedAt || order.createdAt), "MMM d, h:mm a") : "—"}
-                        </TableCell>
-                        <TableCell>
-                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                        </TableCell>
+                        <TableCell className="text-muted-foreground">{order.orderedAt ? format(new Date(order.orderedAt), "MMM d, h:mm a") : "—"}</TableCell>
+                        <TableCell><ChevronRight className="h-4 w-4 text-muted-foreground" /></TableCell>
                       </TableRow>
-                    ))}
+                    )})}
                   </TableBody>
                 </Table>
               </div>
 
               {totalPages > 1 && (
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-2 p-2 md:p-4 border-t">
-                  <p className="text-xs md:text-sm text-muted-foreground">
-                    Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, data?.total || 0)} of {data?.total || 0}
-                  </p>
+                  <p className="text-xs md:text-sm text-muted-foreground">Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, data?.total || 0)} of {data?.total || 0}</p>
                   <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage(p => Math.max(0, p - 1))}
-                      disabled={page === 0}
-                      className="min-h-[44px]"
-                      data-testid="button-prev-page"
-                    >
-                      Previous
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage(p => p + 1)}
-                      disabled={page >= totalPages - 1}
-                      className="min-h-[44px]"
-                      data-testid="button-next-page"
-                    >
-                      Next
-                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="min-h-[44px]">Previous</Button>
+                    <Button variant="outline" size="sm" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1} className="min-h-[44px]">Next</Button>
                   </div>
                 </div>
               )}
             </>
           )}
         </div>
-
+        
         {selectedOrderId && (
           <div className="w-[400px] border-l bg-muted/30 overflow-auto hidden lg:block">
-            <OrderDetailPanel
-              detail={orderDetail}
-              loading={detailLoading}
-              onClose={() => setSelectedOrderId(null)}
-            />
+            <OrderDetailPanel detail={orderDetail} loading={detailLoading} onClose={() => setSelectedOrderId(null)} />
           </div>
         )}
       </div>
-
+      
       {selectedOrderId && isMobile && (
         <Sheet open={!!selectedOrderId} onOpenChange={() => setSelectedOrderId(null)}>
           <SheetContent className="w-full sm:max-w-lg max-h-[90vh] overflow-y-auto p-0">
-            <OrderDetailPanel
-              detail={orderDetail}
-              loading={detailLoading}
-              onClose={() => setSelectedOrderId(null)}
-            />
+            <OrderDetailPanel detail={orderDetail} loading={detailLoading} onClose={() => setSelectedOrderId(null)} />
           </SheetContent>
         </Sheet>
       )}
@@ -717,265 +309,47 @@ export default function OrderHistory() {
   );
 }
 
-function OrderDetailPanel({
-  detail,
-  loading,
-  onClose,
-}: {
-  detail?: OrderDetail;
-  loading: boolean;
-  onClose: () => void;
-}) {
-  const [itemsOpen, setItemsOpen] = useState(true);
-  const [timelineOpen, setTimelineOpen] = useState(true);
+function OrderDetailPanel({ detail, loading, onClose }: { detail?: OrderDetail; loading: boolean; onClose: () => void; }) {
+  if (loading) return <div className="p-4 space-y-4"><Skeleton className="h-8 w-48" /><Skeleton className="h-24 w-full" /></div>;
+  if (!detail) return <div className="p-4 text-center text-muted-foreground">Select an order</div>;
 
-  if (loading) {
-    return (
-      <div className="p-4 space-y-4">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-24 w-full" />
-        <Skeleton className="h-32 w-full" />
-      </div>
-    );
-  }
-
-  if (!detail) {
-    return (
-      <div className="p-4 text-center text-muted-foreground">
-        Select an order to view details
-      </div>
-    );
-  }
-
-  const { order, items, pickingLogs, picker } = detail;
-
-  const cycleTime = order.completedAt && order.startedAt
-    ? Math.round((new Date(order.completedAt).getTime() - new Date(order.startedAt).getTime()) / 60000)
-    : null;
+  const { order, items } = detail;
 
   return (
     <ScrollArea className="h-full">
       <div className="p-4 space-y-4">
         <div className="flex items-start justify-between">
           <div>
-            <h2 className="text-xl font-bold">#{order.orderNumber}</h2>
+            <h2 className="text-xl font-bold">#{order.externalOrderNumber}</h2>
             <p className="text-sm text-muted-foreground">{order.customerName}</p>
           </div>
-          <Button variant="ghost" size="icon" onClick={onClose} className="lg:hidden min-h-[44px] min-w-[44px]" data-testid="button-close-detail">
-            <X className="h-4 w-4" />
-          </Button>
+          <Button variant="ghost" size="icon" onClick={onClose} className="lg:hidden"><X className="h-4 w-4" /></Button>
         </div>
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Order Info</CardTitle>
-          </CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Order Info</CardTitle></CardHeader>
           <CardContent className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Status</span>
-              <Badge variant="outline" className={`gap-1 ${getStatusColor(order.warehouseStatus)}`}>
-                {getStatusIcon(order.warehouseStatus)}
-                {order.warehouseStatus}
-              </Badge>
-            </div>
-            {order.priority !== "normal" && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Priority</span>
-                <Badge variant="outline" className={getPriorityColor(order.priority)}>
-                  {order.priority}
-                </Badge>
-              </div>
-            )}
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Picker</span>
-              <span className="flex items-center gap-1">
-                <User className="h-3.5 w-3.5" />
-                {picker?.displayName || "—"}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Shopify #</span>
-              <span className="font-mono text-xs">{order.shopifyOrderId}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Created</span>
-              <span>{order.createdAt ? format(new Date(order.createdAt), "MMM d, h:mm a") : "—"}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Completed</span>
-              <span>{order.completedAt ? format(new Date(order.completedAt), "MMM d, h:mm a") : "—"}</span>
-            </div>
-            {cycleTime !== null && (
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Pick Time</span>
-                <span className="flex items-center gap-1">
-                  <Clock className="h-3.5 w-3.5" />
-                  {cycleTime} min
-                </span>
-              </div>
-            )}
+            <div className="flex justify-between"><span className="text-muted-foreground">Status</span><Badge variant="outline" className={`gap-1 ${getStatusColor(order.status)}`}>{order.status}</Badge></div>
+            <div className="flex justify-between"><span className="text-muted-foreground">Financial Status</span><span className="font-medium">{order.financialStatus}</span></div>
+            <div className="flex justify-between"><span className="text-muted-foreground">Fulfillment Status</span><span className="font-medium">{order.fulfillmentStatus}</span></div>
+            <div className="flex justify-between"><span className="text-muted-foreground">Total</span><span className="font-medium">${(order.totalCents / 100).toFixed(2)}</span></div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Shipments {detail.shipmentHistory.length > 0 && `(${detail.shipmentHistory.length})`}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {detail.shipmentHistory.length === 0 ? (
-              <p className="text-sm text-muted-foreground italic">No shipments recorded</p>
-            ) : (
-              <div className="space-y-3">
-                {detail.shipmentHistory.map((s) => (
-                  <div key={s.id} className="border rounded-lg p-3 text-sm space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Badge variant="outline" className={cn("text-xs",
-                        s.status === "delivered" ? "bg-green-100 text-green-800 border-green-200" :
-                        s.status === "shipped" ? "bg-blue-100 text-blue-800 border-blue-200" :
-                        s.status === "packed" ? "bg-purple-100 text-purple-800 border-purple-200" :
-                        "bg-gray-100 text-gray-800"
-                      )}>
-                        {s.status}
-                      </Badge>
-                      <span className="text-xs text-muted-foreground">
-                        {s.source === "shopify_webhook" ? "Shopify" : s.source}
-                      </span>
-                    </div>
-                    {s.carrier && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Carrier</span>
-                        <span>{s.carrier}</span>
-                      </div>
-                    )}
-                    {s.trackingNumber && (
-                      <div className="flex justify-between items-center">
-                        <span className="text-muted-foreground">Tracking</span>
-                        {s.trackingUrl ? (
-                          <a href={s.trackingUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-blue-600 hover:underline flex items-center gap-1">
-                            {s.trackingNumber}
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        ) : (
-                          <span className="font-mono text-xs">{s.trackingNumber}</span>
-                        )}
-                      </div>
-                    )}
-                    {s.shippedAt && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Shipped</span>
-                        <span>{format(new Date(s.shippedAt), "MMM d, h:mm a")}</span>
-                      </div>
-                    )}
-                    {s.deliveredAt && (
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">Delivered</span>
-                        <span>{format(new Date(s.deliveredAt), "MMM d, h:mm a")}</span>
-                      </div>
-                    )}
-                    {s.items.length > 0 && (
-                      <div className="border-t pt-2 mt-2">
-                        <div className="text-xs text-muted-foreground mb-1">Items</div>
-                        {s.items.map((si, idx) => (
-                          <div key={idx} className="flex justify-between text-xs">
-                            <span className="font-mono">{si.sku || "—"}</span>
-                            <span>x{si.qty}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">Items ({items.length})</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            {items.map((item, idx) => (
+              <div key={idx} className="text-sm border-b pb-2 last:border-0 last:pb-0">
+                <p className="font-medium">{item.title}</p>
+                <div className="flex justify-between text-muted-foreground mt-1 text-xs">
+                  <span>SKU: {item.sku}</span>
+                  <span>Qty: {item.quantity}</span>
+                </div>
               </div>
-            )}
+            ))}
           </CardContent>
         </Card>
-
-        <Collapsible open={itemsOpen} onOpenChange={setItemsOpen}>
-          <Card>
-            <CollapsibleTrigger className="w-full">
-              <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  Line Items ({items.length})
-                </CardTitle>
-                {itemsOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </CardHeader>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <CardContent className="space-y-3">
-                {items.map((item) => (
-                  <div key={item.id} className="border rounded-lg p-3 text-sm">
-                    <div className="flex justify-between items-start mb-1">
-                      <span className="font-medium">{item.sku}</span>
-                      <Badge variant={item.status === "completed" ? "default" : item.status === "short" ? "destructive" : "secondary"}>
-                        {item.pickedQuantity}/{item.quantity}
-                      </Badge>
-                    </div>
-                    <p className="text-muted-foreground text-xs line-clamp-1">{item.name}</p>
-                    <div className="flex justify-between mt-2 text-xs text-muted-foreground">
-                      <span>Location: {item.location}</span>
-                      {item.shortReason && (
-                        <span className="text-amber-600">Short: {item.shortReason}</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </CardContent>
-            </CollapsibleContent>
-          </Card>
-        </Collapsible>
-
-        <Collapsible open={timelineOpen} onOpenChange={setTimelineOpen}>
-          <Card>
-            <CollapsibleTrigger className="w-full">
-              <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                <CardTitle className="text-sm font-medium text-muted-foreground">
-                  Pick Timeline ({pickingLogs.length})
-                </CardTitle>
-                {timelineOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </CardHeader>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <CardContent>
-                <div className="space-y-3">
-                  {pickingLogs.length === 0 ? (
-                    <p className="text-sm text-muted-foreground italic">No picking activity recorded</p>
-                  ) : (
-                    pickingLogs.map((log) => (
-                      <div key={log.id} className="flex gap-3 text-sm">
-                        <div className="text-xs text-muted-foreground w-16 shrink-0">
-                          {log.timestamp ? format(new Date(log.timestamp), "h:mm a") : ""}
-                        </div>
-                        <div className="flex-1">
-                          <div className="font-medium">{getActionLabel(log.actionType)}</div>
-                          {log.sku && (
-                            <div className="text-xs text-muted-foreground">
-                              {log.sku}
-                              {log.qtyDelta !== null && log.qtyDelta !== undefined && (
-                                <span className="ml-1">
-                                  ({log.qtyDelta > 0 ? '+' : ''}{log.qtyDelta})
-                                </span>
-                              )}
-                              {log.pickMethod && (
-                                <Badge variant="outline" className="ml-2 text-xs">
-                                  {getPickMethodLabel(log.pickMethod)}
-                                </Badge>
-                              )}
-                            </div>
-                          )}
-                          {log.reason && (
-                            <div className="text-xs text-amber-600">{log.reason}</div>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </CardContent>
-            </CollapsibleContent>
-          </Card>
-        </Collapsible>
       </div>
     </ScrollArea>
   );

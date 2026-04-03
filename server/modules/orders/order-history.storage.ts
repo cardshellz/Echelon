@@ -1,220 +1,156 @@
-import {
-  db, eq, and, or, inArray, sql, desc, asc, gte, lte, like,
-  type Order, type OrderItem, type PickingLog,
-  orders, orderItems, pickingLogs, users, outboundShipments, outboundShipmentItems, productVariants,
-} from "../../storage/base";
+import { db, eq, and, or, sql, desc, asc, like, inArray } from "../../storage/base";
+import { omsOrders, omsOrderLines, omsOrderEvents, channels } from "@shared/schema";
+import type { OmsOrder, OmsOrderLine } from "@shared/schema";
 
 export interface IOrderHistoryStorage {
   getOrderHistory(filters: {
+    search?: string;
     orderNumber?: string;
     customerName?: string;
     sku?: string;
-    pickerId?: string;
     status?: string[];
-    priority?: string;
     channel?: string;
     startDate?: Date;
     endDate?: Date;
     limit?: number;
     offset?: number;
-  }): Promise<(Order & { items: OrderItem[]; pickerName?: string })[]>;
+  }): Promise<(OmsOrder & { items: OmsOrderLine[], channelProvider?: string })[]>;
   getOrderHistoryCount(filters: {
+    search?: string;
     orderNumber?: string;
     customerName?: string;
     sku?: string;
-    pickerId?: string;
     status?: string[];
-    priority?: string;
     channel?: string;
     startDate?: Date;
     endDate?: Date;
   }): Promise<number>;
   getOrderDetail(orderId: number): Promise<{
-    order: Order;
-    items: OrderItem[];
-    pickingLogs: PickingLog[];
-    picker?: { id: string; displayName: string | null };
-    shipmentHistory: Array<{
-      id: number;
-      status: string;
-      carrier: string | null;
-      trackingNumber: string | null;
-      trackingUrl: string | null;
-      shippedAt: string | null;
-      deliveredAt: string | null;
-      createdAt: string;
-      source: string;
-      externalFulfillmentId: string | null;
-      items: Array<{ sku: string | null; name: string | null; qty: number }>;
-    }>;
+    order: OmsOrder;
+    items: OmsOrderLine[];
+    events: any[];
   } | null>;
 }
 
 export const orderHistoryMethods: IOrderHistoryStorage = {
-  async getOrderHistory(filters: {
-    search?: string;
-    orderNumber?: string;
-    customerName?: string;
-    sku?: string;
-    pickerId?: string;
-    status?: string[];
-    priority?: string;
-    channel?: string;
-    startDate?: Date;
-    endDate?: Date;
-    limit?: number;
-    offset?: number;
-  }): Promise<(Order & { items: OrderItem[]; pickerName?: string })[]> {
+  async getOrderHistory(filters) {
     const conditions = [];
 
     if (filters.search) {
       const term = `%${filters.search}%`;
       conditions.push(or(
-        like(orders.orderNumber, term),
-        like(orders.customerName, term),
-        like(orders.externalOrderId, term),
+        like(omsOrders.externalOrderNumber, term),
+        like(omsOrders.customerName, term),
+        like(omsOrders.externalOrderId, term),
       )!);
     }
 
     if (filters.status && filters.status.length > 0) {
-      conditions.push(inArray(orders.warehouseStatus, filters.status as any));
+      conditions.push(inArray(omsOrders.status, filters.status));
     }
-
     if (filters.orderNumber) {
-      conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
+      conditions.push(like(omsOrders.externalOrderNumber, `%${filters.orderNumber}%`));
     }
     if (filters.customerName) {
-      conditions.push(like(orders.customerName, `%${filters.customerName}%`));
-    }
-    if (filters.pickerId) {
-      conditions.push(eq(orders.assignedPickerId, filters.pickerId));
-    }
-    if (filters.priority) {
-      conditions.push(eq(orders.priority, filters.priority));
+      conditions.push(like(omsOrders.customerName, `%${filters.customerName}%`));
     }
     if (filters.channel) {
-      conditions.push(eq(orders.source, filters.channel));
-    }
-    if (filters.startDate) {
-      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
-    }
-    if (filters.endDate) {
-      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
-    }
-
-    if (filters.sku) {
-      const skuFilter = filters.sku.toUpperCase();
-      const ordersWithSku = await db
-        .select({ orderId: orderItems.orderId })
-        .from(orderItems)
-        .where(like(orderItems.sku, `%${skuFilter}%`));
-      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
-
-      if (matchingOrderIds.length === 0) {
+      // For now, channel filtering assumes channel name or provider string
+      const matchingChannels = await db.select({ id: channels.id }).from(channels).where(like(channels.provider, `%${filters.channel}%`));
+      const channelIds = matchingChannels.map(c => c.id);
+      if (channelIds.length > 0) {
+        conditions.push(inArray(omsOrders.channelId, channelIds));
+      } else {
         return [];
       }
-      conditions.push(inArray(orders.id, matchingOrderIds));
+    }
+    if (filters.startDate) {
+      conditions.push(sql`${omsOrders.orderedAt} >= ${filters.startDate}`);
+    }
+    if (filters.endDate) {
+      conditions.push(sql`${omsOrders.orderedAt} <= ${filters.endDate}`);
+    }
+    if (filters.sku) {
+      const skuFilter = filters.sku.toUpperCase();
+      const ordersWithSku = await db.select({ orderId: omsOrderLines.orderId }).from(omsOrderLines).where(like(omsOrderLines.sku, `%${skuFilter}%`));
+      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
+      if (matchingOrderIds.length === 0) return [];
+      conditions.push(inArray(omsOrders.id, matchingOrderIds));
     }
 
-    let query = db.select().from(orders);
-
+    let query = db.select({
+      order: omsOrders,
+      channelProvider: channels.provider,
+    }).from(omsOrders)
+      .leftJoin(channels, eq(omsOrders.channelId, channels.id)) as any;
+      
     if (conditions.length > 0) {
-      query = query.where(and(...conditions)) as any;
+      query = query.where(and(...conditions));
     }
-
-    query = query.orderBy(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) DESC`) as any;
     
+    query = query.orderBy(desc(omsOrders.orderedAt));
     const limit = filters.limit || 50;
-    query = query.limit(limit) as any;
-    
-    if (filters.offset) {
-      query = query.offset(filters.offset) as any;
-    }
-    
+    query = query.limit(limit);
+    if (filters.offset) query = query.offset(filters.offset);
+
     const orderList = await query;
+    const results = [];
     
-    const results: (Order & { items: OrderItem[]; pickerName?: string })[] = [];
-    
-    for (const order of orderList) {
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
-      
-      let pickerName: string | undefined;
-      if (order.assignedPickerId) {
-        const picker = await db.select({ displayName: users.displayName }).from(users).where(eq(users.id, order.assignedPickerId));
-        pickerName = picker[0]?.displayName || undefined;
-      }
-      
-      results.push({ ...order, items, pickerName });
+    for (const row of orderList) {
+      const items = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, row.order.id));
+      results.push({ ...row.order, items, channelProvider: row.channelProvider });
     }
     
     return results;
   },
   
-  async getOrderHistoryCount(filters: {
-    search?: string;
-    orderNumber?: string;
-    customerName?: string;
-    sku?: string;
-    pickerId?: string;
-    status?: string[];
-    priority?: string;
-    channel?: string;
-    startDate?: Date;
-    endDate?: Date;
-  }): Promise<number> {
+  async getOrderHistoryCount(filters) {
     const conditions = [];
 
     if (filters.search) {
       const term = `%${filters.search}%`;
       conditions.push(or(
-        like(orders.orderNumber, term),
-        like(orders.customerName, term),
-        like(orders.externalOrderId, term),
+        like(omsOrders.externalOrderNumber, term),
+        like(omsOrders.customerName, term),
+        like(omsOrders.externalOrderId, term),
       )!);
     }
 
     if (filters.status && filters.status.length > 0) {
-      conditions.push(inArray(orders.warehouseStatus, filters.status as any));
+      conditions.push(inArray(omsOrders.status, filters.status));
     }
-
     if (filters.orderNumber) {
-      conditions.push(like(orders.orderNumber, `%${filters.orderNumber}%`));
+      conditions.push(like(omsOrders.externalOrderNumber, `%${filters.orderNumber}%`));
     }
     if (filters.customerName) {
-      conditions.push(like(orders.customerName, `%${filters.customerName}%`));
-    }
-    if (filters.pickerId) {
-      conditions.push(eq(orders.assignedPickerId, filters.pickerId));
-    }
-    if (filters.priority) {
-      conditions.push(eq(orders.priority, filters.priority));
+      conditions.push(like(omsOrders.customerName, `%${filters.customerName}%`));
     }
     if (filters.channel) {
-      conditions.push(eq(orders.source, filters.channel));
+      const matchingChannels = await db.select({ id: channels.id }).from(channels).where(like(channels.provider, `%${filters.channel}%`));
+      const channelIds = matchingChannels.map(c => c.id);
+      if (channelIds.length > 0) {
+        conditions.push(inArray(omsOrders.channelId, channelIds));
+      } else {
+        return 0;
+      }
     }
     if (filters.startDate) {
-      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) >= ${filters.startDate}`);
+      conditions.push(sql`${omsOrders.orderedAt} >= ${filters.startDate}`);
     }
     if (filters.endDate) {
-      conditions.push(sql`COALESCE(${orders.orderPlacedAt}, ${orders.createdAt}) <= ${filters.endDate}`);
+      conditions.push(sql`${omsOrders.orderedAt} <= ${filters.endDate}`);
     }
-
     if (filters.sku) {
       const skuFilter = filters.sku.toUpperCase();
-      const ordersWithSku = await db
-        .select({ orderId: orderItems.orderId })
-        .from(orderItems)
-        .where(like(orderItems.sku, `%${skuFilter}%`));
+      const ordersWithSku = await db.select({ orderId: omsOrderLines.orderId }).from(omsOrderLines).where(like(omsOrderLines.sku, `%${skuFilter}%`));
       const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
-      
       if (matchingOrderIds.length === 0) return 0;
-      conditions.push(inArray(orders.id, matchingOrderIds));
+      conditions.push(inArray(omsOrders.id, matchingOrderIds));
     }
     
-    let query = db.select({ count: sql<number>`count(*)` }).from(orders);
-    
+    let query = db.select({ count: sql<number>`count(*)` }).from(omsOrders) as any;
     if (conditions.length > 0) {
-      query = query.where(and(...conditions)) as any;
+      query = query.where(and(...conditions));
     }
     
     const result = await query;
@@ -222,49 +158,16 @@ export const orderHistoryMethods: IOrderHistoryStorage = {
   },
   
   async getOrderDetail(orderId: number) {
-    const order = await db.select().from(orders).where(eq(orders.id, orderId));
+    const order = await db.select().from(omsOrders).where(eq(omsOrders.id, orderId));
     if (order.length === 0) return null;
 
-    const items = await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
-    const logs = await db.select().from(pickingLogs).where(eq(pickingLogs.orderId, orderId)).orderBy(asc(pickingLogs.timestamp));
-
-    let picker: { id: string; displayName: string | null } | undefined;
-    if (order[0].assignedPickerId) {
-      const pickerResult = await db.select({ id: users.id, displayName: users.displayName }).from(users).where(eq(users.id, order[0].assignedPickerId));
-      picker = pickerResult[0];
-    }
-
-    const orderShipments = await db.select().from(outboundShipments).where(eq(outboundShipments.orderId, orderId)).orderBy(asc(outboundShipments.createdAt));
-    const shipmentHistory = [];
-    for (const s of orderShipments) {
-      const sItems = await db.select({
-        sku: productVariants.sku,
-        name: productVariants.name,
-        qty: outboundShipmentItems.qty,
-      }).from(outboundShipmentItems)
-        .leftJoin(productVariants, eq(outboundShipmentItems.productVariantId, productVariants.id))
-        .where(eq(outboundShipmentItems.shipmentId, s.id));
-      shipmentHistory.push({
-        id: s.id,
-        status: s.status,
-        carrier: s.carrier,
-        trackingNumber: s.trackingNumber,
-        trackingUrl: s.trackingUrl,
-        shippedAt: s.shippedAt?.toISOString() ?? null,
-        deliveredAt: s.deliveredAt?.toISOString() ?? null,
-        createdAt: s.createdAt.toISOString(),
-        source: s.source,
-        externalFulfillmentId: s.externalFulfillmentId,
-        items: sItems.map(si => ({ sku: si.sku, name: si.name, qty: si.qty })),
-      });
-    }
+    const items = await db.select().from(omsOrderLines).where(eq(omsOrderLines.orderId, orderId));
+    const events = await db.select().from(omsOrderEvents).where(eq(omsOrderEvents.orderId, orderId)).orderBy(asc(omsOrderEvents.createdAt));
 
     return {
-      order: order[0],
-      items,
-      pickingLogs: logs,
-      picker,
-      shipmentHistory,
+      order: order[0] as OmsOrder,
+      items: items as OmsOrderLine[],
+      events,
     };
   },
 };

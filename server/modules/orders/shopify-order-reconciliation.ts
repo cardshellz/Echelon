@@ -47,6 +47,8 @@ interface ShopifyApiOrder {
   subtotal_price: string;
   total_tax: string;
   total_discounts: string;
+  taxes_included: boolean;
+  tax_exempt: boolean;
   note: string | null;
   tags: string;
   customer: {
@@ -251,7 +253,7 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       total_price_cents, subtotal_price_cents, total_shipping_cents,
       total_tax_cents, total_discounts_cents,
       currency, order_date, financial_status, fulfillment_status,
-      cancelled_at, shop_domain, source_name
+      cancelled_at, shop_domain, source_name, tax_exempt
     ) VALUES (
       ${shopifyId},
       ${order.name || `#${order.order_number}`},
@@ -274,7 +276,8 @@ async function ensureShopifyOrderRow(order: ShopifyApiOrder): Promise<string> {
       ${order.fulfillment_status || null},
       ${order.cancelled_at ? new Date(order.cancelled_at) : null},
       ${null},
-      ${order.source_name || "web"}
+      ${order.source_name || "web"},
+      ${order.tax_exempt || false}
     )
     ON CONFLICT (id) DO NOTHING
   `);

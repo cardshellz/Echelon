@@ -42,9 +42,7 @@ shadowIngestionRouter.post('/shadow-ingest', async (req: Request, res: Response)
       orderNumber: payload.name,
       customerName: payload.customer?.name || 'Guest',
       shippingName: payload.shippingAddress?.name,
-      shippingAddress: payload.shippingAddress?.address1,
-      // Includes legacy financials
-      totalAmount: payload.totalPrice
+      shippingAddress: payload.shippingAddress?.address1
     }).returning();
 
     if (payload.lineItems && payload.lineItems.length > 0) {
@@ -52,8 +50,7 @@ shadowIngestionRouter.post('/shadow-ingest', async (req: Request, res: Response)
         orderId: legacyOrder.id,
         sku: item.sku,
         name: item.name,
-        quantity: item.quantity,
-        priceCents: Math.round(parseFloat(item.price || 0) * 100)
+        quantity: item.quantity
       }));
       await db.insert(legacyOrderItems).values(legacyLines);
     }

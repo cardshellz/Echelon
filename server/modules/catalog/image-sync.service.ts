@@ -154,7 +154,7 @@ export function createImageSyncService() {
 
           if (downloaded) {
             await db.execute(sql`
-              UPDATE product_assets SET file_data = ${downloaded.buffer} WHERE id = ${asset.id}
+              UPDATE catalog.product_assets SET file_data = ${downloaded.buffer} WHERE id = ${asset.id}
             `);
           }
 
@@ -290,7 +290,7 @@ export function createImageSyncService() {
 
           if (downloaded) {
             await db.execute(sql`
-              UPDATE product_assets SET file_data = ${downloaded.buffer} WHERE id = ${asset.id}
+              UPDATE catalog.product_assets SET file_data = ${downloaded.buffer} WHERE id = ${asset.id}
             `);
           }
 

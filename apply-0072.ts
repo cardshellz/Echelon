@@ -6,11 +6,11 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const sql = readFileSync('c:/Users/owner/Echelon/migrations/0072_override_priority_permission.sql', 'utf8');
+const sql = readFileSync('c:/Users/owner/Echelon/migrations/0073_migrate_priority_to_int.sql', 'utf8');
 
 pool.query(sql)
   .then(() => { 
-    console.log('Successfully applied 0072_override_priority_permission.sql'); 
+    console.log('Successfully applied 0073_migrate_priority_to_int.sql'); 
     process.exit(0); 
   })
   .catch(e => { 

@@ -867,8 +867,8 @@ export function registerChannelRoutes(app: Express) {
           FROM channel_connections WHERE channel_id = 36
         `);
 
-        const totalResult = await client.query(`SELECT COUNT(*) FROM product_assets WHERE url LIKE 'https://%'`);
-        const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM products WHERE shopify_product_id IS NOT NULL`);
+        const totalResult = await client.query(`SELECT COUNT(*) FROM catalog.product_assets WHERE url LIKE 'https://%'`);
+        const prodWithShopifyId = await client.query(`SELECT COUNT(*) FROM catalog.products WHERE shopify_product_id IS NOT NULL`);
 
         // Check channel_listings for fresh Shopify IDs
         const listingsCheck = await client.query(`

@@ -55,6 +55,7 @@ export const omsOrders = omsSchema.table("oms_orders", {
   subtotalCents: integer("subtotal_cents").notNull().default(0),
   shippingCents: integer("shipping_cents").notNull().default(0),
   taxCents: integer("tax_cents").notNull().default(0),
+  taxExempt: boolean("tax_exempt").default(false),
   discountCents: integer("discount_cents").notNull().default(0),
   totalCents: integer("total_cents").notNull().default(0),
   currency: varchar("currency", { length: 3 }).notNull().default("USD"),

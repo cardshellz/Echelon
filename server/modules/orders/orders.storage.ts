@@ -1,19 +1,19 @@
 import {
-  type Order,
-  type InsertOrder,
-  type OrderItem,
-  type InsertOrderItem,
+  type WmsOrder as Order,
+  type InsertWmsOrder as InsertOrder,
+  type WmsOrderItem as OrderItem,
+  type InsertWmsOrderItem as InsertOrderItem,
   type OrderStatus,
   type ItemStatus,
-  orders,
-  orderItems,
+  wmsOrders as orders,
+  wmsOrderItems as orderItems,
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
 import { eq, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 
 export interface IOrderStorage {
-  getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined>;
+  getOrderByExternalId(externalOrderId: string): Promise<Order | undefined>;
   getOrderById(id: number): Promise<Order | undefined>;
   getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
   getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
@@ -33,8 +33,8 @@ export interface IOrderStorage {
   updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number, postPickStatus?: string): Promise<Order | null>;
 
-  updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null>;
-  getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined>;
+  updateItemFulfilledQuantity(omsOrderLineId: number, additionalQty: number): Promise<OrderItem | null>;
+  getOrderItemByShopifyLineId(omsOrderLineId: number): Promise<OrderItem | undefined>;
   areAllItemsFulfilled(orderId: number): Promise<boolean>;
 
   getOrderByOrderNumber(orderNumber: string): Promise<Order | undefined>;
@@ -110,8 +110,8 @@ export interface IOrderStorage {
 }
 
 export const orderMethods: IOrderStorage = {
-  async getOrderByShopifyId(shopifyOrderId: string): Promise<Order | undefined> {
-    const result = await db.select().from(orders).where(eq(orders.shopifyOrderId, shopifyOrderId));
+  async getOrderByExternalId(externalOrderId: string): Promise<Order | undefined> {
+    const result = await db.select().from(orders).where(eq(orders.externalOrderId, externalOrderId));
     return result[0];
   },
 
@@ -139,13 +139,13 @@ export const orderMethods: IOrderStorage = {
     }
     
     const orderIds = orderList.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    const allItems = await db.select().from(orderItems).where(inArray(orderItems.wmsOrderId, orderIds));
     
     const itemsByOrderId = new Map<number, OrderItem[]>();
     for (const item of allItems) {
-      const existing = itemsByOrderId.get(item.orderId) || [];
+      const existing = itemsByOrderId.get(item.wmsOrderId) || [];
       existing.push(item);
-      itemsByOrderId.set(item.orderId, existing);
+      itemsByOrderId.set(item.wmsOrderId, existing);
     }
     
     return orderList.map(order => ({
@@ -181,8 +181,7 @@ export const orderMethods: IOrderStorage = {
       channelId: row.channel_id,
       source: row.source,
       externalOrderId: row.external_order_id,
-      sourceTableId: row.source_table_id,
-      shopifyOrderId: row.shopify_order_id,
+      omsFulfillmentOrderId: row.source_table_id,
       orderNumber: row.order_number,
       customerName: row.customer_name,
       customerEmail: row.customer_email,
@@ -224,11 +223,11 @@ export const orderMethods: IOrderStorage = {
     }
     
     const orderIds = orderRows.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds));
+    const allItems = await db.select().from(orderItems).where(inArray(orderItems.wmsOrderId, orderIds));
     
-    const skusMissingImages = [...new Set(
+    const skusMissingImages = Array.from(new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
-    )];
+    ));
 
     const imageMap = new Map<string, string>();
     if (skusMissingImages.length > 0) {
@@ -257,9 +256,9 @@ export const orderMethods: IOrderStorage = {
       }
     }
     
-    const skusMissingBarcodes = [...new Set(
+    const skusMissingBarcodes = Array.from(new Set(
       allItems.filter(item => !item.barcode && item.sku).map(item => item.sku!.toUpperCase())
-    )];
+    ));
 
     const barcodeMap = new Map<string, string>();
     if (skusMissingBarcodes.length > 0) {
@@ -296,9 +295,9 @@ export const orderMethods: IOrderStorage = {
     
     const itemsByOrderId = new Map<number, OrderItem[]>();
     for (const item of enrichedItems) {
-      const existing = itemsByOrderId.get(item.orderId) || [];
+      const existing = itemsByOrderId.get(item.wmsOrderId) || [];
       existing.push(item);
-      itemsByOrderId.set(item.orderId, existing);
+      itemsByOrderId.set(item.wmsOrderId, existing);
     }
     
     for (const order of orderRows) {
@@ -335,17 +334,17 @@ export const orderMethods: IOrderStorage = {
   },
 
   async createOrderWithItems(order: InsertOrder, items: InsertOrderItem[]): Promise<Order> {
-    if (order.shopifyOrderId) {
-      const existingByShopifyId = await this.getOrderByShopifyId(order.shopifyOrderId);
+    if (order.externalOrderId) {
+      const existingByShopifyId = await this.getOrderByExternalId(order.externalOrderId);
       if (existingByShopifyId) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by shopifyOrderId: ${order.shopifyOrderId}`);
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by externalOrderId: ${order.externalOrderId}`);
         return existingByShopifyId;
       }
     }
-    if (order.sourceTableId) {
-      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.sourceTableId, order.sourceTableId));
+    if (order.omsFulfillmentOrderId) {
+      const existingBySourceTableId = await db.select().from(orders).where(eq(orders.omsFulfillmentOrderId, order.omsFulfillmentOrderId));
       if (existingBySourceTableId.length > 0) {
-        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by sourceTableId: ${order.sourceTableId}`);
+        console.log(`[ORDER CREATE] Skipping duplicate order - already exists by omsFulfillmentOrderId: ${order.omsFulfillmentOrderId}`);
         return existingBySourceTableId[0];
       }
     }
@@ -356,10 +355,13 @@ export const orderMethods: IOrderStorage = {
     }).returning();
     
     if (items.length > 0) {
-      const itemsWithOrderId = items.map(item => ({
-        ...item,
-        orderId: newOrder.id,
-      }));
+      const itemsWithOrderId = items.map((item: any) => {
+        const { orderId, ...rest } = item;
+        return {
+          ...rest,
+          wmsOrderId: newOrder.id,
+        };
+      });
       await db.insert(orderItems).values(itemsWithOrderId);
     }
     
@@ -454,7 +456,7 @@ export const orderMethods: IOrderStorage = {
       await db
         .update(orderItems)
         .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.orderId, orderId));
+        .where(eq(orderItems.wmsOrderId, orderId));
     }
     
     return result[0] || null;
@@ -484,7 +486,7 @@ export const orderMethods: IOrderStorage = {
       await db
         .update(orderItems)
         .set({ status: "pending" as ItemStatus, pickedQuantity: 0, shortReason: null })
-        .where(eq(orderItems.orderId, orderId));
+        .where(eq(orderItems.wmsOrderId, orderId));
     }
     
     return result[0] || null;
@@ -531,7 +533,7 @@ export const orderMethods: IOrderStorage = {
   },
 
   async getOrderItems(orderId: number): Promise<OrderItem[]> {
-    return await db.select().from(orderItems).where(eq(orderItems.orderId, orderId));
+    return await db.select().from(orderItems).where(eq(orderItems.wmsOrderId, orderId));
   },
 
   async getOrderItemById(itemId: number): Promise<OrderItem | undefined> {
@@ -650,16 +652,16 @@ export const orderMethods: IOrderStorage = {
   },
 
 
-  async getOrderItemByShopifyLineId(shopifyLineItemId: string): Promise<OrderItem | undefined> {
+  async getOrderItemByShopifyLineId(omsOrderLineId: number): Promise<OrderItem | undefined> {
     const result = await db
       .select()
       .from(orderItems)
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId));
+      .where(eq(orderItems.omsOrderLineId, omsOrderLineId));
     return result[0];
   },
 
-  async updateItemFulfilledQuantity(shopifyLineItemId: string, additionalQty: number): Promise<OrderItem | null> {
-    const item = await this.getOrderItemByShopifyLineId(shopifyLineItemId);
+  async updateItemFulfilledQuantity(omsOrderLineId: number, additionalQty: number): Promise<OrderItem | null> {
+    const item = await this.getOrderItemByShopifyLineId(omsOrderLineId);
     if (!item) return null;
     
     const newFulfilledQty = Math.min(
@@ -670,7 +672,7 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .update(orderItems)
       .set({ fulfilledQuantity: newFulfilledQty })
-      .where(eq(orderItems.shopifyLineItemId, shopifyLineItemId))
+      .where(eq(orderItems.omsOrderLineId, omsOrderLineId))
       .returning();
     
     return result[0] || null;
@@ -688,11 +690,11 @@ export const orderMethods: IOrderStorage = {
       .select()
       .from(orders)
       .where(eq(orders.warehouseStatus, "exception"))
-      .orderBy(desc(orders.exceptionAt));
+      .orderBy(desc(orders.heldAt));
     
     const result: (Order & { items: OrderItem[] })[] = [];
     for (const order of exceptionOrders) {
-      const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+      const items = await db.select().from(orderItems).where(eq(orderItems.wmsOrderId, order.id));
       result.push({ ...order, items });
     }
     

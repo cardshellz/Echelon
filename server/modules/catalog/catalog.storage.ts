@@ -375,7 +375,7 @@ export const productMethods: IProductStorage = {
         warehouseLocationId: productLocations.warehouseLocationId,
         warehouseId: warehouseLocations.warehouseId,
         status: sql<string>`COALESCE(${productLocations.status}, 'unassigned')`.as('status'),
-        imageUrl: sql<string | null>`(SELECT url FROM product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+        imageUrl: sql<string | null>`(SELECT url FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
         updatedAt: productLocations.updatedAt,
       })
       .from(products)
@@ -398,7 +398,7 @@ export const productMethods: IProductStorage = {
         shopifyProductId: products.shopifyProductId,
         sku: products.sku,
         title: sql<string>`COALESCE(${products.title}, ${products.name})`.as('title'),
-        imageUrl: sql<string | null>`(SELECT url FROM product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
+        imageUrl: sql<string | null>`(SELECT url FROM catalog.product_assets WHERE product_id = ${products.id} AND product_variant_id IS NULL AND is_primary = 1 LIMIT 1)`.as('image_url'),
       })
       .from(products)
       .leftJoin(productLocations, eq(products.id, productLocations.productId))

@@ -223,7 +223,7 @@ export function registerDropshipAdminRoutes(app: Express) {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          `UPDATE products SET dropship_eligible = $1 WHERE id = $2 RETURNING id, name, dropship_eligible`,
+          `UPDATE catalog.products SET dropship_eligible = $1 WHERE id = $2 RETURNING id, name, dropship_eligible`,
           [eligible, productId]
         );
 
@@ -259,7 +259,7 @@ export function registerDropshipAdminRoutes(app: Express) {
       const client = await pool.connect();
       try {
         const result = await client.query(
-          `UPDATE products SET dropship_eligible = $1 WHERE id = ANY($2::int[]) RETURNING id`,
+          `UPDATE catalog.products SET dropship_eligible = $1 WHERE id = ANY($2::int[]) RETURNING id`,
           [eligible, productIds]
         );
 

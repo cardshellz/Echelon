@@ -327,8 +327,8 @@ export function createShipStationService(db: any, inventoryCore?: any) {
           try {
             // Check if this OMS order has a corresponding WMS order
             const wmsOrderResult: any = await db.execute(sql`
-              SELECT id, warehouse_status FROM orders
-              WHERE source_table_id = ${String(omsOrderId)} AND source IN ('ebay')
+              SELECT id, warehouse_status FROM wms.orders
+              WHERE oms_fulfillment_order_id = ${String(omsOrderId)} AND source IN ('ebay')
               LIMIT 1
             `);
 
@@ -343,7 +343,7 @@ export function createShipStationService(db: any, inventoryCore?: any) {
                 const trackingUrl = buildTrackingUrl(carrier, trackingNumber);
 
                 await db.execute(sql`
-                  UPDATE orders SET
+                  UPDATE wms.orders SET
                     warehouse_status = 'shipped',
                     completed_at = ${now},
                     tracking_number = ${trackingNumber},
@@ -353,20 +353,20 @@ export function createShipStationService(db: any, inventoryCore?: any) {
 
                 // Mark all order items as completed
                 await db.execute(sql`
-                  UPDATE order_items SET
+                  UPDATE wms.order_items SET
                     status = 'completed',
                     picked_quantity = quantity,
                     fulfilled_quantity = quantity
-                  WHERE order_id = ${wmsOrderId}
+                  WHERE wms_order_id = ${wmsOrderId}
                     AND status NOT IN ('completed', 'short', 'cancelled')
                 `);
 
                 console.log(`[ShipStation Webhook] Updated WMS order ${wmsOrderId} to shipped`);
               }
 
-              // Create shipment record for the WMS order
+              // Create shipment record for the WMS order (now bounded to WMS context)
               await db.execute(sql`
-                INSERT INTO shipments (order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
+                INSERT INTO wms.outbound_shipments (wms_order_id, channel_id, source, status, carrier, tracking_number, shipped_at)
                 VALUES (${wmsOrderId}, ${EBAY_CHANNEL_ID}, 'api', 'shipped', ${carrier}, ${trackingNumber}, ${now})
                 ON CONFLICT DO NOTHING
               `);

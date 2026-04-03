@@ -167,10 +167,13 @@ export class ShopifyAdapter implements IChannelAdapter {
       }
 
       // UPDATE
+      const updatePayload = { ...payload, id: Number(shopifyProductId) };
+      delete (updatePayload as any).images; // Safety Omission: Never push images to Shopify during an update to prevent wiping.
+
       const response = await this.shopifyPut(
         creds,
         `/products/${shopifyProductId}.json`,
-        { product: { ...payload, id: Number(shopifyProductId) } },
+        { product: updatePayload },
       );
 
       const variantIdMap: Record<number, string> = {};

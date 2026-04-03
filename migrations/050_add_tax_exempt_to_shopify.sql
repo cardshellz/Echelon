@@ -1,0 +1,1 @@
+ALTER TABLE shopify_orders ADD COLUMN IF NOT EXISTS tax_exempt BOOLEAN DEFAULT false;

@@ -473,6 +473,7 @@ export function createChannelProductPushService(db: any) {
     resolved: ResolvedChannelProduct,
   ): Promise<any> {
     const payload = buildShopifyProductPayload(resolved);
+    delete (payload as any).images; // Safety Omission: Never push images to Shopify during an update to prevent wiping.
 
     const url = `https://${shopDomain}/admin/api/${apiVersion}/products/${externalProductId}.json`;
     const response = await fetch(url, {
