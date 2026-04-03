@@ -175,8 +175,11 @@ export const orderMethods: IOrderStorage = {
           OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours')
         )
       ORDER BY
-        o.on_hold ASC,
-        COALESCE(o.order_placed_at, o.created_at) ASC
+        o.on_hold ASC,           -- Held orders sink to the bottom
+        CASE WHEN o.priority >= 9999 THEN 1 ELSE 0 END DESC, -- Bumped orders always float to top
+        CASE WHEN s.value = 'true' THEN 0 ELSE o.priority END DESC, -- Bypass standard priority scoring if FIFO enabled
+        o.sla_due_at ASC NULLS LAST,
+        COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
     
     const orderRows = (orderList.rows as any[]).map((row: any) => ({
