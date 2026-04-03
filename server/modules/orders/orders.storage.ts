@@ -139,13 +139,20 @@ export const orderMethods: IOrderStorage = {
     }
     
     const orderIds = orderList.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.wmsOrderId, orderIds));
+    if (orderIds.length === 0) return [];
     
-    const itemsByOrderId = new Map<number, OrderItem[]>();
-    for (const item of allItems) {
-      const existing = itemsByOrderId.get(item.wmsOrderId) || [];
+    // We must hit public.order_items because the legacy orders are there
+    const allItems = await db.execute(sql`
+      SELECT * FROM public.order_items 
+      WHERE order_id = ANY(${orderIds}::int[])
+    `);
+    
+    const itemsByOrderId = new Map<number, any[]>();
+    for (const item of allItems.rows) {
+      const orderId = (item as any).order_id as number;
+      const existing = itemsByOrderId.get(orderId) || [];
       existing.push(item);
-      itemsByOrderId.set(item.wmsOrderId, existing);
+      itemsByOrderId.set(orderId, existing);
     }
     
     return orderList.map(order => ({
@@ -159,7 +166,7 @@ export const orderMethods: IOrderStorage = {
     
     const orderList = await db.execute(sql`
       SELECT o.*
-      FROM orders o
+      FROM public.orders o
       LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
@@ -223,7 +230,35 @@ export const orderMethods: IOrderStorage = {
     }
     
     const orderIds = orderRows.map(o => o.id);
-    const allItems = await db.select().from(orderItems).where(inArray(orderItems.wmsOrderId, orderIds));
+    const allItemsResult = await db.execute(sql`
+      SELECT * FROM public.order_items 
+      WHERE order_id = ANY(${orderIds}::int[])
+    `);
+    
+    // Map raw legacy items to the expected structure
+    const allItems: any[] = allItemsResult.rows.map((row: any) => ({
+      id: row.id,
+      wmsOrderId: row.order_id,
+      sku: row.sku,
+      title: row.title,
+      barcode: row.barcode,
+      quantity: row.quantity,
+      pickedQuantity: row.picked_quantity,
+      price: row.price,
+      requiresShipping: row.requires_shipping === 1,
+      taxable: row.taxable === 1,
+      fulfillmentStatus: row.fulfillment_status,
+      status: row.status,
+      assignedPickerId: row.assigned_picker_id,
+      pickerName: row.picker_name,
+      imageUrl: row.image_url,
+      locationId: row.location_id,
+      locationPath: row.location_path,
+      binLocation: row.bin_location,
+      notes: row.notes,
+      sourceTableId: row.source_table_id,
+      externalOrderItemId: row.external_order_item_id
+    }));
     
     const skusMissingImages = Array.from(new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
