@@ -143,13 +143,13 @@ export const orderMethods: IOrderStorage = {
     
     const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
     const allItems = await db.execute(sql`
-      SELECT * FROM public.order_items 
-      WHERE order_id IN (${idList})
+      SELECT * FROM wms.order_items 
+      WHERE wms_order_id IN (${idList})
     `);
     
     const itemsByOrderId = new Map<number, any[]>();
     for (const item of allItems.rows) {
-      const orderId = (item as any).order_id as number;
+      const orderId = (item as any).wms_order_id as number;
       const existing = itemsByOrderId.get(orderId) || [];
       existing.push(item);
       itemsByOrderId.set(orderId, existing);
@@ -165,7 +165,7 @@ export const orderMethods: IOrderStorage = {
     
     const orderList = await db.execute(sql`
       SELECT o.*
-      FROM public.orders o
+      FROM wms.orders o
       LEFT JOIN echelon_settings s ON s.key = CONCAT('warehouse_', o.warehouse_id, '_fifo_mode')
       WHERE o.warehouse_status NOT IN ('shipped', 'ready_to_ship', 'cancelled')
         AND (
@@ -231,14 +231,14 @@ export const orderMethods: IOrderStorage = {
     const orderIds = orderRows.map((o: any) => o.id);
     const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
-      SELECT * FROM public.order_items 
-      WHERE order_id IN (${idList})
+      SELECT * FROM wms.order_items 
+      WHERE wms_order_id IN (${idList})
     `);
     
     // Map raw legacy items to the expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
-      wmsOrderId: row.order_id,
+      wmsOrderId: row.wms_order_id,
       sku: row.sku,
       title: row.title,
       barcode: row.barcode,
