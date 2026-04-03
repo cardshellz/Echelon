@@ -235,29 +235,39 @@ export const orderMethods: IOrderStorage = {
       WHERE wms_order_id IN (${idList})
     `);
     
-    // Map raw legacy items to the expected structure
+    // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
       wmsOrderId: row.wms_order_id,
+      orderId: row.wms_order_id,
+      omsOrderLineId: row.oms_order_line_id,
+      productId: row.product_id,
       sku: row.sku,
-      title: row.title,
+      name: row.name,
+      title: row.name,
       barcode: row.barcode,
       quantity: row.quantity,
       pickedQuantity: row.picked_quantity,
-      price: row.price,
+      fulfilledQuantity: row.fulfilled_quantity,
       requiresShipping: row.requires_shipping,
-      taxable: row.taxable,
-      fulfillmentStatus: row.fulfillment_status,
       status: row.status,
-      assignedPickerId: row.assigned_picker_id,
-      pickerName: row.picker_name,
+      location: row.location,
+      zone: row.zone,
+      shortReason: row.short_reason,
+      pickedAt: row.picked_at,
       imageUrl: row.image_url,
-      locationId: row.location_id,
-      locationPath: row.location_path,
-      binLocation: row.bin_location,
-      notes: row.notes,
-      sourceTableId: row.source_table_id,
-      externalOrderItemId: row.external_order_item_id
+      // Fields not in wms schema — default values for compatibility
+      price: null,
+      taxable: null,
+      fulfillmentStatus: null,
+      assignedPickerId: null,
+      pickerName: null,
+      locationId: null,
+      locationPath: null,
+      binLocation: row.location,
+      notes: null,
+      sourceTableId: null,
+      externalOrderItemId: null,
     }));
     
     const skusMissingImages = Array.from(new Set(
