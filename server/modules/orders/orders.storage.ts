@@ -144,7 +144,7 @@ export const orderMethods: IOrderStorage = {
     const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
     const allItems = await db.execute(sql`
       SELECT * FROM wms.order_items 
-      WHERE wms_order_id IN (${idList})
+      WHERE order_id IN (${idList})
     `);
     
     const itemsByOrderId = new Map<number, any[]>();
@@ -232,14 +232,14 @@ export const orderMethods: IOrderStorage = {
     const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
       SELECT * FROM wms.order_items 
-      WHERE wms_order_id IN (${idList})
+      WHERE order_id IN (${idList})
     `);
     
     // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
-      wmsOrderId: row.wms_order_id,
-      orderId: row.wms_order_id,
+      wmsOrderId: row.order_id,
+      orderId: row.order_id,
       omsOrderLineId: row.oms_order_line_id,
       productId: row.product_id,
       sku: row.sku,
