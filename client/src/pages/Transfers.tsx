@@ -143,6 +143,18 @@ export default function Transfers() {
     },
     enabled: !!fromLocationId
   });
+
+  useEffect(() => {
+    if (skusAtLocation && skusAtLocation.length === 1 && !variantId) {
+      const result = skusAtLocation[0];
+      setSelectedSkuLabel(result.sku);
+      setVariantId(result.variantId);
+      setSelectedSkuAvailable(result.available);
+      if (!quantity) {
+        setQuantity(String(result.available));
+      }
+    }
+  }, [skusAtLocation, variantId, quantity]);
   
   const { data: lookupResults = [] } = useQuery<Array<{
     sku: string;
