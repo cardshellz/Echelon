@@ -187,6 +187,13 @@ export function createServices(db: any) {
         } catch (err: any) {
           console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
         }
+        try {
+          // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
+          // after bulk receipts, transfers, or inventory adjustments
+          await replenishment.reevaluateReplenForProduct(productId);
+        } catch (err: any) {
+          console.warn(`[Replen] Auto-sync replen failed for product ${productId}: ${err.message}`);
+        }
       }, 2000); // 2s debounce
     } catch (err: any) {
       console.warn(`[InventorySync] Failed to resolve variant ${productVariantId}: ${err.message}`);

@@ -378,6 +378,61 @@ class ReplenishmentService {
     }
   }
 
+  /**
+   * Called globally when inventory for a product changes (e.g. newly received).
+   * It clears any stalled stockout blocks and checks if downstream pick bins
+   * are now eligible for auto-replenishment from this new source stock.
+   */
+  async reevaluateReplenForProduct(productId: number): Promise<void> {
+    // 1. Cancel any "ghost" tasks blocked specifically because no source stock was found.
+    const blockedTasks = await this.db.select().from(replenTasks)
+      .where(
+        and(
+          eq(replenTasks.productId, productId),
+          eq(replenTasks.status, "blocked"),
+          isNull(replenTasks.dependsOnTaskId)
+        )
+      );
+
+    for (const task of blockedTasks) {
+      await this.db
+        .update(replenTasks)
+        .set({
+          status: "cancelled",
+          notes: `${task.notes || ""}\nCancelled to re-evaluate due to inventory change.`.trim()
+        })
+        .where(eq(replenTasks.id, task.id));
+      
+      // Also call checkReplenForLocation on the target destination, because we just cancelled a task for it
+      try {
+        await this.checkReplenForLocation(task.toLocationId);
+      } catch (err: any) {
+        console.warn(`[Replen] Failed to re-evaluate task target loc ${task.toLocationId}:`, err?.message);
+      }
+    }
+
+    // 2. Find all variants of this product and their pick bins, and re-evaluate
+    const variants = await this.db.select({ id: productVariants.id })
+      .from(productVariants)
+      .where(eq(productVariants.productId, productId));
+    
+    if (variants.length === 0) return;
+    const variantIds = variants.map((v: any) => v.id);
+
+    const assignments = await this.db.select({ warehouseLocationId: productLocations.warehouseLocationId })
+      .from(productLocations)
+      .where(inArray(productLocations.productVariantId, variantIds));
+
+    const locIds = Array.from(new Set(assignments.map((a: any) => a.warehouseLocationId)));
+    for (const locId of locIds) {
+      try {
+        await this.checkReplenForLocation(locId as number);
+      } catch (err: any) {
+         console.warn(`[Replen] Failed to re-evaluate product pick loc ${locId}:`, err?.message);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // 2. EXECUTE TASK -- move stock from bulk to pick location
   // ---------------------------------------------------------------------------
