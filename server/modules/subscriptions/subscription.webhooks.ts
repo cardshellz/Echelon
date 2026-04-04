@@ -2,12 +2,14 @@
 // These routes must be registered BEFORE auth middleware (unauthenticated, signature-verified).
 import type { Express, Request, Response } from "express";
 import { verifyShopifyWebhook } from "../integrations/shopify";
+/*
 import {
   handleContractCreated,
   handleContractUpdated,
   handleBillingSuccess,
   handleBillingFailure,
 } from "./subscription.service";
+*/
 
 /**
  * Register subscription webhook routes.

@@ -1,12 +1,12 @@
 // subscription.storage.ts — Database operations for subscriptions
-import { pool } from "../../db";
+import { pool } from "../../../db";
 import type {
   SubscriptionRecord,
   PlanRecord,
   BillingLogRecord,
   SubscriptionEvent,
   SubscriptionDashboardStats,
-} from "./subscription.types";
+} from "../subscription.types";
 
 // ─── Plans ───────────────────────────────────────────────────────────
 

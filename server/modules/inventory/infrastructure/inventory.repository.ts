@@ -7,20 +7,20 @@ import {
   type ProductVariant,
   inventoryLevels, inventoryTransactions, adjustmentReasons,
   channelFeeds, productVariants, warehouseLocations, productLocations,
-} from "../../storage/base";
+} from "../../../storage/base";
 
 export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
   getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number): Promise<InventoryLevel | undefined>;
-  createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
-  upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel>;
-  adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }): Promise<InventoryLevel | null>;
-  updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number }): Promise<InventoryLevel | null>;
+  createInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
+  upsertInventoryLevel(level: InsertInventoryLevel, tx?: any): Promise<InventoryLevel>;
+  adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }, tx?: any): Promise<InventoryLevel | null>;
+  updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number }, tx?: any): Promise<InventoryLevel | null>;
   getTotalOnHandByProductVariantId(productVariantId: number, pickableOnly?: boolean): Promise<number>;
   getTotalReservedByProductVariantId(productVariantId: number): Promise<number>;
 
-  createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction>;
+  createInventoryTransaction(transaction: InsertInventoryTransaction, tx?: any): Promise<InventoryTransaction>;
   getInventoryTransactionsByProductVariantId(productVariantId: number, limit?: number): Promise<InventoryTransaction[]>;
   getInventoryTransactions(filters: {
     batchId?: string;
@@ -39,7 +39,7 @@ export interface IInventoryStorage {
     quantity: number;
     userId: string;
     notes?: string;
-  }): Promise<InventoryTransaction>;
+  }, tx?: any): Promise<InventoryTransaction>;
   getTransferHistory(limit?: number): Promise<{
     id: number;
     fromLocation: string;
@@ -111,17 +111,17 @@ export const inventoryMethods: IInventoryStorage = {
     return result[0];
   },
 
-  async createInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
-    const result = await db.insert(inventoryLevels).values(level).returning();
+  async createInventoryLevel(level: InsertInventoryLevel, tx: any = db): Promise<InventoryLevel> {
+    const result = await tx.insert(inventoryLevels).values(level).returning();
     return result[0];
   },
 
-  async upsertInventoryLevel(level: InsertInventoryLevel): Promise<InventoryLevel> {
+  async upsertInventoryLevel(level: InsertInventoryLevel, tx: any = db): Promise<InventoryLevel> {
     if (!level.productVariantId) {
       throw new Error("productVariantId is required for upsertInventoryLevel");
     }
 
-    const existing = await db
+    const existing = await tx
       .select()
       .from(inventoryLevels)
       .where(and(
@@ -130,19 +130,19 @@ export const inventoryMethods: IInventoryStorage = {
       ));
 
     if (existing[0]) {
-      const result = await db
+      const result = await tx
         .update(inventoryLevels)
         .set({ ...level, updatedAt: new Date() })
         .where(eq(inventoryLevels.id, existing[0].id))
         .returning();
       return result[0];
     } else {
-      const result = await db.insert(inventoryLevels).values(level).returning();
+      const result = await tx.insert(inventoryLevels).values(level).returning();
       return result[0];
     }
   },
 
-  async adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }): Promise<InventoryLevel | null> {
+  async adjustInventoryLevel(id: number, adjustments: { variantQty?: number; reservedQty?: number; pickedQty?: number; backorderQty?: number }, tx: any = db): Promise<InventoryLevel | null> {
     const updates: any = { updatedAt: new Date() };
 
     if (adjustments.variantQty !== undefined) {
@@ -158,7 +158,7 @@ export const inventoryMethods: IInventoryStorage = {
       updates.backorderQty = sql`${inventoryLevels.backorderQty} + ${adjustments.backorderQty}`;
     }
 
-    const result = await db
+    const result = await tx
       .update(inventoryLevels)
       .set(updates)
       .where(eq(inventoryLevels.id, id))
@@ -166,7 +166,7 @@ export const inventoryMethods: IInventoryStorage = {
     return result[0] || null;
   },
 
-  async updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number }): Promise<InventoryLevel | null> {
+  async updateInventoryLevel(id: number, updates: { productVariantId?: number; variantQty?: number }, tx: any = db): Promise<InventoryLevel | null> {
     const setValues: any = { updatedAt: new Date() };
 
     if (updates.productVariantId !== undefined) {
@@ -176,7 +176,7 @@ export const inventoryMethods: IInventoryStorage = {
       setValues.variantQty = updates.variantQty;
     }
 
-    const result = await db
+    const result = await tx
       .update(inventoryLevels)
       .set(setValues)
       .where(eq(inventoryLevels.id, id))
@@ -212,8 +212,8 @@ export const inventoryMethods: IInventoryStorage = {
     return result[0]?.total || 0;
   },
 
-  async createInventoryTransaction(transaction: InsertInventoryTransaction): Promise<InventoryTransaction> {
-    const result = await db.insert(inventoryTransactions).values(transaction).returning();
+  async createInventoryTransaction(transaction: InsertInventoryTransaction, tx: any = db): Promise<InventoryTransaction> {
+    const result = await tx.insert(inventoryTransactions).values(transaction).returning();
     return result[0];
   },
 
@@ -268,10 +268,10 @@ export const inventoryMethods: IInventoryStorage = {
     quantity: number;
     userId: string;
     notes?: string;
-  }): Promise<InventoryTransaction> {
+  }, tx: any = db): Promise<InventoryTransaction> {
     const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
 
-    const sourceLevel = await db
+    const sourceLevel = await tx
       .select()
       .from(inventoryLevels)
       .where(and(
@@ -284,12 +284,12 @@ export const inventoryMethods: IInventoryStorage = {
       throw new Error(`Insufficient inventory at source location. Available: ${sourceLevel[0]?.variantQty || 0}`);
     }
 
-    const variant = await db.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
+    const variant = await tx.select().from(productVariants).where(eq(productVariants.id, productVariantId)).limit(1);
     if (!variant.length) {
       throw new Error("Variant not found");
     }
 
-    await db
+    await tx
       .update(inventoryLevels)
       .set({
         variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
@@ -297,7 +297,7 @@ export const inventoryMethods: IInventoryStorage = {
       })
       .where(eq(inventoryLevels.id, sourceLevel[0].id));
 
-    const destLevel = await db
+    const destLevel = await tx
       .select()
       .from(inventoryLevels)
       .where(and(
@@ -307,7 +307,7 @@ export const inventoryMethods: IInventoryStorage = {
       .limit(1);
 
     if (destLevel.length) {
-      await db
+      await tx
         .update(inventoryLevels)
         .set({
           variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
@@ -315,7 +315,7 @@ export const inventoryMethods: IInventoryStorage = {
         })
         .where(eq(inventoryLevels.id, destLevel[0].id));
     } else {
-      await db.insert(inventoryLevels).values({
+      await tx.insert(inventoryLevels).values({
         warehouseLocationId: toLocationId,
         productVariantId: productVariantId,
         variantQty: quantity,
@@ -327,7 +327,7 @@ export const inventoryMethods: IInventoryStorage = {
     }
 
     const batchId = `TRANSFER-${Date.now()}`;
-    const transaction = await db.insert(inventoryTransactions).values({
+    const transaction = await tx.insert(inventoryTransactions).values({
       productVariantId,
       fromLocationId,
       toLocationId,

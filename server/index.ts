@@ -470,8 +470,13 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     if ((res as any).rowCount > 0) {
       console.log(`[Startup Fix] Cleared ${(res as any).rowCount} negative inventory levels.`);
     }
+
+    const fixRes = await db.execute(sql`UPDATE wms.order_items SET picked_quantity = quantity, fulfilled_quantity = quantity WHERE status = 'completed' AND quantity > 0 AND picked_quantity = 0`);
+    if ((fixRes as any).rowCount > 0) {
+      console.log(`[Startup Fix] Fixed ${(fixRes as any).rowCount} dangling 0/x completed line items.`);
+    }
   } catch (err) {
-    console.error("[Startup Fix] Failed to clear negative inventory balances", err);
+    console.error("[Startup Fix] Failed to clear negative inventory balances or dangling items", err);
   }
 
   httpServer.listen(

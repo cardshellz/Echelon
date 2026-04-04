@@ -535,9 +535,9 @@ export function registerInventoryRoutes(app: Express) {
           const variantQtyDelta = targetQty - variantQtyBefore;
 
           // Log with Full WMS fields
-          const { inventoryCore: csvCore } = req.app.locals.services;
-          await csvCore.logTransaction({
+          await storage.createInventoryTransaction({
             productVariantId: variant?.id,
+            fromLocationId: null,
             toLocationId: warehouseLocation.id, // CSV import = TO location (adding/setting inventory)
             transactionType: "csv_upload",
             reasonId: csvReason?.id,

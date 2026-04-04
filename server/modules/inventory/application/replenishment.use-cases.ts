@@ -16,8 +16,8 @@ import {
   cycleCounts,
   cycleCountItems,
 } from "@shared/schema";
-import { calculateRemainingCapacity, findOverflowBin } from "./inventory-utils";
-import { notify } from "../notifications/notifications.service";
+import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
+import { notify } from "../../notifications/notifications.service";
 import type {
   ReplenTask,
   InsertReplenTask,
@@ -121,25 +121,20 @@ type InventoryCore = {
   withTx: (tx: any) => InventoryCore;
 };
 
+import { InventoryUseCases } from "./inventory.use-cases";
+
 /**
- * Replenishment service for the Echelon WMS.
+ * Replenishment use cases for the Echelon WMS.
  *
  * Detects low stock in forward-pick locations and creates/executes tasks
  * to move inventory from bulk storage. Manages the full replen task
  * lifecycle: creation, execution (with case-break support), cancellation,
  * and auto-triggering after picks.
- *
- * Design principles:
- * - Receives `db` and `inventoryCore` via constructor -- no global singletons.
- * - Uses replen rules (SKU overrides) and tier defaults (hierarchy-level rules)
- *   to determine replenishment parameters.
- * - Deduplicates tasks: will not create a new pending task for a product+location
- *   pair that already has one in pending/assigned/in_progress state.
  */
-class ReplenishmentService {
+export class ReplenishmentUseCases {
   constructor(
     private readonly db: DrizzleDb,
-    private readonly inventoryCore: InventoryCore,
+    private readonly inventoryUseCases: InventoryUseCases,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -229,7 +224,10 @@ class ReplenishmentService {
   ): Promise<ReplenEvalResult> {
     const _tag = `[Replen evaluate] variant=${productVariantId} loc=${warehouseLocationId}`;
 
-    const level = await this.inventoryCore.getLevel(productVariantId, warehouseLocationId);
+    // Here we query the level directly since InventoryUseCases doesn't expose getLevel anymore
+    const { inventoryLevels } = await import("@shared/schema");
+    const [level] = await this.db.select().from(inventoryLevels)
+      .where(and(eq(inventoryLevels.productVariantId, productVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
     if (!level) return { status: "skip", skipReason: "no_inventory_level" };
 
     const [location] = await this.db
@@ -508,7 +506,6 @@ class ReplenishmentService {
     }
 
     const movedBaseUnits = await this.db.transaction(async (tx: any) => {
-      const txCore = this.inventoryCore.withTx(tx);
       let moved = 0;
 
       if (
@@ -531,9 +528,9 @@ class ReplenishmentService {
         const breakNotes = `Case break: ${task.qtySourceUnits} x ${sourceVariant.name} -> ${pickVariantUnits} x ${pickVariant.name}` +
           (remainder > 0 ? ` (${remainder} base units remainder)` : "");
 
-        // Decrement source variant via inventoryCore.adjustInventory()
+        // Decrement source variant via inventoryUseCases.adjustInventory()
         // (routes through audit trail, lot tracking, negative guards, and notifyChange)
-        await txCore.adjustInventory({
+        await this.inventoryUseCases.adjustInventory({
           productVariantId: sourceVariant.id,
           warehouseLocationId: task.fromLocationId,
           qtyDelta: -task.qtySourceUnits,
@@ -541,9 +538,9 @@ class ReplenishmentService {
           userId: userId ?? undefined,
         });
 
-        // Increment target variant via inventoryCore.adjustInventory()
+        // Increment target variant via inventoryUseCases.adjustInventory()
         // (routes through audit trail, lot tracking, and notifyChange)
-        await txCore.adjustInventory({
+        await this.inventoryUseCases.adjustInventory({
           productVariantId: pickVariant.id,
           warehouseLocationId: task.toLocationId,
           qtyDelta: pickVariantUnits,
@@ -558,7 +555,7 @@ class ReplenishmentService {
         const variant = sourceVariant ?? pickVariant;
         const baseUnits = task.qtySourceUnits * (variant?.unitsPerVariant ?? 1);
 
-        await txCore.transfer({
+        await this.inventoryUseCases.transfer({
           productVariantId: variantId,
           fromLocationId: task.fromLocationId,
           toLocationId: task.toLocationId,
@@ -1024,13 +1021,16 @@ class ReplenishmentService {
 
     if (targetVariantId && targetLocationId) {
       // Get current system qty at the target bin
-      const currentLevel = await this.inventoryCore.getLevel(targetVariantId, targetLocationId);
-      const systemQty = currentLevel?.variantQty ?? 0;
+      // Assume we need some level info - we fetch it
+      const { inventoryLevels } = await import("@shared/schema");
+      const [sourceLevel] = await this.db.select().from(inventoryLevels)
+        .where(and(eq(inventoryLevels.productVariantId, task.sourceProductVariantId!), eq(inventoryLevels.warehouseLocationId, task.fromLocationId!))).limit(1);
+      const systemQty = sourceLevel?.variantQty ?? 0;
       const variance = actualCount - systemQty;
 
       // Reconcile: picker's count is the source of truth
       if (variance !== 0) {
-        await this.inventoryCore.adjustInventory({
+        await this.inventoryUseCases.adjustInventory({
           productVariantId: targetVariantId,
           warehouseLocationId: targetLocationId,
           qtyDelta: variance,
@@ -1104,7 +1104,7 @@ class ReplenishmentService {
         .limit(1);
 
       // Fire notification to leads/admins
-      const { notify } = await import("../notifications/notifications.service");
+      const { notify } = await import("../../notifications/notifications.service");
       await notify("cycle_count_needed", {
         title: `Bin variance detected: ${variant?.sku ?? 'unknown'}`,
         message: `${targetLoc?.code ?? 'target bin'} has ${variance} more units than expected ` +
@@ -1278,9 +1278,9 @@ class ReplenishmentService {
     if (!sourceLocation) return { action: "true_short_pick" };
 
     if (sourceLocation.isPickable === 1) {
-      const sourceLevel = await this.inventoryCore.getLevel(
-        params.sourceVariantId ?? variant.id, sourceLocation.id,
-      );
+      const { inventoryLevels } = await import("@shared/schema");
+      const [sourceLevel] = await this.db.select().from(inventoryLevels)
+        .where(and(eq(inventoryLevels.productVariantId, params.sourceVariantId ?? variant.id), eq(inventoryLevels.warehouseLocationId, sourceLocation.id))).limit(1);
       const sourceVariant = params.sourceVariantId
         ? (await this.db.select().from(productVariants).where(eq(productVariants.id, params.sourceVariantId)).limit(1))[0]
         : variant;
@@ -1794,10 +1794,12 @@ class ReplenishmentService {
   ): Promise<WarehouseLocation | null> {
     // --- 1. Try dedicated parent location first ---
     if (parentLocationId) {
-      const parentLevel = await this.inventoryCore.getLevel(
-        productVariantId,
-        parentLocationId,
-      );
+      const [parentLevel] = await this.db.select().from(inventoryLevels).where(
+        and(
+          eq(inventoryLevels.productVariantId, productVariantId),
+          eq(inventoryLevels.warehouseLocationId, parentLocationId)
+        )
+      ).limit(1);
       if (parentLevel && parentLevel.variantQty > 0) {
         const [parentLoc] = await this.db
           .select()
@@ -1867,6 +1869,6 @@ class ReplenishmentService {
  * await replen.checkReplenNeeded(variantId, locationId);
  * ```
  */
-export function createReplenishmentService(db: any, inventoryCore: any) {
-  return new ReplenishmentService(db, inventoryCore);
+export function createReplenishmentService(db: any, inventoryUseCases: any) {
+  return new ReplenishmentUseCases(db, inventoryUseCases);
 }

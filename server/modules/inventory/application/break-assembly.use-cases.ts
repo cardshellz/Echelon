@@ -58,19 +58,14 @@ interface BreakableVariantInfo {
  * Every operation runs inside a single DB transaction and produces a linked
  * pair of inventory transactions sharing the same batchId.
  */
-class BreakAssemblyService {
+import { InventoryUseCases } from "./inventory.use-cases";
+
+export class BreakAssemblyUseCases {
   private onChangeCallback: ((variantId: number, trigger: string) => void) | null = null;
 
   constructor(
     private db: any,
-    private inventoryCore: {
-      adjustLevel: Function;
-      adjustInventory: Function;
-      getLevel: Function;
-      upsertLevel: Function;
-      logTransaction: Function;
-      withTx: (tx: any) => any;
-    }
+    private inventoryUseCases: InventoryUseCases
   ) {}
 
   /** Register a callback to fire after break/assembly changes inventory */
@@ -163,10 +158,11 @@ class BreakAssemblyService {
     const batchId = this.generateBatchId("break");
 
     await this.db.transaction(async (tx: any) => {
-      const txCore = this.inventoryCore.withTx(tx);
 
       // Validate source stock within the transaction
-      const sourceLevel = await txCore.getLevel(sourceVariantId, warehouseLocationId);
+      const { inventoryLevels } = await import("@shared/schema");
+      const [sourceLevel] = await tx.select().from(inventoryLevels)
+        .where(and(eq(inventoryLevels.productVariantId, sourceVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
       if (!sourceLevel || sourceLevel.variantQty < sourceQty) {
         const available = sourceLevel?.variantQty ?? 0;
         throw new Error(
@@ -177,8 +173,8 @@ class BreakAssemblyService {
 
       const noteText = notes ?? `Break ${sourceQty} x ${sourceVariant.sku ?? sourceVariant.name} into ${targetQty} x ${targetVariant.sku ?? targetVariant.name}`;
 
-      // Decrement source variant via inventoryCore (audit trail, lot tracking, negative guards)
-      await txCore.adjustInventory({
+      // Decrement source variant via inventoryUseCases (audit trail, lot tracking, negative guards)
+      await this.inventoryUseCases.adjustInventory({
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQty,
@@ -186,8 +182,8 @@ class BreakAssemblyService {
         userId: userId ?? undefined,
       });
 
-      // Increment target variant via inventoryCore (audit trail, lot tracking)
-      await txCore.adjustInventory({
+      // Increment target variant via inventoryUseCases (audit trail, lot tracking)
+      await this.inventoryUseCases.adjustInventory({
         productVariantId: targetVariantId,
         warehouseLocationId: resolvedTargetLocationId,
         qtyDelta: targetQty,
@@ -260,9 +256,10 @@ class BreakAssemblyService {
     const batchId = this.generateBatchId("assemble");
 
     await this.db.transaction(async (tx: any) => {
-      const txCore = this.inventoryCore.withTx(tx);
 
-      const sourceLevel = await txCore.getLevel(sourceVariantId, warehouseLocationId);
+      const { inventoryLevels } = await import("@shared/schema");
+      const [sourceLevel] = await tx.select().from(inventoryLevels)
+        .where(and(eq(inventoryLevels.productVariantId, sourceVariantId), eq(inventoryLevels.warehouseLocationId, warehouseLocationId))).limit(1);
       if (!sourceLevel || sourceLevel.variantQty < sourceQtyNeeded) {
         const available = sourceLevel?.variantQty ?? 0;
         throw new Error(
@@ -273,8 +270,8 @@ class BreakAssemblyService {
 
       const noteText = notes ?? `Assemble ${targetQty} x ${targetVariant.sku ?? targetVariant.name} from ${sourceQtyNeeded} x ${sourceVariant.sku ?? sourceVariant.name}`;
 
-      // Decrement source variant via inventoryCore (audit trail, lot tracking, negative guards)
-      await txCore.adjustInventory({
+      // Decrement source variant via inventoryUseCases (audit trail, lot tracking, negative guards)
+      await this.inventoryUseCases.adjustInventory({
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQtyNeeded,
@@ -282,8 +279,8 @@ class BreakAssemblyService {
         userId: userId ?? undefined,
       });
 
-      // Increment target variant via inventoryCore (audit trail, lot tracking)
-      await txCore.adjustInventory({
+      // Increment target variant via inventoryUseCases (audit trail, lot tracking)
+      await this.inventoryUseCases.adjustInventory({
         productVariantId: targetVariantId,
         warehouseLocationId,
         qtyDelta: targetQty,
@@ -637,6 +634,6 @@ class BreakAssemblyService {
 // Factory
 // ============================================================================
 
-export function createBreakAssemblyService(db: any, inventoryCore: any) {
-  return new BreakAssemblyService(db, inventoryCore);
+export function createBreakAssemblyService(db: any, inventoryUseCases: any) {
+  return new BreakAssemblyUseCases(db, inventoryUseCases);
 }

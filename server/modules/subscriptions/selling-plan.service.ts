@@ -1,6 +1,6 @@
 // selling-plan.service.ts — Shopify Selling Plans API wrapper (GraphQL)
 import { getShopifyConfig } from "../integrations/shopify";
-import * as storage from "./subscription.storage";
+import * as storage from "./infrastructure/subscription.repository";
 import type { SellingPlanConfig, SellingPlanGroupResult, ShopifyGraphQLResponse } from "./subscription.types";
 
 const SHOPIFY_API_VERSION = "2024-10";

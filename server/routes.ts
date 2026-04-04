@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity/rbac";
+import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity";
 
 import { registerAuthRoutes } from "./modules/identity/identity.routes";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";

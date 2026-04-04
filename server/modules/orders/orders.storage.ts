@@ -823,35 +823,35 @@ export const orderMethods: IOrderStorage = {
       cancelled_at: Date | null;
     }>(sql`
       SELECT
-        oms.id::text as id,
-        oms.external_order_number as order_number,
-        NULL as legacy_order_id,
-        NULL as member_id,
-        NULL as shopify_customer_id,
-        oms.ordered_at as order_date,
-        oms.financial_status,
-        oms.fulfillment_status,
-        oms.total_cents as total_price_cents,
-        oms.currency,
-        oms.notes as note,
-        oms.tags::text[] as tags,
-        NULL as discount_codes,
-        oms.created_at,
-        oms.customer_name,
-        oms.customer_email,
-        oms.ship_to_name as shipping_name,
-        oms.ship_to_address1 as shipping_address1,
-        oms.ship_to_address2 as shipping_address2,
-        oms.ship_to_city as shipping_city,
-        oms.ship_to_state as shipping_state,
-        oms.ship_to_zip as shipping_postal_code,
-        oms.ship_to_country as shipping_country,
-        oms.cancelled_at
-      FROM oms_orders oms
-      WHERE oms.fulfillment_status IS NULL
-         OR oms.fulfillment_status = 'unfulfilled'
-         OR oms.fulfillment_status = 'partial'
-      ORDER BY oms.ordered_at DESC
+        so.id::text as id,
+        so.order_number,
+        so.legacy_order_id,
+        so.member_id,
+        so.shopify_customer_id,
+        so.order_date,
+        so.financial_status,
+        so.fulfillment_status,
+        so.total_price_cents,
+        so.currency,
+        so.note,
+        so.tags,
+        so.discount_codes,
+        so.created_at,
+        so.customer_name,
+        so.customer_email,
+        so.shipping_name,
+        so.shipping_address1,
+        so.shipping_address2,
+        so.shipping_city,
+        so.shipping_state,
+        so.shipping_postal_code,
+        so.shipping_country,
+        so.cancelled_at
+      FROM shopify_orders so
+      WHERE so.fulfillment_status IS NULL
+         OR so.fulfillment_status = 'unfulfilled'
+         OR so.fulfillment_status = 'partial'
+      ORDER BY so.order_date DESC
     `);
     return result.rows;
   },

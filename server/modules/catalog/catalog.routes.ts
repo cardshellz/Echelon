@@ -281,14 +281,19 @@ export async function registerProductRoutes(app: Express) {
                 });
               }
 
-              await inventoryCore.skuCorrectionTransfer({
-                sourceVariantId: v.id,
-                targetVariantId: transferToVariantId,
+              await inventoryCore.adjustInventory({
+                productVariantId: v.id,
                 warehouseLocationId: level.warehouseLocationId,
-                qty: level.variantQty,
-                batchId,
+                qtyDelta: -level.variantQty,
+                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
                 userId,
-                notes: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer)`,
+              });
+              await inventoryCore.adjustInventory({
+                productVariantId: transferToVariantId,
+                warehouseLocationId: level.warehouseLocationId,
+                qtyDelta: level.variantQty,
+                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
+                userId,
               });
               inventoryTransferred += level.variantQty;
             }
@@ -730,14 +735,19 @@ export async function registerProductRoutes(app: Express) {
                 error: `Cannot transfer: ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
               });
             }
-            await inventoryCore.skuCorrectionTransfer({
-              sourceVariantId: id,
-              targetVariantId: transferToVariantId,
+            await inventoryCore.adjustInventory({
+              productVariantId: id,
               warehouseLocationId: level.warehouseLocationId,
-              qty: level.variantQty,
-              batchId,
+              qtyDelta: -level.variantQty,
+              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
               userId,
-              notes: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer)`,
+            });
+            await inventoryCore.adjustInventory({
+              productVariantId: transferToVariantId,
+              warehouseLocationId: level.warehouseLocationId,
+              qtyDelta: level.variantQty,
+              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
+              userId,
             });
             inventoryTransferred += level.variantQty;
           }

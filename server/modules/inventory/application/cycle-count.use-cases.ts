@@ -15,7 +15,7 @@
  *     are synced with physical reality.
  */
 
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and } from "drizzle-orm";
 import type { CycleCountItem, InsertCycleCount, CycleCount } from "@shared/schema";
 
 // ---------------------------------------------------------------------------
@@ -30,26 +30,7 @@ type DrizzleDb = {
   execute: (...args: any[]) => any;
 };
 
-type InventoryCore = {
-  adjustInventory(params: {
-    productVariantId: number;
-    warehouseLocationId: number;
-    qtyDelta: number;
-    reason: string;
-    cycleCountId?: number;
-    userId: string | undefined;
-    allowNegative?: boolean;
-  }): Promise<any>;
-  transfer(params: {
-    productVariantId: number;
-    fromLocationId: number;
-    toLocationId: number;
-    qty: number;
-    userId?: string;
-    notes?: string;
-  }): Promise<void>;
-  getLevel(productVariantId: number, warehouseLocationId: number): Promise<{ variantQty: number; reservedQty: number } | null>;
-};
+import { InventoryUseCases } from "./inventory.use-cases";
 
 type ChannelSync = {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
@@ -182,10 +163,10 @@ export interface ReconciliationPreview {
 // Service
 // ---------------------------------------------------------------------------
 
-class CycleCountService {
+export class CycleCountUseCases {
   constructor(
     private db: DrizzleDb,
-    private inventoryCore: InventoryCore,
+    private inventoryUseCases: InventoryUseCases,
     private channelSync: ChannelSync,
     private replenishment: Replenishment,
     private storage: Storage,
@@ -354,7 +335,7 @@ class CycleCountService {
           `staleVariance=${item.varianceQty} realTimeVariance=${realTimeVariance} sku=${item.expectedSku || item.countedSku}`
         );
 
-        await this.inventoryCore.adjustInventory({
+        await this.inventoryUseCases.adjustInventory({
           productVariantId: item.productVariantId,
           warehouseLocationId: item.warehouseLocationId,
           qtyDelta: realTimeVariance,
@@ -861,7 +842,7 @@ class CycleCountService {
           console.warn(`[CYCLE COUNT] Auto-approve blocked by negative guard: current=${autoCurrentQty} variance=${autoRealTimeVariance}`);
           // Fall through to regular variance status instead of auto-approving
         } else if (autoRealTimeVariance !== 0) {
-          await this.inventoryCore.adjustInventory({
+          await this.inventoryUseCases.adjustInventory({
             productVariantId: item.productVariantId,
             warehouseLocationId: item.warehouseLocationId,
             qtyDelta: autoRealTimeVariance,
@@ -1024,7 +1005,7 @@ class CycleCountService {
     // Execute the transfer via inventory core
     const transferNotes = `Cycle count #${cycleCountId} transfer resolution: ${item.expectedSku || 'unknown'} x ${params.qty} → ${destCode}. ${params.notes || ''}`.trim();
 
-    await this.inventoryCore.transfer({
+    await this.inventoryUseCases.transfer({
       productVariantId: item.productVariantId,
       fromLocationId: item.warehouseLocationId,
       toLocationId: params.destinationLocationId,
@@ -1314,9 +1295,11 @@ class CycleCountService {
         const toLoc = await this.storage.getWarehouseLocationById(transfer.toLocationId);
         
         // Verify source has enough qty for transfer
-        const sourceLevel = await this.inventoryCore.getLevel(transfer.productVariantId, transfer.fromLocationId);
+        const { inventoryLevels } = await import("@shared/schema");
+        const [sourceLevel] = await this.db.select().from(inventoryLevels)
+          .where(and(eq(inventoryLevels.productVariantId, transfer.productVariantId), eq(inventoryLevels.warehouseLocationId, transfer.fromLocationId))).limit(1);
         if (sourceLevel && sourceLevel.variantQty >= transfer.qty) {
-          await this.inventoryCore.transfer({
+          await this.inventoryUseCases.transfer({
             productVariantId: transfer.productVariantId,
             fromLocationId: transfer.fromLocationId,
             toLocationId: transfer.toLocationId,
@@ -1789,14 +1772,14 @@ class CycleCountService {
 // ---------------------------------------------------------------------------
 
 export function createCycleCountService(
-  db: DrizzleDb,
-  inventoryCore: InventoryCore,
-  channelSync: ChannelSync,
-  replenishment: Replenishment,
-  storage: Storage,
-  reservation?: Reservation | null,
-) {
-  return new CycleCountService(db, inventoryCore, channelSync, replenishment, storage, reservation ?? null);
+  db: any,
+  inventoryUseCases: any,
+  channelSync: any,
+  replenishment: any,
+  storage: any,
+  reservation: any = null,
+): CycleCountUseCases {
+  return new CycleCountUseCases(db, inventoryUseCases, channelSync, replenishment, storage, reservation);
 }
 
-export type { CycleCountService };
+export type { CycleCountUseCases as CycleCountService };
