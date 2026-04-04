@@ -1141,9 +1141,9 @@ export function registerPurchasingRoutes(app: Express) {
       }
 
       res.status(201).json(task);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error creating replen task:", error);
-      res.status(500).json({ error: "Failed to create replen task" });
+      res.status(500).json({ error: error.message || "Failed to create replen task" });
     }
   });
   

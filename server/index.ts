@@ -464,6 +464,16 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
+  try {
+    const { sql } = require("drizzle-orm");
+    const res = await db.execute(sql`UPDATE inventory_levels SET variant_qty = 0 WHERE variant_qty < 0`);
+    if ((res as any).rowCount > 0) {
+      console.log(`[Startup Fix] Cleared ${(res as any).rowCount} negative inventory levels.`);
+    }
+  } catch (err) {
+    console.error("[Startup Fix] Failed to clear negative inventory balances", err);
+  }
+
   httpServer.listen(
     {
       port,

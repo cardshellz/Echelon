@@ -693,18 +693,22 @@ export default function Replenishment() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });
-      setShowTaskDialog(false);
-      resetTaskForm();
-      if (data.autoExecuted) {
-        toast({ title: "Case break completed", description: `Moved ${data.moved} units` });
-      } else if (data.autoExecuteError) {
-        toast({ title: "Task created but execution failed", description: data.autoExecuteError, variant: "destructive" });
+      if (data.autoExecuteError) {
+        toast({ title: "Task created but execution failed", description: data.autoExecuteError, variant: "destructive", duration: 8000 });
+        // Don't close the dialog so the user sees something went wrong with the stock
       } else {
-        toast({ title: "Replen task created" });
+        setShowTaskDialog(false);
+        resetTaskForm();
+        if (data.autoExecuted) {
+          toast({ title: "Case break completed", description: `Moved ${data.moved} units` });
+        } else {
+          toast({ title: "Replen task created" });
+        }
       }
     },
     onError: (err: Error) => {
-      toast({ title: "Failed to create task", description: err.message, variant: "destructive" });
+      console.error("Mutation Error:", err);
+      toast({ title: "Failed to create task", description: err.message, variant: "destructive", duration: 7000 });
     },
   });
 
