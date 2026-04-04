@@ -30,16 +30,26 @@ export async function handleContractCreated(payload: ContractWebhookPayload): Pr
   let planId: number | null = sellingPlanInfo?.planId || null;
   let plan: any = null;
 
-  if (planId) {
+  if (!planId && sellingPlanInfo?.productId) {
+    const numericProductId = sellingPlanInfo.productId.split("/").pop() || "";
+    // Second try: Determine plan from product ID if selling plan was missing/unlinked
+    const plans = await storage.getActivePlans();
+    plan = plans.find(p => p.shopify_product_id === numericProductId);
+    planId = plan?.id || null;
+  }
+
+  if (planId && !plan) {
     plan = await storage.getPlanById(planId);
   }
 
   if (!plan) {
-    // Fallback: try to determine plan from billing policy
+    // Ultimate fallback: try to determine plan from billing policy interval
     const plans = await storage.getActivePlans();
     const interval = payload.billing_policy?.interval?.toLowerCase();
+    const normalizedInterval = interval === "year" ? "yearly" : interval === "month" ? "monthly" : interval;
+    
     plan = plans.find(p =>
-      p.billing_interval === interval && p.tier === "standard"
+      p.billing_interval === normalizedInterval && p.tier === "standard"
     ) || plans[0];
     planId = plan?.id;
   }

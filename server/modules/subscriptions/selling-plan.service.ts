@@ -206,7 +206,7 @@ export async function listSellingPlanGroups(): Promise<any[]> {
 /**
  * Look up a subscription contract's line items to determine which selling plan was used.
  */
-export async function getContractSellingPlan(contractGid: string): Promise<{ sellingPlanGid: string; planId: number | null } | null> {
+export async function getContractSellingPlan(contractGid: string): Promise<{ sellingPlanGid: string | null; productId: string | null; planId: number | null } | null> {
   const query = `
     query getContract($id: ID!) {
       subscriptionContract(id: $id) {
@@ -215,6 +215,7 @@ export async function getContractSellingPlan(contractGid: string): Promise<{ sel
         lines(first: 5) {
           edges {
             node {
+              productId
               sellingPlanId
               sellingPlanName
             }
@@ -239,16 +240,20 @@ export async function getContractSellingPlan(contractGid: string): Promise<{ sel
   const contract = data.subscriptionContract;
   if (!contract) return null;
 
-  // Get selling plan ID from contract lines
+  // Get selling plan ID or product ID from contract lines
   const line = contract.lines?.edges?.[0]?.node;
-  const sellingPlanGid = line?.sellingPlanId;
-  if (!sellingPlanGid) return null;
+  const sellingPlanGid = line?.sellingPlanId || null;
+  const productId = line?.productId || null;
 
   // Look up in selling_plan_map
-  const plan = await storage.getPlanBySellingPlanGid(sellingPlanGid);
+  let plan = null;
+  if (sellingPlanGid) {
+    plan = await storage.getPlanBySellingPlanGid(sellingPlanGid);
+  }
 
   return {
     sellingPlanGid,
+    productId,
     planId: plan?.id || null,
   };
 }

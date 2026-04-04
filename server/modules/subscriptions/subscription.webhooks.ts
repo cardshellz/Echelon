@@ -52,6 +52,9 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
     }
   }
 
+  /*
+  // Disabled: shellz-club-app is now the canonical membership webhook listener
+  
   // subscription_contracts/create
   app.post("/api/webhooks/subscription-contracts/create", (req, res) => {
     processWebhook(req, res, handleContractCreated);
@@ -71,6 +74,7 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
   app.post("/api/webhooks/subscription-billing/failure", (req, res) => {
     processWebhook(req, res, handleBillingFailure);
   });
+  */
 
   console.log("[SubWebhook] Subscription webhook routes registered");
 }

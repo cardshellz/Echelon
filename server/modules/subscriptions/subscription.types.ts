@@ -82,6 +82,7 @@ export interface PlanRecord {
   billing_interval: string | null;
   billing_interval_count: number;
   price_cents: number | null;
+  shopify_product_id: string | null;
   shopify_selling_plan_gid: string | null;
   includes_dropship: boolean;
   is_active: boolean;

@@ -1,0 +1,72 @@
+[
+  {
+    "id": "ab3f371c-c15d-4239-bb84-096362a9102f",
+    "member_subscription_id": "f5b01635-94df-4d4f-8ff0-838f615f9593",
+    "shopify_contract_id": "gid://shopify/SubscriptionContract/15819538591",
+    "event_type": "contract_created",
+    "event_source": "webhook",
+    "payload": {
+      "customerId": "23490001436831",
+      "billingInterval": "year",
+      "billingIntervalCount": 1
+    },
+    "notes": "Subscription contract created for customer 23490001436831",
+    "created_at": "2026-04-02T22:15:44.707Z"
+  },
+  {
+    "id": "3a5966d6-ef41-42a0-82a8-1def15267a01",
+    "member_subscription_id": "9f74926e-56aa-4c71-a123-ba1a5d1ce477",
+    "shopify_contract_id": "gid://shopify/SubscriptionContract/15818752159",
+    "event_type": "contract_created",
+    "event_source": "webhook",
+    "payload": {
+      "customerId": "23463136198815",
+      "billingInterval": "year",
+      "billingIntervalCount": 1
+    },
+    "notes": "Subscription contract created for customer 23463136198815",
+    "created_at": "2026-04-02T20:00:12.416Z"
+  },
+  {
+    "id": "d087d9d6-d1d8-4254-b9b6-761add214ba1",
+    "member_subscription_id": "f27087b5-82f8-4379-a4cc-07b20c11e9f0",
+    "shopify_contract_id": "gid://shopify/SubscriptionContract/15816196255",
+    "event_type": "contract_created",
+    "event_source": "webhook",
+    "payload": {
+      "customerId": "22923568054431",
+      "billingInterval": "year",
+      "billingIntervalCount": 1
+    },
+    "notes": "Subscription contract created for customer 22923568054431",
+    "created_at": "2026-04-02T05:21:06.570Z"
+  },
+  {
+    "id": "0aeec0c4-aa92-404f-945a-003d46689766",
+    "member_subscription_id": "772e4358-a589-4c04-be69-5ba3fe1ca8cf",
+    "shopify_contract_id": "gid://shopify/SubscriptionContract/15816032415",
+    "event_type": "contract_created",
+    "event_source": "webhook",
+    "payload": {
+      "customerId": "22931407831199",
+      "billingInterval": "year",
+      "billingIntervalCount": 1
+    },
+    "notes": "Subscription contract created for customer 22931407831199",
+    "created_at": "2026-04-02T05:01:42.371Z"
+  },
+  {
+    "id": "e2d0cf5e-fcbd-46ca-b87a-9ff139c38598",
+    "member_subscription_id": "bf8875ac-90bb-4490-8776-dfaf95069dc9",
+    "shopify_contract_id": "gid://shopify/SubscriptionContract/15815868575",
+    "event_type": "contract_created",
+    "event_source": "webhook",
+    "payload": {
+      "customerId": "23339693637791",
+      "billingInterval": "year",
+      "billingIntervalCount": 1
+    },
+    "notes": "Subscription contract created for customer 23339693637791",
+    "created_at": "2026-04-02T05:01:15.289Z"
+  }
+]

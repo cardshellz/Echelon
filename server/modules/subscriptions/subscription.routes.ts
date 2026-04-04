@@ -185,8 +185,9 @@ export function registerSubscriptionRoutes(app: Express): void {
   app.post("/api/membership/register-webhooks", async (req: Request, res: Response) => {
     try {
       const baseUrl = req.body?.base_url || `https://${req.headers.host}`;
-      const registered = await registerSubscriptionWebhooks(baseUrl);
-      res.json({ registered });
+      // const registered = await registerSubscriptionWebhooks(baseUrl);
+      // res.json({ registered });
+      res.json({ registered: ["disabled - handled by shellz-club-app"] });
     } catch (err: any) {
       console.error("[SubRoutes] Webhook registration error:", err.message);
       res.status(500).json({ error: err.message });
