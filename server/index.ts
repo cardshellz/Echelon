@@ -7,8 +7,8 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 // REMOVED: order-sync-listener deleted (Phase 3 - duplicate path eliminated)
-// REMOVED: reconciliation disabled until rebuilt without syncSingleOrder
-// import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
+// REMOVED: reconciliation rebuilt without syncSingleOrder for OMS decoupling
+import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
@@ -492,9 +492,8 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       // Now using: Echelon OMS webhooks → oms_orders → wmsSync → orders
 
       // Start Shopify order reconciliation (catches TikTok, POS, missed webhooks)
-      // TODO: Update reconciliation to work without syncSingleOrder
-      // initReconciliation(syncSingleOrder, services.oms);
-      // startShopifyReconciliation();
+      initReconciliation(services.oms);
+      startShopifyReconciliation();
 
       // Start subscription billing scheduler (runs hourly)
       startBillingScheduler();

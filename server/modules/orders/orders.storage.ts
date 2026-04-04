@@ -42,13 +42,12 @@ export interface IOrderStorage {
   getExceptionOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   resolveException(orderId: number, resolution: string, resolvedBy: string, notes?: string): Promise<Order | null>;
 
-  // Shopify raw-table queries (used by sync routes)
-  getUnfulfilledShopifyRawOrders(): Promise<{
-    id: string;
+  // OMS raw-table queries (used by sync routes)
+  getUnfulfilledOmsOrders(): Promise<{
+    id: string; // Will be oms_orders.id
+    external_order_id: string;
     order_number: string;
-    legacy_order_id: string | null;
-    member_id: string | null;
-    shopify_customer_id: string | null;
+    channel_id: number;
     order_date: Date | null;
     financial_status: string | null;
     fulfillment_status: string | null;
@@ -56,34 +55,32 @@ export interface IOrderStorage {
     currency: string | null;
     note: string | null;
     tags: string[] | null;
-    discount_codes: any | null;
     created_at: Date | null;
     customer_name: string | null;
     customer_email: string | null;
-    shipping_name: string | null;
-    shipping_address1: string | null;
-    shipping_address2: string | null;
-    shipping_city: string | null;
-    shipping_state: string | null;
-    shipping_postal_code: string | null;
-    shipping_country: string | null;
-    cancelled_at: Date | null;
+    ship_to_name: string | null;
+    ship_to_address1: string | null;
+    ship_to_address2: string | null;
+    ship_to_city: string | null;
+    ship_to_state: string | null;
+    ship_to_zip: string | null;
+    ship_to_country: string | null;
   }[]>;
-  getShopifyRawOrderItems(orderId: string): Promise<{
+  getOmsOrderItems(orderId: string): Promise<{
     id: string;
-    shopify_line_item_id: string;
+    external_line_item_id: string;
     sku: string | null;
-    name: string | null;
-    title: string | null;
+    title: string;
+    variant_title: string | null;
     quantity: number;
     fulfillable_quantity: number | null;
     fulfillment_status: string | null;
     requires_shipping: boolean | null;
   }[]>;
   syncFulfilledStatusesFromShopify(): Promise<void>;
-  backfillOrdersFromShopifyRaw(): Promise<{ updated: number }>;
+  backfillOrdersFromOms(): Promise<{ updated: number }>;
   countOrdersMissingShippingData(): Promise<number>;
-  updateShopifyRawOrderCustomer(orderId: string, data: {
+  updateOmsRawOrderCustomer(orderId: string, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -94,7 +91,7 @@ export interface IOrderStorage {
     shippingPostalCode: string | null;
     shippingCountry: string | null;
   }): Promise<number>;
-  countShopifyRawOrdersMissingCustomerName(): Promise<number>;
+  countOmsRawOrdersMissingCustomerName(): Promise<number>;
 
   // Diagnostic/admin queries
   debugPickingQueue(): Promise<any[]>;
@@ -795,13 +792,12 @@ export const orderMethods: IOrderStorage = {
 
   // Shopify raw-table queries (used by sync routes)
 
-  async getUnfulfilledShopifyRawOrders() {
+  async getUnfulfilledOmsOrders() {
     const result = await db.execute<{
-      id: string;
+      id: string; // Will be oms_orders.id
+      external_order_id: string;
       order_number: string;
-      legacy_order_id: string | null;
-      member_id: string | null;
-      shopify_customer_id: string | null;
+      channel_id: number;
       order_date: Date | null;
       financial_status: string | null;
       fulfillment_status: string | null;
@@ -809,67 +805,73 @@ export const orderMethods: IOrderStorage = {
       currency: string | null;
       note: string | null;
       tags: string[] | null;
-      discount_codes: any | null;
       created_at: Date | null;
       customer_name: string | null;
       customer_email: string | null;
-      shipping_name: string | null;
-      shipping_address1: string | null;
-      shipping_address2: string | null;
-      shipping_city: string | null;
-      shipping_state: string | null;
-      shipping_postal_code: string | null;
-      shipping_country: string | null;
-      cancelled_at: Date | null;
+      ship_to_name: string | null;
+      ship_to_address1: string | null;
+      ship_to_address2: string | null;
+      ship_to_city: string | null;
+      ship_to_state: string | null;
+      ship_to_zip: string | null;
+      ship_to_country: string | null;
     }>(sql`
       SELECT
-        so.id::text as id,
-        so.order_number,
-        so.legacy_order_id,
-        so.member_id,
-        so.shopify_customer_id,
-        so.order_date,
-        so.financial_status,
-        so.fulfillment_status,
-        so.total_price_cents,
-        so.currency,
-        so.note,
-        so.tags,
-        so.discount_codes,
-        so.created_at,
-        so.customer_name,
-        so.customer_email,
-        so.shipping_name,
-        so.shipping_address1,
-        so.shipping_address2,
-        so.shipping_city,
-        so.shipping_state,
-        so.shipping_postal_code,
-        so.shipping_country,
-        so.cancelled_at
-      FROM shopify_orders so
-      WHERE so.fulfillment_status IS NULL
-         OR so.fulfillment_status = 'unfulfilled'
-         OR so.fulfillment_status = 'partial'
-      ORDER BY so.order_date DESC
+        oms.id::text as id,
+        oms.external_order_id,
+        oms.external_order_number as order_number,
+        oms.channel_id,
+        oms.ordered_at as order_date,
+        oms.financial_status,
+        oms.fulfillment_status,
+        oms.total_cents as total_price_cents,
+        oms.currency,
+        oms.notes as note,
+        oms.tags,
+        oms.created_at,
+        oms.customer_name,
+        oms.customer_email,
+        oms.ship_to_name,
+        oms.ship_to_address1,
+        oms.ship_to_address2,
+        oms.ship_to_city,
+        oms.ship_to_state,
+        oms.ship_to_zip,
+        oms.ship_to_country
+      FROM oms_orders oms
+      WHERE oms.fulfillment_status IS NULL
+         OR oms.fulfillment_status = 'unfulfilled'
+         OR oms.fulfillment_status = 'partial'
+         OR oms.fulfillment_status = 'pending'
+      ORDER BY oms.ordered_at DESC
     `);
     return result.rows;
   },
 
-  async getShopifyRawOrderItems(orderId: string) {
+  async getOmsOrderItems(omsOrderId: string) {
     const result = await db.execute<{
       id: string;
-      shopify_line_item_id: string;
+      external_line_item_id: string;
       sku: string | null;
-      name: string | null;
-      title: string | null;
+      title: string;
+      variant_title: string | null;
       quantity: number;
       fulfillable_quantity: number | null;
       fulfillment_status: string | null;
       requires_shipping: boolean | null;
     }>(sql`
-      SELECT * FROM shopify_order_items
-      WHERE order_id = ${orderId}
+      SELECT
+        ol.id::text as id,
+        ol.external_line_item_id,
+        ol.sku,
+        ol.title,
+        ol.variant_title,
+        ol.quantity,
+        ol.fulfillable_quantity,
+        ol.fulfillment_status,
+        ol.requires_shipping
+      FROM oms_order_lines ol
+      WHERE ol.order_id = ${omsOrderId}
     `);
     return result.rows;
   },
@@ -924,7 +926,7 @@ export const orderMethods: IOrderStorage = {
     `);
   },
 
-  async backfillOrdersFromShopifyRaw(): Promise<{ updated: number }> {
+  async backfillOrdersFromOms(): Promise<{ updated: number }> {
     const result = await db.execute(sql`
       UPDATE wms.orders o SET
         customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
@@ -944,14 +946,14 @@ export const orderMethods: IOrderStorage = {
   async countOrdersMissingShippingData(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
       SELECT COUNT(*) as count FROM wms.orders
-      WHERE source = 'shopify'
-        AND shopify_order_id IS NOT NULL
+      WHERE source = 'oms'
+        AND source_table_id IS NOT NULL
         AND (shipping_address IS NULL OR shipping_city IS NULL)
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
   },
 
-  async updateShopifyRawOrderCustomer(orderId: string, data: {
+  async updateOmsRawOrderCustomer(orderId: string, data: {
     customerName: string;
     customerEmail: string | null;
     shippingName: string | null;
@@ -963,24 +965,24 @@ export const orderMethods: IOrderStorage = {
     shippingCountry: string | null;
   }): Promise<number> {
     const result = await db.execute(sql`
-      UPDATE shopify_orders SET
+      UPDATE oms_orders SET
         customer_name = ${data.customerName},
         customer_email = ${data.customerEmail},
-        shipping_name = ${data.shippingName},
-        shipping_address1 = ${data.shippingAddress1},
-        shipping_address2 = ${data.shippingAddress2},
-        shipping_city = ${data.shippingCity},
-        shipping_state = ${data.shippingState},
-        shipping_postal_code = ${data.shippingPostalCode},
-        shipping_country = ${data.shippingCountry}
+        ship_to_name = ${data.shippingName},
+        ship_to_address1 = ${data.shippingAddress1},
+        ship_to_address2 = ${data.shippingAddress2},
+        ship_to_city = ${data.shippingCity},
+        ship_to_state = ${data.shippingState},
+        ship_to_zip = ${data.shippingPostalCode},
+        ship_to_country = ${data.shippingCountry}
       WHERE id = ${orderId}
     `);
     return result.rowCount || 0;
   },
 
-  async countShopifyRawOrdersMissingCustomerName(): Promise<number> {
+  async countOmsRawOrdersMissingCustomerName(): Promise<number> {
     const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM shopify_orders WHERE customer_name IS NULL
+      SELECT COUNT(*) as count FROM oms_orders WHERE customer_name IS NULL
     `);
     return parseInt(result.rows[0]?.count || '0', 10);
   },

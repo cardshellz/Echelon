@@ -112,7 +112,6 @@ let reconciliationInterval: ReturnType<typeof setInterval> | null = null;
 let isRunning = false;
 
 // Services injected at startup
-let syncSingleOrderFn: ((shopifyOrderId: string) => Promise<boolean>) | null = null;
 let omsService: OmsService | null = null;
 
 // ---------------------------------------------------------------------------
@@ -366,8 +365,8 @@ async function runReconciliation(): Promise<ReconciliationResult> {
   const startTime = Date.now();
 
   try {
-    if (!syncSingleOrderFn) {
-      throw new Error("syncSingleOrder not initialized — call initReconciliation first");
+    if (!omsService) {
+      throw new Error("omsService not initialized — call initReconciliation first");
     }
 
     const lastCheck = await getLastCheckTime();
@@ -414,22 +413,17 @@ async function runReconciliation(): Promise<ReconciliationResult> {
         // Step 1: Ensure shopify_orders + shopify_order_items rows exist
         const shopifyRowId = await ensureShopifyOrderRow(order);
 
-        // Step 2: Sync to WMS via existing pipeline
-        const wasCreated = await syncSingleOrderFn(shopifyRowId);
-
-        if (wasCreated) {
-          result.reconciled++;
-          const source = order.source_name || "unknown";
-          result.details.push(`${order.name} (${source})`);
-
-          // Step 3: Bridge to OMS (non-blocking)
-          if (omsService) {
-            try {
-              const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
-              await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
-            } catch (err: any) {
-              console.error(`[RECONCILE] OMS bridge failed for ${order.name}: ${err.message}`);
-            }
+        // Step 2: Bridge to OMS
+        if (omsService) {
+          try {
+            const { bridgeShopifyOrderToOms } = require("../oms/shopify-bridge");
+            await bridgeShopifyOrderToOms(db, omsService, shopifyRowId);
+            result.reconciled++;
+            const source = order.source_name || "unknown";
+            result.details.push(`${order.name} (${source})`);
+          } catch (err: any) {
+            result.failed++;
+            console.error(`[RECONCILE] OMS bridge failed for ${order.name}: ${err.message}`);
           }
         } else {
           result.skipped++;
@@ -471,10 +465,8 @@ async function runReconciliation(): Promise<ReconciliationResult> {
  * Must be called before startShopifyReconciliation().
  */
 export function initReconciliation(
-  syncFn: (shopifyOrderId: string) => Promise<boolean>,
   oms?: OmsService,
 ) {
-  syncSingleOrderFn = syncFn;
   omsService = oms || null;
 }
 

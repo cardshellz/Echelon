@@ -1,0 +1,150 @@
+[
+  {
+    "column_name": "id",
+    "data_type": "character varying"
+  },
+  {
+    "column_name": "legacy_order_id",
+    "data_type": "text"
+  },
+  {
+    "column_name": "member_id",
+    "data_type": "character varying"
+  },
+  {
+    "column_name": "shopify_customer_id",
+    "data_type": "text"
+  },
+  {
+    "column_name": "order_number",
+    "data_type": "text"
+  },
+  {
+    "column_name": "order_date",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "financial_status",
+    "data_type": "text"
+  },
+  {
+    "column_name": "fulfillment_status",
+    "data_type": "text"
+  },
+  {
+    "column_name": "total_price_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "subtotal_price_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "total_discounts_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "total_tax_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "total_shipping_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "currency",
+    "data_type": "text"
+  },
+  {
+    "column_name": "rewards_processed",
+    "data_type": "boolean"
+  },
+  {
+    "column_name": "discount_codes",
+    "data_type": "jsonb"
+  },
+  {
+    "column_name": "tags",
+    "data_type": "ARRAY"
+  },
+  {
+    "column_name": "note",
+    "data_type": "text"
+  },
+  {
+    "column_name": "cancelled_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "refunded_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "created_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "processed_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "updated_at",
+    "data_type": "timestamp without time zone"
+  },
+  {
+    "column_name": "plan_discounts_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "coupon_discounts_cents",
+    "data_type": "integer"
+  },
+  {
+    "column_name": "customer_name",
+    "data_type": "text"
+  },
+  {
+    "column_name": "customer_email",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_name",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_address1",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_address2",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_city",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_state",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_postal_code",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shipping_country",
+    "data_type": "text"
+  },
+  {
+    "column_name": "shop_domain",
+    "data_type": "text"
+  },
+  {
+    "column_name": "source_name",
+    "data_type": "text"
+  },
+  {
+    "column_name": "tax_exempt",
+    "data_type": "boolean"
+  }
+]

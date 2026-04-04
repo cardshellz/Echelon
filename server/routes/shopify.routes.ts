@@ -154,33 +154,32 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
-  // Sync from shopify_orders/shopify_order_items tables to operational orders/order_items
-  // This reads from the raw Shopify tables and extracts operational subset
-  app.post("/api/shopify/sync-from-raw-tables", async (req, res) => {
+  // Sync from oms_orders/oms_order_lines tables to operational orders/order_items
+  // This reads from the unified OMS Hub and extracts the WMS operational subset
+  app.post("/api/orders/sync-from-oms", async (req, res) => {
     try {
-      console.log("Starting sync from shopify_orders to operational orders...");
+      console.log("Starting sync from oms_orders to operational WMS orders...");
       
-      // Get default Shopify channel for linking orders
       const allChannels = await storage.getAllChannels();
       const shopifyChannel = allChannels.find(c => c.provider === "shopify" && c.isDefault === 1);
-      const shopifyChannelId = shopifyChannel?.id || null;
+      const defaultChannelId = shopifyChannel?.id || null;
       
-      // Fetch unfulfilled orders from shopify_orders table
-      const rawOrderRows = await storage.getUnfulfilledShopifyRawOrders();
+      // Fetch unfulfilled orders from oms_orders table
+      const rawOrderRows = await storage.getUnfulfilledOmsOrders();
       
       let created = 0;
       let skipped = 0;
       
       for (const rawOrder of rawOrderRows) {
-        // Check if order already exists in operational table
-        const existingOrder = await storage.getOrderByExternalId(rawOrder.id);
+        // Check if order already exists in operational table (using oms_orders.id as sourceTableId)
+        const existingOrder = await storage.getOrderByExternalId(rawOrder.external_order_id || rawOrder.id);
         if (existingOrder) {
           skipped++;
           continue;
         }
         
-        // Fetch ALL line items for this order from shopify_order_items (including requires_shipping flag)
-        const rawItemRows = await storage.getShopifyRawOrderItems(rawOrder.id);
+        // Fetch ALL line items for this order from oms_order_lines (including requires_shipping flag)
+        const rawItemRows = await storage.getOmsOrderItems(rawOrder.id);
 
         // Skip if no items at all
         if (rawItemRows.length === 0) {
@@ -210,7 +209,6 @@ export function registerShopifyRoutes(app: Express) {
         for (const item of unfulfilledItems) {
           const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           
-          // Look up image from product_locations first (best source), then products/product_variants
           let itemImageUrl = binLocation?.imageUrl || null;
           if (!itemImageUrl && item.sku) {
             itemImageUrl = await storage.getItemImageUrlBySku(item.sku);
@@ -218,10 +216,10 @@ export function registerShopifyRoutes(app: Express) {
           
           enrichedItems.push({
             orderId: 0,
-            shopifyLineItemId: item.shopify_line_item_id,
-            sourceItemId: item.id, // Links to shopify_order_items.id
+            shopifyLineItemId: item.external_line_item_id, // Keep field name for legacy compatibility
+            sourceItemId: item.id, // Links to oms_order_lines.id
             sku: item.sku || 'UNKNOWN',
-            name: item.name || item.title || 'Unknown Item',
+            name: item.title || item.variant_title || 'Unknown Item',
             quantity: item.fulfillable_quantity || item.quantity,
             pickedQuantity: 0,
             fulfilledQuantity: 0,
@@ -234,27 +232,26 @@ export function registerShopifyRoutes(app: Express) {
           });
         }
         
-        // Create operational order using customer/shipping data from shopify_orders
+        // Create operational order using customer/shipping data from oms_orders
         await storage.createOrderWithItems({
-          shopifyOrderId: rawOrder.id,
-          externalOrderId: rawOrder.id,
-          sourceTableId: rawOrder.id, // Links to shopify_orders.id for JOINs
-          channelId: shopifyChannelId,
-          source: "shopify",
+          shopifyOrderId: rawOrder.external_order_id,
+          externalOrderId: rawOrder.external_order_id || rawOrder.id,
+          sourceTableId: rawOrder.id, // Links to oms_orders.id for JOINs
+          channelId: rawOrder.channel_id || defaultChannelId,
+          source: "oms", // Updated to reflect it comes from the unified hub
           orderNumber: rawOrder.order_number,
-          customerName: rawOrder.customer_name || rawOrder.shipping_name || rawOrder.order_number,
+          customerName: rawOrder.customer_name || rawOrder.ship_to_name || rawOrder.order_number,
           customerEmail: rawOrder.customer_email,
-          shippingName: rawOrder.shipping_name,
-          shippingAddress: rawOrder.shipping_address1,
-          shippingCity: rawOrder.shipping_city,
-          shippingState: rawOrder.shipping_state,
-          shippingPostalCode: rawOrder.shipping_postal_code,
-          shippingCountry: rawOrder.shipping_country,
+          shippingName: rawOrder.ship_to_name,
+          shippingAddress: rawOrder.ship_to_address1,
+          shippingCity: rawOrder.ship_to_city,
+          shippingState: rawOrder.ship_to_state,
+          shippingPostalCode: rawOrder.ship_to_zip,
+          shippingCountry: rawOrder.ship_to_country,
           financialStatus: rawOrder.financial_status,
           shopifyFulfillmentStatus: rawOrder.fulfillment_status,
-          cancelledAt: rawOrder.cancelled_at ? new Date(rawOrder.cancelled_at) : undefined,
           priority: 100,
-          warehouseStatus: rawOrder.cancelled_at ? "cancelled" : (hasShippableItems ? "ready" : "completed"),
+          warehouseStatus: hasShippableItems ? "ready" : "completed",
           itemCount: enrichedItems.length,
           unitCount: totalUnits,
           shopifyCreatedAt: rawOrder.order_date || rawOrder.created_at || undefined,
@@ -295,29 +292,30 @@ export function registerShopifyRoutes(app: Express) {
     }
   });
 
-  // Backfill operational orders table with customer data from shopify_orders
+  // Backfill operational orders table with customer data from oms_orders
   // Uses efficient UPDATE FROM JOIN to process thousands of orders at once
-  app.post("/api/shopify/backfill-orders-from-raw", async (req, res) => {
+  app.post("/api/orders/backfill-orders-from-oms", async (req, res) => {
     try {
-      console.log("Starting backfill of operational orders from shopify_orders...");
+      console.log("Starting backfill of operational orders from oms_orders...");
       const startTime = Date.now();
-
-      const { updated } = await storage.backfillOrdersFromShopifyRaw();
-      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      
+      const result = await storage.backfillOrdersFromOms();
+      
+      const elapsed = Date.now() - startTime;
+      console.log(`Backfill complete in ${elapsed}ms. Updated ${result.updated} orders.`);
 
       // Count remaining (orders that couldn't be matched)
       const remaining = await storage.countOrdersMissingShippingData();
       
-      console.log(`Backfill complete: ${updated} updated, ${remaining} remaining, ${elapsed}s`);
       
       res.json({ 
         success: true, 
-        updated,
+        updated: result.updated,
         remaining,
-        elapsed: `${elapsed}s`,
+        elapsed: `${elapsed}ms`,
         message: remaining > 0 
-          ? `Updated ${updated} orders. ${remaining} orders could not be matched to shopify_orders.`
-          : `All ${updated} orders backfilled!`
+          ? `Updated ${result.updated} orders. ${remaining} orders could not be matched to oms_orders.`
+          : `All ${result.updated} orders backfilled!`
       });
     } catch (error) {
       console.error("Error backfilling orders:", error);
@@ -399,7 +397,7 @@ export function registerShopifyRoutes(app: Express) {
           const customerEmail = shopifyOrder.email || shopifyOrder.customer?.email || null;
           const shipping = shopifyOrder.shipping_address || {};
           
-          const result = await storage.updateShopifyRawOrderCustomer(orderId, {
+          const result = await storage.updateOmsRawOrderCustomer(orderId, {
             customerName: customerName || 'Unknown',
             customerEmail,
             shippingName: shipping.name || null,
@@ -434,7 +432,7 @@ export function registerShopifyRoutes(app: Express) {
       const elapsed = Math.round((Date.now() - startTime) / 1000);
       
       // Count remaining orders
-      const remaining = await storage.countShopifyRawOrdersMissingCustomerName();
+      const remaining = await storage.countOmsRawOrdersMissingCustomerName();
       
       const finished = !pageInfo;
       console.log(`Backfill: ${pagesProcessed} pages, ${totalUpdated} updated, ${totalSkipped} not in DB, ${remaining} remaining, ${elapsed}s`);
