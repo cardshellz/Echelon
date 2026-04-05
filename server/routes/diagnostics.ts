@@ -2,6 +2,7 @@ import type { Express } from "express";
 import { db } from "../db";
 import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
+import { WmsSyncService } from "../modules/oms/wms-sync.service";
 
 export function registerDiagnosticsRoutes(app: Express) {
   // Clean up duplicate orders with normalized Shopify IDs (handles gid:// prefix differences)
@@ -194,6 +195,55 @@ export function registerDiagnosticsRoutes(app: Express) {
       });
     } catch (error: any) {
       console.error("Member tier backfill error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Diagnose broken WMS orders (items mismatch with OMS)
+  app.get("/api/diagnostics/broken-wms-orders", async (req, res) => {
+    try {
+      const services = (req.app.locals as any).services;
+      const wmsSyncSvc = new WmsSyncService({
+        inventoryCore: services.inventoryCore,
+        reservation: services.reservation,
+        fulfillmentRouter: services.fulfillmentRouter,
+      });
+      const result = await wmsSyncSvc.repairBrokenOrders(true); // dry run
+      res.json({ ...result, dryRun: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Repair broken WMS orders — resyncs items from OMS
+  app.post("/api/diagnostics/repair-wms-orders", async (req, res) => {
+    try {
+      const services = (req.app.locals as any).services;
+      const wmsSyncSvc = new WmsSyncService({
+        inventoryCore: services.inventoryCore,
+        reservation: services.reservation,
+        fulfillmentRouter: services.fulfillmentRouter,
+      });
+      const result = await wmsSyncSvc.repairBrokenOrders(false); // actually fix
+      res.json({ ...result, dryRun: false });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Resync a single WMS order's items from OMS
+  app.post("/api/diagnostics/resync-wms-order/:wmsOrderId", async (req, res) => {
+    try {
+      const wmsOrderId = parseInt(req.params.wmsOrderId, 10);
+      const services = (req.app.locals as any).services;
+      const wmsSyncSvc = new WmsSyncService({
+        inventoryCore: services.inventoryCore,
+        reservation: services.reservation,
+        fulfillmentRouter: services.fulfillmentRouter,
+      });
+      const result = await wmsSyncSvc.resyncOrderItems(wmsOrderId);
+      res.json(result);
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
