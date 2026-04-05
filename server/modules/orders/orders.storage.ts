@@ -602,9 +602,13 @@ export const orderMethods: IOrderStorage = {
       updates.pickedAt = null;
     }
 
-    const condition = expectedCurrentStatus
+    // When marking as completed, allow transition from both "pending" and "in_progress"
+    // to handle race conditions where status transitions between read and write
+    const condition = expectedCurrentStatus && status !== "completed"
       ? and(eq(orderItems.id, itemId), eq(orderItems.status, expectedCurrentStatus))
-      : eq(orderItems.id, itemId);
+      : expectedCurrentStatus && status === "completed"
+        ? and(eq(orderItems.id, itemId), inArray(orderItems.status, [expectedCurrentStatus as ItemStatus, "pending" as ItemStatus, "in_progress" as ItemStatus]))
+        : eq(orderItems.id, itemId);
 
     const result = await db
       .update(orderItems)
