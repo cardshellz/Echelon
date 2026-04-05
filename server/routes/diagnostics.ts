@@ -248,6 +248,29 @@ export function registerDiagnosticsRoutes(app: Express) {
     }
   });
 
+  // Bulk release ALL stuck in_progress orders with an assignedPickerId
+  // Safe to run — only unassigns orders, doesn't reset pick progress
+  app.post("/api/diagnostics/release-stuck-orders", async (req, res) => {
+    try {
+      const { orderNumberGte, resetProgress = false } = req.body; // e.g. orderNumberGte: "55561"
+      let whereClause = `warehouse_status = 'in_progress' AND assigned_picker_id IS NOT NULL`;
+      if (orderNumberGte) {
+        whereClause += ` AND CAST(REGEXP_REPLACE(order_number, '[^0-9]', '', 'g') AS INTEGER) >= ${parseInt(orderNumberGte)}`;
+      }
+      const result = await db.execute(sql.raw(`
+        UPDATE wms.orders SET
+          warehouse_status = 'ready',
+          assigned_picker_id = NULL,
+          started_at = NULL
+        WHERE ${whereClause}
+        RETURNING id, order_number, assigned_picker_id
+      `));
+      res.json({ released: result.rowCount, orders: result.rows });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Force release an order by order number (admin use only)
   app.post("/api/diagnostics/force-release-by-number/:orderNumber", async (req, res) => {
     try {
