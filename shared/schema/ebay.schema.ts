@@ -5,10 +5,13 @@
  * that don't fit in the generic channels schema.
  */
 
-import { pgTable, text, varchar, integer, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgSchema, text, varchar, integer, timestamp, boolean, uniqueIndex, index, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { channels } from "./channels.schema";
+import { products } from "./catalog.schema";
+
+export const ebaySchema = pgSchema("ebay");
 
 // ---------------------------------------------------------------------------
 // eBay OAuth Tokens — rotating token storage
@@ -21,7 +24,7 @@ import { channels } from "./channels.schema";
  * The new refresh token must be persisted immediately or access is lost.
  * One row per channel + environment combination.
  */
-export const ebayOauthTokens = pgTable("ebay_oauth_tokens", {
+export const ebayOauthTokens = ebaySchema.table("ebay_oauth_tokens", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
   environment: varchar("environment", { length: 20 }).notNull().default("production"), // sandbox | production
@@ -50,7 +53,7 @@ export type EbayOauthToken = typeof ebayOauthTokens.$inferSelect;
 // eBay Listing Rules — cascading config (default → product_type → SKU)
 // ---------------------------------------------------------------------------
 
-export const ebayListingRules = pgTable("ebay_listing_rules", {
+export const ebayListingRules = ebaySchema.table("ebay_listing_rules", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id),
   scopeType: varchar("scope_type", { length: 20 }).notNull(), // 'default' | 'product_type' | 'sku'
@@ -81,7 +84,7 @@ export type EbayListingRule = typeof ebayListingRules.$inferSelect;
 // eBay Category Mappings — product type → eBay category associations
 // ---------------------------------------------------------------------------
 
-export const ebayCategoryMappings = pgTable("ebay_category_mappings", {
+export const ebayCategoryMappings = ebaySchema.table("ebay_category_mappings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   channelId: integer("channel_id").notNull().references(() => channels.id),
   productTypeSlug: varchar("product_type_slug", { length: 50 }).notNull(),
@@ -107,3 +110,52 @@ export const insertEbayCategoryMappingSchema = createInsertSchema(ebayCategoryMa
 
 export type InsertEbayCategoryMapping = z.infer<typeof insertEbayCategoryMappingSchema>;
 export type EbayCategoryMapping = typeof ebayCategoryMappings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// eBay Item Specifics (Aspects)
+// ---------------------------------------------------------------------------
+
+export const ebayCategoryAspects = ebaySchema.table("ebay_category_aspects", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  categoryId: varchar("category_id", { length: 20 }).notNull(),
+  aspectName: varchar("aspect_name", { length: 200 }).notNull(),
+  aspectRequired: boolean("aspect_required").notNull().default(false),
+  aspectMode: varchar("aspect_mode", { length: 20 }).notNull().default('FREE_TEXT'),
+  aspectUsage: varchar("aspect_usage", { length: 20 }).notNull().default('RECOMMENDED'),
+  aspectValues: jsonb("aspect_values"),
+  aspectOrder: integer("aspect_order").notNull().default(0),
+  fetchedAt: timestamp("fetched_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ebay_cat_aspect_idx").on(table.categoryId, table.aspectName),
+  index("idx_ebay_cat_aspects_cat").on(table.categoryId),
+]);
+
+export type EbayCategoryAspect = typeof ebayCategoryAspects.$inferSelect;
+
+export const ebayTypeAspectDefaults = ebaySchema.table("ebay_type_aspect_defaults", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productTypeSlug: varchar("product_type_slug", { length: 100 }).notNull(),
+  aspectName: varchar("aspect_name", { length: 200 }).notNull(),
+  aspectValue: varchar("aspect_value", { length: 500 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ebay_type_aspect_idx").on(table.productTypeSlug, table.aspectName),
+  index("idx_ebay_type_aspects_slug").on(table.productTypeSlug),
+]);
+
+export type EbayTypeAspectDefault = typeof ebayTypeAspectDefaults.$inferSelect;
+
+export const ebayProductAspectOverrides = ebaySchema.table("ebay_product_aspect_overrides", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  productId: integer("product_id").notNull().references(() => products.id),
+  aspectName: varchar("aspect_name", { length: 200 }).notNull(),
+  aspectValue: varchar("aspect_value", { length: 500 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ebay_prod_aspect_idx").on(table.productId, table.aspectName),
+  index("idx_ebay_prod_aspects_pid").on(table.productId),
+]);
+
+export type EbayProductAspectOverride = typeof ebayProductAspectOverrides.$inferSelect;
